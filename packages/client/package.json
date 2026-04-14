@@ -1,0 +1,15 @@
+{
+  "name": "@pgxsinkit/client",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.4.4",
+    "@electric-sql/pglite-react": "0.3.4",
+    "@pgxsinkit/contracts": "workspace:*",
+    "@pgxsinkit/sync-engine": "workspace:*",
+    "drizzle-orm": "1.0.0-beta.22"
+  }
+}

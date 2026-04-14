@@ -1,0 +1,19 @@
+[tools]
+bun = "1.3"
+node = "24"
+
+[tasks.install]
+description = "Install the pinned toolchain and workspace dependencies"
+run = "mise install && bun install"
+
+[tasks.check]
+description = "Run the standard repository validation suite"
+run = "bun run format-check && bun run lint-check && bun run test"
+
+[tasks.infra-up]
+description = "Start PostgreSQL and ElectricSQL locally"
+run = "bun run infra:up"
+
+[tasks.infra-down]
+description = "Stop local PostgreSQL and ElectricSQL"
+run = "bun run infra:down"

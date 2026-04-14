@@ -1,0 +1,10 @@
+export * from "./authors";
+export * from "./todos";
+export * from "./schema";
+export * from "./db-mapping";
+export * from "./registry";
+export * from "./demo-auth";
+export * from "./performance";
+export { authorTableSpec, authorTableSpecInput } from "./author-config";
+export { todoTableSpec, todoTableSpecInput } from "./todo-config";
+export { buildDemoSyncConfig } from "./sync-config";

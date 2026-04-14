@@ -1,0 +1,14 @@
+{
+  "name": "@pgxsinkit/server",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@pgxsinkit/contracts": "workspace:*",
+    "drizzle-orm": "1.0.0-beta.22",
+    "hono": "4.12.14",
+    "postgres": "3.4.9"
+  }
+}

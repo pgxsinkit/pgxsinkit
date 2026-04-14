@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "react", "import", "node", "vitest", "oxc"],
+  "env": {
+    "browser": true,
+    "node": true,
+    "es2026": true,
+  },
+  "ignorePatterns": ["dist/**", "coverage/**", "node_modules/**", "tmp/**"],
+  "options": {
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "error",
+    "typeAware": true,
+  },
+  "settings": {
+    "react": {
+      "version": "19.2.5",
+    },
+  },
+  "rules": {
+    "typescript/no-deprecated": "error",
+    "typescript/consistent-type-imports": "error",
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": [
+      "error",
+      {
+        "checksVoidReturn": {
+          "attributes": false,
+        },
+      },
+    ],
+  },
+  "overrides": [
+    {
+      "files": ["tests/**/*.ts"],
+      "env": {
+        "vitest": true,
+      },
+    },
+  ],
+}

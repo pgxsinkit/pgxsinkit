@@ -1,0 +1,70 @@
+import type { PerfLabDb } from "./pglite";
+
+const HISTORY_SCHEMA_SQL = `
+  CREATE SCHEMA IF NOT EXISTS debug;
+  CREATE TABLE IF NOT EXISTS debug.repl_history (
+    seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    sql TEXT NOT NULL,
+    result_json TEXT,
+    error_message TEXT,
+    executed_at_us BIGINT NOT NULL
+  );
+`;
+
+const MAX_RESULT_BYTES = 8192;
+
+export function createReplProxy(db: PerfLabDb): PerfLabDb {
+  let historyTableReady: Promise<void> | null = null;
+
+  function ensureHistoryTable(): Promise<void> {
+    if (!historyTableReady) {
+      historyTableReady = db
+        .exec(HISTORY_SCHEMA_SQL)
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          historyTableReady = null;
+          throw error;
+        });
+    }
+
+    return historyTableReady;
+  }
+
+  return new Proxy(db, {
+    get(target, prop, _receiver) {
+      if (prop !== "exec") {
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? (value as Function).bind(target) : value;
+      }
+
+      return async (sql: string, options?: Parameters<PerfLabDb["exec"]>[1]) => {
+        const executedAtUs = Date.now() * 1000;
+        let resultJson: string | null = null;
+        let errorMessage: string | null = null;
+
+        try {
+          const result = await target.exec(sql, options);
+          const serialized = JSON.stringify(result);
+          resultJson =
+            serialized.length > MAX_RESULT_BYTES ? `${serialized.slice(0, MAX_RESULT_BYTES)}...` : serialized;
+          return result;
+        } catch (error) {
+          errorMessage = error instanceof Error ? error.message : String(error);
+          throw error;
+        } finally {
+          void ensureHistoryTable()
+            .then(() =>
+              target.query(
+                `INSERT INTO debug.repl_history (sql, result_json, error_message, executed_at_us)
+                 VALUES ($1, $2, $3, $4)`,
+                [sql, resultJson, errorMessage, executedAtUs],
+              ),
+            )
+            .catch(() => {
+              // REPL history persistence is best-effort only.
+            });
+        }
+      };
+    },
+  }) as PerfLabDb;
+}

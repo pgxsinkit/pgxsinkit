@@ -1,0 +1,13 @@
+{
+  "name": "@pgxsinkit/demo",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@pgxsinkit/contracts": "workspace:*",
+    "drizzle-orm": "1.0.0-beta.22",
+    "zod": "4.3.6"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "resolveJsonModule": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@pgxsinkit/client": ["./packages/client/src/index.ts"],
+      "@pgxsinkit/demo": ["./packages/demo/src/index.ts"],
+      "@pgxsinkit/contracts": ["./packages/contracts/src/index.ts"],
+      "@pgxsinkit/server": ["./packages/server/src/index.ts"],
+      "@pgxsinkit/sync-engine": ["./packages/sync-engine/src/index.ts"],
+      "@pgxsinkit/test-utils": ["./packages/test-utils/src/index.ts"]
+    }
+  }
+}

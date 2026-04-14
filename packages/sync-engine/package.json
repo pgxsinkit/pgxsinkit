@@ -1,0 +1,14 @@
+{
+  "name": "@pgxsinkit/sync-engine",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.4.4",
+    "@pgxsinkit/contracts": "workspace:*",
+    "@pgxsinkit/pglite-sync": "workspace:*",
+    "zod": "4.3.6"
+  }
+}
