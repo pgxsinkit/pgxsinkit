@@ -1,14 +1,32 @@
 {
   "name": "@pgxsinkit/sync-engine",
-  "private": true,
+  "version": "0.1.0",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
+    "@pgxsinkit/contracts": "^0.1.0",
+    "@pgxsinkit/pglite-sync": "^0.1.0"
+  },
+  "peerDependencies": {
     "@electric-sql/pglite": "0.4.5",
-    "@pgxsinkit/contracts": "workspace:*",
-    "@pgxsinkit/pglite-sync": "workspace:*",
-    "zod": "4.4.1"
+    "zod": "^4.4.1"
   }
 }

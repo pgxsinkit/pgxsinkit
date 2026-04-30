@@ -7,6 +7,7 @@
   ],
   "type": "module",
   "scripts": {
+    "build:public-packages": "bun scripts/build-public-packages.ts",
     "db:apply:governance": "bun scripts/apply-governance-migration.ts",
     "db:apply:sync-function": "bun scripts/apply-sync-function-artifact.ts",
     "db:generate": "drizzle-kit generate",
@@ -23,6 +24,9 @@
     "lint": "oxlint -c .oxlintrc.jsonc apps/*/src packages/*/src scripts tests *.ts",
     "lint-check": "bun run lint",
     "perf:lab": "bun scripts/run-perf-lab.ts",
+    "release:public:dry-run": "bun run build:public-packages && bun scripts/release-public-dry-run.ts",
+    "release:public:publish": "bun run build:public-packages && bun scripts/publish-public-packages.ts --tag next",
+    "release:public:publish:latest": "bun run build:public-packages && bun scripts/publish-public-packages.ts --tag latest",
     "sync:function:generate": "bun scripts/generate-sync-function-artifact.ts",
     "test": "bun run test:unit && bun run test:integration",
     "test:integration": "bun run test:integration:contract && bun run test:integration:implementation",
