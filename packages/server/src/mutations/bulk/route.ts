@@ -18,14 +18,7 @@ import {
 
 import type { OperationsLogConfig } from "../../operations-log/types";
 import { logOperation, logOperationSafely } from "../../operations-log/writer";
-import { executeDynamicMutation, installDynamicMutationFunction } from "./dynamic-strategy";
-import {
-  executePlpgsqlBatch,
-  installPlpgsqlBatchFunction,
-  verifyArtifactRlsAuthHelpers,
-  verifyPlpgsqlBatchFunction,
-} from "./plpgsql-strategy";
-import { executePregeneratedMutation, installPregeneratedMutationFunctions } from "./pregenerated-strategy";
+import { executePlpgsqlBatch, verifyArtifactRlsAuthHelpers, verifyPlpgsqlBatchFunction } from "./plpgsql-strategy";
 import type { BulkMutationBackend, TransactionClient } from "./types";
 
 export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
@@ -37,10 +30,18 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
   operationsLogReady: Promise<void>,
   resolveAuthClaims?: (request: Request) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null,
 ) {
-  const startupReady = installBulkStartupDdl(db, registry, backend);
+  let startupReadyPromise: Promise<void> | undefined;
+
+  const startupReady = () => {
+    if (!startupReadyPromise) {
+      startupReadyPromise = installBulkStartupDdl(db, registry, backend);
+    }
+
+    return startupReadyPromise;
+  };
 
   app.post("/api/mutations", async (context) => {
-    await Promise.all([startupReady, operationsLogReady]);
+    await Promise.all([startupReady(), operationsLogReady]);
 
     let rawBody: unknown;
 
@@ -123,15 +124,13 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
         continue;
       }
 
-      if (backend === "bulk-plpgsql-artifact") {
-        const managedFieldViolations = findManagedFieldViolations(syncEntry, mutation.kind, normalizedPayload);
+      const managedFieldViolations = findManagedFieldViolations(syncEntry, mutation.kind, normalizedPayload);
 
-        if (managedFieldViolations.length > 0) {
-          const message = `${mutation.tableName}/${mutation.mutationId} includes server-managed fields: ${managedFieldViolations.join(", ")}`;
-          validationErrors.push(message);
-          invalidMutations.push({ mutation, message });
-          continue;
-        }
+      if (managedFieldViolations.length > 0) {
+        const message = `${mutation.tableName}/${mutation.mutationId} includes server-managed fields: ${managedFieldViolations.join(", ")}`;
+        validationErrors.push(message);
+        invalidMutations.push({ mutation, message });
+        continue;
       }
 
       try {
@@ -173,107 +172,61 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
 
     const acks: MutationAck[] = [];
     let actorUserId: string | null = null;
-    const artifactAuthContextRequired = backend === "bulk-plpgsql-artifact" && isArtifactAuthContextRequired(registry);
+    const artifactAuthContextRequired = isArtifactAuthContextRequired(registry);
 
     try {
       await db.transaction(async (tx) => {
-        if (backend === "bulk-plpgsql" || backend === "bulk-plpgsql-artifact") {
-          const shouldApplyRlsContext = artifactAuthContextRequired;
-          let userClaims: Record<string, unknown> = {};
+        const shouldApplyRlsContext = artifactAuthContextRequired;
+        let userClaims: Record<string, unknown> = {};
 
-          if (shouldApplyRlsContext) {
-            const resolvedClaims = await resolveAuthClaims?.(context.req.raw);
+        if (shouldApplyRlsContext) {
+          const resolvedClaims = await resolveAuthClaims?.(context.req.raw);
 
-            if (!isPlainObject(resolvedClaims)) {
-              await logOperationSafely(db, operationsLogConfig, {
-                source: "batch",
-                backend,
-                tableName: null,
-                operationKind: null,
-                entityKey: null,
-                payload: rawBody,
-                status: "validation_failed",
-                errorMessage: "Missing validated JWT claims for RLS-enabled artifact backend",
-                httpStatus: 401,
-                requestPath: context.req.path,
-              });
-
-              throw new UnauthorizedBatchMutationError(
-                "RLS-enabled artifact backend requires validated JWT claims in request context",
-              );
-            }
-
-            userClaims = resolvedClaims;
-            actorUserId = getUuidClaim(userClaims, "sub");
-          }
-
-          const batchRequest =
-            backend === "bulk-plpgsql-artifact" ? sanitizeArtifactRestrictedFields(body, registry) : body;
-
-          if (backend === "bulk-plpgsql-artifact") {
-            await tx.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
-          }
-
-          await executePlpgsqlBatch(
-            tx as unknown as TransactionClient,
-            batchRequest,
-            context.req.path,
-            operationsLogConfig.enabled && backend === "bulk-plpgsql",
-            shouldApplyRlsContext,
-            userClaims,
-          );
-
-          if (shouldApplyRlsContext) {
-            await tx.execute(sql`RESET ROLE`);
-          }
-
-          for (const mutation of batchRequest.mutations) {
-            const serverUpdatedAtUs = await readServerUpdatedAtUs(
-              tx as unknown as TransactionClient,
-              registry[mutation.tableName as keyof TRegistry] as SyncTableEntry,
-              mutation.entityKey,
-            );
-
-            if (backend === "bulk-plpgsql-artifact") {
-              await logOperation(tx, operationsLogConfig, {
-                source: "batch",
-                backend,
-                tableName: mutation.tableName,
-                operationKind: mutation.kind,
-                entityKey: mutation.entityKey,
-                payload: mutation.payload,
-                status: "succeeded",
-                httpStatus: 200,
-                mutationId: mutation.mutationId,
-                mutationSeq: mutation.mutationSeq,
-                clientTimestampUs: mutation.clientTimestampUs,
-                requestPath: context.req.path,
-                userId: actorUserId,
-              });
-            }
-
-            acks.push({
-              tableName: mutation.tableName,
-              entityKey: mutation.entityKey,
-              mutationId: mutation.mutationId,
-              mutationSeq: mutation.mutationSeq,
-              status: "acked",
-              ...(serverUpdatedAtUs ? { serverUpdatedAtUs } : {}),
+          if (!isPlainObject(resolvedClaims)) {
+            await logOperationSafely(db, operationsLogConfig, {
+              source: "batch",
+              backend,
+              tableName: null,
+              operationKind: null,
+              entityKey: null,
+              payload: rawBody,
+              status: "validation_failed",
+              errorMessage: "Missing validated JWT claims for RLS-enabled artifact backend",
+              httpStatus: 401,
+              requestPath: context.req.path,
             });
+
+            throw new UnauthorizedBatchMutationError(
+              "RLS-enabled artifact backend requires validated JWT claims in request context",
+            );
           }
 
-          return;
+          userClaims = resolvedClaims;
+          actorUserId = getUuidClaim(userClaims, "sub");
         }
 
-        for (const mutation of body.mutations) {
-          const entry = registry[mutation.tableName as keyof TRegistry]!;
-          const primaryKeyColumnName = (entry as SyncTableEntry).primaryKey.columns[0]!;
+        const batchRequest = sanitizeArtifactRestrictedFields(body, registry);
+        await tx.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
 
-          if (backend === "bulk-dynamic") {
-            await executeDynamicMutation(tx as unknown as TransactionClient, mutation, primaryKeyColumnName);
-          } else {
-            await executePregeneratedMutation(tx as unknown as TransactionClient, mutation);
-          }
+        await executePlpgsqlBatch(
+          tx as unknown as TransactionClient,
+          batchRequest,
+          context.req.path,
+          false,
+          shouldApplyRlsContext,
+          userClaims,
+        );
+
+        if (shouldApplyRlsContext) {
+          await tx.execute(sql`RESET ROLE`);
+        }
+
+        for (const mutation of batchRequest.mutations) {
+          const serverUpdatedAtUs = await readServerUpdatedAtUs(
+            tx as unknown as TransactionClient,
+            registry[mutation.tableName as keyof TRegistry] as SyncTableEntry,
+            mutation.entityKey,
+          );
 
           await logOperation(tx, operationsLogConfig, {
             source: "batch",
@@ -290,12 +243,6 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
             requestPath: context.req.path,
             userId: actorUserId,
           });
-
-          const serverUpdatedAtUs = await readServerUpdatedAtUs(
-            tx as unknown as TransactionClient,
-            entry as SyncTableEntry,
-            mutation.entityKey,
-          );
 
           acks.push({
             tableName: mutation.tableName,
@@ -587,27 +534,11 @@ function quoteIdentifier(identifier: string) {
 async function installBulkStartupDdl<TRegistry extends SyncTableRegistry>(
   db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
   registry: TRegistry,
-  backend: BulkMutationBackend,
+  _backend: BulkMutationBackend,
 ): Promise<void> {
-  if (backend === "bulk-dynamic") {
-    await installDynamicMutationFunction(db);
-    return;
+  await verifyPlpgsqlBatchFunction(db);
+
+  if (isArtifactAuthContextRequired(registry)) {
+    await verifyArtifactRlsAuthHelpers(db);
   }
-
-  if (backend === "bulk-plpgsql") {
-    await installPlpgsqlBatchFunction(db, registry);
-    return;
-  }
-
-  if (backend === "bulk-plpgsql-artifact") {
-    await verifyPlpgsqlBatchFunction(db);
-
-    if (isArtifactAuthContextRequired(registry)) {
-      await verifyArtifactRlsAuthHelpers(db);
-    }
-
-    return;
-  }
-
-  await installPregeneratedMutationFunctions(db, registry);
 }

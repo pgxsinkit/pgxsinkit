@@ -28,26 +28,22 @@ The repository is split into four boundaries:
 4. The browser may enqueue mutations one at a time or atomically stage a local batch into the same overlay and journal tables.
 5. The browser flushes journal entries through the write API.
 6. In artifact mode with RLS enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims` and `auth.set_auth_context`.
-7. The API writes to PostgreSQL using Drizzle or configured batch backend.
+7. The API writes to PostgreSQL through the artifact batch function (`POST /api/mutations`).
 8. ElectricSQL exposes shape data from PostgreSQL.
 9. The write API shape proxy (`/v1/shape-proxy`) forwards read requests to Electric and enforces owner filtering for protected tables unless caller role is admin.
 10. PGlite subscribes through the vendored `packages/pglite-sync` implementation.
 11. Acked overlay rows are cleared only after the synced echo reaches the acknowledged server `updated_at_us` value.
 12. The integration tests assert eventual convergence inside local PGlite.
 
-## Demo backend switching
+## Stable write mode
 
-The demo write API can switch mutation execution backends with `WRITE_API_BACKEND`:
+Stable write behavior is `WRITE_API_BACKEND=bulk-plpgsql-artifact`.
 
-- `drizzle` for direct Drizzle CRUD route writes
-- `bulk-dynamic` for a single `/api/mutations` endpoint using runtime metadata lookup
-- `bulk-pregenerated` for a single `/api/mutations` endpoint using startup-generated SQL functions
-- `bulk-plpgsql` for a single `/api/mutations` endpoint that sends the full batch object to one PL/pgSQL entry function
-- `bulk-plpgsql-artifact` for a single `/api/mutations` endpoint that requires a preinstalled PL/pgSQL entry function managed by migrations/artifacts, defers constraints during execution (`SET CONSTRAINTS ALL DEFERRED`), and applies Supabase-compatible auth claim context for RLS-enabled registries
+This mode requires a preinstalled PL/pgSQL entry function managed by migrations/artifacts, defers constraints during execution (`SET CONSTRAINTS ALL DEFERRED`), and applies Supabase-compatible auth claim context for RLS-enabled registries.
 
-The demo web client can opt into batch flush via `VITE_BATCH_WRITE_URL`. If unset, it uses per-table write routes.
+Stable client flush behavior uses `POST /api/mutations`. `VITE_BATCH_WRITE_URL` may override the base URL, and otherwise the client uses `writeUrl` for batch flushes.
 
-Local client batching is separate from that transport choice. `client.mutate.batch([...])` stages multiple local mutations atomically in one PGlite transaction, but `flush()` remains the transport boundary. If `VITE_BATCH_WRITE_URL` is set, flush sends queued mutations through `POST /api/mutations`; otherwise flush drains the same local journal through per-table CRUD routes.
+Legacy backend/transport utilities are isolated under experimental exports (`@pgxsinkit/server/experimental`, `@pgxsinkit/client/experimental`).
 
 The write API also supports startup-time control of server-side operations logging via `WRITE_API_OPS_LOG_ENABLED`. This flag is read at process start and requires a restart to change.
 

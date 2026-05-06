@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/client",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "files": [
     "dist",
     "src",
@@ -13,6 +13,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./dist/index.js"
+    },
+    "./experimental": {
+      "types": "./src/experimental/index.ts",
+      "default": "./dist/experimental/index.js"
     }
   },
   "publishConfig": {
@@ -22,8 +26,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.3",
-    "@pgxsinkit/sync-engine": "^0.1.3"
+    "@pgxsinkit/contracts": "^0.1.4",
+    "@pgxsinkit/sync-engine": "^0.1.4"
   },
   "peerDependencies": {
     "@electric-sql/pglite": "0.4.5",

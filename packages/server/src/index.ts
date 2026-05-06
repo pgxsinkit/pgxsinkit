@@ -41,7 +41,7 @@ interface BunNamespace {
 export interface CreateSyncServerOptions<TRegistry extends SyncTableRegistry> {
   registry: TRegistry;
   databaseUrl: string;
-  backend?: "drizzle" | BulkMutationBackend;
+  backend?: BulkMutationBackend;
   resolveAuthClaims?: (request: Request) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
   operationsLog?: {
     enabled?: boolean;
@@ -87,7 +87,7 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
   let address: SyncServerAddress | null = null;
   const operationsLogConfig = resolveOperationsLogConfig(options.operationsLog);
   const operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig);
-  const backend = options.backend ?? "drizzle";
+  const backend = options.backend ?? "bulk-plpgsql-artifact";
 
   app.use(
     "/api/*",
@@ -133,17 +133,15 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
     });
   }
 
-  if (backend !== "drizzle") {
-    registerBulkMutationRoute(
-      app,
-      db,
-      options.registry,
-      backend,
-      operationsLogConfig,
-      operationsLogReady,
-      options.resolveAuthClaims,
-    );
-  }
+  registerBulkMutationRoute(
+    app,
+    db,
+    options.registry,
+    backend,
+    operationsLogConfig,
+    operationsLogReady,
+    options.resolveAuthClaims,
+  );
 
   const fetch = async (request: Request) => app.fetch(request);
 

@@ -219,6 +219,12 @@ const ensureSupabaseAuthHelpersSql = sql.raw(`
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
       EXECUTE 'GRANT USAGE ON SCHEMA auth TO authenticated';
       EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO authenticated';
+      IF to_regclass('public.authors') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "authors" TO authenticated';
+      END IF;
+      IF to_regclass('public.todos') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "todos" TO authenticated';
+      END IF;
     END IF;
   END;
   $$;
@@ -266,8 +272,14 @@ describe("write api implementation integration", () => {
     server = createSyncServer({
       registry: demoSyncRegistry,
       databaseUrl: env.databaseUrl,
+      resolveAuthClaims: () => ({
+        role: "authenticated",
+        sub: DEMO_USER1_ID,
+      }),
     });
     await server.drizzle.execute(ensureTablesSql);
+    await server.drizzle.execute(ensureSupabaseAuthHelpersSql);
+    await installPlpgsqlBatchFunction(server.drizzle, demoSyncRegistry);
   });
 
   beforeEach(async () => {
@@ -280,15 +292,19 @@ describe("write api implementation integration", () => {
   });
 
   it("rejects invalid payloads", async () => {
-    const response = await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        title: "",
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: "0fd99c86-dca0-47c3-b8f7-6555633e8bf2" },
+        mutationId: "0e6dca9b-c37f-471b-bc37-c84ff0467a1c",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: "0fd99c86-dca0-47c3-b8f7-6555633e8bf2",
+          title: "",
+        },
       }),
-    });
+    ]);
 
     expect(response.status).toBe(400);
   });
@@ -316,18 +332,21 @@ describe("write api implementation integration", () => {
 
   it("creates and lists authors", async () => {
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f920";
-    const createResponse = await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Ada Lovelace",
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "bc14916d-c484-4f9b-b643-90fda3f466f0",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Ada Lovelace",
+        },
       }),
-    });
+    ]);
 
-    expect(createResponse.status).toBe(201);
+    expect(createResponse.status).toBe(200);
 
     const listResponse = await server.request("/api/authors");
     expect(listResponse.status).toBe(200);
@@ -343,45 +362,43 @@ describe("write api implementation integration", () => {
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f999";
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f920";
 
-    await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Ada Lovelace",
+    await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "fef6d5a5-1719-49f9-89e3-813b131868cb",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Ada Lovelace",
+        },
       }),
-    });
+    ]);
 
-    const response = await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: todoId,
-        title: "Persist from integration test",
-        description: "written through Hono + Drizzle",
-        authorId,
-        status: "todo",
-        priority: "high",
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "4c97657d-fdb8-4bca-938f-3c57f9a5e72f",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Persist from integration test",
+          description: "written through Hono + Drizzle",
+          author_id: authorId,
+          status: "todo",
+          priority: "high",
+        },
       }),
-    });
+    ]);
 
-    expect(response.status).toBe(201);
-    const created = (await response.json()) as {
-      id: string;
-      createdAtUs: string;
-      updatedAtUs: string;
-    };
+    expect(response.status).toBe(200);
 
-    const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, created.id));
+    const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId));
 
     expect(rows).toHaveLength(1);
-    expect(created.id).toBe(todoId);
-    expect(created.createdAtUs).toMatch(/^[0-9]+$/);
-    expect(created.updatedAtUs).toMatch(/^[0-9]+$/);
     expect(rows[0]?.authorId).toBe(authorId);
     expect(rows[0]?.title).toBe("Persist from integration test");
   });
@@ -390,89 +407,102 @@ describe("write api implementation integration", () => {
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f981";
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f921";
 
-    await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Grace Hopper",
+    await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "4fe40c68-7a5d-4938-ab35-c625f6736f4a",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Grace Hopper",
+        },
       }),
-    });
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a93d7cb9-1f57-40cb-af3d-b74703e439df",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Before patch",
+          description: null,
+          author_id: authorId,
+          status: "todo",
+          priority: "medium",
+        },
+      }),
+    ]);
 
-    await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: todoId,
-        title: "Before patch",
-        description: null,
-        authorId,
-        status: "todo",
-        priority: "medium",
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "88451f95-962e-4e39-9733-3c8660cc260d",
+        mutationSeq: 3,
+        kind: "update",
+        payload: {
+          status: "done",
+          title: "After patch",
+        },
       }),
-    });
-
-    const response = await server.request(`/api/todos/${todoId}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        status: "done",
-        title: "After patch",
-      }),
-    });
+    ]);
 
     expect(response.status).toBe(200);
-    const updated = (await response.json()) as {
-      title: string;
-      status: string;
-      updatedAtUs: string;
-    };
-    expect(updated.title).toBe("After patch");
-    expect(updated.status).toBe("done");
-    expect(updated.updatedAtUs).toMatch(/^[0-9]+$/);
+
+    const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.title).toBe("After patch");
+    expect(rows[0]?.status).toBe("done");
   });
 
   it("deletes an existing todo", async () => {
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f982";
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f922";
 
-    await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Margaret Hamilton",
+    await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "eff3d2ec-9fd9-47f0-8f85-f938f9ee16f8",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Margaret Hamilton",
+        },
       }),
-    });
-
-    await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: todoId,
-        title: "Delete me",
-        description: null,
-        authorId,
-        status: "todo",
-        priority: "medium",
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "7f11678f-3831-490f-a3ac-7d7e8a2d7b39",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Delete me",
+          description: null,
+          author_id: authorId,
+          status: "todo",
+          priority: "medium",
+        },
       }),
-    });
+    ]);
 
-    const response = await server.request(`/api/todos/${todoId}`, {
-      method: "DELETE",
-    });
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "5745ab9d-c8c9-4f95-9778-c5a6557a90aa",
+        mutationSeq: 3,
+        kind: "delete",
+        payload: { id: todoId },
+      }),
+    ]);
 
-    expect(response.status).toBe(204);
+    expect(response.status).toBe(200);
 
     const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId));
     expect(rows).toHaveLength(0);
@@ -484,44 +514,51 @@ describe("write api implementation integration", () => {
     const disabledServer = createSyncServer({
       registry: demoSyncRegistry,
       databaseUrl: env.databaseUrl,
+      resolveAuthClaims: () => ({
+        role: "authenticated",
+        sub: DEMO_USER1_ID,
+      }),
       operationsLog: {
         enabled: false,
       },
     });
 
     await disabledServer.drizzle.execute(ensureTablesSql);
+    await installPlpgsqlBatchFunction(disabledServer.drizzle, demoSyncRegistry);
 
     try {
       const authorId = "01963227-d4c7-72db-b858-f89f6af8f933";
       const todoId = "01963227-d4c7-72db-b858-f89f6af8f983";
 
-      const createAuthorResponse = await disabledServer.request("/api/authors", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          id: authorId,
-          name: "Disabled logger author",
+      const batchResponse = await postBatchMutations(disabledServer, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "cfc76477-cdc8-4be7-bf2d-045ae815ec8c",
+          mutationSeq: 1,
+          kind: "create",
+          payload: {
+            id: authorId,
+            name: "Disabled logger author",
+          },
         }),
-      });
-      expect(createAuthorResponse.status).toBe(201);
-
-      const createTodoResponse = await disabledServer.request("/api/todos", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          id: todoId,
-          title: "Write with ops log disabled",
-          description: null,
-          authorId,
-          status: "todo",
-          priority: "medium",
+        buildBatchMutation({
+          tableName: "todos",
+          entityKey: { id: todoId },
+          mutationId: "233d36a2-fde4-4e23-98f6-7ff633d28674",
+          mutationSeq: 2,
+          kind: "create",
+          payload: {
+            id: todoId,
+            title: "Write with ops log disabled",
+            description: null,
+            author_id: authorId,
+            status: "todo",
+            priority: "medium",
+          },
         }),
-      });
-      expect(createTodoResponse.status).toBe(201);
+      ]);
+      expect(batchResponse.status).toBe(200);
     } finally {
       await disabledServer.stop();
     }
@@ -531,36 +568,25 @@ describe("write api implementation integration", () => {
   });
 });
 
-describe.each([
-  {
-    backend: "bulk-plpgsql" as const,
-    expectedStatus: 500,
-  },
-  {
-    backend: "bulk-plpgsql-artifact" as const,
-    expectedStatus: 200,
-  },
-])("write api deferred FK behavior — $backend", ({ backend, expectedStatus }) => {
+describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
   let server!: ReturnType<typeof createSyncServer<typeof fkSyncRegistry>>;
 
   beforeAll(async () => {
-    if (backend === "bulk-plpgsql-artifact") {
-      const provisioningServer = createSyncServer({
-        registry: fkSyncRegistry,
-        databaseUrl: env.databaseUrl,
-      });
+    const provisioningServer = createSyncServer({
+      registry: fkSyncRegistry,
+      databaseUrl: env.databaseUrl,
+    });
 
-      try {
-        await installPlpgsqlBatchFunction(provisioningServer.drizzle, fkSyncRegistry);
-      } finally {
-        await provisioningServer.stop();
-      }
+    try {
+      await installPlpgsqlBatchFunction(provisioningServer.drizzle, fkSyncRegistry);
+    } finally {
+      await provisioningServer.stop();
     }
 
     server = createSyncServer({
       registry: fkSyncRegistry,
       databaseUrl: env.databaseUrl,
-      backend,
+      backend: "bulk-plpgsql-artifact",
     });
 
     await server.drizzle.execute(ensureFkTablesSql);
@@ -616,15 +642,14 @@ describe.each([
       }),
     });
 
-    expect(response.status).toBe(expectedStatus);
+    expect(response.status).toBe(200);
 
     const children = await server.drizzle.select().from(fkChildrenTable);
     const parents = await server.drizzle.select().from(fkParentsTable);
-    const persistsDeferredParent = backend === "bulk-plpgsql-artifact";
 
-    expect(children).toHaveLength(persistsDeferredParent ? 1 : 0);
-    expect(parents).toHaveLength(persistsDeferredParent ? 1 : 0);
-    expect(children[0]?.parentId ?? null).toBe(persistsDeferredParent ? parentId : null);
+    expect(children).toHaveLength(1);
+    expect(parents).toHaveLength(1);
+    expect(children[0]?.parentId ?? null).toBe(parentId);
   });
 });
 

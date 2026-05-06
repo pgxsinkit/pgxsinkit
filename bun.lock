@@ -75,10 +75,10 @@
     },
     "packages/client": {
       "name": "@pgxsinkit/client",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
-        "@pgxsinkit/contracts": "^0.1.3",
-        "@pgxsinkit/sync-engine": "^0.1.3",
+        "@pgxsinkit/contracts": "^0.1.4",
+        "@pgxsinkit/sync-engine": "^0.1.4",
       },
       "peerDependencies": {
         "@electric-sql/pglite": "0.4.5",
@@ -88,7 +88,7 @@
     },
     "packages/contracts": {
       "name": "@pgxsinkit/contracts",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "peerDependencies": {
         "drizzle-orm": "1.0.0-rc.2",
         "zod": "^4.4.3",
@@ -104,7 +104,7 @@
     },
     "packages/pglite-sync": {
       "name": "@pgxsinkit/pglite-sync",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "peerDependencies": {
         "@electric-sql/client": "^1.5.16",
         "@electric-sql/experimental": "^6.0.16",
@@ -113,9 +113,9 @@
     },
     "packages/server": {
       "name": "@pgxsinkit/server",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
-        "@pgxsinkit/contracts": "^0.1.3",
+        "@pgxsinkit/contracts": "^0.1.4",
       },
       "peerDependencies": {
         "drizzle-orm": "1.0.0-rc.2",
@@ -125,10 +125,10 @@
     },
     "packages/sync-engine": {
       "name": "@pgxsinkit/sync-engine",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
-        "@pgxsinkit/contracts": "^0.1.3",
-        "@pgxsinkit/pglite-sync": "^0.1.3",
+        "@pgxsinkit/contracts": "^0.1.4",
+        "@pgxsinkit/pglite-sync": "^0.1.4",
       },
       "peerDependencies": {
         "@electric-sql/pglite": "0.4.5",

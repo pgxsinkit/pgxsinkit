@@ -8,6 +8,7 @@ import { createSyncClient } from "@pgxsinkit/client";
 import { createSyncServer } from "@pgxsinkit/server";
 import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 import {
   ensureProjectsTableSql,
   projectsSyncRegistry,
@@ -117,6 +118,7 @@ describe("client facade contract", () => {
     });
 
     await server.drizzle.execute(ensureProjectsTableSql);
+    await installPlpgsqlBatchFunction(server.drizzle, projectsSyncRegistry);
     const startedFetchServer = await startFetchServer(server.fetch, 0);
     httpServer = startedFetchServer.server;
     writeApiPort = startedFetchServer.port;
@@ -140,14 +142,7 @@ describe("client facade contract", () => {
         name: "Client contract seed",
       };
 
-      const response = await server.request("/api/projects", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(seededProject),
-      });
-      expect(response.status).toBe(201);
+      await server.drizzle.insert(projectsTable).values(seededProject);
 
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
@@ -187,13 +182,7 @@ describe("client facade contract", () => {
         name: "Restart proof",
       };
 
-      await server.request("/api/projects", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(seededProject),
-      });
+      await server.drizzle.insert(projectsTable).values(seededProject);
 
       const firstClient = await createSyncClient({
         registry: projectsSyncRegistry,
@@ -262,6 +251,8 @@ describe("client facade contract", () => {
         await waitFor(async () => {
           const remoteRows = await server.drizzle.select().from(projectsTable);
           const localRows = await client.drizzle.select().from(projectsTable);
+
+          await client.reconcile();
           const diagnostics = await client.diagnostics();
 
           expect(remoteRows).toHaveLength(1);

@@ -5,6 +5,7 @@ import { createSyncServer } from "@pgxsinkit/server";
 import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-engine";
 import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const env = readIntegrationEnv();
@@ -41,6 +42,92 @@ const ensureTodosTableSql = sql.raw(`
       );
     END IF;
   END $$;
+`);
+
+const ensureSupabaseAuthHelpersSql = sql.raw(`
+  CREATE SCHEMA IF NOT EXISTS auth;
+
+  DO $$
+  BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+      BEGIN
+        CREATE ROLE authenticated NOLOGIN;
+      EXCEPTION
+        WHEN insufficient_privilege THEN
+          NULL;
+      END;
+    END IF;
+  END;
+  $$;
+
+  CREATE OR REPLACE FUNCTION auth.set_auth_context(claims jsonb)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $$
+  DECLARE
+    normalized_claims jsonb := COALESCE(claims, '{}'::jsonb);
+    target_role text := COALESCE(NULLIF(normalized_claims ->> 'role', ''), 'authenticated');
+  BEGIN
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = target_role) THEN
+        PERFORM set_config('role', target_role, true);
+      ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        PERFORM set_config('role', 'authenticated', true);
+      END IF;
+    EXCEPTION
+      WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    PERFORM set_config('request.jwt.claims', normalized_claims::text, true);
+
+    IF normalized_claims ? 'sub' THEN
+      PERFORM set_config('request.jwt.claim.sub', normalized_claims ->> 'sub', true);
+    END IF;
+  END;
+  $$;
+
+  CREATE OR REPLACE FUNCTION auth.uid()
+  RETURNS uuid
+  LANGUAGE sql
+  STABLE
+  AS $$
+    SELECT coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid
+  $$;
+
+  CREATE OR REPLACE FUNCTION auth.jwt()
+  RETURNS jsonb
+  LANGUAGE sql
+  STABLE
+  AS $$
+    SELECT coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb
+  $$;
+
+  CREATE OR REPLACE FUNCTION auth.has_role(role_name text)
+  RETURNS boolean
+  LANGUAGE sql
+  STABLE
+  AS $$
+    SELECT EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements_text(COALESCE(auth.jwt() -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS assigned_role(role_name_value)
+      WHERE assigned_role.role_name_value = role_name
+    )
+  $$;
+
+  DO $$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+      EXECUTE 'GRANT USAGE ON SCHEMA auth TO authenticated';
+      EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO authenticated';
+      IF to_regclass('public.authors') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "authors" TO authenticated';
+      END IF;
+      IF to_regclass('public.todos') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "todos" TO authenticated';
+      END IF;
+    END IF;
+  END;
+  $$;
 `);
 
 async function createLocalTodoStore() {
@@ -101,11 +188,27 @@ describe("electric -> pglite sync integration", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
 
   beforeAll(async () => {
-    server = createSyncServer({
+    const provisioningServer = createSyncServer({
       registry: demoSyncRegistry,
       databaseUrl: env.databaseUrl,
     });
+
+    try {
+      await installPlpgsqlBatchFunction(provisioningServer.drizzle, demoSyncRegistry);
+    } finally {
+      await provisioningServer.stop();
+    }
+
+    server = createSyncServer({
+      registry: demoSyncRegistry,
+      databaseUrl: env.databaseUrl,
+      resolveAuthClaims: () => ({
+        role: "authenticated",
+        sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d",
+      }),
+    });
     await server.drizzle.execute(ensureTodosTableSql);
+    await server.drizzle.execute(ensureSupabaseAuthHelpersSql);
   });
 
   beforeEach(async () => {
@@ -117,29 +220,42 @@ describe("electric -> pglite sync integration", () => {
   });
 
   it("syncs seeded postgres rows into pglite", async () => {
-    await server.request("/api/authors", {
+    await server.request("/api/mutations", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        id: "01963227-d4c7-72db-b858-f89f6af8f920",
-        name: "Ada Lovelace",
-      }),
-    });
-
-    await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: "01963227-d4c7-72db-b858-f89f6af8f991",
-        title: "Seed row one",
-        description: null,
-        authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
-        status: "todo",
-        priority: "medium",
+        mutations: [
+          {
+            tableName: "authors",
+            entityKey: { id: "01963227-d4c7-72db-b858-f89f6af8f920" },
+            mutationId: "ea44f5ea-6908-4328-94bf-e95fca8f3ca0",
+            mutationSeq: 1,
+            kind: "create",
+            payload: {
+              id: "01963227-d4c7-72db-b858-f89f6af8f920",
+              name: "Ada Lovelace",
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+          {
+            tableName: "todos",
+            entityKey: { id: "01963227-d4c7-72db-b858-f89f6af8f991" },
+            mutationId: "14be349f-bf96-430c-9d87-513d671b9f47",
+            mutationSeq: 2,
+            kind: "create",
+            payload: {
+              id: "01963227-d4c7-72db-b858-f89f6af8f991",
+              title: "Seed row one",
+              description: null,
+              author_id: "01963227-d4c7-72db-b858-f89f6af8f920",
+              status: "todo",
+              priority: "medium",
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
       }),
     });
 
@@ -168,33 +284,57 @@ describe("electric -> pglite sync integration", () => {
     try {
       await initialSyncDone;
 
-      await server.request("/api/authors", {
+      await server.request("/api/mutations", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          id: "01963227-d4c7-72db-b858-f89f6af8f921",
-          name: "Grace Hopper",
+          mutations: [
+            {
+              tableName: "authors",
+              entityKey: { id: "01963227-d4c7-72db-b858-f89f6af8f921" },
+              mutationId: "95be871f-ee6d-45cd-89a6-f1f15fa1d8dd",
+              mutationSeq: 1,
+              kind: "create",
+              payload: {
+                id: "01963227-d4c7-72db-b858-f89f6af8f921",
+                name: "Grace Hopper",
+              },
+              clientTimestampUs: String(Date.now() * 1000),
+            },
+          ],
         }),
       });
 
-      const response = await server.request("/api/todos", {
+      const response = await server.request("/api/mutations", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          id: "01963227-d4c7-72db-b858-f89f6af8f992",
-          title: "Visible after API write",
-          description: "Electric should stream this down",
-          authorId: "01963227-d4c7-72db-b858-f89f6af8f921",
-          status: "in_progress",
-          priority: "high",
+          mutations: [
+            {
+              tableName: "todos",
+              entityKey: { id: "01963227-d4c7-72db-b858-f89f6af8f992" },
+              mutationId: "4cb07d29-d072-44b3-b84e-8ee7f024ca1a",
+              mutationSeq: 1,
+              kind: "create",
+              payload: {
+                id: "01963227-d4c7-72db-b858-f89f6af8f992",
+                title: "Visible after API write",
+                description: "Electric should stream this down",
+                author_id: "01963227-d4c7-72db-b858-f89f6af8f921",
+                status: "in_progress",
+                priority: "high",
+              },
+              clientTimestampUs: String(Date.now() * 1000),
+            },
+          ],
         }),
       });
 
-      expect(response.status).toBe(201);
+      expect(response.status).toBe(200);
 
       await waitFor(async () => {
         const authorResult = await localPg.query<{ name: string }>("SELECT name FROM authors WHERE id = $1;", [

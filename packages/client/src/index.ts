@@ -150,7 +150,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     db: pglite,
     registry: options.registry,
     writeUrl: options.writeUrl,
-    ...(options.batchWriteUrl !== undefined ? { batchWriteUrl: options.batchWriteUrl } : {}),
+    batchWriteUrl: options.batchWriteUrl ?? options.writeUrl,
     ...(options.authToken ? { authToken: options.authToken } : {}),
     ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
   });

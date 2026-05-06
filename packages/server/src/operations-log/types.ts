@@ -2,7 +2,7 @@ import type { SQLWrapper } from "drizzle-orm";
 
 export type OpsLogSource = "crud" | "batch";
 
-export type OpsLogBackend = "drizzle" | "bulk-dynamic" | "bulk-pregenerated" | "bulk-plpgsql" | "bulk-plpgsql-artifact";
+export type OpsLogBackend = "bulk-plpgsql-artifact";
 
 export type OpsLogStatus = "succeeded" | "validation_failed" | "not_found" | "execution_failed";
 

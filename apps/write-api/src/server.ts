@@ -66,23 +66,15 @@ export default {
   fetch: app.fetch,
 };
 
-function readWriteApiBackend(
-  rawValue: string | undefined,
-): "drizzle" | "bulk-dynamic" | "bulk-pregenerated" | "bulk-plpgsql" | "bulk-plpgsql-artifact" {
-  const value = rawValue ?? "drizzle";
+function readWriteApiBackend(rawValue: string | undefined): "bulk-plpgsql-artifact" {
+  const value = rawValue ?? "bulk-plpgsql-artifact";
 
-  if (
-    value === "drizzle" ||
-    value === "bulk-dynamic" ||
-    value === "bulk-pregenerated" ||
-    value === "bulk-plpgsql" ||
-    value === "bulk-plpgsql-artifact"
-  ) {
+  if (value === "bulk-plpgsql-artifact") {
     return value;
   }
 
   throw new Error(
-    `Invalid WRITE_API_BACKEND=${value}. Expected one of: drizzle, bulk-dynamic, bulk-pregenerated, bulk-plpgsql, bulk-plpgsql-artifact.`,
+    `Invalid WRITE_API_BACKEND=${value}. Stable write-api mode is bulk-plpgsql-artifact only. Use @pgxsinkit/server/experimental for legacy backends.`,
   );
 }
 

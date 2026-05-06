@@ -9,7 +9,7 @@ Canonical timestamps are stored as bigint microseconds since unix epoch and cros
 - Keep the downward sync path aligned with upstream `@electric-sql/pglite-sync`, while vendoring locally for hardening.
 - Put the write path behind a typed API using Bun, Drizzle, and Zod.
 - Maintain fast unit tests plus container-backed integration tests.
-- Make upgrades of PostgreSQL, ElectricSQL, and PGlite routine and measurable.
+- Make upgrades of Drizzle, PostgreSQL, ElectricSQL, and PGlite routine and measurable.
 
 ## Workspace layout
 
@@ -100,15 +100,16 @@ The performance runner provisions its own isolated PostgreSQL and ElectricSQL st
 
 More detailed performance configuration, including the full env var list and matrix runner options, lives in `tests/performance/README.md`.
 
-## Backend switching
+## Stable backend contract
 
-`WRITE_API_BACKEND` options:
+Stable write mode is artifact-only:
 
-- `drizzle`
-- `bulk-dynamic`
-- `bulk-pregenerated`
-- `bulk-plpgsql`
-- `bulk-plpgsql-artifact`
+- `WRITE_API_BACKEND=bulk-plpgsql-artifact`
+
+Legacy backend strategy utilities are isolated under experimental exports:
+
+- `@pgxsinkit/server/experimental`
+- `@pgxsinkit/client/experimental`
 
 Long-polling shape proxy requests may need a higher Bun idle timeout than the default 10 seconds.
 
@@ -120,7 +121,7 @@ To send batch writes from web client:
 
 The web app reads `VITE_*` variables from the repository root `.env`, even when launched via `bun run dev:web`.
 
-If unset, client uses per-table write routes.
+If unset, stable client behavior still uses `writeUrl` for `POST /api/mutations`.
 
 ## Demo auth lifecycle
 
