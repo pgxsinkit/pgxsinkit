@@ -9,8 +9,8 @@
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/demo": "workspace:*",
     "@pgxsinkit/server": "workspace:*",
-    "drizzle-orm": "1.0.0-beta.22",
-    "hono": "4.12.16",
+    "drizzle-orm": "1.0.0-rc.2",
+    "hono": "4.12.17",
     "zod": "4.4.3"
   }
 }

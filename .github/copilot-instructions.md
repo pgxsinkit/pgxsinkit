@@ -36,7 +36,7 @@ Build and maintain a battle-hardened demo and verification harness for `PostgreS
 - Add or update tests whenever changing sync configuration, write validation, database schema, or integration setup.
 - Use `mise` for pinned tool installation and Bun workspaces for package management.
 - Preserve Bun for the write API runtime.
-- Preserve Drizzle ORM and `drizzle-kit@1.0.0-beta.*` for schema management.
+- Preserve Drizzle ORM and `drizzle-kit@1.0.0-rc.*` or later for schema management.
 - Keep Drizzle schema authoritative for server-side PostgreSQL structure.
 - Preserve Zod v4 validation on all user-controlled payloads.
 - Run ALL type checks through `tsgo` from `@typescript/native-preview`, never attempt to use tsc.

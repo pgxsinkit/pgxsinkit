@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "files": [
     "dist",
     "src",
@@ -22,11 +22,11 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.2"
+    "@pgxsinkit/contracts": "^0.1.3"
   },
   "peerDependencies": {
-    "drizzle-orm": "1.0.0-rc.2-33e80cd",
-    "hono": "^4.12.15",
+    "drizzle-orm": "1.0.0-rc.2",
+    "hono": "^4.12.17",
     "postgres": "^3.4.9"
   }
 }
