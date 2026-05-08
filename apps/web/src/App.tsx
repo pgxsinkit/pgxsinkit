@@ -53,7 +53,9 @@ export function App() {
 
     void loadPGlite({
       identity: authIdentity,
-      authToken: demoAuthTokenByIdentity[authIdentity],
+      getAuthToken: async () => {
+        return demoAuthTokenByIdentity[authIdentity] ?? undefined;
+      },
     })
       .then(({ client, db, initialSyncDone, dispose }) => {
         disposeClient = dispose;

@@ -1065,7 +1065,7 @@ describe("overlay state helpers", () => {
       registry: demoSyncRegistry,
       writeUrl,
       batchWriteUrl: writeUrl,
-      authToken: "demo-token",
+      getAuthToken: async () => "demo-token",
     });
 
     const originalFetch = globalThis.fetch;

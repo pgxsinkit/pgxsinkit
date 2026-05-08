@@ -1161,13 +1161,13 @@ function buildBatchMutation(input: {
 async function postBatchMutations(
   server: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>,
   mutations: Array<ReturnType<typeof buildBatchMutation>>,
-  authToken?: string,
+  accessToken?: string,
 ) {
   return server.request("/api/mutations", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify({ mutations }),
   });

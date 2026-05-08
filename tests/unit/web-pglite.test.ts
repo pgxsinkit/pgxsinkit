@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const destroyMock = vi.fn<() => Promise<void>>(async () => undefined);
 const createSyncClientMock = vi.fn<
-  () => Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: typeof destroyMock }>
->(async () => ({
+  (options: unknown) => Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: typeof destroyMock }>
+>(async (_options) => ({
   pglite: { name: "mock-db" },
   ready: Promise.resolve(),
   destroy: destroyMock,
@@ -24,17 +24,24 @@ describe("web pglite loader", () => {
     const { loadPGlite, getDemoDataDirForIdentity } = await import("../../apps/web/src/pglite");
 
     const [first, second] = await Promise.all([
-      loadPGlite({ identity: "admin", authToken: "token-admin" }),
-      loadPGlite({ identity: "admin", authToken: "token-admin" }),
+      loadPGlite({ identity: "admin", getAuthToken: async () => "token-admin" }),
+      loadPGlite({ identity: "admin", getAuthToken: async () => "token-admin" }),
     ]);
 
     expect(createSyncClientMock).toHaveBeenCalledTimes(1);
     expect(createSyncClientMock).toHaveBeenCalledWith(
       expect.objectContaining({
         dataDir: getDemoDataDirForIdentity("admin"),
-        authToken: "token-admin",
+        syncEnabled: true,
+        getAuthToken: expect.any(Function),
       }),
     );
+
+    const createSyncClientArgs = createSyncClientMock.mock.calls[0]?.[0] as
+      | { getAuthToken?: () => Promise<string | undefined> }
+      | undefined;
+    expect(await createSyncClientArgs?.getAuthToken?.()).toBe("token-admin");
+
     expect(first.client).toBe(second.client);
     expect(first.db).toBe(second.db);
 
@@ -48,16 +55,21 @@ describe("web pglite loader", () => {
   it("skips read sync for the unauthenticated demo identity", async () => {
     const { loadPGlite, getDemoDataDirForIdentity } = await import("../../apps/web/src/pglite");
 
-    const loaded = await loadPGlite({ identity: "none", authToken: null });
+    const loaded = await loadPGlite({ identity: "none", getAuthToken: async () => null });
 
     expect(createSyncClientMock).toHaveBeenCalledTimes(1);
     expect(createSyncClientMock).toHaveBeenCalledWith(
       expect.objectContaining({
         dataDir: getDemoDataDirForIdentity("none"),
         syncEnabled: false,
+        getAuthToken: expect.any(Function),
       }),
     );
-    expect(createSyncClientMock).toHaveBeenCalledWith(expect.not.objectContaining({ authToken: expect.anything() }));
+
+    const createSyncClientArgs = createSyncClientMock.mock.calls[0]?.[0] as
+      | { getAuthToken?: () => Promise<string | undefined> }
+      | undefined;
+    expect(await createSyncClientArgs?.getAuthToken?.()).toBeUndefined();
 
     await loaded.dispose();
     expect(destroyMock).toHaveBeenCalledTimes(1);

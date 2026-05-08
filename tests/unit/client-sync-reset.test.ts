@@ -14,15 +14,22 @@ const execMock = vi.fn<(sql: string) => Promise<void>>(async (_sql) => {
   order.push("applyLocalSchema");
 });
 
-const startConfiguredSyncMock = vi.fn<() => Promise<{ unsubscribe: () => void; tables: Record<string, never> }>>(
-  async () => {
-    order.push("startConfiguredSync");
-    return {
-      unsubscribe: () => undefined,
-      tables: {},
-    };
-  },
-);
+type StartConfiguredSyncInput = {
+  shapeHeaders?: Record<string, string>;
+};
+
+const startConfiguredSyncMock = vi.fn<
+  (
+    pglite: unknown,
+    input: StartConfiguredSyncInput,
+  ) => Promise<{ unsubscribe: () => void; tables: Record<string, never> }>
+>(async (_pglite, _input) => {
+  order.push("startConfiguredSync");
+  return {
+    unsubscribe: () => undefined,
+    tables: {},
+  };
+});
 
 const recoverSendingMock = vi.fn<() => Promise<void>>(async () => undefined);
 
@@ -197,5 +204,69 @@ describe("createSyncClient subscription reset", () => {
       "deleteSubscription:schema.items",
       "startConfiguredSync",
     ]);
+  });
+
+  it("uses getAuthToken to set shape Authorization headers when authToken is omitted", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+    const getAuthTokenMock = vi.fn<() => Promise<string | undefined>>(async () => "token-from-get-auth-token");
+
+    await createSyncClient({
+      registry: {
+        items: {
+          table: {},
+          mode: "readwrite",
+          primaryKey: { columns: ["id"] },
+          shape: { tableName: "items", shapeKey: "schema.items" },
+          routes: { basePath: "/api/items" },
+          clientProjection: {
+            syncedTable: "items",
+            overlayTable: "items_overlay",
+            journalTable: "items_mutations",
+            readModel: "items_read_model",
+          },
+        },
+      } as any,
+      electricUrl: "http://127.0.0.1:3101/v1/shape-proxy",
+      writeUrl: "http://127.0.0.1:3101",
+      dataDir: "memory:/client-sync-get-auth-token-shape-header-test",
+      resetSubscriptionKeys: ["schema.items"],
+      getAuthToken: getAuthTokenMock,
+    });
+
+    expect(getAuthTokenMock).toHaveBeenCalledTimes(1);
+    const syncInput = startConfiguredSyncMock.mock.calls[0]?.[1] as StartConfiguredSyncInput | undefined;
+    expect(syncInput?.shapeHeaders).toEqual({ Authorization: "Bearer token-from-get-auth-token" });
+  });
+
+  it("does not set shape Authorization headers when getAuthToken returns undefined", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+    const getAuthTokenMock = vi.fn<() => Promise<string | undefined>>(async () => undefined);
+
+    await createSyncClient({
+      registry: {
+        items: {
+          table: {},
+          mode: "readwrite",
+          primaryKey: { columns: ["id"] },
+          shape: { tableName: "items", shapeKey: "schema.items" },
+          routes: { basePath: "/api/items" },
+          clientProjection: {
+            syncedTable: "items",
+            overlayTable: "items_overlay",
+            journalTable: "items_mutations",
+            readModel: "items_read_model",
+          },
+        },
+      } as any,
+      electricUrl: "http://127.0.0.1:3101/v1/shape-proxy",
+      writeUrl: "http://127.0.0.1:3101",
+      dataDir: "memory:/client-sync-no-auth-token-shape-header-test",
+      resetSubscriptionKeys: ["schema.items"],
+      getAuthToken: getAuthTokenMock,
+    });
+
+    expect(getAuthTokenMock).toHaveBeenCalledTimes(1);
+    const syncInput = startConfiguredSyncMock.mock.calls[0]?.[1] as StartConfiguredSyncInput | undefined;
+    expect(syncInput?.shapeHeaders).toBeUndefined();
   });
 });

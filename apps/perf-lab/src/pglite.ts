@@ -11,7 +11,7 @@ export interface PerfLabConnectionOptions {
   writeUrl: string;
   batchWriteUrl: string;
   electricUrl: string;
-  authToken?: string | null;
+  getAuthToken?: () => Promise<string | null | undefined>;
   syncEnabled?: boolean;
 }
 
@@ -54,13 +54,13 @@ export async function loadPerfClient(
   connectionOptions: PerfLabConnectionOptions,
   options: LoadPerfClientOptions = {},
 ) {
-  const resolved = resolveConnectionOptions(connectionOptions);
+  const resolved = await resolveConnectionOptions(connectionOptions);
   const client = await createSyncClient({
     registry,
     electricUrl: resolved.electricUrl,
     writeUrl: resolved.writeUrl,
     batchWriteUrl: resolved.batchWriteUrl,
-    ...(resolved.authToken ? { authToken: resolved.authToken } : {}),
+    ...(resolved.getAuthToken ? { getAuthToken: resolved.getAuthToken } : {}),
     syncEnabled: resolved.syncEnabled,
     ...(resolved.syncEnabled ? { resetSubscriptionKeys: getRegistryShapeKeys(registry) } : {}),
     ...(options.prepareLocalDbBeforeSchema ? { prepareLocalDbBeforeSchema: options.prepareLocalDbBeforeSchema } : {}),
@@ -82,13 +82,13 @@ export function buildPerfDataDir(runId: string) {
   return "idb://pgxsinkit-perf-lab-browser";
 }
 
-function resolveConnectionOptions(connectionOptions: PerfLabConnectionOptions) {
+async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOptions) {
   if (connectionOptions.mode === "offline") {
     return {
       writeUrl: offlineConnectionDefaults.offlineWriteUrl,
       batchWriteUrl: offlineConnectionDefaults.offlineBatchWriteUrl,
       electricUrl: offlineConnectionDefaults.offlineElectricUrl,
-      authToken: undefined,
+      getAuthToken: undefined,
       syncEnabled: false,
     };
   }
@@ -96,14 +96,20 @@ function resolveConnectionOptions(connectionOptions: PerfLabConnectionOptions) {
   const writeUrl = connectionOptions.writeUrl.trim();
   const batchWriteUrl = connectionOptions.batchWriteUrl.trim() || writeUrl;
   const electricUrl = connectionOptions.electricUrl.trim() || `${writeUrl}/v1/shape-proxy`;
-  const authToken = connectionOptions.authToken?.trim() || undefined;
+  const getAuthToken = connectionOptions.getAuthToken
+    ? async () => {
+        const token = await connectionOptions.getAuthToken?.();
+        return token?.trim() || undefined;
+      }
+    : undefined;
+  const initialAuthToken = await getAuthToken?.();
 
   return {
     writeUrl,
     batchWriteUrl,
     electricUrl,
-    authToken,
-    syncEnabled: Boolean(connectionOptions.syncEnabled && authToken),
+    getAuthToken,
+    syncEnabled: Boolean(connectionOptions.syncEnabled && initialAuthToken),
   };
 }
 

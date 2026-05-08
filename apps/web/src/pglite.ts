@@ -13,7 +13,7 @@ interface LoadedDatabase {
 
 interface LoadPGliteOptions {
   identity: DemoAuthIdentity;
-  authToken?: string | null;
+  getAuthToken?: () => Promise<string | null | undefined>;
 }
 
 type SharedLoadedDatabase = Omit<LoadedDatabase, "dispose">;
@@ -29,7 +29,13 @@ export async function loadPGlite(options?: LoadPGliteOptions): Promise<LoadedDat
   const writeUrl = import.meta.env.VITE_WRITE_API_URL ?? "http://localhost:3001";
   const batchWriteUrl = import.meta.env.VITE_BATCH_WRITE_URL ?? writeUrl;
   const electricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${writeUrl}/v1/shape-proxy`;
-  const authToken = options?.authToken ?? undefined;
+  const getAuthToken = options?.getAuthToken
+    ? async () => {
+        const token = await options.getAuthToken?.();
+        return token ?? undefined;
+      }
+    : undefined;
+  const initialAuthToken = await getAuthToken?.();
   const dataDir = getDemoDataDirForIdentity(options?.identity ?? "user1");
   let entry = sharedDatabases.get(dataDir);
 
@@ -41,8 +47,8 @@ export async function loadPGlite(options?: LoadPGliteOptions): Promise<LoadedDat
         electricUrl,
         writeUrl,
         batchWriteUrl,
-        ...(authToken ? { authToken } : {}),
-        syncEnabled: authToken !== undefined,
+        ...(getAuthToken ? { getAuthToken } : {}),
+        syncEnabled: initialAuthToken !== undefined,
         dataDir,
       }).then((client) => ({
         client,

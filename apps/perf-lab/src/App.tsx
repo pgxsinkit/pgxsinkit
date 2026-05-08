@@ -463,7 +463,7 @@ export function App() {
     const nextBundle = buildSyntheticRegistry(registryOptions);
     const nextRunId = createRunId();
     const nextRuntimeDescriptor = buildRuntimeDescriptor(nextScenario, nextConnection);
-    const authToken = demoAuthTokenByIdentity[nextConnection.authIdentity];
+    const authToken = demoAuthTokenByIdentity[nextConnection.authIdentity] ?? undefined;
 
     appendLog(
       `Preparing browser lab with ${registryOptions.tableCount} tables, ${registryOptions.extraColumnCount} extra columns, local schema ${schemaName}, ${describeConnection(nextConnection)}, and data dir ${buildPerfDataDir(nextRunId)}`,
@@ -495,7 +495,7 @@ export function App() {
           writeUrl: nextConnection.writeUrl,
           batchWriteUrl: nextConnection.batchWriteUrl,
           electricUrl: nextConnection.electricUrl,
-          authToken,
+          getAuthToken: async () => authToken,
           syncEnabled: nextConnection.syncEnabled,
         },
         {

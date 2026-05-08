@@ -33,7 +33,6 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   electricUrl: string;
   writeUrl: string;
   batchWriteUrl?: string;
-  authToken?: string;
   getAuthToken?: () => Promise<string | undefined>;
   syncEnabled?: boolean;
   dataDir?: string;
@@ -137,9 +136,11 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     status.phase = "syncing";
     options.onStatusChange?.(status);
 
+    const syncAuthToken = options.getAuthToken ? await options.getAuthToken() : undefined;
+
     sync = await startConfiguredSync(pglite as unknown as Parameters<typeof startConfiguredSync>[0], {
       syncConfig: buildSyncConfigFromRegistry(options.registry, options.electricUrl),
-      ...(options.authToken ? { shapeHeaders: { Authorization: `Bearer ${options.authToken}` } } : {}),
+      ...(syncAuthToken ? { shapeHeaders: { Authorization: `Bearer ${syncAuthToken}` } } : {}),
       ...(options.onTableInitialSync ? { onTableInitialSync: options.onTableInitialSync } : {}),
       onInitialSync: () => {
         status.phase = "ready";
@@ -158,7 +159,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     registry: options.registry,
     writeUrl: options.writeUrl,
     batchWriteUrl: options.batchWriteUrl ?? options.writeUrl,
-    ...(options.authToken ? { authToken: options.authToken } : {}),
     ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
   });
 

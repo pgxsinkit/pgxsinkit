@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/server",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "files": [
     "dist",
     "src",
@@ -26,7 +26,7 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.6"
+    "@pgxsinkit/contracts": "^0.1.7"
   },
   "peerDependencies": {
     "drizzle-orm": "1.0.0-rc.2",

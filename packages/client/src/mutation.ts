@@ -67,7 +67,6 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
   registry: TRegistry;
   writeUrl: string;
   batchWriteUrl?: string;
-  authToken?: string;
   getAuthToken?: () => Promise<string | undefined>;
 }
 
@@ -142,7 +141,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       return await options.getAuthToken();
     }
 
-    return options.authToken;
+    return undefined;
   };
 
   const tableContexts = buildTableContexts(options.registry, options.batchWriteUrl === undefined);
@@ -1742,7 +1741,7 @@ async function sendMutationRequest(
   context: TableContext,
   entityKey: Record<string, string>,
   payload: Record<string, unknown>,
-  authToken?: string,
+  bearerToken?: string,
 ) {
   if (!context.routeBasePath) {
     throw new Error(`routes.basePath is required for direct mutation requests on table ${context.key}`);
@@ -1752,7 +1751,7 @@ async function sendMutationRequest(
     case "create":
       return fetch(`${writeUrl}${context.routeBasePath}`, {
         method: "POST",
-        headers: buildRequestHeaders(authToken),
+        headers: buildRequestHeaders(bearerToken),
         body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.value))),
       });
     case "update":
@@ -1760,7 +1759,7 @@ async function sendMutationRequest(
         `${writeUrl}${context.routeBasePath}/${encodeURIComponent(getSingleEntityKeyValue(context, entityKey))}`,
         {
           method: "PATCH",
-          headers: buildRequestHeaders(authToken),
+          headers: buildRequestHeaders(bearerToken),
           body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.patch))),
         },
       );
@@ -1769,7 +1768,7 @@ async function sendMutationRequest(
         `${writeUrl}${context.routeBasePath}/${encodeURIComponent(getSingleEntityKeyValue(context, entityKey))}`,
         {
           method: "DELETE",
-          headers: buildRequestHeaders(authToken),
+          headers: buildRequestHeaders(bearerToken),
         },
       );
     default:
@@ -1777,8 +1776,8 @@ async function sendMutationRequest(
   }
 }
 
-function buildRequestHeaders(authToken?: string): Record<string, string> {
-  if (!authToken) {
+function buildRequestHeaders(bearerToken?: string): Record<string, string> {
+  if (!bearerToken) {
     return {
       "Content-Type": "application/json",
     };
@@ -1786,7 +1785,7 @@ function buildRequestHeaders(authToken?: string): Record<string, string> {
 
   return {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${authToken}`,
+    Authorization: `Bearer ${bearerToken}`,
   };
 }
 
