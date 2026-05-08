@@ -499,6 +499,9 @@ export function App() {
           syncEnabled: nextConnection.syncEnabled,
         },
         {
+          prepareLocalDbBeforeSchema: async (db) => {
+            await ensureLocalPerfLabPrerequisites(db, nextBundle);
+          },
           prepareLocalDb: async (db) => {
             await truncateLocalPerfLabTablesInDb(db, nextBundle);
           },
@@ -1616,6 +1619,30 @@ async function truncateLocalPerfLabTables(client: PerfLabClient, bundle: Synthet
   await truncateLocalPerfLabTablesInDb(client.pglite, bundle);
 }
 
+async function ensureLocalPerfLabPrerequisites(db: PerfLabDb, bundle: SyntheticRegistryBundle) {
+  const schemaName = getSyncRegistrySchema(bundle.registry);
+  const markerTypeName = "perf_lab_client_pre_schema_marker";
+  const qualifiedMarkerTypeName = localProjectionName(bundle, markerTypeName);
+  const markerTypeNameLiteral = quoteSqlLiteral(markerTypeName);
+  const schemaNameLiteral = quoteSqlLiteral(schemaName);
+
+  await db.exec(`
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_type AS t
+    INNER JOIN pg_namespace AS n ON n.oid = t.typnamespace
+    WHERE t.typname = ${markerTypeNameLiteral}
+      AND n.nspname = ${schemaNameLiteral}
+  ) THEN
+    CREATE TYPE ${qualifiedMarkerTypeName} AS ENUM ('ready');
+  END IF;
+END
+$$;
+`);
+}
+
 async function truncateLocalPerfLabTablesInDb(db: PerfLabDb, bundle: SyntheticRegistryBundle) {
   const statements = bundle.tableNames.flatMap((tableName) => [
     `DELETE FROM ${localProjectionName(bundle, `${tableName}_overlay`)}`,
@@ -1642,6 +1669,10 @@ function localProjectionName(bundle: SyntheticRegistryBundle, objectName: string
 
 function quoteIdentifier(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+function quoteSqlLiteral(value: string) {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function formatCount(value: number) {

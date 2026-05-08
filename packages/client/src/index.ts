@@ -38,6 +38,7 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   syncEnabled?: boolean;
   dataDir?: string;
   resetSubscriptionKeys?: string[];
+  prepareLocalDbBeforeSchema?: (pglite: ClientPGlite) => Promise<void>;
   prepareLocalDb?: (pglite: ClientPGlite) => Promise<void>;
   onStatusChange?: (status: SyncRuntimeStatus) => void;
   onTableInitialSync?: (tableKey: string) => void;
@@ -110,8 +111,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         live,
       },
     })) as ClientPGlite;
+
+    if (options.prepareLocalDbBeforeSchema) {
+      await options.prepareLocalDbBeforeSchema(pglite);
+    }
+
     const schemaSql = generateLocalSchemaSql(options.registry);
     await pglite.exec(schemaSql);
+
     if (options.prepareLocalDb) {
       await options.prepareLocalDb(pglite);
     }

@@ -62,3 +62,23 @@ The `operations_log` table is a Drizzle-managed internal server table included i
 - They are stored as PostgreSQL `BIGINT` microseconds since unix epoch.
 - They cross API and sync boundaries as decimal strings.
 - Human-readable timestamp projections can be added later if they become operationally useful, but they are not the sync truth.
+
+## Client mutation contract
+
+- Applications must not directly mutate synced tables.
+- Client writes must go through the mutation runtime, which stages local intent into overlay and journal tables.
+- Synced tables are updated by shape sync from ElectricSQL and are treated as replication targets.
+
+## Local schema prerequisite hook
+
+- Client initialization now supports a pre-schema hook: `prepareLocalDbBeforeSchema`.
+- This hook runs after PGlite creation and before local schema SQL execution when `createSyncClient` creates the database instance.
+- Use this hook to provision prerequisite local objects required by generated schema SQL.
+- Existing `prepareLocalDb` remains a post-schema hook for compatibility.
+
+## Intentionally out of scope
+
+- Automatic provisioning for non-enum prerequisite objects beyond what callers explicitly provide through `prepareLocalDbBeforeSchema`.
+- Full local DDL parity for defaults, generated columns, identity semantics, and non-primary-key constraints.
+- Local governance and RLS enforcement parity with server-side PostgreSQL policy behavior.
+- Local trigger/function/materialized-view parity with server-side database behavior.

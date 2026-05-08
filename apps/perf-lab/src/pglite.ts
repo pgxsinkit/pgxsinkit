@@ -25,6 +25,7 @@ export interface PerfLabConnectionDefaults {
 }
 
 export interface LoadPerfClientOptions {
+  prepareLocalDbBeforeSchema?: (db: PerfLabDb) => Promise<void>;
   prepareLocalDb?: (db: PerfLabDb) => Promise<void>;
 }
 
@@ -62,6 +63,7 @@ export async function loadPerfClient(
     ...(resolved.authToken ? { authToken: resolved.authToken } : {}),
     syncEnabled: resolved.syncEnabled,
     ...(resolved.syncEnabled ? { resetSubscriptionKeys: getRegistryShapeKeys(registry) } : {}),
+    ...(options.prepareLocalDbBeforeSchema ? { prepareLocalDbBeforeSchema: options.prepareLocalDbBeforeSchema } : {}),
     ...(options.prepareLocalDb ? { prepareLocalDb: options.prepareLocalDb } : {}),
     dataDir,
   });

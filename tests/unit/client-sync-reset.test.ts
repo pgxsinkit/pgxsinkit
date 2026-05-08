@@ -10,6 +10,10 @@ const deleteSubscriptionMock = vi.fn<(key: string) => Promise<void>>(async (key:
   order.push(`deleteSubscription:${key}`);
 });
 
+const execMock = vi.fn<(sql: string) => Promise<void>>(async (_sql) => {
+  order.push("applyLocalSchema");
+});
+
 const startConfiguredSyncMock = vi.fn<() => Promise<{ unsubscribe: () => void; tables: Record<string, never> }>>(
   async () => {
     order.push("startConfiguredSync");
@@ -25,7 +29,7 @@ const recoverSendingMock = vi.fn<() => Promise<void>>(async () => undefined);
 vi.mock("@electric-sql/pglite", () => ({
   PGlite: {
     create: async () => ({
-      exec: async () => undefined,
+      exec: execMock,
       close: async () => undefined,
       electric: {
         initMetadataTables: initMetadataTablesMock,
@@ -69,13 +73,14 @@ vi.mock("../../packages/client/src/schema", () => ({
 describe("createSyncClient subscription reset", () => {
   beforeEach(() => {
     order.length = 0;
+    execMock.mockClear();
     initMetadataTablesMock.mockClear();
     deleteSubscriptionMock.mockClear();
     startConfiguredSyncMock.mockClear();
     recoverSendingMock.mockClear();
   });
 
-  it("clears requested subscriptions before starting sync", async () => {
+  it("applies schema and clears requested subscriptions before starting sync", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
 
     await createSyncClient({
@@ -100,15 +105,21 @@ describe("createSyncClient subscription reset", () => {
       resetSubscriptionKeys: ["schema.items", "schema.items", "  "],
     });
 
+    expect(execMock).toHaveBeenCalledTimes(1);
     expect(initMetadataTablesMock).toHaveBeenCalledTimes(1);
     expect(deleteSubscriptionMock).toHaveBeenCalledTimes(1);
     expect(deleteSubscriptionMock).toHaveBeenCalledWith("schema.items");
     expect(startConfiguredSyncMock).toHaveBeenCalledTimes(1);
-    expect(order).toEqual(["initMetadataTables", "deleteSubscription:schema.items", "startConfiguredSync"]);
+    expect(order).toEqual([
+      "applyLocalSchema",
+      "initMetadataTables",
+      "deleteSubscription:schema.items",
+      "startConfiguredSync",
+    ]);
     expect(recoverSendingMock).toHaveBeenCalledTimes(1);
   });
 
-  it("prepares the local database before starting sync", async () => {
+  it("applies schema, then prepares the local database before starting sync", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const prepareLocalDbMock = vi.fn<(db: unknown) => Promise<void>>(async (_db) => {
       order.push("prepareLocalDb");
@@ -137,9 +148,51 @@ describe("createSyncClient subscription reset", () => {
       prepareLocalDb: prepareLocalDbMock,
     });
 
+    expect(execMock).toHaveBeenCalledTimes(1);
     expect(prepareLocalDbMock).toHaveBeenCalledTimes(1);
     expect(order).toEqual([
+      "applyLocalSchema",
       "prepareLocalDb",
+      "initMetadataTables",
+      "deleteSubscription:schema.items",
+      "startConfiguredSync",
+    ]);
+  });
+
+  it("calls prepareLocalDbBeforeSchema before applying schema", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+    const prepareLocalDbBeforeSchemaMock = vi.fn<(db: unknown) => Promise<void>>(async (_db) => {
+      order.push("prepareLocalDbBeforeSchema");
+    });
+
+    await createSyncClient({
+      registry: {
+        items: {
+          table: {},
+          mode: "readwrite",
+          primaryKey: { columns: ["id"] },
+          shape: { tableName: "items", shapeKey: "schema.items" },
+          routes: { basePath: "/api/items" },
+          clientProjection: {
+            syncedTable: "items",
+            overlayTable: "items_overlay",
+            journalTable: "items_mutations",
+            readModel: "items_read_model",
+          },
+        },
+      } as any,
+      electricUrl: "http://127.0.0.1:3101/v1/shape-proxy",
+      writeUrl: "http://127.0.0.1:3101",
+      dataDir: "memory:/client-sync-prepare-before-schema-test",
+      resetSubscriptionKeys: ["schema.items"],
+      prepareLocalDbBeforeSchema: prepareLocalDbBeforeSchemaMock,
+    });
+
+    expect(prepareLocalDbBeforeSchemaMock).toHaveBeenCalledTimes(1);
+    expect(execMock).toHaveBeenCalledTimes(1);
+    expect(order).toEqual([
+      "prepareLocalDbBeforeSchema",
+      "applyLocalSchema",
       "initMetadataTables",
       "deleteSubscription:schema.items",
       "startConfiguredSync",
