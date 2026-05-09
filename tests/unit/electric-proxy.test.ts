@@ -25,7 +25,7 @@ describe("electric proxy", () => {
     );
     globalThis.fetch = fetchMock as typeof fetch;
 
-    const request = new Request("http://localhost:3001/v1/shape-proxy?table=authors&offset=-1", {
+    const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1", {
       headers: {
         Authorization: "Bearer test-token",
       },
@@ -52,7 +52,7 @@ describe("electric proxy", () => {
     fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
     globalThis.fetch = fetchMock as typeof fetch;
 
-    const request = new Request("http://localhost:3001/v1/shape-proxy?table=todos&offset=-1", {
+    const request = new Request("http://localhost:3001/v1/electric-proxy?table=todos&offset=-1", {
       headers: {
         Authorization: "Bearer admin-token",
       },
@@ -70,7 +70,7 @@ describe("electric proxy", () => {
     fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
     globalThis.fetch = fetchMock as typeof fetch;
 
-    const request = new Request("http://localhost:3001/v1/shape-proxy?table=authors&offset=-1");
+    const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
     await proxyElectricShapeRequest(request, null, {
       electricUrl: "http://localhost:3000/v1/shape",

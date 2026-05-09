@@ -152,6 +152,38 @@ describe("server facade contract", () => {
     expect(successRows).toHaveLength(3);
   });
 
+  it("accepts the functions batch mutation alias", async () => {
+    const id = "02000001-0000-4001-8001-000000000021";
+
+    const response = await server.request("/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          {
+            tableName: "projects",
+            entityKey: { id },
+            mutationId: "12345678-1234-1234-8234-123456780021",
+            mutationSeq: 1,
+            kind: "create",
+            payload: { id, name: "Functions-route project" },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      acks: [
+        expect.objectContaining({
+          mutationId: "12345678-1234-1234-8234-123456780021",
+          status: "acked",
+        }),
+      ],
+    });
+  });
+
   it("rejects CRUD write routes and keeps list route read-only", async () => {
     const createResponse = await server.request("/api/projects", {
       method: "POST",

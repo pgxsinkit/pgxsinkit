@@ -1360,16 +1360,17 @@ async function flushBatch(
 
   let responseOk = false;
   let acksByMutationId: Map<string, BatchMutationAck["acks"][number]> = new Map();
+  const batchMutationUrl = resolveBatchMutationUrl(batchWriteUrl);
 
   try {
-    let response = await fetch(`${batchWriteUrl}/api/mutations`, {
+    let response = await fetch(batchMutationUrl, {
       method: "POST",
       headers: buildRequestHeaders(await getAuthToken?.()),
       body: JSON.stringify({ mutations }),
     });
 
     if ([401, 403].includes(response.status) && getAuthToken) {
-      response = await fetch(`${batchWriteUrl}/api/mutations`, {
+      response = await fetch(batchMutationUrl, {
         method: "POST",
         headers: buildRequestHeaders(await getAuthToken()),
         body: JSON.stringify({ mutations }),
@@ -1486,6 +1487,16 @@ async function flushBatch(
     processedCount: pending.length,
     affectedContexts: [...new Set(pending.map((row) => row.context))],
   };
+}
+
+function resolveBatchMutationUrl(batchWriteUrl: string): string {
+  const trimmed = batchWriteUrl.replace(/\/+$/, "");
+
+  if (trimmed.endsWith("/mutations")) {
+    return trimmed;
+  }
+
+  return `${trimmed}/mutations`;
 }
 
 function toSqlColumnPayload(context: TableContext, payload: Record<string, unknown>): Record<string, unknown> {

@@ -131,7 +131,7 @@ The demo includes an end-to-end auth simulation without external identity provid
 - `user` and `admin` use fixed Supabase-style HS256 JWTs.
 - Client sends `Authorization: Bearer ...` for write and shape requests.
 - Write API validates demo JWTs and maps claims into `resolveAuthClaims`.
-- Write API exposes `/v1/shape-proxy`, forwarding to Electric and enforcing owner filters for protected tables (`authors`, `todos`) unless caller role is `admin`.
+- Write API exposes `/v1/electric-proxy`, forwarding to Electric and enforcing owner filters for protected tables (`authors`, `todos`) unless caller role is `admin`.
 
 If `DEMO_JWT_SECRET` is unset, the shared demo secret is used.
 

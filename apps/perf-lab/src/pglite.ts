@@ -38,7 +38,7 @@ const offlineConnectionDefaults = {
 export function getPerfLabConnectionDefaults(): PerfLabConnectionDefaults {
   const liveWriteUrl = import.meta.env.VITE_WRITE_API_URL ?? "http://127.0.0.1:3101";
   const liveBatchWriteUrl = import.meta.env.VITE_BATCH_WRITE_URL ?? liveWriteUrl;
-  const liveElectricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${liveWriteUrl}/v1/shape-proxy`;
+  const liveElectricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${liveWriteUrl}/v1/electric-proxy`;
 
   return {
     liveWriteUrl,
@@ -95,7 +95,7 @@ async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOpti
 
   const writeUrl = connectionOptions.writeUrl.trim();
   const batchWriteUrl = connectionOptions.batchWriteUrl.trim() || writeUrl;
-  const electricUrl = connectionOptions.electricUrl.trim() || `${writeUrl}/v1/shape-proxy`;
+  const electricUrl = connectionOptions.electricUrl.trim() || `${writeUrl}/v1/electric-proxy`;
   const getAuthToken = connectionOptions.getAuthToken
     ? async () => {
         const token = await connectionOptions.getAuthToken?.();

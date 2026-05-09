@@ -289,7 +289,7 @@ app.post("/api/mutations", async (context) => {
   }
 });
 
-app.get("/v1/shape-proxy", async (context) => {
+app.get("/v1/electric-proxy", async (context) => {
   const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
 
   if (!activeRegistry) {

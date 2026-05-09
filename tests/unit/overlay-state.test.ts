@@ -1107,7 +1107,7 @@ describe("overlay state helpers", () => {
       await runtime.flush("authors");
 
       expect(fetchMock).toHaveBeenCalledWith(
-        "http://localhost:3001/api/mutations",
+        "http://localhost:3001/mutations",
         expect.objectContaining({
           method: "POST",
           headers: expect.objectContaining({
@@ -1180,6 +1180,56 @@ describe("overlay state helpers", () => {
       await Promise.all([firstFlush, secondFlush]);
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("uses an explicit batch endpoint as-is without appending legacy path segments", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(overlaySchemaSql);
+
+    const runtime = createMutationRuntime({
+      db,
+      registry: demoSyncRegistry,
+      writeUrl,
+      batchWriteUrl: "http://localhost:3001/mutations",
+    });
+
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : null;
+      const requestBody = bodyText
+        ? (JSON.parse(bodyText) as { mutations: Array<{ mutationId: string }> })
+        : { mutations: [] };
+
+      return new Response(
+        JSON.stringify({
+          acks: requestBody.mutations.map((mutation) => ({
+            mutationId: mutation.mutationId,
+            status: "acked",
+            httpStatus: 200,
+            serverUpdatedAtUs: "100",
+          })),
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    globalThis.fetch = fetchMock;
+
+    try {
+      await runtime.create("authors", {
+        id: "01963227-d4c7-72db-b858-f89f6af8f937",
+        name: "Endpoint-preserving author",
+      });
+
+      await runtime.flush("authors");
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://localhost:3001/mutations",
+        expect.objectContaining({ method: "POST" }),
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }

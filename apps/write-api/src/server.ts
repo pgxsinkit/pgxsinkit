@@ -44,7 +44,7 @@ app.use(
   }),
 );
 
-app.get("/v1/shape-proxy", async (context) => {
+app.get("/v1/electric-proxy", async (context) => {
   try {
     const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
     return await proxyElectricShapeRequest(context.req.raw, claims, { electricUrl });

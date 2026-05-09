@@ -30,7 +30,7 @@ The repository is split into four boundaries:
 6. In artifact mode with RLS enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims` and `auth.set_auth_context`.
 7. The API writes to PostgreSQL through the artifact batch function (`POST /api/mutations`).
 8. ElectricSQL exposes shape data from PostgreSQL.
-9. The write API shape proxy (`/v1/shape-proxy`) forwards read requests to Electric and enforces owner filtering for protected tables unless caller role is admin.
+9. The write API shape proxy (`/v1/electric-proxy`) forwards read requests to Electric and enforces owner filtering for protected tables unless caller role is admin.
 10. PGlite subscribes through the vendored `packages/pglite-sync` implementation.
 11. Acked overlay rows are cleared only after the synced echo reaches the acknowledged server `updated_at_us` value.
 12. The integration tests assert eventual convergence inside local PGlite.

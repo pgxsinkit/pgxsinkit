@@ -118,6 +118,6 @@ The browser lab is intended for browser-based full-cycle testing of the client r
 
 Set `PGXSINKIT_PERF_MUTATION_BATCH_SIZE` before `bun run perf:lab` to change how many local mutations the browser lab stages per `client.mutate.batch(...)` call. The default is `1`, which keeps one-mutation-at-a-time behavior.
 
-`bun run perf:lab` owns its own dedicated stack. It first tears down any prior `pgxsinkit-perf-lab` containers and fixed child processes, then starts a fresh PostgreSQL, ElectricSQL, perf-lab write server, and Vite browser server on fixed names and ports. The default live URLs are `http://127.0.0.1:3101` for writes and `http://127.0.0.1:3101/v1/shape-proxy` for Electric proxying. The browser app respects `VITE_WRITE_API_URL`, `VITE_BATCH_WRITE_URL`, and `VITE_ELECTRIC_URL` if you intentionally override them.
+`bun run perf:lab` owns its own dedicated stack. It first tears down any prior `pgxsinkit-perf-lab` containers and fixed child processes, then starts a fresh PostgreSQL, ElectricSQL, perf-lab write server, and Vite browser server on fixed names and ports. The default live URLs are `http://127.0.0.1:3101` for writes and `http://127.0.0.1:3101/v1/electric-proxy` for Electric proxying. The browser app respects `VITE_WRITE_API_URL`, `VITE_BATCH_WRITE_URL`, and `VITE_ELECTRIC_URL` if you intentionally override them.
 
 Offline loopback mode remains available for purely local pressure checks, but that is not the default path.

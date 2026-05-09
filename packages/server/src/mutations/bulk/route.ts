@@ -2,7 +2,7 @@ import { getTableName, sql } from "drizzle-orm";
 import type { AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 
 import type {
   BatchMutationRequest,
@@ -31,6 +31,7 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
   resolveAuthClaims?: (request: Request) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null,
 ) {
   let startupReadyPromise: Promise<void> | undefined;
+  const batchMutationPaths = ["/api/mutations", "/mutations"] as const;
 
   const startupReady = () => {
     if (!startupReadyPromise) {
@@ -40,7 +41,7 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
     return startupReadyPromise;
   };
 
-  app.post("/api/mutations", async (context) => {
+  const handleBatchMutation = async (context: Context) => {
     await Promise.all([startupReady(), operationsLogReady]);
 
     let rawBody: unknown;
@@ -284,7 +285,11 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
     }
 
     return context.json({ acks });
-  });
+  };
+
+  for (const path of batchMutationPaths) {
+    app.post(path, handleBatchMutation);
+  }
 }
 
 function isValidationError(error: unknown): error is { issues: unknown[] } {
