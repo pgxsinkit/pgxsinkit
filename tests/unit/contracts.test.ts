@@ -135,6 +135,47 @@ describe("todo contracts", () => {
     expect(result.tables.projects?.clientProjection?.omitColumns).toEqual(["ownerId"]);
   });
 
+  it("accepts rowFilter on shape specs without rejecting unrecognized keys", () => {
+    const result = syncConfigSchema.parse({
+      electricUrl: "http://localhost:3000/v1/shape",
+      tables: {
+        projects: {
+          name: "projects",
+          mode: "readwrite",
+          primaryKey: {
+            columns: ["id"],
+          },
+          shape: {
+            tableName: "projects",
+            shapeKey: "projects-shape",
+            rowFilter: {
+              ownership: { column: "owner_id" },
+              shared: {
+                sharedColumn: "shared",
+                sharedUserId: "00000000-0000-0000-0000-000000000001",
+              },
+              columns: ["id", "title"],
+            },
+          },
+          clientProjection: {
+            syncedTable: "projects",
+            overlayTable: "projects_overlay",
+            journalTable: "projects_mutations",
+            readModel: "projects_read_model",
+          },
+        },
+      },
+    });
+
+    expect(result.tables.projects?.mode).toBe("readwrite");
+    // rowFilter is an unknown passthrough — stored as unknown, but present
+    const shape = result.tables.projects?.shape;
+    expect(shape).toBeDefined();
+    // rowFilter is a z.unknown() passthrough — verify it survived Zod parsing
+    const raw = shape as unknown as { rowFilter?: { ownership?: { column: string } } };
+    expect(raw.rowFilter?.ownership?.column).toBe("owner_id");
+  });
+
   it("attaches registry-level schema metadata without changing table enumeration", () => {
     const schemaName = buildSyntheticRegistrySchemaName({
       tableCount: 1,

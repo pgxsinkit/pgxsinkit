@@ -14,7 +14,10 @@ export const demoSyncRegistry = defineSyncRegistry({
     table: authorsTable,
     mode: authorTableSpec.mode,
     primaryKey: authorTableSpec.primaryKey,
-    shape: authorTableSpec.shape,
+    shape: {
+      ...authorTableSpec.shape,
+      rowFilter: { ownership: { column: "owner_id" } },
+    },
     routes: authorTableSpec.routes,
     clientProjection: authorTableSpec.clientProjection,
     governance: defineTableGovernance(authorsTable, {
@@ -56,7 +59,10 @@ export const demoSyncRegistry = defineSyncRegistry({
     table: todosTable,
     mode: todoTableSpec.mode,
     primaryKey: todoTableSpec.primaryKey,
-    shape: todoTableSpec.shape,
+    shape: {
+      ...todoTableSpec.shape,
+      rowFilter: { ownership: { column: "owner_id" } },
+    },
     routes: todoTableSpec.routes,
     clientProjection: todoTableSpec.clientProjection,
     governance: defineTableGovernance(todosTable, {

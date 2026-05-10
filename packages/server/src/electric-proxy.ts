@@ -68,8 +68,11 @@ function buildProxyTargetUrl(
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(options.electricUrl);
 
-  // Copy all search params from the incoming request
-  targetUrl.search = requestUrl.search;
+  // Merge incoming request params into the electric URL, preserving
+  // any pre-existing params (e.g. secret API token from electricUrl).
+  requestUrl.searchParams.forEach((value, key) => {
+    targetUrl.searchParams.set(key, value);
+  });
 
   const table = targetUrl.searchParams.get("table");
 
