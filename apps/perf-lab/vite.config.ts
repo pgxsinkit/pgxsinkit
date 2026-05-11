@@ -7,7 +7,7 @@ const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 const workspaceAliases = {
   "@pgxsinkit/client": fileURLToPath(new URL("../../packages/client/src/index.ts", import.meta.url)),
   "@pgxsinkit/contracts": fileURLToPath(new URL("../../packages/contracts/src/index.ts", import.meta.url)),
-  "@pgxsinkit/demo": fileURLToPath(new URL("../../packages/demo/src/index.ts", import.meta.url)),
+  "@pgxsinkit/schema": fileURLToPath(new URL("../../packages/schema/src/index.ts", import.meta.url)),
 };
 
 export default defineConfig({

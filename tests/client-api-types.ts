@@ -1,6 +1,6 @@
 import { createSyncClient } from "@pgxsinkit/client";
 import type { SyncTableCreateInput } from "@pgxsinkit/contracts";
-import { demoSyncRegistry } from "@pgxsinkit/demo";
+import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 const validInput: SyncTableCreateInput<typeof demoSyncRegistry, "todos"> = {
   id: "01963227-d4c7-72db-b858-f89f6af8f999",

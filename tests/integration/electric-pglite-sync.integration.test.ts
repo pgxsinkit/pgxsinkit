@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import { buildDemoSyncConfig, demoSyncRegistry } from "@pgxsinkit/demo";
+import { buildDemoSyncConfig, demoSyncRegistry } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-engine";
 import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";

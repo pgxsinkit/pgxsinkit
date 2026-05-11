@@ -3,7 +3,7 @@ import {
   mapCreateTodoToInsert,
   mapUpdateAuthorToValues,
   mapUpdateTodoToValues,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 describe("db mapping helpers", () => {
   it("maps author payloads into insert and update shapes", () => {

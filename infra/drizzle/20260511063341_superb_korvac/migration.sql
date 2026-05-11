@@ -1,4 +1,3 @@
-CREATE ROLE "authenticated";--> statement-breakpoint
 CREATE TABLE "authors" (
 	"id" uuid PRIMARY KEY,
 	"name" varchar(120) NOT NULL,

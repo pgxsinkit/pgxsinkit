@@ -12,7 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
-import { buildSyntheticRegistry, buildSyntheticRegistrySchemaName, demoSyncRegistry } from "@pgxsinkit/demo";
+import { buildSyntheticRegistry, buildSyntheticRegistrySchemaName, demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 

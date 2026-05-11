@@ -2,7 +2,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 
 import type { RlsPolicySpec } from "@pgxsinkit/contracts";
 import { buildSupabaseOwnerOrAdminPredicateSqlText } from "@pgxsinkit/contracts";
-import { authorsTable, demoSyncRegistry, todosTable } from "@pgxsinkit/demo";
+import { authorsTable, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 
 type NativeSqlChunk = {
   value?: string[];

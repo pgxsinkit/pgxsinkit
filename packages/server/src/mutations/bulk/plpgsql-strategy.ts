@@ -240,9 +240,24 @@ DECLARE
   v_mutation_id text;
   v_mutation_seq integer;
   v_client_timestamp_us bigint;
+  _claims jsonb;
+  _target_role text;
 BEGIN
   IF p_rls_enabled THEN
-    PERFORM auth.set_auth_context(COALESCE(p_user_claims, '{}'::jsonb));
+    _claims := COALESCE(p_user_claims, '{}'::jsonb);
+    _target_role := COALESCE(NULLIF(_claims ->> 'role', ''), 'authenticated');
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = _target_role) THEN
+        PERFORM set_config('role', _target_role, true);
+      ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        PERFORM set_config('role', 'authenticated', true);
+      END IF;
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    PERFORM set_config('request.jwt.claims', _claims::text, true);
+    IF _claims ? 'sub' THEN
+      PERFORM set_config('request.jwt.claim.sub', _claims ->> 'sub', true);
+    END IF;
   END IF;
 
   IF jsonb_typeof(p_batch) <> 'object' THEN
@@ -344,10 +359,7 @@ export async function verifyPlpgsqlBatchFunction<TRegistry extends SyncTableRegi
 }
 
 type AuthHelperPresenceRow = {
-  setAuthContext: string | null;
   authUid: string | null;
-  authJwt: string | null;
-  authHasRole: string | null;
 };
 
 export async function verifyArtifactRlsAuthHelpers<TRegistry extends SyncTableRegistry>(
@@ -355,23 +367,16 @@ export async function verifyArtifactRlsAuthHelpers<TRegistry extends SyncTableRe
 ): Promise<void> {
   const result = await db.execute<AuthHelperPresenceRow>(sql`
     SELECT
-      to_regprocedure('auth.set_auth_context(jsonb)')::text AS "setAuthContext",
-      to_regprocedure('auth.uid()')::text AS "authUid",
-      to_regprocedure('auth.jwt()')::text AS "authJwt",
-      to_regprocedure('auth.has_role(text)')::text AS "authHasRole"
+      to_regprocedure('auth.uid()')::text AS "authUid"
   `);
 
   const row = Array.from(result, (entry) => entry as AuthHelperPresenceRow)[0];
-  const missingHelpers = [
-    row?.setAuthContext ? null : "auth.set_auth_context(jsonb)",
-    row?.authUid ? null : "auth.uid()",
-    row?.authJwt ? null : "auth.jwt()",
-    row?.authHasRole ? null : "auth.has_role(text)",
-  ].filter((value): value is string => value !== null);
+  const missingHelpers = [row?.authUid ? null : "auth.uid()"].filter((value): value is string => value !== null);
 
   if (missingHelpers.length > 0) {
     throw new Error(
-      `bulk-plpgsql-artifact backend with RLS-enabled tables requires governance SQL to be applied. Missing: ${missingHelpers.join(", ")}. Run bun run db:apply:governance.`,
+      `bulk-plpgsql-artifact backend requires Supabase auth helpers. Missing: ${missingHelpers.join(", ")}. ` +
+        "Ensure auth.uid() is available (standard on Supabase-managed databases).",
     );
   }
 }

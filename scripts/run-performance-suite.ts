@@ -3,6 +3,8 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 
+import { composeCredentials } from "../infra/compose-credentials";
+
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
 const SERVICE_START_TIMEOUT_MS = 180_000;
 const SERVICE_POLL_INTERVAL_MS = 500;
@@ -150,12 +152,12 @@ async function main() {
   const composeProject = buildProjectName();
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    PGXSINKIT_POSTGRES_PORT: String(postgresPort),
+    PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
     PGXSINKIT_ELECTRIC_PORT: String(electricPort),
   };
   cleanupEnv = composeEnv;
 
-  const databaseUrl = `postgresql://postgres:password@127.0.0.1:${postgresPort}/pgxsinkit?sslmode=disable`;
+  const databaseUrl = composeCredentials.buildLocalDatabaseUrl("127.0.0.1", postgresPort);
   const electricUrl = `http://127.0.0.1:${electricPort}/v1/shape`;
   const testEnv: NodeJS.ProcessEnv = {
     ...composeEnv,
@@ -183,7 +185,7 @@ async function main() {
     await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL");
     await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL");
 
-    await runCommand("bun", ["run", "db:push"], testEnv);
+    await runCommand("bun", ["run", "db:migrate"], testEnv);
     await runCommand("bun", ["run", "vitest", "run", "--no-file-parallelism", ...testFiles], testEnv);
   } catch (error) {
     suiteError = error;

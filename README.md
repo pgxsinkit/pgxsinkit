@@ -20,7 +20,7 @@ Canonical timestamps are stored as bigint microseconds since unix epoch and cros
 - `packages/sync-engine`: wrapper around vendored sync package.
 - `packages/test-utils`: shared test helpers.
 - `infra/compose`: compose files for PostgreSQL and ElectricSQL.
-- `infra/sql`: local bootstrap SQL.
+- `infra/drizzle`: drizzle migrations for PostgreSQL.
 - `tests/unit`: pure unit tests.
 - `tests/integration`: container-backed integration tests.
 

@@ -1,32 +1,27 @@
 services:
   postgres:
-    image: docker.io/postgres:18-alpine
-    environment:
-      POSTGRES_DB: pgxsinkit
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-    ports:
-      - "${PGXSINKIT_POSTGRES_PORT:-54321}:5432"
-    command:
-      - postgres
-      - -c
-      - wal_level=logical
-      - -c
-      - max_replication_slots=10
-      - -c
-      - max_wal_senders=10
+    image: docker.io/supabase/postgres:17.6.1.116
     volumes:
-      - ../sql/001-init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - ./entrypoint-masks/init-scripts:/docker-entrypoint-initdb.d:ro
+    environment:
+      POSTGRES_USER: ${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}
+      POSTGRES_PASSWORD: ${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}
+      POSTGRES_DB: ${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
+      POSTGRES_INITDB_SKIP_SCRIPTS: ${PGXSINKIT_INTEGRATION_POSTGRES_SKIP_INIT_SCRIPTS:-false}
+    ports:
+      - "${PGXSINKIT_INTEGRATION_POSTGRES_PORT:-54321}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d pgxsinkit"]
-      interval: 5s
-      timeout: 5s
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin} -d ${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
+      interval: 2s
+      timeout: 3s
       retries: 20
 
   electric:
     image: docker.io/electricsql/electric:latest
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/pgxsinkit?sslmode=disable
+      DATABASE_URL: postgresql://supabase_admin:your-super-secret-and-long-postgres-password@postgres:5432/postgres?sslmode=disable
       ELECTRIC_INSECURE: "true"
       ELECTRIC_ENABLE_INTEGRATION_TESTING: "true"
     ports:

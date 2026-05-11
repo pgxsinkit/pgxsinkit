@@ -11,7 +11,7 @@ import {
   findSyntheticPerfLabScenarioDefinition,
   pickSyntheticWorkloadTarget,
   syntheticPerfLabPresets,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 

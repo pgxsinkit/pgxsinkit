@@ -18,7 +18,7 @@ import {
   todoRecordSchema,
   todoTableSpec,
   updateTodoInputSchema,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 const projectedContractsTable = pgTable("projected_contracts_items", {
   id: uuid("id").primaryKey(),

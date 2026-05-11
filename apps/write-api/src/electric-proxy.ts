@@ -1,4 +1,4 @@
-import { demoJwtHasRole, type DemoJwtClaims } from "@pgxsinkit/demo";
+import { demoJwtHasRole, type DemoJwtClaims } from "@pgxsinkit/schema";
 
 const protectedTables = new Set(["authors", "todos"]);
 

@@ -19,7 +19,7 @@ import {
   type SyntheticPerfLabScenario,
   type SyntheticRegistryBundle,
   type SyntheticRegistryOptions,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 import {
   buildPerfDataDir,

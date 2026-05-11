@@ -2,7 +2,7 @@ import { performance } from "node:perf_hooks";
 
 import { sql } from "drizzle-orm";
 
-import { DEMO_JWT_USER1, DEMO_JWT_USER2 } from "@pgxsinkit/demo";
+import { DEMO_JWT_USER1, DEMO_JWT_USER2 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { readIntegrationEnv } from "@pgxsinkit/test-utils";
 

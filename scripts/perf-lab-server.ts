@@ -27,7 +27,7 @@ import {
   findSyntheticPerfLabScenarioDefinition,
   syntheticPerfLabScenarioDefinitions,
   type DemoJwtClaims,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 import { parseDemoAuthClaimsFromRequest } from "../apps/write-api/src/demo-auth";
 import {

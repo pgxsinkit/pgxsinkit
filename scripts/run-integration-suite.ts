@@ -1,8 +1,12 @@
 import { spawnSync } from "node:child_process";
 import net from "node:net";
 
+import postgres from "postgres";
+
+import { composeCredentials } from "../infra/compose-credentials";
+
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
-const SERVICE_START_TIMEOUT_MS = 60_000;
+const SERVICE_START_TIMEOUT_MS = 120_000;
 const SERVICE_POLL_INTERVAL_MS = 500;
 
 function assertTestFiles(args: string[]): string[] {
@@ -145,6 +149,25 @@ async function waitForTcpService(host: string, port: number, label: string): Pro
   throw new Error(`Timed out waiting for ${label} at ${host}:${port}`);
 }
 
+async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): Promise<void> {
+  const start = Date.now();
+  const client = postgres(databaseUrl, { connect_timeout: 2, idle_timeout: 2 });
+
+  try {
+    while (Date.now() - start < timeoutMs) {
+      try {
+        await client.unsafe("SELECT 1");
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    throw new Error("Timed out waiting for PostgreSQL to accept queries");
+  } finally {
+    await client.end();
+  }
+}
+
 function buildProjectName(): string {
   return `pgxsinkit-it-${Date.now().toString(36)}-${process.pid}`;
 }
@@ -162,11 +185,11 @@ async function main() {
   const composeProject = buildProjectName();
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    PGXSINKIT_POSTGRES_PORT: String(postgresPort),
+    PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
     PGXSINKIT_ELECTRIC_PORT: String(electricPort),
   };
 
-  const databaseUrl = `postgresql://postgres:password@127.0.0.1:${postgresPort}/pgxsinkit?sslmode=disable`;
+  const databaseUrl = composeCredentials.buildLocalDatabaseUrl("127.0.0.1", postgresPort);
   const electricUrl = `http://127.0.0.1:${electricPort}/v1/shape`;
   const testEnv: NodeJS.ProcessEnv = {
     ...composeEnv,
@@ -189,9 +212,10 @@ async function main() {
     composeStarted = true;
 
     await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL");
+    await waitForPgReady(databaseUrl);
     await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL");
 
-    runCommand("bun", ["run", "db:push"], testEnv);
+    runCommand("bun", ["run", "db:migrate"], testEnv);
     runCommand("bun", ["run", "vitest", "run", "--no-file-parallelism", ...testFiles], testEnv);
   } catch (error) {
     suiteError = error;

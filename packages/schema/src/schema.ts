@@ -1,11 +1,10 @@
 import { sql } from "drizzle-orm";
-import { bigint, pgRole, pgTable, text, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, pgTable, text, uuid, varchar } from "drizzle-orm/pg-core";
+import { authenticatedRole } from "drizzle-orm/supabase";
 
 import { buildSupabaseOwnerOrAdminNativePolicies } from "@pgxsinkit/contracts";
 
 const nowMicrosecondsSql = sql`(floor((EXTRACT(epoch FROM clock_timestamp()) * (1000000)::numeric)))`;
-
-export const authenticatedRole = pgRole("authenticated");
 
 export const authorsTable = pgTable(
   "authors",

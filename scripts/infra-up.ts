@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import net from "node:net";
 
+import { composeCredentials } from "../infra/compose-credentials";
+
 type ServiceCheck = {
   label: string;
   host: string;
@@ -8,7 +10,7 @@ type ServiceCheck = {
 };
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
-const DEFAULT_DATABASE_URL = "postgresql://postgres:password@localhost:54321/pgxsinkit?sslmode=disable";
+const DEFAULT_DATABASE_URL = composeCredentials.DEFAULT_DATABASE_URL;
 const DEFAULT_ELECTRIC_URL = "http://localhost:3000/v1/shape";
 
 function parsePort(url: URL): number {
@@ -84,10 +86,7 @@ async function main() {
 
   runCommand("podman", ["compose", "-f", COMPOSE_FILE, "up", "-d"], env);
   await waitForServices(services);
-  runCommand("bun", ["run", "db:push"], env);
-  runCommand("bun", ["run", "db:apply:governance"], env);
-  runCommand("bun", ["run", "db:apply:sync-function"], env);
-  runCommand("bun", ["run", "db:verify:sync-function"], env);
+  runCommand("bun", ["run", "db:migrate"], env);
 }
 
 await main();

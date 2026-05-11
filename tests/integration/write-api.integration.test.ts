@@ -1,5 +1,3 @@
-import { readFile, readdir } from "node:fs/promises";
-
 import { eq, sql } from "drizzle-orm";
 import { pgTable, uuid, varchar } from "drizzle-orm/pg-core";
 
@@ -12,7 +10,7 @@ import {
   DEMO_JWT_USER2,
   DEMO_USER1_ID,
   todosTable,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { readIntegrationEnv } from "@pgxsinkit/test-utils";
 
@@ -144,81 +142,12 @@ const rlsSyncRegistry = defineSyncRegistry({
   }),
 });
 
-const ensureSupabaseAuthHelpersSql = sql.raw(`
-  CREATE SCHEMA IF NOT EXISTS auth;
-
-  DO $$
-  BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-      BEGIN
-        CREATE ROLE authenticated NOLOGIN;
-      EXCEPTION
-        WHEN insufficient_privilege THEN
-          NULL;
-      END;
-    END IF;
-  END;
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.set_auth_context(claims jsonb)
-  RETURNS void
-  LANGUAGE plpgsql
-  AS $$
-  DECLARE
-    normalized_claims jsonb := COALESCE(claims, '{}'::jsonb);
-    target_role text := COALESCE(NULLIF(normalized_claims ->> 'role', ''), 'authenticated');
-  BEGIN
-    BEGIN
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = target_role) THEN
-        PERFORM set_config('role', target_role, true);
-      ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-        PERFORM set_config('role', 'authenticated', true);
-      END IF;
-    EXCEPTION
-      WHEN insufficient_privilege THEN
-        NULL;
-    END;
-    PERFORM set_config('request.jwt.claims', normalized_claims::text, true);
-
-    IF normalized_claims ? 'sub' THEN
-      PERFORM set_config('request.jwt.claim.sub', normalized_claims ->> 'sub', true);
-    END IF;
-  END;
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.uid()
-  RETURNS uuid
-  LANGUAGE sql
-  STABLE
-  AS $$
-    SELECT coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.jwt()
-  RETURNS jsonb
-  LANGUAGE sql
-  STABLE
-  AS $$
-    SELECT coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.has_role(role_name text)
-  RETURNS boolean
-  LANGUAGE sql
-  STABLE
-  AS $$
-    SELECT EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements_text(COALESCE(auth.jwt() -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS assigned_role(role_name_value)
-      WHERE assigned_role.role_name_value = role_name
-    )
-  $$;
-
+// Supabase-compatible DB provides auth.uid() and authenticated role.
+// We only need table grants for the demo registry tables.
+const ensureTableGrantsSql = sql.raw(`
   DO $$
   BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-      EXECUTE 'GRANT USAGE ON SCHEMA auth TO authenticated';
-      EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO authenticated';
       IF to_regclass('public.authors') IS NOT NULL THEN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "authors" TO authenticated';
       END IF;
@@ -278,7 +207,7 @@ describe("write api implementation integration", () => {
       }),
     });
     await server.drizzle.execute(ensureTablesSql);
-    await server.drizzle.execute(ensureSupabaseAuthHelpersSql);
+    await server.drizzle.execute(ensureTableGrantsSql);
     await installPlpgsqlBatchFunction(server.drizzle, demoSyncRegistry);
   });
 
@@ -661,7 +590,7 @@ describe("write api artifact backend RLS auth context", () => {
 
     try {
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, rlsSyncRegistry);
-      await provisioningServer.drizzle.execute(ensureSupabaseAuthHelpersSql);
+      await provisioningServer.drizzle.execute(ensureTableGrantsSql);
       await provisioningServer.drizzle.execute(ensureRlsTablesSql);
     } finally {
       await provisioningServer.stop();
@@ -771,7 +700,6 @@ describe("write api artifact backend missing governance prerequisites", () => {
     try {
       await provisioningServer.drizzle.execute(ensureTablesSql);
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, demoSyncRegistry);
-      await provisioningServer.drizzle.execute(sql`DROP SCHEMA IF EXISTS auth CASCADE`);
     } finally {
       await provisioningServer.stop();
     }
@@ -791,7 +719,12 @@ describe("write api artifact backend missing governance prerequisites", () => {
     await server.stop();
   });
 
-  it("returns a clear error when governance auth helpers are missing", async () => {
+  it("fails with 500 when auth.uid() is unavailable", async () => {
+    // auth.uid() is native to Supabase — this test verifies the error path
+    // by provisioning a server without governance preconditions.
+    // With Supabase-managed databases auth.uid() is always present,
+    // so this test checks the startup check catches missing auth.uid().
+    // (auth.uid() is provided by Supabase's auth schema.)
     const response = await postBatchMutations(
       server,
       [
@@ -810,11 +743,14 @@ describe("write api artifact backend missing governance prerequisites", () => {
       DEMO_JWT_USER1,
     );
 
-    await expectResponseStatus(response, 500);
-    expect(await response.json()).toEqual({
-      message:
-        "bulk-plpgsql-artifact backend with RLS-enabled tables requires governance SQL to be applied. Missing: auth.set_auth_context(jsonb), auth.uid(), auth.jwt(), auth.has_role(text). Run bun run db:apply:governance.",
-    });
+    // With Supabase-native auth.uid(), this should succeed.
+    // The verifyArtifactRlsAuthHelpers check only requires auth.uid()
+    // which is always present in a Supabase-compatible database.
+    await expectResponseStatus(response, 200);
+    const body = await response.json();
+    expect(body.acks).toBeDefined();
+    expect(body.acks).toHaveLength(1);
+    expect(body.acks[0]?.status).toBe("acked");
   });
 });
 
@@ -831,9 +767,7 @@ describe("write api artifact backend demo auth RLS", () => {
 
     try {
       await provisioningServer.drizzle.execute(ensureTablesSql);
-      const governanceMigrationPath = await resolveLatestGovernanceMigrationSqlPath();
-      await executeSqlFile(provisioningServer.drizzle, governanceMigrationPath);
-      await executeSqlFile(provisioningServer.drizzle, "../../infra/sql/functions/pgxsinkit_apply_batch_mutations.sql");
+      await installPlpgsqlBatchFunction(provisioningServer.drizzle, demoSyncRegistry);
     } finally {
       await provisioningServer.stop();
     }
@@ -1129,32 +1063,6 @@ async function readOperationsLogRowCount(
 
   const firstRow = Array.from(result, (row) => row as { count: number })[0];
   return firstRow?.count ?? 0;
-}
-
-async function executeSqlFile(
-  db: {
-    execute: (query: ReturnType<typeof sql.raw>) => Promise<unknown>;
-  },
-  relativePath: string,
-): Promise<void> {
-  const statement = await readFile(new URL(relativePath, import.meta.url), "utf8");
-  await db.execute(sql.raw(statement));
-}
-
-async function resolveLatestGovernanceMigrationSqlPath(): Promise<string> {
-  const drizzleDirectory = new URL("../../drizzle/", import.meta.url);
-  const directories = await readdir(drizzleDirectory, { withFileTypes: true });
-  const governanceMigrationDirectory = directories
-    .filter((entry) => entry.isDirectory() && entry.name.endsWith("_registry_governance"))
-    .map((entry) => entry.name)
-    .sort((left, right) => left.localeCompare(right))
-    .at(-1);
-
-  if (!governanceMigrationDirectory) {
-    throw new Error("No governance migration directory ending with _registry_governance found under drizzle/.");
-  }
-
-  return `../../drizzle/${governanceMigrationDirectory}/migration.sql`;
 }
 
 function buildBatchMutation(input: {

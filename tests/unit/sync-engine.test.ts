@@ -1,4 +1,4 @@
-import { buildDemoSyncConfig } from "@pgxsinkit/demo";
+import { buildDemoSyncConfig } from "@pgxsinkit/schema";
 import { buildConfiguredShapeSpecs, buildShapeConfig, buildShapeUrl } from "@pgxsinkit/sync-engine";
 
 describe("sync-engine", () => {

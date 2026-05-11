@@ -1,14 +1,14 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
-import { demoSyncRegistry } from "@pgxsinkit/demo";
+import { demoSyncRegistry } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 
+import { composeCredentials } from "../../../infra/compose-credentials";
 import { parseDemoAuthClaimsFromRequest } from "./demo-auth";
 import { proxyElectricShapeRequest } from "./electric-proxy";
 
-const databaseUrl =
-  process.env.DATABASE_URL ?? "postgresql://postgres:password@localhost:54321/pgxsinkit?sslmode=disable";
+const databaseUrl = process.env.DATABASE_URL ?? composeCredentials.DEFAULT_DATABASE_URL;
 const electricUrl = process.env.ELECTRIC_URL ?? "http://localhost:3000/v1/shape";
 const allowedOrigins = ["http://localhost:5173", "http://localhost:5174"];
 const backend = readWriteApiBackend(process.env.WRITE_API_BACKEND);

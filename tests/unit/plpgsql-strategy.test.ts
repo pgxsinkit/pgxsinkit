@@ -1,7 +1,7 @@
 import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
-import { demoSyncRegistry } from "@pgxsinkit/demo";
+import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 

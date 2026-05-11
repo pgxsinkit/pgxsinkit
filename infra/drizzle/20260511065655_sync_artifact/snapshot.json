@@ -1,8 +1,8 @@
 {
+  "id": "9145c90c-fbb9-489d-9d40-ea5e56e747d4",
+  "prevIds": ["55afbcfa-da84-4e0c-a5f5-8bfa1c5e85b2"],
   "version": "8",
   "dialect": "postgres",
-  "id": "70e71504-f9c8-476f-8e8c-f577cc2758d3",
-  "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "ddl": [
     {
       "isRlsEnabled": true,
@@ -592,20 +592,6 @@
       "schema": "public",
       "table": "operations_log",
       "entityType": "pks"
-    },
-    {
-      "superuser": false,
-      "createDb": false,
-      "createRole": false,
-      "inherit": true,
-      "canLogin": false,
-      "replication": false,
-      "bypassRls": false,
-      "connLimit": -1,
-      "password": null,
-      "validUntil": null,
-      "name": "authenticated",
-      "entityType": "roles"
     },
     {
       "as": "PERMISSIVE",

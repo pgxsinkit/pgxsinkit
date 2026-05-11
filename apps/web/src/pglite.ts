@@ -1,5 +1,5 @@
 import { createSyncClient, type ClientPGlite } from "@pgxsinkit/client";
-import { demoSyncRegistry, type DemoAuthIdentity } from "@pgxsinkit/demo";
+import { demoSyncRegistry, type DemoAuthIdentity } from "@pgxsinkit/schema";
 
 export type AppDb = ClientPGlite;
 export type AppClient = Awaited<ReturnType<typeof createSyncClient<typeof demoSyncRegistry>>>;

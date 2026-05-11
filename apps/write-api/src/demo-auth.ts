@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { z } from "zod";
 
-import { DEMO_AUTH_SECRET, type DemoJwtClaims } from "@pgxsinkit/demo";
+import { DEMO_AUTH_SECRET, type DemoJwtClaims } from "@pgxsinkit/schema";
 
 const bearerPrefix = /^Bearer\s+/i;
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { demoSyncRegistry, DEMO_USER1_ID } from "@pgxsinkit/demo";
+import { demoSyncRegistry, DEMO_USER1_ID } from "@pgxsinkit/schema";
 import { proxyElectricShapeRequest } from "@pgxsinkit/server";
 
 const fetchMock = vi.fn<typeof fetch>();

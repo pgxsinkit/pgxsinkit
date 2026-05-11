@@ -6,17 +6,13 @@ The repository is split into four boundaries:
 
 `packages/contracts` owns the transport shape. Zod schemas define what the browser may send and what the API may return.
 
-## 2. Persistence
-
-`packages/db` owns the PostgreSQL table definition via Drizzle. It also exports helpers for building a database connection and common SQL fragments.
-
-## 3. Sync adapter
+## 2. Sync adapter
 
 `packages/pglite-sync` vendors the upstream `@electric-sql/pglite-sync` implementation.
 
 `packages/sync-engine` is a narrow wrapper around that vendored package. This keeps upstream behavior visible while giving the repo a stable place to layer retries, instrumentation, and version-specific patches later.
 
-## 4. Verification harness
+## 3. Verification harness
 
 `tests/integration` proves the topology against real services. This is the main value of the repo. The demo UI is deliberately smaller than the harness.
 

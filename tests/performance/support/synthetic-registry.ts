@@ -4,4 +4,4 @@ export {
   buildSyntheticRegistry,
   buildSyntheticServerSchemaSql,
   buildSyntheticUpdatePatch,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";

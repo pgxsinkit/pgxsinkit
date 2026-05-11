@@ -66,7 +66,7 @@ import {
   buildSyntheticRegistry,
   buildSyntheticServerSchemaSql,
   buildSyntheticUpdatePatch,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 

@@ -8,7 +8,7 @@ import {
   mapCreateAuthorToInsert,
   mapUpdateAuthorToValues,
   type AuthorRecord,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 import type { CrudRouteSpec } from "./crud-routes";
 import type { createDatabase } from "./db";

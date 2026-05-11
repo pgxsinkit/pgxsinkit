@@ -1,7 +1,7 @@
 import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
-import { buildSyntheticRegistry, demoSyncRegistry } from "@pgxsinkit/demo";
+import { buildSyntheticRegistry, demoSyncRegistry } from "@pgxsinkit/schema";
 
 import {
   DEFAULT_FLUSH_BATCH_SIZE,

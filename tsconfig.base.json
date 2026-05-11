@@ -16,7 +16,7 @@
       "drizzle-orm": ["./node_modules/drizzle-orm"],
       "drizzle-orm/*": ["./node_modules/drizzle-orm/*"],
       "@pgxsinkit/client": ["./packages/client/src/index.ts"],
-      "@pgxsinkit/demo": ["./packages/demo/src/index.ts"],
+      "@pgxsinkit/schema": ["./packages/schema/src/index.ts"],
       "@pgxsinkit/contracts": ["./packages/contracts/src/index.ts"],
       "@pgxsinkit/pglite-sync": ["./packages/pglite-sync/src/index.ts"],
       "@pgxsinkit/server": ["./packages/server/src/index.ts"],

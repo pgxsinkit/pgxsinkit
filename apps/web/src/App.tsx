@@ -13,7 +13,7 @@ import {
   type DemoAuthIdentity,
   type AuthorRecord,
   type TodoRecord,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 import { loadPGlite, type AppClient, type AppDb } from "./pglite";
 import { createReplProxy } from "./repl-proxy";
