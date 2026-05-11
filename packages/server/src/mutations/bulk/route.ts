@@ -499,13 +499,29 @@ function toSchemaPayload(entry: SyncTableEntry, payload: unknown): unknown {
   return Object.fromEntries(Object.entries(payload).map(([key, value]) => [keyMap.get(key) ?? key, value]));
 }
 
+function resolveServerUpdatedAtColumnName(entry: SyncTableEntry): string {
+  // Derive from governance.managedFields, matching client-side resolution.
+  const managedField = (entry.governance?.managedFields ?? []).find(
+    (f) => f.strategy === "nowMicroseconds" && f.applyOn.includes("update"),
+  );
+  if (managedField) {
+    const columns = getColumns(entry.table as AnyPgTable);
+    const col = Object.values(columns).find(
+      (c) => c.name === managedField.column,
+    );
+    if (col) return col.name;
+  }
+  return "updated_at_us";
+}
+
 async function readServerUpdatedAtUs(
   tx: TransactionClient,
   entry: SyncTableEntry,
   entityKey: Record<string, string>,
 ): Promise<string | undefined> {
   const columns = getColumns(entry.table as AnyPgTable);
-  const updatedAtColumn = Object.values(columns).find((column) => column.name === "updated_at_us");
+  const columnName = resolveServerUpdatedAtColumnName(entry);
+  const updatedAtColumn = Object.values(columns).find((column) => column.name === columnName);
 
   if (!updatedAtColumn) {
     return undefined;
@@ -522,7 +538,7 @@ async function readServerUpdatedAtUs(
   });
 
   const result = (await tx.execute(sql`
-    SELECT ${quoteIdentifier("updated_at_us")}::text AS "updatedAtUs"
+    SELECT ${quoteIdentifier(columnName)}::text AS "updatedAtUs"
     FROM ${quoteIdentifier(getTableName(entry.table as AnyPgTable))}
     WHERE ${sql.join(conditions, sql` AND `)}
     LIMIT 1
