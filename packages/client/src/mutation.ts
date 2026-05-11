@@ -1301,7 +1301,11 @@ async function flushBatch(
           ? entityKey
           : toSqlColumnPayload(
               context,
-              (rawPayload.value ?? rawPayload.patch ?? rawPayload) as Record<string, unknown>,
+              stripManagedFields(
+                context,
+                (rawPayload.value ?? rawPayload.patch ?? rawPayload) as Record<string, unknown>,
+                row.mutationKind as "create" | "update",
+              ),
             ),
       sqlTableName: context.entry.shape?.tableName ?? context.key,
     };
@@ -1533,6 +1537,24 @@ function filterProjectedPayload(context: TableContext, payload: Record<string, u
   }
 
   return normalized;
+}
+
+function stripManagedFields(
+  context: TableContext,
+  payload: Record<string, unknown>,
+  operation: "create" | "update",
+): Record<string, unknown> {
+  const managedColumns = new Set<string>();
+
+  for (const mf of context.entry.governance?.managedFields ?? []) {
+    if (mf.applyOn.includes(operation)) {
+      managedColumns.add(mf.column);
+    }
+  }
+
+  if (managedColumns.size === 0) return payload;
+
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !managedColumns.has(key)));
 }
 
 async function flushTable(
