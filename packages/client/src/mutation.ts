@@ -1487,9 +1487,17 @@ async function flushBatch(
     );
   }
 
+  // Reconcile overlays for affected tables so acknowledged
+  // mutations are cleared from the local overlay.
+  const reconciledContexts = [...new Set(pending.map((row) => row.context))];
+
+  for (const context of reconciledContexts) {
+    await reconcileTable(db, context);
+  }
+
   return {
     processedCount: pending.length,
-    affectedContexts: [...new Set(pending.map((row) => row.context))],
+    affectedContexts: reconciledContexts,
   };
 }
 
