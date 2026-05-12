@@ -1,15 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import net from "node:net";
 import path from "node:path";
 
-import postgres from "postgres";
-
 import { composeCredentials } from "../infra/compose-credentials";
+import { allocatePort, waitForPgReady, waitForTcpService } from "./lib";
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
 const SERVICE_START_TIMEOUT_MS = 180_000;
-const SERVICE_POLL_INTERVAL_MS = 500;
 const PERF_RESULTS_DIR = "tmp/perf-results";
 const PERF_COMPOSE_PROJECT = "pgxsinkit-performance-suite";
 const WORKSPACE_ROOT = process.cwd();
@@ -78,82 +75,6 @@ async function runCommand(
   });
 }
 
-async function allocatePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const server = net.createServer();
-
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to allocate ephemeral port.")));
-        return;
-      }
-
-      const port = address.port;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve(port);
-      });
-    });
-  });
-}
-
-async function canConnect(host: string, port: number, timeoutMs = 1200): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const socket = net.createConnection({ host, port });
-
-    const finish = (value: boolean) => {
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(value);
-    };
-
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false));
-    socket.once("error", () => finish(false));
-  });
-}
-
-async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): Promise<void> {
-  const start = Date.now();
-  const client = postgres(databaseUrl, { connect_timeout: 2, idle_timeout: 2 });
-
-  try {
-    while (Date.now() - start < timeoutMs) {
-      try {
-        await client.unsafe("SELECT 1");
-        return;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-    }
-    throw new Error("Timed out waiting for PostgreSQL to accept queries");
-  } finally {
-    await client.end();
-  }
-}
-
-async function waitForTcpService(host: string, port: number, label: string): Promise<void> {
-  const start = Date.now();
-
-  while (Date.now() - start < SERVICE_START_TIMEOUT_MS) {
-    if (await canConnect(host, port)) {
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, SERVICE_POLL_INTERVAL_MS));
-  }
-
-  throw new Error(`Timed out waiting for ${label} at ${host}:${port}`);
-}
-
 function buildProjectName(): string {
   return PERF_COMPOSE_PROJECT;
 }
@@ -203,9 +124,9 @@ async function main() {
     await cleanupPerformanceState();
     await runCommand("podman", ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "up", "-d"], composeEnv);
 
-    await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL");
+    await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL", SERVICE_START_TIMEOUT_MS);
     await waitForPgReady(databaseUrl);
-    await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL");
+    await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL", SERVICE_START_TIMEOUT_MS);
 
     await runCommand("bun", ["run", "db:migrate"], testEnv);
     await runCommand("bun", ["run", "vitest", "run", "--no-file-parallelism", ...testFiles], testEnv);

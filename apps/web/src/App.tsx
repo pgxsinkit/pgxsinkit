@@ -1,4 +1,5 @@
 import { Repl } from "@electric-sql/pglite-repl";
+import { sql } from "drizzle-orm";
 import { useEffect, useMemo, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 
@@ -6,20 +7,21 @@ import type { MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 import {
   authorListSchema,
+  authorsView,
   createAuthorInputSchema,
   createTodoInputSchema,
   demoAuthTokenByIdentity,
   todoListSchema,
+  todosView,
   type demoSyncRegistry,
   type DemoAuthIdentity,
-  type AuthorRecord,
   type TodoRecord,
 } from "@pgxsinkit/schema";
 
 import { loadPGlite, type AppClient } from "./pglite";
 import { createReplProxy } from "./repl-proxy";
 
-const { SyncClientProvider, useSyncClient, useLiveRows } = createSyncClientHooks<typeof demoSyncRegistry>();
+const { SyncClientProvider, useSyncClient, useLiveDrizzleRows } = createSyncClientHooks<typeof demoSyncRegistry>();
 
 const emptyForm = {
   title: "",
@@ -125,12 +127,6 @@ export function App() {
   );
 }
 
-type ReadModelRow = TodoRecord & {
-  overlayKind: string;
-  localUpdatedAtUs: string;
-};
-
-type AuthorRow = AuthorRecord;
 type JournalRow = MutationDetail;
 
 type Tab = "app" | "repl";
@@ -160,26 +156,39 @@ function TodoApp({
     failedCount: 0,
     ackedCount: 0,
   });
-  const { rows: rawTodoRows } = useLiveRows<ReadModelRow>(`
-    SELECT
-      id,
-      title,
-      description,
-      author_id AS "authorId",
-      status,
-      priority,
-      overlay_kind AS "overlayKind",
-      local_updated_at_us::text AS "localUpdatedAtUs",
-      created_at_us::text AS "createdAtUs",
-      updated_at_us::text AS "updatedAtUs"
-    FROM todo_read_model
-    ORDER BY created_at_us ASC
-  `);
-  const { rows: rawAuthorRows } = useLiveRows<AuthorRow>(`
-    SELECT id, name, created_at_us::text AS "createdAtUs", updated_at_us::text AS "updatedAtUs"
-    FROM author_read_model
-    ORDER BY created_at_us ASC
-  `);
+  const { rows: rawTodoRows } = useLiveDrizzleRows(
+    (c) =>
+      c.drizzle
+        .select({
+          id: todosView.id,
+          title: todosView.title,
+          description: todosView.description,
+          authorId: todosView.authorId,
+          status: todosView.status,
+          priority: todosView.priority,
+          overlayKind: todosView.overlay_kind,
+          localUpdatedAtUs: sql<string>`${todosView.local_updated_at_us}::text`,
+          // createdAtUs: sql<string>`${todosView.createdAtUs}::text`,
+          createdAtUs: todosView.createdAtUs,
+          updatedAtUs: sql<string>`${todosView.updatedAtUs}::text`,
+        })
+        .from(todosView)
+        .orderBy(todosView.createdAtUs),
+    [],
+  );
+  const { rows: rawAuthorRows } = useLiveDrizzleRows(
+    (c) =>
+      c.drizzle
+        .select({
+          id: authorsView.id,
+          name: authorsView.name,
+          createdAtUs: sql<string>`${authorsView.createdAtUs}::text`,
+          updatedAtUs: sql<string>`${authorsView.updatedAtUs}::text`,
+        })
+        .from(authorsView)
+        .orderBy(authorsView.createdAtUs),
+    [],
+  );
 
   useEffect(() => {
     let isDisposed = false;

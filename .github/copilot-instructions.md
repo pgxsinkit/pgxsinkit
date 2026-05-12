@@ -19,7 +19,7 @@
 
 ## Prohibitions
 
-- DO NOT suggest `npm install -g typescript` or any other method for installing the old version of typescript.
+- Never suggest installing the old version of `typescript`.
 - DO NOT use `bunx` for TypeScript execution.
 - NEVER create migration SQL files by hand. Always use the `drizzle-kit` commands to generate migration files, and then edit/add the SQL if necessary.
 - NEVER launch a new set of tests without making sure that the previous test run is fully complete and all related containers and processes are stopped. Always check `podman ps` and `podman compose ls` to confirm no prior test containers are running before starting a new test run.

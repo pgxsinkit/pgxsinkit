@@ -1,13 +1,10 @@
 import { spawnSync } from "node:child_process";
-import net from "node:net";
-
-import postgres from "postgres";
 
 import { composeCredentials } from "../infra/compose-credentials";
+import { allocatePort, runComposeDown, waitForPgReady, waitForTcpService } from "./lib";
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
 const SERVICE_START_TIMEOUT_MS = 120_000;
-const SERVICE_POLL_INTERVAL_MS = 500;
 
 function assertTestFiles(args: string[]): string[] {
   const testFiles = args.filter((arg) => arg.endsWith(".test.ts"));
@@ -27,144 +24,6 @@ function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): vo
 
   if (result.status !== 0) {
     throw new Error(`Command failed: ${command} ${args.join(" ")}`);
-  }
-}
-
-function sanitizeComposeDownStderr(stderr: string): { filtered: string; suppressedKnownNoise: boolean } {
-  const lines = stderr.split(/\r?\n/);
-  const kept: string[] = [];
-  let suppressedKnownNoise = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    if (line.includes("network: 1 error occurred:") && line.includes("Error: removing container")) {
-      suppressedKnownNoise = true;
-      continue;
-    }
-
-    if (line.includes("rootless netns: kill network process: permission denied")) {
-      suppressedKnownNoise = true;
-      continue;
-    }
-
-    if (trimmed.length === 0) {
-      continue;
-    }
-
-    kept.push(line);
-  }
-
-  return {
-    filtered: kept.join("\n"),
-    suppressedKnownNoise,
-  };
-}
-
-function runComposeDown(env: NodeJS.ProcessEnv, composeProject: string): void {
-  const result = spawnSync(
-    "podman",
-    ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "down", "--volumes", "--remove-orphans"],
-    {
-      env,
-      encoding: "utf8",
-    },
-  );
-
-  if (result.stdout) {
-    process.stdout.write(result.stdout);
-  }
-
-  const sanitized = sanitizeComposeDownStderr(result.stderr ?? "");
-
-  if (sanitized.filtered.length > 0) {
-    process.stderr.write(`${sanitized.filtered}\n`);
-  }
-
-  if (sanitized.suppressedKnownNoise) {
-    console.warn("[integration] Ignored known Podman rootless netns cleanup warning.");
-  }
-
-  if (result.status !== 0 && !(sanitized.suppressedKnownNoise && sanitized.filtered.length === 0)) {
-    throw new Error(
-      `Command failed: podman compose -f ${COMPOSE_FILE} -p ${composeProject} down --volumes --remove-orphans`,
-    );
-  }
-}
-
-async function allocatePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const server = net.createServer();
-
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to allocate ephemeral port.")));
-        return;
-      }
-
-      const port = address.port;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve(port);
-      });
-    });
-  });
-}
-
-async function canConnect(host: string, port: number, timeoutMs = 1200): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const socket = net.createConnection({ host, port });
-
-    const finish = (value: boolean) => {
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(value);
-    };
-
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false));
-    socket.once("error", () => finish(false));
-  });
-}
-
-async function waitForTcpService(host: string, port: number, label: string): Promise<void> {
-  const start = Date.now();
-
-  while (Date.now() - start < SERVICE_START_TIMEOUT_MS) {
-    if (await canConnect(host, port)) {
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, SERVICE_POLL_INTERVAL_MS));
-  }
-
-  throw new Error(`Timed out waiting for ${label} at ${host}:${port}`);
-}
-
-async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): Promise<void> {
-  const start = Date.now();
-  const client = postgres(databaseUrl, { connect_timeout: 2, idle_timeout: 2 });
-
-  try {
-    while (Date.now() - start < timeoutMs) {
-      try {
-        await client.unsafe("SELECT 1");
-        return;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-    }
-    throw new Error("Timed out waiting for PostgreSQL to accept queries");
-  } finally {
-    await client.end();
   }
 }
 
@@ -211,9 +70,9 @@ async function main() {
     runCommand("podman", ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "up", "-d"], composeEnv);
     composeStarted = true;
 
-    await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL");
+    await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL", SERVICE_START_TIMEOUT_MS);
     await waitForPgReady(databaseUrl);
-    await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL");
+    await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL", SERVICE_START_TIMEOUT_MS);
 
     runCommand("bun", ["run", "db:migrate"], testEnv);
     runCommand("bun", ["run", "vitest", "run", "--no-file-parallelism", ...testFiles], testEnv);
@@ -223,7 +82,7 @@ async function main() {
     if (composeStarted) {
       try {
         console.log("[integration] Tearing down isolated containers", { composeProject });
-        runComposeDown(composeEnv, composeProject);
+        runComposeDown(composeEnv, composeProject, "integration");
       } catch (error) {
         console.error("[integration] Failed to tear down isolated containers.");
         teardownError = error;
