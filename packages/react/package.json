@@ -1,0 +1,23 @@
+{
+  "name": "@pgxsinkit/react",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@pgxsinkit/client": "workspace:*",
+    "@pgxsinkit/contracts": "workspace:*"
+  },
+  "peerDependencies": {
+    "@electric-sql/pglite": "0.4.5",
+    "drizzle-orm": "1.0.0-rc.2",
+    "react": ">=18"
+  }
+}

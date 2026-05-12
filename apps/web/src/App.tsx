@@ -1,22 +1,25 @@
-import { PGliteProvider, useLiveQuery } from "@electric-sql/pglite-react";
 import { Repl } from "@electric-sql/pglite-repl";
 import { useEffect, useMemo, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 
 import type { MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
+import { createSyncClientHooks } from "@pgxsinkit/react";
 import {
   authorListSchema,
   createAuthorInputSchema,
   createTodoInputSchema,
   demoAuthTokenByIdentity,
   todoListSchema,
+  type demoSyncRegistry,
   type DemoAuthIdentity,
   type AuthorRecord,
   type TodoRecord,
 } from "@pgxsinkit/schema";
 
-import { loadPGlite, type AppClient, type AppDb } from "./pglite";
+import { loadPGlite, type AppClient } from "./pglite";
 import { createReplProxy } from "./repl-proxy";
+
+const { SyncClientProvider, useSyncClient, useLiveRows } = createSyncClientHooks<typeof demoSyncRegistry>();
 
 const emptyForm = {
   title: "",
@@ -38,7 +41,6 @@ export function App() {
     return "user1";
   });
   const [client, setClient] = useState<AppClient>();
-  const [db, setDb] = useState<Awaited<ReturnType<typeof loadPGlite>>["db"]>();
   const [syncPhase, setSyncPhase] = useState<SyncPhase>("booting");
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
@@ -47,7 +49,6 @@ export function App() {
     let disposeClient: (() => Promise<void>) | null = null;
 
     setClient(undefined);
-    setDb(undefined);
     setSyncPhase("booting");
     setBootstrapError(null);
 
@@ -57,7 +58,7 @@ export function App() {
         return demoAuthTokenByIdentity[authIdentity] ?? undefined;
       },
     })
-      .then(({ client, db, initialSyncDone, dispose }) => {
+      .then(({ client, initialSyncDone, dispose }) => {
         disposeClient = dispose;
 
         if (!isMounted) {
@@ -66,7 +67,6 @@ export function App() {
         }
 
         setClient(client);
-        setDb(db);
         setSyncPhase("syncing");
 
         void initialSyncDone.then(() => {
@@ -106,7 +106,7 @@ export function App() {
     );
   }
 
-  if (!client || !db) {
+  if (!client) {
     return (
       <main className="shell">
         <section className="hero">
@@ -119,15 +119,9 @@ export function App() {
   }
 
   return (
-    <PGliteProvider db={db}>
-      <TodoApp
-        client={client}
-        db={db}
-        syncPhase={syncPhase}
-        authIdentity={authIdentity}
-        onAuthIdentityChange={handleIdentityChange}
-      />
-    </PGliteProvider>
+    <SyncClientProvider client={client}>
+      <TodoApp syncPhase={syncPhase} authIdentity={authIdentity} onAuthIdentityChange={handleIdentityChange} />
+    </SyncClientProvider>
   );
 }
 
@@ -142,18 +136,16 @@ type JournalRow = MutationDetail;
 type Tab = "app" | "repl";
 
 function TodoApp({
-  client,
-  db,
   syncPhase,
   authIdentity,
   onAuthIdentityChange,
 }: {
-  client: AppClient;
-  db: AppDb;
   syncPhase: SyncPhase;
   authIdentity: DemoAuthIdentity;
   onAuthIdentityChange: (identity: DemoAuthIdentity) => void;
 }) {
+  const client = useSyncClient();
+  const db = client.pglite;
   const [tab, setTab] = useState<Tab>("app");
   const replProxy = useMemo(() => createReplProxy(db), [db]);
   const [journalRows, setJournalRows] = useState<JournalRow[]>([]);
@@ -168,7 +160,7 @@ function TodoApp({
     failedCount: 0,
     ackedCount: 0,
   });
-  const results = useLiveQuery<ReadModelRow>(`
+  const { rows: rawTodoRows } = useLiveRows<ReadModelRow>(`
     SELECT
       id,
       title,
@@ -183,7 +175,7 @@ function TodoApp({
     FROM todo_read_model
     ORDER BY created_at_us ASC
   `);
-  const authorResults = useLiveQuery<AuthorRow>(`
+  const { rows: rawAuthorRows } = useLiveRows<AuthorRow>(`
     SELECT id, name, created_at_us::text AS "createdAtUs", updated_at_us::text AS "updatedAtUs"
     FROM author_read_model
     ORDER BY created_at_us ASC
@@ -223,16 +215,14 @@ function TodoApp({
     };
   }, [client]);
 
-  const authors = useMemo(() => (authorResults ? authorListSchema.parse(authorResults.rows) : []), [authorResults]);
+  const authors = useMemo(() => authorListSchema.parse(rawAuthorRows), [rawAuthorRows]);
 
   const todos = useMemo(
     () =>
-      results
-        ? todoListSchema.parse(
-            results.rows.map(({ overlayKind: _overlayKind, localUpdatedAtUs: _localUpdatedAtUs, ...todo }) => todo),
-          )
-        : [],
-    [results],
+      todoListSchema.parse(
+        rawTodoRows.map(({ overlayKind: _overlayKind, localUpdatedAtUs: _localUpdatedAtUs, ...todo }) => todo),
+      ),
+    [rawTodoRows],
   );
 
   useEffect(() => {
