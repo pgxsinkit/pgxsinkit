@@ -3,6 +3,8 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 
+import postgres from "postgres";
+
 import { composeCredentials } from "../infra/compose-credentials";
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
@@ -119,6 +121,25 @@ async function canConnect(host: string, port: number, timeoutMs = 1200): Promise
   });
 }
 
+async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): Promise<void> {
+  const start = Date.now();
+  const client = postgres(databaseUrl, { connect_timeout: 2, idle_timeout: 2 });
+
+  try {
+    while (Date.now() - start < timeoutMs) {
+      try {
+        await client.unsafe("SELECT 1");
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    throw new Error("Timed out waiting for PostgreSQL to accept queries");
+  } finally {
+    await client.end();
+  }
+}
+
 async function waitForTcpService(host: string, port: number, label: string): Promise<void> {
   const start = Date.now();
 
@@ -183,6 +204,7 @@ async function main() {
     await runCommand("podman", ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "up", "-d"], composeEnv);
 
     await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL");
+    await waitForPgReady(databaseUrl);
     await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL");
 
     await runCommand("bun", ["run", "db:migrate"], testEnv);
