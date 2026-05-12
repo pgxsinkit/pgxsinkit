@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/client",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "files": [
     "dist",
     "src",
@@ -22,8 +22,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.15",
-    "@pgxsinkit/sync-engine": "^0.1.15"
+    "@pgxsinkit/contracts": "^0.1.16",
+    "@pgxsinkit/sync-engine": "^0.1.16"
   },
   "peerDependencies": {
     "@electric-sql/pglite": "0.4.5",

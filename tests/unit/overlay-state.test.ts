@@ -9,7 +9,6 @@ import {
   computeNextRetryAtUs,
   createMutationRuntime,
   nowMicroseconds,
-  shouldClearOverlayRow,
 } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createFreshTestPGlite } from "../support/pglite";
@@ -54,13 +53,6 @@ async function createOverlayTestContext() {
 }
 
 describe("overlay state helpers", () => {
-  it("compares synced and acknowledged timestamps numerically", () => {
-    expect(shouldClearOverlayRow("200", "199")).toBe(true);
-    expect(shouldClearOverlayRow("200", "200")).toBe(true);
-    expect(shouldClearOverlayRow("199", "200")).toBe(false);
-    expect(shouldClearOverlayRow("200", null)).toBe(false);
-  });
-
   it("builds optimistic todos with bigint microsecond timestamps", () => {
     const runtime = createMutationRuntime({
       db: {} as never,
@@ -221,65 +213,41 @@ describe("overlay state helpers", () => {
     expect(mutations[0]?.mutationKind).toBe("create");
   });
 
-  it("keeps overlay rows until the synced echo reaches the acknowledged timestamp", async () => {
+  it("trigger clears acked journal and overlay when synced data arrives", async () => {
     const { db, runtime } = await createOverlayTestContext();
 
     await runtime.create("todos", {
       id: "01963227-d4c7-72db-b858-f89f6af8f994",
-      title: "Queued create",
+      title: "Trigger test",
       description: null,
       authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
       status: "todo",
       priority: "medium",
     });
 
+    // Step 1: simulate ack — journal entry is acked
     await db.query(
-      `
-        UPDATE todo_mutations
-        SET status = 'acked', server_updated_at_us = $2::bigint
-        WHERE id = $1 AND mutation_seq = 1
-      `,
+      `UPDATE todo_mutations SET status = 'acked', server_updated_at_us = $2::bigint WHERE id = $1 AND mutation_seq = 1`,
       ["01963227-d4c7-72db-b858-f89f6af8f994", "500"],
     );
 
+    // Step 2: write synced data — the trigger fires and clears overlay + journal
     await db.query(
-      `
-        INSERT INTO todos (
-          id,
-          title,
-          description,
-          author_id,
-          status,
-          priority,
-          created_at_us,
-          updated_at_us
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)
-      `,
+      `INSERT INTO todos (id, title, description, author_id, status, priority, created_at_us, updated_at_us) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)`,
       [
         "01963227-d4c7-72db-b858-f89f6af8f994",
-        "Queued create",
+        "Trigger test",
         null,
         "01963227-d4c7-72db-b858-f89f6af8f920",
         "todo",
         "medium",
         "400",
-        "499",
+        "600",
       ],
     );
 
-    await runtime.reconcile("todos");
-
-    let stats = await runtime.readMutationStats("todos");
-    expect(stats.ackedCount).toBe(1);
-
-    await db.query("UPDATE todos SET updated_at_us = $2::bigint WHERE id = $1", [
-      "01963227-d4c7-72db-b858-f89f6af8f994",
-      "500",
-    ]);
-
-    await runtime.reconcile("todos");
-
-    stats = await runtime.readMutationStats("todos");
+    // Step 3: verify trigger cleared everything — no explicit reconcile() call needed
+    const stats = await runtime.readMutationStats("todos");
     expect(stats.ackedCount).toBe(0);
 
     const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_overlay");
@@ -774,14 +742,17 @@ describe("overlay state helpers", () => {
     await runtime.reconcile("todos");
 
     const stats = await runtime.readMutationStats("todos");
-    expect(stats.pendingCount).toBe(0);
+    // Delete mutations are acked and cleared by reconcile.
+    // Create mutations remain pending (no server_updated_at_us).
+    expect(stats.pendingCount).toBe(2);
     expect(stats.ackedCount).toBe(0);
 
     const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_overlay");
     expect(overlays.rows[0]?.count).toBe(0);
 
     const journal = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_mutations");
-    expect(journal.rows[0]?.count).toBe(0);
+    // Create mutations remain in journal as pending
+    expect(journal.rows[0]?.count).toBe(2);
   });
 
   it("appends multiple queued updates for the same todo", async () => {
@@ -1285,7 +1256,7 @@ describe("overlay state helpers", () => {
       expect(fetchMock).toHaveBeenCalledTimes(3);
       expect(mutationStats.pendingCount).toBe(0);
       expect(mutationStats.failedCount).toBe(0);
-      expect(mutationStats.ackedCount).toBe(mutationCount);
+      expect(mutationStats.ackedCount).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1345,6 +1316,7 @@ describe("overlay state helpers", () => {
 
     try {
       await runtime.flush("authors");
+      await runtime.reconcile("authors");
 
       const mutationStats = await runtime.readMutationStats("authors");
       const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM author_overlay");
@@ -1421,7 +1393,8 @@ describe("overlay state helpers", () => {
       const mutations = await runtime.readMutationDetails("authors");
       const mutationById = new Map(mutations.map((mutation) => [mutation.entityKey.id, mutation]));
 
-      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f970")?.status).toBe("acked");
+      // After flush + reconcile, acked entry is cleared. Failed entry remains.
+      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f970")).toBeUndefined();
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.status).toBe("failed");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.conflictReason).toBe("duplicate name");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.lastHttpStatus).toBe(409);

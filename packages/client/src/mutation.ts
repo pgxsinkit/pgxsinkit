@@ -86,11 +86,6 @@ interface TableContext {
     propertyKey: string;
     column: ReturnType<typeof getProjectedTableColumns<AnyPgTable>>[number]["column"];
   }>;
-  /** Column name for the "last updated" timestamp on the synced table,
-   *  used by reconcileTable to verify the sync echo has arrived.
-   *  Derived from governance.managedFields with strategy "nowMicroseconds"
-   *  on "update", or defaulting to "updated_at_us". */
-  updatedAtColumn: string;
 }
 
 export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
@@ -739,41 +734,6 @@ type NormalizedBatchItem =
       order: number;
     };
 
-function resolveUpdatedAtColumn(
-  key: string,
-  entry: SyncTableEntry<AnyPgTable>,
-  columns: TableContext["columns"],
-): string {
-  // Derive from governance.managedFields: the "nowMicroseconds" field
-  // that applies to "update" operations is the authoritative timestamp.
-  const managedTimestamp = (entry.governance?.managedFields ?? []).find(
-    (f) => f.strategy === "nowMicroseconds" && f.applyOn.includes("update"),
-  );
-
-  // The managed field spec uses Drizzle property keys (camelCase).
-  // Resolve to the SQL column name used on the synced table.
-  const candidatePropertyKey = managedTimestamp?.column;
-  const candidate = candidatePropertyKey
-    ? columns.find((c) => c.propertyKey === candidatePropertyKey)?.column.name
-    : "updated_at_us";
-
-  if (!candidate) {
-    throw new Error(
-      `Table "${key}" has managed field "${candidatePropertyKey}" with strategy "nowMicroseconds" ` +
-        `on "update", but no matching column exists in the synced projection.`,
-    );
-  }
-
-  if (!columns.some((c) => c.column.name === candidate)) {
-    throw new Error(
-      `Table "${key}" has updatedAtColumn "${candidate}" but no matching column exists ` +
-        `in the synced projection (via managed field "${candidatePropertyKey}").`,
-    );
-  }
-
-  return candidate;
-}
-
 function buildTableContexts<TRegistry extends SyncTableRegistry>(registry: TRegistry, requireRouteBasePath: boolean) {
   const localSchema = getSyncRegistrySchema(registry);
 
@@ -813,8 +773,6 @@ function buildTableContext(
     return column.propertyKey;
   });
 
-  const updatedAtColumn = resolveUpdatedAtColumn(key, entry, columns);
-
   return {
     key,
     entry,
@@ -827,7 +785,6 @@ function buildTableContext(
     pkColumnNames: [...entry.primaryKey.columns],
     pkPropertyKeys,
     recordIncludesOverlayState: recordSchemaIncludesOverlayState(entry.schemas?.recordSchema),
-    updatedAtColumn,
     columns,
   };
 }
@@ -1533,17 +1490,9 @@ async function flushBatch(
     );
   }
 
-  // Reconcile overlays for affected tables so acknowledged
-  // mutations are cleared from the local overlay.
-  const reconciledContexts = [...new Set(pending.map((row) => row.context))];
-
-  for (const context of reconciledContexts) {
-    await reconcileTable(db, context);
-  }
-
   return {
     processedCount: pending.length,
-    affectedContexts: reconciledContexts,
+    affectedContexts: [...new Set(pending.map((row) => row.context))],
   };
 }
 
@@ -1555,6 +1504,24 @@ function resolveBatchMutationUrl(batchWriteUrl: string): string {
   }
 
   return `${trimmed}/mutations`;
+}
+
+function stripManagedFields(
+  context: TableContext,
+  payload: Record<string, unknown>,
+  operation: "create" | "update",
+): Record<string, unknown> {
+  const managedColumns = new Set<string>();
+
+  for (const mf of context.entry.governance?.managedFields ?? []) {
+    if (mf.applyOn.includes(operation)) {
+      managedColumns.add(mf.column);
+    }
+  }
+
+  if (managedColumns.size === 0) return payload;
+
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !managedColumns.has(key)));
 }
 
 function toSqlColumnPayload(context: TableContext, payload: Record<string, unknown>): Record<string, unknown> {
@@ -1591,24 +1558,6 @@ function filterProjectedPayload(context: TableContext, payload: Record<string, u
   }
 
   return normalized;
-}
-
-function stripManagedFields(
-  context: TableContext,
-  payload: Record<string, unknown>,
-  operation: "create" | "update",
-): Record<string, unknown> {
-  const managedColumns = new Set<string>();
-
-  for (const mf of context.entry.governance?.managedFields ?? []) {
-    if (mf.applyOn.includes(operation)) {
-      managedColumns.add(mf.column);
-    }
-  }
-
-  if (managedColumns.size === 0) return payload;
-
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => !managedColumns.has(key)));
 }
 
 async function flushTable(
@@ -1743,90 +1692,82 @@ async function flushTable(
     }
   }
 
-  await reconcileTable(db, context);
   return result.rows.length;
 }
 
 async function reconcileTable(db: MutationDb, context: TableContext) {
-  await clearAcknowledgedDeletes(db, context);
-
+  // PK-match only — no timestamp gate. The trigger on the synced table
+  // handles real-time cleanup; this is a bulk recovery/fallback path.
   await db.exec("BEGIN");
 
   try {
+    // Clear acknowledged non-delete mutations + matching overlays
     await db.query(
-      "WITH deleted AS (" +
+      "WITH cleared_journal AS (" +
         "DELETE FROM " +
         context.journalTable +
         " AS journal " +
-        "USING " +
-        context.syncedTable +
-        " AS synced " +
         "WHERE journal.status = 'acked' " +
-        "AND journal.mutation_kind <> 'delete' " +
         "AND journal.server_updated_at_us IS NOT NULL " +
-        "AND " +
-        buildColumnEquality(context.pkColumnNames, "journal", "synced") +
-        " " +
-        "AND synced." +
-        context.updatedAtColumn +
-        " >= journal.server_updated_at_us " +
-        "RETURNING journal.mutation_id, journal.entity_key_json, " +
+        "AND journal.mutation_kind <> 'delete' " +
+        "RETURNING journal.entity_key_json, " +
         context.pkColumnNames.map((cn) => "journal." + cn).join(", ") +
-        ")," +
-        "clearable_entities AS (" +
-        "SELECT DISTINCT deleted.entity_key_json, " +
-        context.pkColumnNames.map((cn) => "deleted." + cn).join(", ") +
-        " FROM deleted " +
-        "WHERE NOT EXISTS (" +
-        "SELECT 1 " +
-        "FROM " +
-        context.journalTable +
-        " AS remaining " +
-        "WHERE remaining.entity_key_json = deleted.entity_key_json " +
-        "AND remaining.mutation_id NOT IN (" +
-        "SELECT deleted_for_entity.mutation_id " +
-        "FROM deleted AS deleted_for_entity " +
-        "WHERE deleted_for_entity.entity_key_json = deleted.entity_key_json" +
-        ")" +
-        ")" +
         ") " +
         "DELETE FROM " +
         context.overlayTable +
         " AS overlay " +
-        "USING clearable_entities " +
+        "USING cleared_journal AS cj " +
         "WHERE " +
-        buildColumnEquality(context.pkColumnNames, "overlay", "clearable_entities"),
+        buildColumnEquality(context.pkColumnNames, "overlay", "cj") +
+        " " +
+        "AND NOT EXISTS (" +
+        "SELECT 1 FROM " +
+        context.journalTable +
+        " AS j " +
+        "WHERE j.entity_key_json = cj.entity_key_json " +
+        "AND j.status IN ('pending', 'sending', 'failed')" +
+        ")",
     );
-    await db.exec("COMMIT");
-  } catch (error) {
-    await db.exec("ROLLBACK");
-    throw error;
-  }
-}
 
-async function clearAcknowledgedDeletes(db: MutationDb, context: TableContext) {
-  await db.exec("BEGIN");
-
-  try {
-    await db.query(`
-      WITH clearable_entities AS (
-        SELECT DISTINCT journal.entity_key_json, ${context.pkColumnNames.map((columnName) => `journal.${columnName}`).join(", ")}
-        FROM ${context.journalTable} AS journal
-        LEFT JOIN ${context.syncedTable} AS synced
-          ON ${buildColumnEquality(context.pkColumnNames, "journal", "synced")}
-        WHERE journal.status = 'acked'
-          AND journal.mutation_kind = 'delete'
-          AND synced.${context.pkColumnNames[0]!} IS NULL
-      ),
-      deleted_overlay AS (
-        DELETE FROM ${context.overlayTable} AS overlay
-        USING clearable_entities
-        WHERE ${buildColumnEquality(context.pkColumnNames, "overlay", "clearable_entities")}
-      )
-      DELETE FROM ${context.journalTable} AS journal
-      USING clearable_entities
-      WHERE journal.entity_key_json = clearable_entities.entity_key_json
-    `);
+    // Clear acknowledged delete mutations where synced row is absent
+    // Single compound CTE — PGlite does not support multi-statement query().
+    await db.query(
+      "WITH clearable_entities AS (" +
+        "SELECT DISTINCT journal.entity_key_json, " +
+        context.pkColumnNames.map((cn) => "journal." + cn).join(", ") +
+        " FROM " +
+        context.journalTable +
+        " AS journal " +
+        "LEFT JOIN " +
+        context.syncedTable +
+        " AS synced " +
+        "ON " +
+        buildColumnEquality(context.pkColumnNames, "journal", "synced") +
+        " " +
+        "WHERE journal.status = 'acked' " +
+        "AND journal.mutation_kind = 'delete' " +
+        "AND synced." +
+        context.pkColumnNames[0] +
+        " IS NULL" +
+        "), " +
+        "deleted_overlay AS (" +
+        "DELETE FROM " +
+        context.overlayTable +
+        " AS overlay " +
+        "USING clearable_entities AS ce " +
+        "WHERE " +
+        buildColumnEquality(context.pkColumnNames, "overlay", "ce") +
+        ") " +
+        "DELETE FROM " +
+        context.journalTable +
+        " AS journal " +
+        "USING clearable_entities AS ce " +
+        "WHERE " +
+        buildColumnEquality(context.pkColumnNames, "journal", "ce") +
+        " " +
+        "AND journal.status = 'acked' " +
+        "AND journal.mutation_kind = 'delete'",
+    );
     await db.exec("COMMIT");
   } catch (error) {
     await db.exec("ROLLBACK");
@@ -1850,7 +1791,9 @@ async function sendMutationRequest(
       return fetch(`${writeUrl}${context.routeBasePath}`, {
         method: "POST",
         headers: buildRequestHeaders(bearerToken),
-        body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.value))),
+        body: JSON.stringify(
+          filterProjectedPayload(context, stripManagedFields(context, ensureRecord(payload.value), "create")),
+        ),
       });
     case "update":
       return fetch(
@@ -1858,7 +1801,9 @@ async function sendMutationRequest(
         {
           method: "PATCH",
           headers: buildRequestHeaders(bearerToken),
-          body: JSON.stringify(filterProjectedPayload(context, ensureRecord(payload.patch))),
+          body: JSON.stringify(
+            filterProjectedPayload(context, stripManagedFields(context, ensureRecord(payload.patch), "update")),
+          ),
         },
       );
     case "delete":

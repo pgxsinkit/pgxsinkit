@@ -111,6 +111,41 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
       `CREATE INDEX IF NOT EXISTS ${baseProjection(entry, tableKey).journalTable}_entity_status_seq_idx ON ${projection.journalTable} (entity_key_json, status, mutation_seq);`,
     );
 
+    // Trigger: automatically clear overlay + journal entries when the sync
+    // echo arrives. Fires on INSERT/UPDATE (new data from Electric) and DELETE
+    // (row removed on server, synced back via Electric).
+    const triggerFnName = `${projection.syncedTable}_reconcile_on_sync`;
+
+    const pkMatchSql = (alias: string) =>
+      primaryKeyColumns
+        .map((col) => `"${alias}"."${col.name}" = COALESCE(NEW."${col.name}", OLD."${col.name}")`)
+        .join(" AND ");
+    const pkOverlayMatchSql = primaryKeyColumns
+      .map((col) => `"overlay"."${col.name}" = COALESCE(NEW."${col.name}", OLD."${col.name}")`)
+      .join(" AND ");
+
+    statements.push(
+      `CREATE OR REPLACE FUNCTION ${triggerFnName}() RETURNS TRIGGER AS $$\n` +
+        `BEGIN\n` +
+        `  DELETE FROM ${projection.journalTable}\n` +
+        `  WHERE status = 'acked' AND (${pkMatchSql(projection.journalTable)});\n` +
+        `  DELETE FROM ${projection.overlayTable} AS "overlay"\n` +
+        `  WHERE (${pkOverlayMatchSql})\n` +
+        `    AND NOT EXISTS (\n` +
+        `      SELECT 1 FROM ${projection.journalTable} AS j\n` +
+        `      WHERE (${pkMatchSql("j")})\n` +
+        `    );\n` +
+        `  RETURN COALESCE(NEW, OLD);\n` +
+        `END;\n` +
+        `$$ LANGUAGE plpgsql;`,
+    );
+
+    statements.push(
+      `CREATE OR REPLACE TRIGGER ${triggerFnName}\n` +
+        `AFTER INSERT OR UPDATE OR DELETE ON ${projection.syncedTable}\n` +
+        `FOR EACH ROW EXECUTE FUNCTION ${triggerFnName}();`,
+    );
+
     statements.push(
       `CREATE OR REPLACE VIEW ${projection.readModel} AS\n${buildReadModelViewSql(
         entry,

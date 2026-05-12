@@ -506,9 +506,7 @@ function resolveServerUpdatedAtColumnName(entry: SyncTableEntry): string {
   );
   if (managedField) {
     const columns = getColumns(entry.table as AnyPgTable);
-    const col = Object.values(columns).find(
-      (c) => c.name === managedField.column,
-    );
+    const col = Object.values(columns).find((c) => c.name === managedField.column);
     if (col) return col.name;
   }
   return "updated_at_us";
