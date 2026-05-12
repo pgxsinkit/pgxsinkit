@@ -1,5 +1,5 @@
 import { getTableName, sql } from "drizzle-orm";
-import type { AnyPgTable } from "drizzle-orm/pg-core";
+import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
 import type { Context, Hono } from "hono";
@@ -353,7 +353,7 @@ function getErrorStringProperty(error: Error, key: string): string | null {
 function isArtifactAuthContextRequired(registry: SyncTableRegistry): boolean {
   return Object.values(registry).some(
     (entry) =>
-      entry.governance?.rls?.enabled === true ||
+      getTableConfig(entry.table as AnyPgTable).policies.length > 0 ||
       (entry.governance?.managedFields ?? []).some((field) => field.strategy === "authUid"),
   );
 }

@@ -1,9 +1,4 @@
-import {
-  buildSupabaseOwnerOrAdminGovernancePolicies,
-  defineSyncRegistry,
-  defineSyncTable,
-  defineTableGovernance,
-} from "@pgxsinkit/contracts";
+import { defineSyncRegistry, defineSyncTable, defineTableGovernance } from "@pgxsinkit/contracts";
 
 import { authorTableSpec } from "./author-config";
 import { authorsTable, todosTable } from "./schema";
@@ -43,14 +38,6 @@ export const demoSyncRegistry = defineSyncRegistry({
           strategy: "nowMicroseconds",
         },
       ],
-      rls: {
-        enabled: true,
-        force: false,
-        policies: buildSupabaseOwnerOrAdminGovernancePolicies({
-          tableName: "authors",
-          ownerField: "ownerId" as const,
-        }),
-      },
     }),
     schemas: authorTableSpec.schemas,
     adapters: authorTableSpec.adapters,
@@ -95,14 +82,6 @@ export const demoSyncRegistry = defineSyncRegistry({
           strategy: "nowMicroseconds",
         },
       ],
-      rls: {
-        enabled: true,
-        force: false,
-        policies: buildSupabaseOwnerOrAdminGovernancePolicies({
-          tableName: "todos",
-          ownerField: "ownerId" as const,
-        }),
-      },
     }),
     schemas: todoTableSpec.schemas,
     adapters: todoTableSpec.adapters,

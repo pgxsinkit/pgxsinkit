@@ -1,8 +1,7 @@
 import { getTableConfig } from "drizzle-orm/pg-core";
 
-import type { RlsPolicySpec } from "@pgxsinkit/contracts";
 import { buildSupabaseOwnerOrAdminPredicateSqlText } from "@pgxsinkit/contracts";
-import { authorsTable, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
+import { authorsTable, todosTable } from "@pgxsinkit/schema";
 
 type NativeSqlChunk = {
   value?: string[];
@@ -75,17 +74,6 @@ function normalizeNativePolicy(policy: NativePolicy): NormalizedPolicyShape {
   };
 }
 
-function normalizeGovernancePolicy(policy: RlsPolicySpec): NormalizedPolicyShape {
-  return {
-    name: policy.name,
-    mode: policy.as,
-    command: policy.command,
-    roles: [...policy.roles].sort(),
-    using: policy.using ? normalizeSqlText(policy.using) : null,
-    withCheck: policy.withCheck ? normalizeSqlText(policy.withCheck) : null,
-  };
-}
-
 function sortByName<T extends { name: string }>(items: T[]): T[] {
   return [...items].sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -95,18 +83,8 @@ function getNativePolicyNames(table: typeof authorsTable | typeof todosTable): s
   return config.policies.map((policy) => policy.name);
 }
 
-function getRegistryPolicyNames(tableKey: "authors" | "todos"): string[] {
-  return (demoSyncRegistry[tableKey]?.governance?.rls?.policies ?? []).map((policy) => policy.name);
-}
-
 function getNormalizedNativePolicies(table: typeof authorsTable | typeof todosTable): NormalizedPolicyShape[] {
   return sortByName(getTableConfig(table).policies.map((policy) => normalizeNativePolicy(policy as NativePolicy)));
-}
-
-function getNormalizedGovernancePolicies(tableKey: "authors" | "todos"): NormalizedPolicyShape[] {
-  return sortByName(
-    (demoSyncRegistry[tableKey]?.governance?.rls?.policies ?? []).map((policy) => normalizeGovernancePolicy(policy)),
-  );
 }
 
 describe("demo schema native RLS policies", () => {
@@ -132,12 +110,7 @@ describe("demo schema native RLS policies", () => {
     ]);
   });
 
-  it("keeps governance registry policy names aligned with native schema policies", () => {
-    expect(getRegistryPolicyNames("authors")).toEqual(getNativePolicyNames(authorsTable));
-    expect(getRegistryPolicyNames("todos")).toEqual(getNativePolicyNames(todosTable));
-  });
-
-  it("keeps governance and native policies aligned on command, mode, role, and predicates", () => {
+  it("native policies have correct command, mode, role, and predicates", () => {
     const expectedPredicate = normalizeSqlText(buildSupabaseOwnerOrAdminPredicateSqlText());
     const expectedByCommand: Record<string, { using: string | null; withCheck: string | null }> = {
       select: {
@@ -160,11 +133,6 @@ describe("demo schema native RLS policies", () => {
 
     const authorsNative = getNormalizedNativePolicies(authorsTable);
     const todosNative = getNormalizedNativePolicies(todosTable);
-    const authorsGovernance = getNormalizedGovernancePolicies("authors");
-    const todosGovernance = getNormalizedGovernancePolicies("todos");
-
-    expect(authorsNative).toEqual(authorsGovernance);
-    expect(todosNative).toEqual(todosGovernance);
 
     for (const policy of [...authorsNative, ...todosNative]) {
       expect(policy).toEqual(

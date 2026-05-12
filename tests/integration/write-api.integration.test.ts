@@ -1,7 +1,13 @@
 import { eq, sql } from "drizzle-orm";
 import { pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { authenticatedRole } from "drizzle-orm/supabase";
 
-import { defineSyncRegistry, defineSyncTable, defineTableGovernance } from "@pgxsinkit/contracts";
+import {
+  buildSupabaseOwnerOrAdminNativePolicies,
+  defineSyncRegistry,
+  defineSyncTable,
+  defineTableGovernance,
+} from "@pgxsinkit/contracts";
 import {
   authorsTable,
   demoSyncRegistry,
@@ -119,11 +125,20 @@ const ensureFkConstraintDeferrableSql = sql.raw(`
   DEFERRABLE INITIALLY IMMEDIATE;
 `);
 
-const rlsTodosTable = pgTable("rls_todos", {
-  id: uuid("id").primaryKey(),
-  title: varchar("title", { length: 120 }).notNull(),
-  ownerId: uuid("owner_id"),
-});
+const rlsTodosTable = pgTable(
+  "rls_todos",
+  {
+    id: uuid("id").primaryKey(),
+    title: varchar("title", { length: 120 }).notNull(),
+    ownerId: uuid("owner_id"),
+  },
+  () =>
+    buildSupabaseOwnerOrAdminNativePolicies({
+      tableName: "rls_todos",
+      role: authenticatedRole,
+      ownerSqlColumn: "owner_id",
+    }),
+);
 
 const rlsSyncRegistry = defineSyncRegistry({
   rls_todos: defineSyncTable({
@@ -132,13 +147,7 @@ const rlsSyncRegistry = defineSyncRegistry({
     primaryKey: { columns: ["id"] },
     shape: { tableName: "rls_todos", shapeKey: "rls_todos" },
     routes: { basePath: "/api/rls-todos", allowBatch: false },
-    governance: defineTableGovernance(rlsTodosTable, {
-      rls: {
-        enabled: true,
-        force: false,
-        policies: [],
-      },
-    }),
+    governance: defineTableGovernance(rlsTodosTable, {}),
   }),
 });
 

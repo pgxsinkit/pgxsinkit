@@ -62,54 +62,6 @@ export const deferrableConstraintSpecSchema = z
   })
   .strict();
 
-export const rlsPolicyCommandSchema = z.enum(["all", "select", "insert", "update", "delete"]);
-export const rlsPolicyModeSchema = z.enum(["permissive", "restrictive"]);
-
-export const rlsPolicySpecSchema = z
-  .object({
-    name: z.string().trim().min(1),
-    command: rlsPolicyCommandSchema,
-    as: rlsPolicyModeSchema.default("permissive"),
-    roles: z.array(z.string().trim().min(1)).min(1),
-    using: z.string().trim().min(1).optional(),
-    withCheck: z.string().trim().min(1).optional(),
-    usingColumns: z.array(z.string().trim().min(1)).optional(),
-    withCheckColumns: z.array(z.string().trim().min(1)).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if ((value.command === "select" || value.command === "delete") && value.using === undefined) {
-      context.addIssue({
-        code: "custom",
-        message: "using is required for SELECT and DELETE policies",
-        path: ["using"],
-      });
-    }
-
-    if (value.command === "insert" && value.withCheck === undefined) {
-      context.addIssue({
-        code: "custom",
-        message: "withCheck is required for INSERT policies",
-        path: ["withCheck"],
-      });
-    }
-
-    if (value.command === "update" && value.using === undefined && value.withCheck === undefined) {
-      context.addIssue({
-        code: "custom",
-        message: "update policies must declare at least one of using or withCheck",
-      });
-    }
-  });
-
-export const rowLevelSecuritySpecSchema = z
-  .object({
-    enabled: z.boolean().default(false),
-    force: z.boolean().default(false),
-    policies: z.array(rlsPolicySpecSchema).default([]),
-  })
-  .strict();
-
 export const managedFieldApplyOnSchema = z.enum(["create", "update"]);
 export const managedFieldStrategySchema = z.enum(["authUid", "nowMicroseconds"]);
 
@@ -134,7 +86,6 @@ export const tableGovernanceSpecSchema = z
   .object({
     deferrableConstraints: z.array(deferrableConstraintSpecSchema).optional(),
     managedFields: z.array(managedFieldSpecSchema).optional(),
-    rls: rowLevelSecuritySpecSchema.optional(),
   })
   .strict();
 
@@ -225,10 +176,6 @@ export interface ShapeSpec extends ShapeSpecBase {
 export type ServerRouteSpec = z.infer<typeof serverRouteSpecSchema>;
 export type ClientProjectionSpec = z.infer<typeof clientProjectionSpecSchema>;
 export type DeferrableConstraintSpec = z.infer<typeof deferrableConstraintSpecSchema>;
-export type RlsPolicyCommand = z.infer<typeof rlsPolicyCommandSchema>;
-export type RlsPolicyMode = z.infer<typeof rlsPolicyModeSchema>;
-export type RlsPolicySpec = z.infer<typeof rlsPolicySpecSchema>;
-export type RowLevelSecuritySpec = z.infer<typeof rowLevelSecuritySpecSchema>;
 export type ManagedFieldApplyOn = z.infer<typeof managedFieldApplyOnSchema>;
 export type ManagedFieldStrategy = z.infer<typeof managedFieldStrategySchema>;
 export type ManagedFieldSpec = z.infer<typeof managedFieldSpecSchema>;

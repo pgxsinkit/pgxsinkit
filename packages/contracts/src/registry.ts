@@ -9,8 +9,6 @@ import type {
   ManagedFieldSpec,
   ManagedFieldStrategy,
   PrimaryKeySpec,
-  RlsPolicySpec,
-  RowLevelSecuritySpec,
   ServerRouteSpec,
   ShapeSpec,
   TableGovernanceSpec as TableGovernanceSpecBase,
@@ -31,18 +29,6 @@ export type TableColumnKey<TTable extends AnyPgTable> = Extract<keyof TableColum
 
 export type DeferrableConstraintSpecForTable<TTable extends AnyPgTable> = Omit<DeferrableConstraintSpec, "columns"> & {
   columns: Array<TableColumnKey<TTable>>;
-};
-
-export type RlsPolicySpecForTable<TTable extends AnyPgTable> = Omit<
-  RlsPolicySpec,
-  "usingColumns" | "withCheckColumns"
-> & {
-  usingColumns?: Array<TableColumnKey<TTable>>;
-  withCheckColumns?: Array<TableColumnKey<TTable>>;
-};
-
-export type RowLevelSecuritySpecForTable<TTable extends AnyPgTable> = Omit<RowLevelSecuritySpec, "policies"> & {
-  policies?: Array<RlsPolicySpecForTable<TTable>>;
 };
 
 export type ManagedFieldSpecForTable<TTable extends AnyPgTable> = Omit<ManagedFieldSpec, "column"> & {
@@ -67,11 +53,10 @@ export interface ProjectedTableColumn<TTable extends AnyPgTable = AnyPgTable> {
 
 export type TableGovernanceSpecForTable<TTable extends AnyPgTable> = Omit<
   TableGovernanceSpecBase,
-  "deferrableConstraints" | "managedFields" | "rls"
+  "deferrableConstraints" | "managedFields"
 > & {
   deferrableConstraints?: Array<DeferrableConstraintSpecForTable<TTable>>;
   managedFields?: Array<ManagedFieldSpecForTable<TTable>>;
-  rls?: RowLevelSecuritySpecForTable<TTable>;
 };
 
 export interface SyncTableEntry<

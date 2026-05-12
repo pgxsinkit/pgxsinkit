@@ -1,8 +1,6 @@
 import { sql } from "drizzle-orm";
 import { pgPolicy, type PgRole } from "drizzle-orm/pg-core";
 
-import type { RlsPolicySpec } from "./config";
-
 type SupabaseOwnerOrAdminPolicyKind = "select" | "insert" | "update" | "delete";
 
 type SupabaseOwnerOrAdminPolicyShape = {
@@ -21,13 +19,6 @@ export type SupabaseOwnerOrAdminNativePoliciesOptions = SupabaseOwnerOrAdminPred
   tableName: string;
   role: PgRole;
 };
-
-export type SupabaseOwnerOrAdminGovernancePoliciesOptions<TColumn extends string> =
-  SupabaseOwnerOrAdminPredicateOptions & {
-    tableName: string;
-    ownerField: TColumn;
-    authenticatedRoleName?: string;
-  };
 
 const defaultOwnerSqlColumn = "owner_id";
 const defaultOwnerPropertyKey = "ownerId";
@@ -139,38 +130,6 @@ export function buildSupabaseOwnerOrAdminNativePolicies(options: SupabaseOwnerOr
       ...(shape.withCheck ? { withCheck: predicate } : {}),
     }),
   );
-}
-
-export function buildSupabaseOwnerOrAdminGovernancePolicies<const TColumn extends string>(
-  options: SupabaseOwnerOrAdminGovernancePoliciesOptions<TColumn>,
-): Array<
-  Omit<RlsPolicySpec, "usingColumns" | "withCheckColumns"> & {
-    usingColumns?: TColumn[];
-    withCheckColumns?: TColumn[];
-  }
-> {
-  const predicate = buildSupabaseOwnerOrAdminPredicateSqlText(toPredicateOptions(options));
-
-  const authenticatedRoleName = options.authenticatedRoleName ?? defaultAuthenticatedRoleName;
-
-  return ownerOrAdminPolicyShapes.map((shape) => ({
-    name: buildOwnerOrAdminPolicyName(options.tableName, shape.command),
-    command: shape.command,
-    as: "permissive",
-    roles: [authenticatedRoleName],
-    ...(shape.using
-      ? {
-          using: predicate,
-          usingColumns: [options.ownerField],
-        }
-      : {}),
-    ...(shape.withCheck
-      ? {
-          withCheck: predicate,
-          withCheckColumns: [options.ownerField],
-        }
-      : {}),
-  }));
 }
 
 export const supabaseOwnerOrAdminDefaults = {

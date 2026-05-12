@@ -1,8 +1,14 @@
 import { bigint, getTableConfig, pgSchema, pgTable, type AnyPgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { authenticatedRole } from "drizzle-orm/supabase";
 import { getColumns } from "drizzle-orm/utils";
 import { z } from "zod";
 
-import { attachSyncRegistrySchema, type SyncTableEntry, type SyncTableRegistry } from "@pgxsinkit/contracts";
+import {
+  attachSyncRegistrySchema,
+  buildSupabaseOwnerOrAdminNativePolicies,
+  type SyncTableEntry,
+  type SyncTableRegistry,
+} from "@pgxsinkit/contracts";
 
 const statusSchema = z.enum(["todo", "in_progress", "done"]);
 const prioritySchema = z.enum(["low", "medium", "high"]);
@@ -142,46 +148,6 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
             strategy: "nowMicroseconds",
           },
         ],
-        rls: {
-          enabled: true,
-          force: false,
-          policies: [
-            {
-              name: `${tableName}_select_owner_or_admin`,
-              command: "select",
-              as: "permissive",
-              roles: ["authenticated"],
-              using: "owner_id = auth.uid() OR auth.has_role('admin')",
-              usingColumns: ["ownerId"],
-            },
-            {
-              name: `${tableName}_insert_owner_or_admin`,
-              command: "insert",
-              as: "permissive",
-              roles: ["authenticated"],
-              withCheck: "owner_id = auth.uid() OR auth.has_role('admin')",
-              withCheckColumns: ["ownerId"],
-            },
-            {
-              name: `${tableName}_update_owner_or_admin`,
-              command: "update",
-              as: "permissive",
-              roles: ["authenticated"],
-              using: "owner_id = auth.uid() OR auth.has_role('admin')",
-              withCheck: "owner_id = auth.uid() OR auth.has_role('admin')",
-              usingColumns: ["ownerId"],
-              withCheckColumns: ["ownerId"],
-            },
-            {
-              name: `${tableName}_delete_owner_or_admin`,
-              command: "delete",
-              as: "permissive",
-              roles: ["authenticated"],
-              using: "owner_id = auth.uid() OR auth.has_role('admin')",
-              usingColumns: ["ownerId"],
-            },
-          ],
-        },
       },
       schemas: buildSchemas(options.extraColumnCount),
       adapters: {
@@ -263,12 +229,29 @@ export function buildSyntheticGovernanceSql(
       ].join("\n"),
     );
 
-    for (const policy of entry.governance?.rls?.policies ?? []) {
-      const commandSql = policy.command === "all" ? "ALL" : policy.command.toUpperCase();
-      const rolesSql = policy.roles.map((role) => (role === "public" ? "PUBLIC" : `"${role}"`)).join(", ");
-      const modeSql = policy.as.toUpperCase();
-      const usingSql = policy.using ? ` USING (${policy.using})` : "";
-      const withCheckSql = policy.withCheck ? ` WITH CHECK (${policy.withCheck})` : "";
+    for (const policy of getTableConfig(entry.table as AnyPgTable).policies) {
+      const commandSql = !policy.for || policy.for === "all" ? "ALL" : policy.for.toUpperCase();
+      const role = policy.to;
+      const rolesSql = Array.isArray(role)
+        ? role
+            .map((r) =>
+              typeof r === "string" ? (r === "public" ? "PUBLIC" : `"${r}"`) : `"${(r as { name: string }).name}"`,
+            )
+            .join(", ")
+        : typeof role === "string"
+          ? role === "public"
+            ? "PUBLIC"
+            : `"${role}"`
+          : `"${(role as { name: string }).name}"`;
+      const modeSql = policy.as ? policy.as.toUpperCase() : "PERMISSIVE";
+      const usingText = policy.using
+        ? ((policy.using as { queryChunks?: Array<{ value?: string }> }).queryChunks?.[0]?.value ?? "")
+        : "";
+      const withCheckText = policy.withCheck
+        ? ((policy.withCheck as { queryChunks?: Array<{ value?: string }> }).queryChunks?.[0]?.value ?? "")
+        : "";
+      const usingSql = usingText ? ` USING (${usingText})` : "";
+      const withCheckSql = withCheckText ? ` WITH CHECK (${withCheckText})` : "";
 
       statements.push(
         [
@@ -427,7 +410,13 @@ function buildSyntheticTable(
     ).notNull();
   }
 
-  return syntheticSchema ? syntheticSchema.table(tableName, columns) : pgTable(tableName, columns);
+  return syntheticSchema
+    ? syntheticSchema.table(tableName, columns, () =>
+        buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
+      )
+    : pgTable(tableName, columns, () =>
+        buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
+      );
 }
 
 function buildServerColumnSql(columnName: string, columnType: string, notNull: boolean, entry: SyncTableEntry): string {

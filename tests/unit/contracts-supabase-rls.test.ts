@@ -1,7 +1,6 @@
 import { pgRole } from "drizzle-orm/pg-core";
 
 import {
-  buildSupabaseOwnerOrAdminGovernancePolicies,
   buildSupabaseOwnerOrAdminNativePolicies,
   buildSupabaseOwnerOrAdminPredicateSqlText,
   supabaseOwnerOrAdminDefaults,
@@ -88,48 +87,6 @@ describe("contracts supabase RLS helpers", () => {
     expect(predicate).toContain("tenant_owner_id = coalesce(");
     expect(predicate).toContain("::text");
     expect(predicate).toContain("assigned_role.role_name_value = 'team''lead'");
-  });
-
-  it("builds governance policies with default and custom role wiring", () => {
-    const defaultPolicies = buildSupabaseOwnerOrAdminGovernancePolicies({
-      tableName: "projects",
-      ownerField: "ownerId",
-    });
-
-    expect(defaultPolicies.map((policy) => policy.name)).toEqual([
-      "projects_select_owner_or_admin",
-      "projects_insert_owner_or_admin",
-      "projects_update_owner_or_admin",
-      "projects_delete_owner_or_admin",
-    ]);
-
-    expect(defaultPolicies.map((policy) => policy.roles)).toEqual([
-      ["authenticated"],
-      ["authenticated"],
-      ["authenticated"],
-      ["authenticated"],
-    ]);
-
-    const customPolicies = buildSupabaseOwnerOrAdminGovernancePolicies({
-      tableName: "projects",
-      ownerField: "tenantId",
-      ownerSqlColumn: "tenant_id",
-      authenticatedRoleName: "member",
-      adminRoleName: "maintainer",
-      subjectCastType: "text",
-    });
-
-    expect(customPolicies.map((policy) => policy.roles)).toEqual([["member"], ["member"], ["member"], ["member"]]);
-
-    expect(normalizeSqlText(customPolicies[0]?.using ?? "")).toContain("tenant_id = coalesce(");
-    expect(normalizeSqlText(customPolicies[0]?.using ?? "")).toContain("::text");
-    expect(normalizeSqlText(customPolicies[0]?.using ?? "")).toContain("assigned_role.role_name_value = 'maintainer'");
-
-    expect(customPolicies[0]?.usingColumns).toEqual(["tenantId"]);
-    expect(customPolicies[1]?.withCheckColumns).toEqual(["tenantId"]);
-    expect(customPolicies[2]?.usingColumns).toEqual(["tenantId"]);
-    expect(customPolicies[2]?.withCheckColumns).toEqual(["tenantId"]);
-    expect(customPolicies[3]?.usingColumns).toEqual(["tenantId"]);
   });
 
   it("builds native Drizzle policies that keep command semantics and predicate parity", () => {
