@@ -1,12 +1,13 @@
 import { defineSyncRegistry, defineSyncTable, defineTableGovernance } from "@pgxsinkit/contracts";
 
 import { authorTableSpec } from "./author-config";
-import { authorsTable, todosTable } from "./schema";
+import { authorsTable, authorsView, todosTable, todosView } from "./schema";
 import { todoTableSpec } from "./todo-config";
 
 export const demoSyncRegistry = defineSyncRegistry({
   authors: defineSyncTable({
     table: authorsTable,
+    view: authorsView,
     mode: authorTableSpec.mode,
     primaryKey: authorTableSpec.primaryKey,
     shape: {
@@ -44,6 +45,7 @@ export const demoSyncRegistry = defineSyncRegistry({
   }),
   todos: defineSyncTable({
     table: todosTable,
+    view: todosView,
     mode: todoTableSpec.mode,
     primaryKey: todoTableSpec.primaryKey,
     shape: {

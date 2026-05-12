@@ -9,6 +9,7 @@ import type {
   MutationDiagnostics,
   RegistryRelations,
   RegistryTables,
+  RegistryViews,
   SyncConfigInput,
   SyncRuntimeStatus,
   SyncTableCreateInput,
@@ -55,6 +56,7 @@ export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey
 export interface SyncClient<TRegistry extends SyncTableRegistry> {
   drizzle: PgliteDatabase<RegistryRelations<TRegistry>>;
   pglite: ClientPGlite;
+  views: RegistryViews<TRegistry>;
   tables: {
     [TKey in SyncTableName<TRegistry>]: SyncClientTableHandle<TRegistry, TKey>;
   };
@@ -174,6 +176,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   const client: SyncClient<TRegistry> = {
     drizzle: drizzleDb,
     pglite,
+    views: buildViews(options.registry),
     tables: Object.fromEntries(
       Object.keys(options.registry).map((tableKey) => [
         tableKey,
@@ -252,6 +255,12 @@ function buildSchema<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
   return Object.fromEntries(
     Object.entries(registry).map(([key, entry]) => [key, entry.table]),
   ) as RegistryTables<TRegistry>;
+}
+
+function buildViews<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
+  return Object.fromEntries(
+    Object.entries(registry).flatMap(([key, entry]) => (entry.view != null ? [[key, entry.view]] : [])),
+  ) as RegistryViews<TRegistry>;
 }
 
 function buildSyncConfigFromRegistry<TRegistry extends SyncTableRegistry>(

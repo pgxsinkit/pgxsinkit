@@ -1,4 +1,4 @@
-import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
+import { getTableConfig, type AnyPgTable, type PgView } from "drizzle-orm/pg-core";
 import type { ExtractTablesWithRelations } from "drizzle-orm/relations";
 import { getColumns } from "drizzle-orm/utils";
 
@@ -16,6 +16,10 @@ import type {
   TableMode,
   TableSchemas,
 } from "./config";
+
+// PgView is generic; this alias covers any pg view instance.
+// biome-ignore lint: intentional any
+type AnyPgView = PgView<any, any, any>;
 
 type TableColumnsShape<TTable extends AnyPgTable> = TTable extends {
   _: {
@@ -66,6 +70,7 @@ export interface SyncTableEntry<
   TRecord = unknown,
 > {
   table: TTable;
+  view?: AnyPgView;
   mode: TableMode;
   primaryKey: PrimaryKeySpec;
   shape?: ShapeSpec;
@@ -87,6 +92,12 @@ export const syncRegistrySchemaSymbol = Symbol.for("@pgxsinkit/contracts/syncReg
 
 export type RegistryTables<TRegistry extends SyncTableRegistry> = {
   [TKey in keyof TRegistry]: TRegistry[TKey]["table"];
+};
+
+export type RegistryViews<TRegistry extends SyncTableRegistry> = {
+  [TKey in keyof TRegistry as TRegistry[TKey] extends { view: AnyPgView } ? TKey : never]: NonNullable<
+    TRegistry[TKey]["view"]
+  >;
 };
 
 export type RegistryRelations<TRegistry extends SyncTableRegistry> = ExtractTablesWithRelations<
