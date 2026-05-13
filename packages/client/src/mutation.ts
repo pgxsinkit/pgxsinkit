@@ -1,6 +1,22 @@
 import { getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import { ZodObject } from "zod";
 
+/**
+ * Strip the two internal overlay columns that appear on _read_model views
+ * (`overlay_kind`, `local_updated_at_us`) from any user-supplied input or
+ * patch object before it is serialised into a mutation payload.  Callers
+ * that spread a view row directly into a create/update call would otherwise
+ * hit `TypeError: Do not know how to serialize a BigInt` because
+ * `local_updated_at_us` is stored as a native JS `bigint`.
+ */
+function stripReadModelOverlayFields<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  const obj = value as Record<string, unknown>;
+  if (!("overlay_kind" in obj) && !("local_updated_at_us" in obj)) return value;
+  const { overlay_kind: _ok, local_updated_at_us: _lu, ...rest } = obj;
+  return rest as T;
+}
+
 import type {
   BatchMutationAck,
   MutationDiagnostics,
@@ -166,7 +182,8 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
 
     switch (item.kind) {
       case "create": {
-        const optimisticRecord = ensureRecord(createOptimisticRecordFromContext(context, item.input));
+        const strippedInput = stripReadModelOverlayFields(item.input);
+        const optimisticRecord = ensureRecord(createOptimisticRecordFromContext(context, strippedInput));
         const entityKey = buildEntityKeyFromRecord(context, optimisticRecord);
 
         return {
@@ -175,7 +192,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
           entityKey,
           entityKeyJson: serializeEntityKey(entityKey),
           optimisticRecord,
-          input: item.input,
+          input: strippedInput,
           mutationId,
           nowUs,
           order,
@@ -183,7 +200,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       }
       case "update": {
         const entityKey = normalizeEntityKey(context, item.entityKey);
-        const patch = ensureRecord(parseUpdateInput(context, item.patch));
+        const patch = ensureRecord(parseUpdateInput(context, stripReadModelOverlayFields(item.patch)));
 
         return {
           context,

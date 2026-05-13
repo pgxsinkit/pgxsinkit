@@ -13,6 +13,7 @@ const publicPackageDirs = [
   "packages/sync-engine",
   "packages/client",
   "packages/server",
+  "packages/react",
 ] as const;
 
 type DependencySection = "dependencies" | "devDependencies" | "peerDependencies" | "optionalDependencies";
