@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
+import { createInsertSchema } from "drizzle-orm/zod";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import postgres from "postgres";
@@ -195,7 +196,6 @@ app.post("/api/mutations", async (context) => {
     }
 
     const syncEntry = entry as SyncTableEntry;
-    const schemas = syncEntry.schemas;
     const normalizedPayload = toSchemaPayload(syncEntry, mutation.payload);
     const managedFieldViolations = findManagedFieldViolations(syncEntry, mutation.kind, normalizedPayload);
 
@@ -207,11 +207,21 @@ app.post("/api/mutations", async (context) => {
     }
 
     try {
-      if (mutation.kind === "create" && schemas?.createSchema) {
-        schemas.createSchema.parse(normalizedPayload);
-      } else if (mutation.kind === "update" && schemas?.updateSchema) {
-        schemas.updateSchema.parse(normalizedPayload);
+      if (mutation.kind === "update") {
+        const payloadKeys =
+          typeof normalizedPayload === "object" && normalizedPayload !== null
+            ? Object.keys(normalizedPayload as object)
+            : [];
+        if (payloadKeys.length === 0) {
+          throw new Error("At least one field must be provided");
+        }
+        createInsertSchema(syncEntry.table as AnyPgTable)
+          .partial()
+          .parse(normalizedPayload);
+      } else if (mutation.kind === "create") {
+        createInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
       }
+      // delete has no payload to validate
     } catch (error) {
       const suffix = isValidationError(error) ? ` (${JSON.stringify(error.issues)})` : "";
       validationErrors.push(`${mutation.tableName}/${mutation.mutationId}${suffix}`);

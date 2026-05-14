@@ -1,15 +1,16 @@
 import { Repl } from "@electric-sql/pglite-repl";
 import { sql } from "drizzle-orm";
+import { createInsertSchema } from "drizzle-orm/zod";
 import { useEffect, useMemo, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 
 import type { MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 import {
+  authorsTable,
   authorsView,
-  createAuthorInputSchema,
-  createTodoInputSchema,
   demoAuthTokenByIdentity,
+  todosTable,
   todosView,
   type demoSyncRegistry,
   type DemoAuthIdentity,
@@ -17,6 +18,9 @@ import {
 
 import { loadPGlite, type AppClient } from "./pglite";
 import { createReplProxy } from "./repl-proxy";
+
+const createTodoInputSchema = createInsertSchema(todosTable);
+const createAuthorInputSchema = createInsertSchema(authorsTable);
 
 const { SyncClientProvider, useSyncClient, useLiveDrizzleRows } = createSyncClientHooks<typeof demoSyncRegistry>();
 

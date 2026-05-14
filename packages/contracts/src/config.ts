@@ -1,196 +1,63 @@
-import { z } from "zod";
+export type TableMode = "readonly" | "writeonly" | "readwrite";
 
-export const tableModeSchema = z.enum(["readonly", "writeonly", "readwrite"]);
+export interface PrimaryKeySpec {
+  columns: string[];
+}
 
-export const primaryKeySpecSchema = z
-  .object({
-    columns: z.array(z.string().trim().min(1)).min(1),
-  })
-  .strict();
-
-export const shapeSpecSchema = z
-  .object({
-    tableName: z.string().trim().min(1),
-    shapeKey: z.string().trim().min(1),
-    electricTable: z.string().trim().min(1).optional(),
-    // rowFilter is a runtime-only TypeScript type (contains function fields Zod can't represent).
-    // Declared as z.unknown() passthrough so Zod doesn't strip it during .strict() validation.
-    rowFilter: z.unknown().optional(),
-  })
-  .strict();
-
-export const clientProjectionSpecSchema = z
-  .object({
-    syncedTable: z.string().trim().min(1),
-    overlayTable: z.string().trim().min(1).optional(),
-    journalTable: z.string().trim().min(1).optional(),
-    omitColumns: z.array(z.string().trim().min(1)).optional(),
-    localPrimaryKey: primaryKeySpecSchema.optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.omitColumns && new Set(value.omitColumns).size !== value.omitColumns.length) {
-      context.addIssue({
-        code: "custom",
-        message: "omitColumns must not contain duplicate entries",
-        path: ["omitColumns"],
-      });
-    }
-
-    if (value.localPrimaryKey && new Set(value.localPrimaryKey.columns).size !== value.localPrimaryKey.columns.length) {
-      context.addIssue({
-        code: "custom",
-        message: "localPrimaryKey.columns must not contain duplicate entries",
-        path: ["localPrimaryKey", "columns"],
-      });
-    }
-  });
-
-export const deferrableConstraintSpecSchema = z
-  .object({
-    constraintName: z.string().trim().min(1),
-    columns: z.array(z.string().trim().min(1)).min(1),
-    initiallyDeferred: z.boolean().optional(),
-  })
-  .strict();
-
-export const managedFieldApplyOnSchema = z.enum(["create", "update"]);
-export const managedFieldStrategySchema = z.enum(["authUid", "nowMicroseconds"]);
-
-export const managedFieldSpecSchema = z
-  .object({
-    column: z.string().trim().min(1),
-    applyOn: z.array(managedFieldApplyOnSchema).min(1),
-    strategy: managedFieldStrategySchema,
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (new Set(value.applyOn).size !== value.applyOn.length) {
-      context.addIssue({
-        code: "custom",
-        message: "applyOn must not contain duplicate operations",
-        path: ["applyOn"],
-      });
-    }
-  });
-
-export const tableGovernanceSpecSchema = z
-  .object({
-    deferrableConstraints: z.array(deferrableConstraintSpecSchema).optional(),
-    managedFields: z.array(managedFieldSpecSchema).optional(),
-  })
-  .strict();
-
-export const tableSpecInputSchema = z
-  .object({
-    name: z.string().trim().min(1),
-    mode: tableModeSchema,
-    primaryKey: primaryKeySpecSchema,
-    shape: shapeSpecSchema.optional(),
-    clientProjection: clientProjectionSpecSchema.optional(),
-    governance: tableGovernanceSpecSchema.optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.mode !== "writeonly" && value.shape === undefined) {
-      context.addIssue({
-        code: "custom",
-        message: "shape is required for readonly and readwrite tables",
-        path: ["shape"],
-      });
-    }
-
-    if (value.mode !== "writeonly" && value.clientProjection === undefined) {
-      context.addIssue({
-        code: "custom",
-        message: "clientProjection is required for readonly and readwrite tables",
-        path: ["clientProjection"],
-      });
-    }
-
-    if (value.clientProjection?.localPrimaryKey && value.mode !== "readonly") {
-      context.addIssue({
-        code: "custom",
-        message: "clientProjection.localPrimaryKey is only supported for readonly tables",
-        path: ["clientProjection", "localPrimaryKey"],
-      });
-    }
-
-    const omittedColumns = new Set(value.clientProjection?.omitColumns ?? []);
-    const localPrimaryKeyColumns = value.clientProjection?.localPrimaryKey?.columns ?? [];
-    const omittedLocalPrimaryKeyColumns = localPrimaryKeyColumns.filter((column) => omittedColumns.has(column));
-
-    if (omittedLocalPrimaryKeyColumns.length > 0) {
-      context.addIssue({
-        code: "custom",
-        message:
-          "clientProjection.localPrimaryKey.columns must not include omitted columns: " +
-          omittedLocalPrimaryKeyColumns.join(", "),
-        path: ["clientProjection", "localPrimaryKey", "columns"],
-      });
-    }
-  });
-
-export const syncConfigSchema = z
-  .object({
-    electricUrl: z.url(),
-    localSchema: z.string().trim().min(1).optional(),
-    tables: z.record(z.string(), tableSpecInputSchema),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (Object.keys(value.tables).length === 0) {
-      context.addIssue({
-        code: "custom",
-        message: "at least one table must be configured",
-        path: ["tables"],
-      });
-    }
-
-    for (const [key, spec] of Object.entries(value.tables)) {
-      if (spec.name !== key) {
-        context.addIssue({
-          code: "custom",
-          message: "table config key must match spec.name",
-          path: ["tables", key, "name"],
-        });
-      }
-    }
-  });
-
-export type TableMode = z.infer<typeof tableModeSchema>;
-export type PrimaryKeySpec = z.infer<typeof primaryKeySpecSchema>;
-export type ShapeSpecBase = z.infer<typeof shapeSpecSchema>;
-export interface ShapeSpec extends ShapeSpecBase {
+export interface ShapeSpec {
+  tableName: string;
+  shapeKey: string;
+  electricTable?: string;
   rowFilter?: RowFilterSpec;
 }
-export type ClientProjectionSpec = z.infer<typeof clientProjectionSpecSchema>;
-export type DeferrableConstraintSpec = z.infer<typeof deferrableConstraintSpecSchema>;
-export type ManagedFieldApplyOn = z.infer<typeof managedFieldApplyOnSchema>;
-export type ManagedFieldStrategy = z.infer<typeof managedFieldStrategySchema>;
-export type ManagedFieldSpec = z.infer<typeof managedFieldSpecSchema>;
-export type TableGovernanceSpec = z.infer<typeof tableGovernanceSpecSchema>;
-export type TableSpecInput = z.infer<typeof tableSpecInputSchema>;
-export type SyncConfigInput = z.infer<typeof syncConfigSchema>;
 
-export interface TableSchemas<TCreate, TUpdate, TRecord = unknown> {
-  createSchema: z.ZodType<TCreate>;
-  updateSchema: z.ZodType<TUpdate>;
-  recordSchema?: z.ZodType<TRecord>;
+/** Input variant of {@link ShapeSpec} where `tableName` and `shapeKey` are optional.
+ * When omitted, both default to the top-level `tableName` of the `defineSyncTable` call. */
+export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey"> & {
+  tableName?: string;
+  shapeKey?: string;
+};
+
+export interface ClientProjectionSpec {
+  syncedTable?: string;
+  overlayTable?: string;
+  journalTable?: string;
+  omitColumns?: string[];
+  localPrimaryKey?: PrimaryKeySpec;
 }
 
-export interface TableAdapters {
-  toEntityKey?: (record: Record<string, unknown>) => Record<string, string>;
+export interface DeferrableConstraintSpec {
+  constraintName: string;
+  columns: string[];
+  initiallyDeferred?: boolean;
 }
 
-export interface TableSpec<TCreate, TUpdate, TRecord = unknown> extends TableSpecInput {
-  schemas: TableSchemas<TCreate, TUpdate, TRecord>;
-  adapters?: TableAdapters;
+export type ManagedFieldApplyOn = "create" | "update";
+export type ManagedFieldStrategy = "authUid" | "nowMicroseconds";
+
+export interface ManagedFieldSpec {
+  column: string;
+  applyOn: ManagedFieldApplyOn[];
+  strategy: ManagedFieldStrategy;
 }
 
-export interface SyncConfig {
+export interface TableGovernanceSpec {
+  deferrableConstraints?: DeferrableConstraintSpec[];
+  managedFields?: ManagedFieldSpec[];
+}
+
+export interface TableSpecInput {
+  mode: TableMode;
+  primaryKey: PrimaryKeySpec;
+  shape?: ShapeSpec;
+  clientProjection?: ClientProjectionSpec;
+  governance?: TableGovernanceSpec;
+}
+
+export interface SyncConfigInput {
   electricUrl: string;
-  tables: Record<string, TableSpec<any, any, any>>;
+  localSchema?: string;
+  tables: Record<string, TableSpecInput>;
 }
 
 export function getLocalSyncPrimaryKey(source: {
@@ -207,8 +74,6 @@ export function getLocalSyncPrimaryKeyColumns(source: {
   return [...getLocalSyncPrimaryKey(source).columns];
 }
 
-// RowFilterSpec is defined as a pure TypeScript type (not Zod) because it contains
-// function-typed fields (customWhere, sharedUserId) that Zod cannot represent.
 export interface RowFilterSpec {
   /** WHERE "column" = auth.uid() — ownership-based row filtering. */
   ownership?: {

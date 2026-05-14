@@ -1,14 +1,7 @@
 import { sql } from "drizzle-orm";
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
-import { z } from "zod";
 
-import {
-  defineSyncRegistry,
-  defineSyncTable,
-  type TableSpec,
-  type TableSpecInput,
-  unixMicrosecondsSchema,
-} from "@pgxsinkit/contracts";
+import { defineSyncRegistry, defineSyncTable, type TableSpecInput } from "@pgxsinkit/contracts";
 
 const nowMicrosecondsSql = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)`;
 
@@ -23,49 +16,13 @@ const projectsSyncEntry = defineSyncTable({
   tableName: "projects",
   makeColumns: makeProjectsColumns,
   mode: "readwrite",
-  shape: { tableName: "projects", shapeKey: "projects" },
-  clientProjection: {
-    syncedTable: "projects",
-    overlayTable: "projects_overlay",
-    journalTable: "projects_mutations",
-  },
 });
 
 export const projectsTable = projectsSyncEntry.table;
 export const projectsView = projectsSyncEntry.view;
 
-export const createProjectInputSchema = z.object({
-  id: z.uuid(),
-  name: z.string().trim().min(1).max(120),
-});
-
-export const updateProjectInputSchema = z
-  .object({
-    name: z.string().trim().min(1).max(120).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (Object.keys(value).length === 0) {
-      context.addIssue({
-        code: "custom",
-        message: "At least one field must be provided",
-      });
-    }
-  });
-
-export const projectRecordSchema = z.object({
-  id: z.uuid(),
-  name: z.string(),
-  createdAtUs: unixMicrosecondsSchema,
-  updatedAtUs: unixMicrosecondsSchema,
-});
-
-export type CreateProjectInput = z.infer<typeof createProjectInputSchema>;
-export type UpdateProjectInput = z.infer<typeof updateProjectInputSchema>;
-export type ProjectRecord = z.infer<typeof projectRecordSchema>;
-
+export type CreateProjectInput = typeof projectsTable.$inferInsert;
 export const projectTableSpecInput = {
-  name: "projects",
   mode: "readwrite",
   primaryKey: {
     columns: ["id"],
@@ -74,21 +31,9 @@ export const projectTableSpecInput = {
     tableName: "projects",
     shapeKey: "projects",
   },
-  clientProjection: {
-    syncedTable: "projects",
-    overlayTable: "projects_overlay",
-    journalTable: "projects_mutations",
-  },
 } satisfies TableSpecInput;
 
-export const projectTableSpec = {
-  ...projectTableSpecInput,
-  schemas: {
-    createSchema: createProjectInputSchema,
-    updateSchema: updateProjectInputSchema,
-    recordSchema: projectRecordSchema,
-  },
-} satisfies TableSpec<CreateProjectInput, UpdateProjectInput, ProjectRecord>;
+export const projectTableSpec = projectTableSpecInput;
 
 export const projectsSyncRegistry = defineSyncRegistry({
   projects: projectsSyncEntry,

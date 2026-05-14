@@ -238,60 +238,13 @@ function readBaseColumnTypeSql(column: TableColumn, localSchema: string) {
     return qualifyIdentifier(enumDefinition.schemaName, enumDefinition.enumName);
   }
 
-  const sqlType = readColumnSqlType(column);
+  const sqlType = (column as { getSQLType(): string }).getSQLType();
 
-  if (sqlType) {
-    return sqlType;
+  if (!sqlType) {
+    throw new Error(`Unsupported column type for local schema generation: ${column.columnType}`);
   }
 
-  switch (column.columnType) {
-    case "PgUUID":
-      return "UUID";
-    case "PgText":
-      return "TEXT";
-    case "PgVarchar":
-      return `VARCHAR(${readVarcharLength(column) ?? 255})`;
-    case "PgBigInt64":
-    case "PgBigInt53":
-      return "BIGINT";
-    case "PgInteger":
-    case "PgSerial":
-    case "PgSmallInt":
-      return "INTEGER";
-    case "PgBoolean":
-      return "BOOLEAN";
-    case "PgJson":
-    case "PgJsonb":
-      return "JSONB";
-    case "PgReal":
-    case "PgDoublePrecision":
-      return "REAL";
-    case "PgTimestamp":
-    case "PgTimestampString":
-      return "TIMESTAMP";
-    default:
-      if (column.dataType.includes("uuid")) {
-        return "UUID";
-      }
-
-      if (column.dataType.includes("bigint")) {
-        return "BIGINT";
-      }
-
-      if (column.dataType.includes("json")) {
-        return "JSONB";
-      }
-
-      if (column.dataType.includes("float")) {
-        return "REAL";
-      }
-
-      if (column.dataType === "string") {
-        return "TEXT";
-      }
-
-      throw new Error(`Unsupported column type for local schema generation: ${column.columnType}`);
-  }
+  return sqlType;
 }
 
 type EnumDefinition = {
@@ -393,22 +346,9 @@ function readEnumColumnDefinition(column: TableColumn, localSchema: string): Enu
   };
 }
 
-function readColumnSqlType(column: TableColumn) {
-  const candidate = column as TableColumn & {
-    getSQLType?: () => string;
-  };
-
-  return typeof candidate.getSQLType === "function" ? candidate.getSQLType() : undefined;
-}
-
 function readArrayDimensions(column: TableColumn) {
   const arrayColumn = column as TableColumn & { dimensions?: number };
   return arrayColumn.dimensions ?? 0;
-}
-
-function readVarcharLength(column: TableColumn) {
-  const varcharColumn = column as { config?: { length?: number } };
-  return varcharColumn.config?.length;
 }
 
 function buildPrimaryKeyMatch(primaryKeyColumns: string[]) {
@@ -417,10 +357,11 @@ function buildPrimaryKeyMatch(primaryKeyColumns: string[]) {
 
 function getClientProjection(entry: SyncTableEntry, tableKey: string, localSchema: string): ResolvedProjection {
   const projection = baseProjection(entry, tableKey);
-  const readModelName = entry.view != null ? getViewConfig(entry.view).name : projection.syncedTable;
+  const syncedTableName = projection.syncedTable ?? tableKey;
+  const readModelName = entry.view != null ? getViewConfig(entry.view).name : syncedTableName;
 
   return {
-    syncedTable: qualifyIdentifier(localSchema, projection.syncedTable),
+    syncedTable: qualifyIdentifier(localSchema, syncedTableName),
     ...(projection.overlayTable ? { overlayTable: qualifyIdentifier(localSchema, projection.overlayTable) } : {}),
     ...(projection.journalTable ? { journalTable: qualifyIdentifier(localSchema, projection.journalTable) } : {}),
     readModel: qualifyIdentifier(localSchema, readModelName),

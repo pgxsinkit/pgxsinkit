@@ -67,7 +67,6 @@ const fkParentsSyncEntry = defineSyncTable({
     name: varchar("name", { length: 120 }).notNull(),
   }),
   mode: "readwrite",
-  shape: { tableName: "fk_parents", shapeKey: "fk_parents" },
 });
 const fkParentsTable = fkParentsSyncEntry.table;
 
@@ -81,7 +80,6 @@ const fkChildrenSyncEntry = defineSyncTable({
       .references(() => fkParentsTable.id),
   }),
   mode: "readwrite",
-  shape: { tableName: "fk_children", shapeKey: "fk_children" },
 });
 const fkChildrenTable = fkChildrenSyncEntry.table;
 
@@ -133,7 +131,6 @@ const rlsTodosSyncEntry = defineSyncTable({
     ownerSqlColumn: "owner_id",
   }),
   mode: "readwrite",
-  shape: { tableName: "rls_todos", shapeKey: "rls_todos" },
 });
 const rlsTodosTable = rlsTodosSyncEntry.table;
 

@@ -28,7 +28,6 @@ describe("sync-engine", () => {
       localSchema: "workspace_local",
       tables: {
         projects: {
-          name: "projects",
           mode: "readwrite",
           primaryKey: {
             columns: ["id"],
@@ -37,14 +36,8 @@ describe("sync-engine", () => {
             tableName: "projects",
             shapeKey: "projects-shape",
           },
-          clientProjection: {
-            syncedTable: "projects_local",
-            overlayTable: "projects_overlay",
-            journalTable: "projects_mutations",
-          },
         },
         activity_feed: {
-          name: "activity_feed",
           mode: "readonly",
           primaryKey: {
             columns: ["id"],
@@ -53,12 +46,8 @@ describe("sync-engine", () => {
             tableName: "activity_feed",
             shapeKey: "activity-feed-shape",
           },
-          clientProjection: {
-            syncedTable: "activity_feed_local",
-          },
         },
         write_audit: {
-          name: "write_audit",
           mode: "writeonly",
           primaryKey: {
             columns: ["id"],
@@ -69,7 +58,7 @@ describe("sync-engine", () => {
 
     expect(specs).toHaveLength(2);
     expect(specs.map((spec) => spec.key)).toEqual(["projects", "activity_feed"]);
-    expect(specs[0]?.tableName).toBe("projects_local");
+    expect(specs[0]?.tableName).toBe("projects");
     expect(specs[0]?.schema).toBe("workspace_local");
     expect(specs[1]?.electricTable).toBe("activity_feed");
   });

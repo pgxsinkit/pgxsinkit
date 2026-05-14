@@ -277,7 +277,7 @@ describe("server facade contract", () => {
       }),
     });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(400);
 
     const rows = await server.drizzle.select().from(projectsTable);
     expect(rows).toHaveLength(0);

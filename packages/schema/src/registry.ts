@@ -1,8 +1,6 @@
 import { defineSyncRegistry } from "@pgxsinkit/contracts";
 
-import { authorTableSpec } from "./author-config";
 import { authorsSyncEntry, todosSyncEntry } from "./schema";
-import { todoTableSpec } from "./todo-config";
 
 function escapeSqlLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -30,10 +28,10 @@ function ownershipRowFilter(claims: Record<string, unknown>): string | null {
 export const demoSyncRegistry = defineSyncRegistry({
   authors: {
     ...authorsSyncEntry,
-    shape: { ...authorTableSpec.shape, rowFilter: { customWhere: ownershipRowFilter } },
+    shape: { ...authorsSyncEntry.shape!, rowFilter: { customWhere: ownershipRowFilter } },
   },
   todos: {
     ...todosSyncEntry,
-    shape: { ...todoTableSpec.shape, rowFilter: { customWhere: ownershipRowFilter } },
+    shape: { ...todosSyncEntry.shape!, rowFilter: { customWhere: ownershipRowFilter } },
   },
 });

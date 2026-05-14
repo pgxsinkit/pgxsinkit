@@ -278,7 +278,7 @@ function buildSyncTableInput(entry: SyncTableEntry, tableKey: string) {
     name: tableKey,
     mode: entry.mode,
     primaryKey: entry.primaryKey,
-    shape: entry.shape,
+    ...(entry.shape !== undefined ? { shape: entry.shape } : {}),
     clientProjection,
   };
 }

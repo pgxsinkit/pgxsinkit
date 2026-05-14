@@ -1,5 +1,4 @@
-import { getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
-import { ZodObject } from "zod";
+import { getTableConfig, getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
 /**
  * Strip the two internal overlay columns that appear on _read_model views
@@ -15,6 +14,19 @@ function stripReadModelOverlayFields<T>(value: T): T {
   if (!("overlay_kind" in obj) && !("local_updated_at_us" in obj)) return value;
   const { overlay_kind: _ok, local_updated_at_us: _lu, ...rest } = obj;
   return rest as T;
+}
+
+/**
+ * JSON replacer that serialises `bigint` values as strings. PostgreSQL
+ * accepts string literals for BIGINT columns, and JSON has no native bigint
+ * type, so this is the safest cross-boundary representation.
+ */
+function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? String(value) : value;
+}
+
+function jsonStringifyPayload(value: unknown): string {
+  return JSON.stringify(value, bigintReplacer);
 }
 
 import type {
@@ -200,7 +212,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       }
       case "update": {
         const entityKey = normalizeEntityKey(context, item.entityKey);
-        const patch = ensureRecord(parseUpdateInput(context, stripReadModelOverlayFields(item.patch)));
+        const patch = ensureRecord(stripReadModelOverlayFields(item.patch));
 
         return {
           context,
@@ -295,7 +307,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               entityKey: item.entityKey,
               entityKeyJson: item.entityKeyJson,
               mutationKind: "create",
-              payloadJson: JSON.stringify({
+              payloadJson: jsonStringifyPayload({
                 kind: "create",
                 value: item.input,
               }),
@@ -345,7 +357,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               entityKey: item.entityKey,
               entityKeyJson: item.entityKeyJson,
               mutationKind: "update",
-              payloadJson: JSON.stringify({
+              payloadJson: jsonStringifyPayload({
                 kind: "update",
                 patch: item.patch,
               }),
@@ -380,7 +392,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               entityKey: item.entityKey,
               entityKeyJson: item.entityKeyJson,
               mutationKind: "delete",
-              payloadJson: JSON.stringify({
+              payloadJson: jsonStringifyPayload({
                 kind: "delete",
                 entityKey: item.entityKey,
               }),
@@ -536,7 +548,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       };
 
       for (const context of contexts) {
-        const result = await options.db.query<MutationDiagnostics>(`
+        const result = await options.db.query<MutationDiagnostics & Record<string, unknown>>(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'pending')::int AS "pendingCount",
             COUNT(*) FILTER (WHERE status = 'sending')::int AS "sendingCount",
@@ -759,15 +771,20 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     entry,
     readModel: qualifyLocalIdentifier(
       localSchema,
-      entry.view != null ? getViewConfig(entry.view).name : entry.clientProjection.syncedTable,
+      entry.view != null
+        ? getViewConfig(entry.view).name
+        : (entry.clientProjection?.syncedTable ?? getTableConfig(entry.table).name),
     ),
-    syncedTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.syncedTable),
+    syncedTable: qualifyLocalIdentifier(
+      localSchema,
+      entry.clientProjection?.syncedTable ?? getTableConfig(entry.table).name,
+    ),
     overlayTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.overlayTable),
     journalTable: qualifyLocalIdentifier(localSchema, entry.clientProjection.journalTable),
     journalSequence: qualifyLocalIdentifier(localSchema, buildJournalSequenceName(entry.clientProjection.journalTable)),
     pkColumnNames: [...entry.primaryKey.columns],
     pkPropertyKeys,
-    recordIncludesOverlayState: recordSchemaIncludesOverlayState(entry.schemas?.recordSchema),
+    recordIncludesOverlayState: "overlayTable" in (entry.clientProjection ?? {}),
     columns,
   };
 }
@@ -785,9 +802,8 @@ function filterContexts<TRegistry extends SyncTableRegistry>(
 }
 
 function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableContext, input: TCreate): TRecord {
-  const parsed = parseCreateInput(context, input);
   const record = {
-    ...(isRecord(parsed) ? parsed : {}),
+    ...(isRecord(input) ? input : {}),
   };
   const nowUs = nowMicroseconds();
 
@@ -805,18 +821,6 @@ function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableConte
   }) as TRecord;
 }
 
-function parseCreateInput(context: TableContext, input: unknown) {
-  return context.entry.schemas?.createSchema ? context.entry.schemas.createSchema.parse(input) : input;
-}
-
-function parseUpdateInput(context: TableContext, input: unknown) {
-  return context.entry.schemas?.updateSchema ? context.entry.schemas.updateSchema.parse(input) : input;
-}
-
-function parseRecord(context: TableContext, input: unknown) {
-  return context.entry.schemas?.recordSchema ? context.entry.schemas.recordSchema.parse(input) : input;
-}
-
 function buildOptimisticRecord(
   context: TableContext,
   record: Record<string, unknown>,
@@ -826,34 +830,21 @@ function buildOptimisticRecord(
   },
 ) {
   if (!context.recordIncludesOverlayState) {
-    return parseRecord(context, record);
+    return record;
   }
 
-  return parseRecord(context, {
+  return {
     ...record,
     overlayKind: options.overlayKind,
     localUpdatedAtUs: options.localUpdatedAtUs,
-  });
-}
-
-function recordSchemaIncludesOverlayState(schema: unknown) {
-  if (!(schema instanceof ZodObject)) {
-    return false;
-  }
-
-  const shape = schema.shape;
-  return "overlayKind" in shape && "localUpdatedAtUs" in shape;
+  };
 }
 
 function buildEntityKeyFromRecord(context: TableContext, record: unknown) {
   const recordObject = ensureRecord(record);
   return normalizeEntityKey(
     context,
-    context.entry.adapters?.toEntityKey
-      ? context.entry.adapters.toEntityKey(recordObject)
-      : Object.fromEntries(
-          context.pkPropertyKeys.map((propertyKey) => [propertyKey, String(recordObject[propertyKey])]),
-        ),
+    Object.fromEntries(context.pkPropertyKeys.map((propertyKey) => [propertyKey, String(recordObject[propertyKey])])),
   );
 }
 
@@ -1356,14 +1347,14 @@ async function flushBatch(
     let response = await fetch(batchMutationUrl, {
       method: "POST",
       headers: buildRequestHeaders(await getAuthToken?.()),
-      body: JSON.stringify({ mutations }),
+      body: jsonStringifyPayload({ mutations }),
     });
 
     if ([401, 403].includes(response.status) && getAuthToken) {
       response = await fetch(batchMutationUrl, {
         method: "POST",
         headers: buildRequestHeaders(await getAuthToken()),
-        body: JSON.stringify({ mutations }),
+        body: jsonStringifyPayload({ mutations }),
       });
     }
 

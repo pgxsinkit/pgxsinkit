@@ -18,11 +18,7 @@ const projectedClientRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
-    shape: { tableName: "projected_client_items", shapeKey: "projected_client_items" },
     clientProjection: {
-      syncedTable: "projected_client_items",
-      overlayTable: "projected_client_items_overlay",
-      journalTable: "projected_client_items_mutations",
       omitColumns: ["ownerId", "modifiedBy", "notes"],
     },
     governance: {
@@ -50,10 +46,6 @@ const compositeReadonlyRegistry = defineSyncRegistry({
       efactor: real("efactor").notNull(),
     }),
     primaryKey: ["id", "owner_id"],
-    shape: { tableName: "composite_readonly_items", shapeKey: "composite_readonly_items" },
-    clientProjection: {
-      syncedTable: "composite_readonly_items",
-    },
   }),
 });
 
@@ -68,12 +60,6 @@ const fallbackReadModelRegistry = defineSyncRegistry({
       title: varchar("title", { length: 120 }).notNull(),
     }),
     mode: "readwrite",
-    shape: { tableName: "fallback_read_model_items", shapeKey: "fallback_read_model_items" },
-    clientProjection: {
-      syncedTable: "fallback_read_model_items",
-      overlayTable: "fallback_read_model_items_overlay",
-      journalTable: "fallback_read_model_items_mutations",
-    },
   }),
 });
 
@@ -87,10 +73,6 @@ const workspaceReadonlyRegistry = defineSyncRegistry({
         status: workspaceReadonlyStatusEnum("status").notNull(),
       }),
       schema: workspaceLocalSchema,
-      shape: { tableName: "workspace_readonly_items", shapeKey: "workspace_readonly_items" },
-      clientProjection: {
-        syncedTable: "workspace_readonly_items",
-      },
     }),
   },
 });
@@ -100,23 +82,23 @@ describe("client local schema generation", () => {
     const sql = generateLocalSchemaSql(demoSyncRegistry);
 
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS authors");
-    expect(sql).toContain("CREATE TABLE IF NOT EXISTS author_overlay");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS authors_overlay");
     expect(sql).toContain(
-      "CREATE SEQUENCE IF NOT EXISTS author_mutations_mutation_seq AS integer START WITH 1 INCREMENT BY 1;",
+      "CREATE SEQUENCE IF NOT EXISTS authors_mutations_mutation_seq AS integer START WITH 1 INCREMENT BY 1;",
     );
-    expect(sql).toContain("CREATE TABLE IF NOT EXISTS author_mutations");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS authors_mutations");
     expect(sql).toContain("CREATE OR REPLACE VIEW authors_read_model AS");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS todos");
-    expect(sql).toContain("CREATE TABLE IF NOT EXISTS todo_overlay");
-    expect(sql).toContain("CREATE TABLE IF NOT EXISTS todo_mutations");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS todos_overlay");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS todos_mutations");
     expect(sql).toContain("CREATE OR REPLACE VIEW todos_read_model AS");
     expect(sql).toContain("entity_key_json TEXT NOT NULL");
     expect(sql).toContain(
-      "mutation_seq INTEGER NOT NULL UNIQUE DEFAULT nextval('author_mutations_mutation_seq')::integer",
+      "mutation_seq INTEGER NOT NULL UNIQUE DEFAULT nextval('authors_mutations_mutation_seq')::integer",
     );
     expect(sql).not.toContain("UNIQUE (entity_key_json, mutation_seq)");
-    expect(sql).toContain("author_mutations_status_retry_idx");
-    expect(sql).toContain("author_mutations_entity_status_seq_idx");
+    expect(sql).toContain("authors_mutations_status_retry_idx");
+    expect(sql).toContain("authors_mutations_entity_status_seq_idx");
   });
 
   it("qualifies local tables and views when the registry schema is non-public", () => {

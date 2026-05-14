@@ -26,12 +26,6 @@ const routeOptionalBatchRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
-    shape: { tableName: "route_optional_batch_items", shapeKey: "route_optional_batch_items" },
-    clientProjection: {
-      syncedTable: "route_optional_batch_items",
-      overlayTable: "route_optional_batch_items_overlay",
-      journalTable: "route_optional_batch_items_mutations",
-    },
   }),
 });
 
@@ -98,8 +92,8 @@ describe("overlay state helpers", () => {
       runtime.create("routeOptionalBatchItems", {
         id: "01963227-d4c7-72db-b858-f89f6af8f901",
         title: "Queued without per-table routes",
-        createdAtUs: "100",
-        updatedAtUs: "100",
+        createdAtUs: 100n,
+        updatedAtUs: 100n,
       }),
     ).resolves.toBeUndefined();
 
@@ -223,7 +217,7 @@ describe("overlay state helpers", () => {
 
     // Step 1: simulate ack — journal entry is acked
     await db.query(
-      `UPDATE todo_mutations SET status = 'acked', server_updated_at_us = $2::bigint WHERE id = $1 AND mutation_seq = 1`,
+      `UPDATE todos_mutations SET status = 'acked', server_updated_at_us = $2::bigint WHERE id = $1 AND mutation_seq = 1`,
       ["01963227-d4c7-72db-b858-f89f6af8f994", "500"],
     );
 
@@ -246,7 +240,7 @@ describe("overlay state helpers", () => {
     const stats = await runtime.readMutationStats("todos");
     expect(stats.ackedCount).toBe(0);
 
-    const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_overlay");
+    const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay");
     expect(overlayRows.rows[0]?.count).toBe(0);
   });
 
@@ -280,7 +274,7 @@ describe("overlay state helpers", () => {
     }
 
     await db.query(`
-      UPDATE todo_mutations
+      UPDATE todos_mutations
       SET
         status = 'acked',
         server_updated_at_us = 500,
@@ -296,7 +290,7 @@ describe("overlay state helpers", () => {
     const stats = await runtime.readMutationStats("todos");
     expect(stats.ackedCount).toBe(0);
 
-    const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_overlay");
+    const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay");
     expect(overlayRows.rows[0]?.count).toBe(0);
   });
 
@@ -350,7 +344,7 @@ describe("overlay state helpers", () => {
 
     const overlayRows = await db.query<{ title: string; status: string; overlayKind: string }>(`
       SELECT title, status, overlay_kind AS "overlayKind"
-      FROM todo_overlay
+      FROM todos_overlay
       WHERE id = '01963227-d4c7-72db-b858-f89f6af8f995'
     `);
 
@@ -386,7 +380,7 @@ describe("overlay state helpers", () => {
     expect(visibleRows.rows[0]?.count).toBe(0);
 
     const overlays = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM todo_overlay WHERE id = $1`,
+      `SELECT overlay_kind AS "overlayKind" FROM todos_overlay WHERE id = $1`,
       ["01963227-d4c7-72db-b858-f89f6af8f996"],
     );
     expect(overlays.rows[0]?.overlayKind).toBe("pending_delete");
@@ -479,7 +473,7 @@ describe("overlay state helpers", () => {
     ]);
 
     const overlayRows = await db.query<{ title: string; status: string }>(
-      `SELECT title, status FROM todo_overlay WHERE id = $1`,
+      `SELECT title, status FROM todos_overlay WHERE id = $1`,
       [todoId],
     );
     const mutations = await runtime.readMutationDetails("todos");
@@ -562,7 +556,7 @@ describe("overlay state helpers", () => {
     const journalRows = await db.query<{ id: string; mutationSeq: number }>(
       `
         SELECT id, mutation_seq AS "mutationSeq"
-        FROM todo_mutations
+        FROM todos_mutations
         ORDER BY mutation_seq ASC
       `,
     );
@@ -608,7 +602,7 @@ describe("overlay state helpers", () => {
     expect(visibleRows.rows[0]?.count).toBe(0);
 
     const overlays = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM todo_overlay WHERE id = $1`,
+      `SELECT overlay_kind AS "overlayKind" FROM todos_overlay WHERE id = $1`,
       [todoId],
     );
     expect(overlays.rows[0]?.overlayKind).toBe("pending_delete");
@@ -657,8 +651,8 @@ describe("overlay state helpers", () => {
     ).rejects.toThrow("todos is already queued for deletion");
 
     const [overlayRows, mutationRows] = await Promise.all([
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_overlay WHERE id = $1", [todoId]),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_mutations WHERE id = $1", [todoId]),
+      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay WHERE id = $1", [todoId]),
+      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_mutations WHERE id = $1", [todoId]),
     ]);
 
     expect(overlayRows.rows[0]?.count).toBe(0);
@@ -683,7 +677,7 @@ describe("overlay state helpers", () => {
           kind: "create",
           input: {
             id: "01963227-d4c7-72db-b858-f89f6af8f941",
-            title: "",
+            title: "x".repeat(200),
             description: null,
             authorId: "01963227-d4c7-72db-b858-f89f6af8f940",
             status: "todo",
@@ -691,13 +685,13 @@ describe("overlay state helpers", () => {
           },
         },
       ]),
-    ).rejects.toThrow("[");
+    ).rejects.toThrow(/value too long for type character varying/);
 
     const [authorOverlay, authorJournal, todoOverlay, todoJournal] = await Promise.all([
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM author_overlay"),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM author_mutations"),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_overlay"),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_mutations"),
+      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors_overlay"),
+      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors_mutations"),
+      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay"),
+      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_mutations"),
     ]);
 
     expect(authorOverlay.rows[0]?.count).toBe(0);
@@ -723,7 +717,7 @@ describe("overlay state helpers", () => {
     }
 
     await db.query(`
-      UPDATE todo_mutations
+      UPDATE todos_mutations
       SET
         status = 'acked',
         updated_at_us = 600,
@@ -743,10 +737,10 @@ describe("overlay state helpers", () => {
     expect(stats.pendingCount).toBe(2);
     expect(stats.ackedCount).toBe(0);
 
-    const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_overlay");
+    const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay");
     expect(overlays.rows[0]?.count).toBe(0);
 
-    const journal = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todo_mutations");
+    const journal = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_mutations");
     // Create mutations remain in journal as pending
     expect(journal.rows[0]?.count).toBe(2);
   });
@@ -795,7 +789,7 @@ describe("overlay state helpers", () => {
     );
 
     const overlayRows = await db.query<{ title: string; status: string }>(
-      `SELECT title, status FROM todo_overlay WHERE id = $1`,
+      `SELECT title, status FROM todos_overlay WHERE id = $1`,
       ["01963227-d4c7-72db-b858-f89f6af8f910"],
     );
     expect(overlayRows.rows[0]).toEqual({
@@ -832,7 +826,7 @@ describe("overlay state helpers", () => {
     );
 
     const overlayRows = await db.query<{ title: string; status: string; overlayKind: string }>(
-      `SELECT title, status, overlay_kind AS "overlayKind" FROM todo_overlay WHERE id = $1`,
+      `SELECT title, status, overlay_kind AS "overlayKind" FROM todos_overlay WHERE id = $1`,
       ["01963227-d4c7-72db-b858-f89f6af8f909"],
     );
 
@@ -869,7 +863,7 @@ describe("overlay state helpers", () => {
     });
 
     await db.exec(`
-      CREATE TABLE todo_mutations (
+      CREATE TABLE todos_mutations (
         mutation_id UUID PRIMARY KEY,
         todo_id UUID NOT NULL,
         entity_key_json TEXT NOT NULL,
@@ -893,7 +887,7 @@ describe("overlay state helpers", () => {
 
     await db.query(
       `
-        INSERT INTO todo_mutations (
+        INSERT INTO todos_mutations (
           mutation_id,
           todo_id,
           entity_key_json,
@@ -938,7 +932,7 @@ describe("overlay state helpers", () => {
 
     await db.query(
       `
-        UPDATE author_mutations
+        UPDATE authors_mutations
         SET
           status = 'sending',
           sent_at_us = $2::bigint,
@@ -1243,7 +1237,7 @@ describe("overlay state helpers", () => {
       await runtime.reconcile("authors");
 
       const mutationStats = await runtime.readMutationStats("authors");
-      const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM author_overlay");
+      const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors_overlay");
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(mutationStats.pendingCount).toBe(0);

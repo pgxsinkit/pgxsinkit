@@ -13,49 +13,6 @@ import {
 
 import type { TransactionClient } from "./types";
 
-const PG_TYPE_MAP: Record<string, string> = {
-  PgUUID: "uuid",
-  PgText: "text",
-  PgVarchar: "varchar",
-  PgChar: "char",
-  PgInteger: "integer",
-  PgSerial: "integer",
-  PgSmallInt: "smallint",
-  PgSmallIntNumber: "smallint",
-  PgBigInt53: "bigint",
-  PgBigInt64: "bigint",
-  PgBigIntString: "bigint",
-  PgBigSerial: "bigint",
-  PgBoolean: "boolean",
-  PgNumeric: "numeric",
-  PgReal: "real",
-  PgDoublePrecision: "double precision",
-  PgTimestamp: "timestamptz",
-  PgTimestampString: "timestamptz",
-  PgDate: "date",
-  PgDateString: "date",
-  PgTime: "time",
-  PgTimeString: "time",
-  PgJson: "json",
-  PgJsonb: "jsonb",
-  PgBytea: "bytea",
-  PgVector: "vector",
-};
-
-function drizzleColumnTypeToPg(columnType: string): string {
-  return PG_TYPE_MAP[columnType] ?? "text";
-}
-
-function drizzleColumnToPg(column: { columnType: string; getSQLType?: () => string }): string {
-  const sqlType = column.getSQLType?.();
-
-  if (sqlType && sqlType.length > 0) {
-    return sqlType;
-  }
-
-  return drizzleColumnTypeToPg(column.columnType);
-}
-
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
@@ -86,28 +43,22 @@ function buildManagedFieldExpression(strategy: "authUid" | "nowMicroseconds"): s
 
 function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create" | "update") {
   const columns = getColumns(entry.table as AnyPgTable);
-  const columnMap = new Map(
-    Object.entries(columns).map(([propertyKey, column]) => [
-      propertyKey,
-      { name: column.name, columnType: drizzleColumnToPg(column) },
-    ]),
-  );
+  const columnNameMap = new Map(Object.entries(columns).map(([propertyKey, column]) => [propertyKey, column.name]));
 
   return (entry.governance?.managedFields ?? []).flatMap((field) => {
     if (!field.applyOn.includes(operation)) {
       return [];
     }
 
-    const column = columnMap.get(field.column);
-    if (!column) {
+    const columnName = columnNameMap.get(field.column);
+    if (!columnName) {
       return [];
     }
 
     return [
       {
         propertyKey: field.column,
-        columnName: column.name,
-        columnType: drizzleColumnTypeToPg(column.columnType),
+        columnName,
         strategy: field.strategy,
       },
     ];
@@ -122,9 +73,7 @@ function buildTableBranch(entry: SyncTableEntry): string {
   const projectedColumns = getProjectedColumns(entry);
   const primaryKeyColumn = entry.primaryKey.columns[0]!;
   const primaryKeyColumnObject = Object.values(columns).find((column) => column.name === primaryKeyColumn);
-  const primaryKeyType = primaryKeyColumnObject
-    ? drizzleColumnToPg(primaryKeyColumnObject)
-    : drizzleColumnTypeToPg("PgText");
+  const primaryKeyType = primaryKeyColumnObject?.getSQLType() ?? "text";
 
   const createManagedFields = getManagedFieldsForOperation(entry, "create");
   const updateManagedFields = getManagedFieldsForOperation(entry, "update");
@@ -134,13 +83,13 @@ function buildTableBranch(entry: SyncTableEntry): string {
   const allColumnPairs = projectedColumns
     .map(({ column }) => column)
     .filter((column) => !createManagedFieldNames.has(column.name))
-    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(drizzleColumnToPg(column))}')`)
+    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(column.getSQLType())}')`)
     .join(",\n            ");
 
   const nonPrimaryKeyColumnPairs = projectedColumns
     .map(({ column }) => column)
     .filter((column) => column.name !== primaryKeyColumn && !updateManagedFieldNames.has(column.name))
-    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(drizzleColumnToPg(column))}')`)
+    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(column.getSQLType())}')`)
     .join(",\n            ");
 
   const createManagedColumnsSql = createManagedFields.map((field) => quoteIdent(field.columnName)).join(", ");

@@ -2,6 +2,7 @@ import { getTableName, sql } from "drizzle-orm";
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
+import { createInsertSchema } from "drizzle-orm/zod";
 import type { Context, Hono } from "hono";
 
 import type {
@@ -114,7 +115,6 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
 
       const entry = registry[mutation.tableName as keyof TRegistry]!;
       const syncEntry = entry as SyncTableEntry;
-      const schemas = syncEntry.schemas;
       const normalizedPayload = toSchemaPayload(syncEntry, mutation.payload);
       const projectedFieldViolations = findProjectedFieldViolations(syncEntry, mutation.kind, normalizedPayload);
 
@@ -135,12 +135,21 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
       }
 
       try {
-        if (mutation.kind === "create" && schemas?.createSchema) {
-          schemas.createSchema.parse(normalizedPayload);
-        } else if (mutation.kind === "update" && schemas?.updateSchema) {
-          schemas.updateSchema.parse(normalizedPayload);
+        if (mutation.kind === "update") {
+          const payloadKeys =
+            typeof normalizedPayload === "object" && normalizedPayload !== null
+              ? Object.keys(normalizedPayload as object)
+              : [];
+          if (payloadKeys.length === 0) {
+            throw new Error("At least one field must be provided");
+          }
+          createInsertSchema(syncEntry.table as AnyPgTable)
+            .partial()
+            .parse(normalizedPayload);
+        } else if (mutation.kind === "create") {
+          createInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
         }
-        // delete has no payload schema
+        // delete has no payload to validate
       } catch (error) {
         const suffix = isValidationError(error) ? ` (${JSON.stringify(error.issues)})` : "";
         const message = `${mutation.tableName}/${mutation.mutationId}${suffix}`;

@@ -1,7 +1,6 @@
 import { bigint, getTableConfig, pgSchema, type AnyPgTable, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 import { getColumns } from "drizzle-orm/utils";
-import { z } from "zod";
 
 import {
   attachSyncRegistrySchema,
@@ -10,9 +9,6 @@ import {
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
-
-const statusSchema = z.enum(["todo", "in_progress", "done"]);
-const prioritySchema = z.enum(["low", "medium", "high"]);
 
 export interface SyntheticRegistryOptions {
   tableCount: number;
@@ -105,50 +101,19 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
   for (let tableIndex = 0; tableIndex < options.tableCount; tableIndex += 1) {
     const tableName = `perf_items_${tableIndex.toString().padStart(3, "0")}`;
     const makeColumns = () => buildSyntheticColumns(options.extraColumnCount);
-    const electricTable = options.schemaName ? `${options.schemaName}.${tableName}` : tableName;
     const entry = defineSyncTable({
       tableName,
       makeColumns,
       policies: buildSupabaseOwnerOrAdminNativePolicies({ tableName, role: authenticatedRole }),
       ...(syntheticSchema ? { schema: syntheticSchema } : {}),
       mode: "readwrite",
-      shape: {
-        tableName,
-        shapeKey: electricTable,
-        ...(electricTable === tableName ? {} : { electricTable }),
-      },
-      clientProjection: {
-        syncedTable: tableName,
-        overlayTable: `${tableName}_overlay`,
-        journalTable: `${tableName}_mutations`,
-      },
       governance: {
         managedFields: [
-          {
-            column: "ownerId",
-            applyOn: ["create"],
-            strategy: "authUid",
-          },
-          {
-            column: "modifiedBy",
-            applyOn: ["create", "update"],
-            strategy: "authUid",
-          },
-          {
-            column: "createdAtUs",
-            applyOn: ["create"],
-            strategy: "nowMicroseconds",
-          },
-          {
-            column: "updatedAtUs",
-            applyOn: ["create", "update"],
-            strategy: "nowMicroseconds",
-          },
+          { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+          { column: "modifiedBy", applyOn: ["create", "update"], strategy: "authUid" },
+          { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
+          { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
         ],
-      },
-      schemas: buildSchemas(options.extraColumnCount),
-      adapters: {
-        toEntityKey: (record) => ({ id: String(record.id) }),
       },
     });
 
@@ -343,46 +308,6 @@ export function buildSyntheticUpdatePatch(rowIndex: number, extraColumnCount: nu
   }
 
   return patch;
-}
-
-function buildSchemas(extraColumnCount: number) {
-  const baseCreateShape: Record<string, z.ZodType> = {
-    id: z.uuid(),
-    status: statusSchema.default("todo"),
-    priority: prioritySchema.default("medium"),
-  };
-  const baseUpdateShape: Record<string, z.ZodType> = {
-    status: statusSchema,
-    priority: prioritySchema,
-  };
-  const baseRecordShape: Record<string, z.ZodType> = {
-    id: z.uuid(),
-    ownerId: z.uuid().nullable().optional(),
-    modifiedBy: z.uuid().nullable().optional(),
-    status: statusSchema,
-    priority: prioritySchema,
-    createdAtUs: z.string(),
-    updatedAtUs: z.string(),
-    overlayKind: z.string(),
-    localUpdatedAtUs: z.string(),
-  };
-
-  for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
-    const key = `field${columnIndex.toString().padStart(2, "0")}`;
-    const schema = z.string().trim().min(1).max(128);
-    baseCreateShape[key] = schema;
-    baseUpdateShape[key] = schema;
-    baseRecordShape[key] = schema;
-  }
-
-  return {
-    createSchema: z.object(baseCreateShape).strict(),
-    updateSchema: z
-      .object(baseUpdateShape)
-      .partial()
-      .refine((value) => Object.keys(value).length > 0, "At least one field must be provided"),
-    recordSchema: z.object(baseRecordShape).strict(),
-  };
 }
 
 function buildSyntheticColumns(extraColumnCount: number) {

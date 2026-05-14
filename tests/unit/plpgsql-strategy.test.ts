@@ -17,11 +17,7 @@ const projectedPlpgsqlRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
-    shape: { tableName: "projected_plpgsql_items", shapeKey: "projected_plpgsql_items" },
     clientProjection: {
-      syncedTable: "projected_plpgsql_items",
-      overlayTable: "projected_plpgsql_items_overlay",
-      journalTable: "projected_plpgsql_items_mutations",
       omitColumns: ["ownerId", "internalNote"],
     },
     governance: {

@@ -1,21 +1,16 @@
 import type { PGlite, PGliteInterfaceExtensions } from "@electric-sql/pglite";
-import { z } from "zod";
 
-import { syncConfigSchema, type SyncConfigInput, type TableSpecInput } from "@pgxsinkit/contracts";
+import { type SyncConfigInput, type TableSpecInput } from "@pgxsinkit/contracts";
 import { electricSync } from "@pgxsinkit/pglite-sync";
 
-export const shapeSyncSpecSchema = z
-  .object({
-    electricUrl: z.url(),
-    tableName: z.string().trim().min(1),
-    schema: z.string().trim().min(1).optional(),
-    shapeKey: z.string().trim().min(1),
-    primaryKey: z.array(z.string().trim().min(1)).min(1),
-    electricTable: z.string().trim().min(1).optional(),
-  })
-  .strict();
-
-export type ShapeSyncSpec = z.infer<typeof shapeSyncSpecSchema>;
+export interface ShapeSyncSpec {
+  electricUrl: string;
+  tableName: string;
+  schema?: string;
+  shapeKey: string;
+  primaryKey: string[];
+  electricTable?: string;
+}
 
 export interface StartShapeSyncOptions extends ShapeSyncSpec {
   headers?: Record<string, string>;
@@ -53,24 +48,21 @@ export function buildShapeUrl(electricUrl: string, table: string) {
 }
 
 export function buildShapeConfig(input: ShapeSyncSpec) {
-  const parsed = shapeSyncSpecSchema.parse(input);
   return {
     shape: {
-      url: buildShapeUrl(parsed.electricUrl, parsed.electricTable ?? parsed.tableName),
+      url: buildShapeUrl(input.electricUrl, input.electricTable ?? input.tableName),
     },
-    table: parsed.tableName,
-    schema: parsed.schema,
-    primaryKey: [...parsed.primaryKey],
-    shapeKey: parsed.shapeKey,
+    table: input.tableName,
+    ...(input.schema !== undefined ? { schema: input.schema } : {}),
+    primaryKey: [...input.primaryKey],
+    shapeKey: input.shapeKey,
   };
 }
 
 export function buildConfiguredShapeSpecs(input: SyncConfigInput): ConfiguredShapeSyncSpec[] {
-  const parsed = syncConfigSchema.parse(input);
-
-  return Object.entries(parsed.tables)
+  return Object.entries(input.tables)
     .filter(([, table]) => table.mode !== "writeonly")
-    .map(([key, table]) => buildConfiguredShapeSpec(parsed.electricUrl, parsed.localSchema, key, table));
+    .map(([key, table]) => buildConfiguredShapeSpec(input.electricUrl, input.localSchema, key, table));
 }
 
 export function createElectricExtension() {
@@ -81,10 +73,10 @@ export async function startShapeSync(pg: SyncEnginePGlite, input: StartShapeSync
   const config = buildShapeConfig({
     electricUrl: input.electricUrl,
     tableName: input.tableName,
-    schema: input.schema,
+    ...(input.schema !== undefined ? { schema: input.schema } : {}),
     shapeKey: input.shapeKey,
     primaryKey: input.primaryKey,
-    electricTable: input.electricTable,
+    ...(input.electricTable !== undefined ? { electricTable: input.electricTable } : {}),
   });
 
   const shapeHeaders = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
@@ -116,10 +108,10 @@ export async function startConfiguredSync(
       const result = await startShapeSync(pg, {
         electricUrl: spec.electricUrl,
         tableName: spec.tableName,
-        schema: spec.schema,
+        ...(spec.schema !== undefined ? { schema: spec.schema } : {}),
         shapeKey: spec.shapeKey,
         primaryKey: spec.primaryKey,
-        electricTable: spec.electricTable,
+        ...(spec.electricTable !== undefined ? { electricTable: spec.electricTable } : {}),
         ...(input.shapeHeaders ? { headers: input.shapeHeaders } : {}),
         onInitialSync: () => {
           pendingInitialSyncs -= 1;
@@ -161,17 +153,13 @@ function buildConfiguredShapeSpec(
     throw new Error(`shape is required for synced table ${key}`);
   }
 
-  if (table.clientProjection === undefined) {
-    throw new Error(`clientProjection is required for synced table ${key}`);
-  }
-
   return {
     key,
     electricUrl,
-    tableName: table.clientProjection.syncedTable,
+    tableName: table.clientProjection?.syncedTable ?? table.shape.tableName,
     ...(localSchema ? { schema: localSchema } : {}),
     shapeKey: table.shape.shapeKey,
-    primaryKey: [...(table.clientProjection.localPrimaryKey?.columns ?? table.primaryKey.columns)],
+    primaryKey: [...(table.clientProjection?.localPrimaryKey?.columns ?? table.primaryKey.columns)],
     electricTable: table.shape.electricTable ?? table.shape.tableName,
   };
 }

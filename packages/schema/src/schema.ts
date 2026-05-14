@@ -1,11 +1,11 @@
 import { sql } from "drizzle-orm";
-import { bigint, text, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, pgEnum, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
 import { buildSupabaseOwnerOrAdminNativePolicies, defineSyncTable } from "@pgxsinkit/contracts";
 
-import { authorTableSpec } from "./author-config";
-import { todoTableSpec } from "./todo-config";
+export const todoStatusEnum = pgEnum("todo_status", ["todo", "in_progress", "done"]);
+export const todoPriorityEnum = pgEnum("todo_priority", ["low", "medium", "high"]);
 
 const nowMicrosecondsSql = sql`(floor((EXTRACT(epoch FROM clock_timestamp()) * (1000000)::numeric)))`;
 
@@ -26,8 +26,6 @@ const authorsSyncEntry = defineSyncTable({
     role: authenticatedRole,
   }),
   mode: "readwrite",
-  shape: authorTableSpec.shape,
-  clientProjection: authorTableSpec.clientProjection,
   governance: {
     managedFields: [
       { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
@@ -36,21 +34,19 @@ const authorsSyncEntry = defineSyncTable({
       { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
     ],
   },
-  schemas: authorTableSpec.schemas,
-  adapters: authorTableSpec.adapters,
 });
 
 const makeTodosColumns = () => ({
   id: uuid("id").primaryKey(),
   title: varchar("title", { length: 120 }).notNull(),
-  description: text("description"),
+  description: varchar("description", { length: 4000 }),
   authorId: uuid("author_id")
     .notNull()
     .references(() => authorsSyncEntry.table.id),
   ownerId: uuid("owner_id"),
   modifiedBy: uuid("modified_by"),
-  status: varchar("status", { length: 24 }).notNull().default("todo"),
-  priority: varchar("priority", { length: 24 }).notNull().default("medium"),
+  status: todoStatusEnum("status").notNull().default("todo"),
+  priority: todoPriorityEnum("priority").notNull().default("medium"),
   createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
 });
@@ -63,8 +59,6 @@ const todosSyncEntry = defineSyncTable({
     role: authenticatedRole,
   }),
   mode: "readwrite",
-  shape: todoTableSpec.shape,
-  clientProjection: todoTableSpec.clientProjection,
   governance: {
     deferrableConstraints: [
       {
@@ -80,8 +74,6 @@ const todosSyncEntry = defineSyncTable({
       { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
     ],
   },
-  schemas: todoTableSpec.schemas,
-  adapters: todoTableSpec.adapters,
 });
 
 export const authorsTable = authorsSyncEntry.table;

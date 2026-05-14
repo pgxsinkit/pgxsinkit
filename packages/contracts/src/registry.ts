@@ -1,4 +1,4 @@
-import type { ColumnBuilderBase } from "drizzle-orm";
+import type { ColumnBuilderBase, InferInsertModel, InferSelectModel } from "drizzle-orm";
 import {
   bigint,
   getTableConfig,
@@ -23,10 +23,9 @@ import type {
   ManagedFieldStrategy,
   PrimaryKeySpec,
   ShapeSpec,
+  ShapeSpecInput,
   TableGovernanceSpec as TableGovernanceSpecBase,
-  TableAdapters,
   TableMode,
-  TableSchemas,
 } from "./config";
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
@@ -77,12 +76,7 @@ export type TableGovernanceSpecForTable<TTable extends AnyPgTable> = Omit<
   managedFields?: Array<ManagedFieldSpecForTable<TTable>>;
 };
 
-export interface SyncTableEntry<
-  TTable extends AnyPgTable = AnyPgTable,
-  TCreate = unknown,
-  TUpdate = unknown,
-  TRecord = unknown,
-> {
+export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable> {
   table: TTable;
   /**
    * Projected client-side table for PGlite use. Columns listed in
@@ -98,8 +92,6 @@ export interface SyncTableEntry<
   shape?: ShapeSpec;
   clientProjection?: ClientProjectionSpecForTable<TTable>;
   governance?: TableGovernanceSpecForTable<TTable>;
-  schemas?: TableSchemas<TCreate, TUpdate, TRecord>;
-  adapters?: TableAdapters;
 }
 
 /** Column property key names from a `makeColumns` factory function. */
@@ -128,13 +120,7 @@ export type SyncTableInputProjection<TColumns extends Record<string, ColumnBuild
  *
  * Access the built objects via `.table` and `.view` on the returned entry.
  */
-export type SyncTableInput<
-  TName extends string,
-  TColumns extends Record<string, ColumnBuilderBase>,
-  TCreate = unknown,
-  TUpdate = unknown,
-  TRecord = unknown,
-> = {
+export type SyncTableInput<TName extends string, TColumns extends Record<string, ColumnBuilderBase>> = {
   tableName: TName;
   makeColumns: () => TColumns;
   /** RLS policies (or other table extras) attached to the Postgres table. */
@@ -154,11 +140,9 @@ export type SyncTableInput<
    * Use an array with multiple entries for composite keys.
    */
   primaryKey?: string[];
-  shape?: ShapeSpec;
+  shape?: ShapeSpecInput;
   clientProjection?: SyncTableInputProjection<TColumns>;
   governance?: SyncTableInputGovernance<TColumns>;
-  schemas?: TableSchemas<TCreate, TUpdate, TRecord>;
-  adapters?: TableAdapters;
 };
 
 export type SyncTableRegistry = Record<string, SyncTableEntry>;
@@ -188,17 +172,14 @@ export type RegistryRelations<TRegistry extends SyncTableRegistry> = ExtractTabl
 export type SyncTableName<TRegistry extends SyncTableRegistry> = keyof TRegistry & string;
 
 export type SyncTableCreateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<any, infer TCreate, any, any> ? TCreate : never;
+  TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable> ? InferInsertModel<TTable> : never;
 
-export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<any, any, infer TUpdate, any> ? TUpdate : never;
+export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> = Partial<
+  SyncTableCreateInput<TRegistry, TKey>
+>;
 
 export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<infer TTable, any, any, any>
-    ? TTable extends { readonly $inferSelect: infer TSelect }
-      ? TSelect
-      : never
-    : never;
+  TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable> ? InferSelectModel<TTable> : never;
 
 /**
  * Filters a columns object, omitting keys in `omitSet`, while preserving TypeScript column types.
@@ -218,13 +199,9 @@ function viewColumnsForProjection<TColumns extends Record<string, ColumnBuilderB
  *
  * Access the built objects via `.table` and `.view` on the returned entry.
  */
-export function defineSyncTable<
-  const TName extends string,
-  const TColumns extends Record<string, ColumnBuilderBase>,
-  TCreate = unknown,
-  TUpdate = unknown,
-  TRecord = unknown,
->(input: SyncTableInput<TName, TColumns, TCreate, TUpdate, TRecord>) {
+export function defineSyncTable<const TName extends string, const TColumns extends Record<string, ColumnBuilderBase>>(
+  input: SyncTableInput<TName, TColumns>,
+) {
   const {
     tableName,
     makeColumns,
@@ -235,11 +212,36 @@ export function defineSyncTable<
     primaryKey,
     governance,
     clientProjection,
+    shape,
     ...otherRest
   } = input;
 
   const resolvedMode: TableMode = mode ?? "readonly";
   const resolvedPrimaryKey: PrimaryKeySpec = { columns: primaryKey ?? ["id"] };
+
+  const resolvedClientProjection =
+    resolvedMode !== "writeonly" || clientProjection != null
+      ? {
+          ...(clientProjection ?? {}),
+          syncedTable: clientProjection?.syncedTable ?? tableName,
+          ...(resolvedMode === "readwrite"
+            ? {
+                overlayTable: clientProjection?.overlayTable ?? `${tableName}_overlay`,
+                journalTable: clientProjection?.journalTable ?? `${tableName}_mutations`,
+              }
+            : {}),
+        }
+      : undefined;
+
+  const resolvedShape: ShapeSpec | undefined =
+    resolvedMode !== "writeonly" || shape != null
+      ? {
+          tableName: shape?.tableName ?? tableName,
+          shapeKey: shape?.shapeKey ?? shape?.tableName ?? tableName,
+          ...(shape?.electricTable != null ? { electricTable: shape.electricTable } : {}),
+          ...(shape?.rowFilter != null ? { rowFilter: shape.rowFilter } : {}),
+        }
+      : undefined;
 
   // biome-ignore lint: intentional any for policy/extras passthrough
   const extrasFn =
@@ -276,8 +278,9 @@ export function defineSyncTable<
     ...otherRest,
     mode: resolvedMode,
     primaryKey: resolvedPrimaryKey,
+    ...(resolvedShape != null ? { shape: resolvedShape } : {}),
     ...(governance != null ? { governance: governance as any } : {}),
-    ...(clientProjection != null ? { clientProjection: clientProjection as any } : {}),
+    ...(resolvedClientProjection != null ? { clientProjection: resolvedClientProjection as any } : {}),
     table,
     localTable,
     ...(view != null ? { view } : {}),
@@ -286,15 +289,15 @@ export function defineSyncTable<
   return entry;
 }
 
-export function defineSyncRegistry<
-  const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any, any, any, any> },
->(registry: TRegistry): TRegistry;
-export function defineSyncRegistry<
-  const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any, any, any, any> },
->(definition: SyncRegistryDefinition<TRegistry>): TRegistry;
-export function defineSyncRegistry<
-  const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any, any, any, any> },
->(input: TRegistry | SyncRegistryDefinition<TRegistry>) {
+export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any> }>(
+  registry: TRegistry,
+): TRegistry;
+export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any> }>(
+  definition: SyncRegistryDefinition<TRegistry>,
+): TRegistry;
+export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry<any> }>(
+  input: TRegistry | SyncRegistryDefinition<TRegistry>,
+) {
   if (isSyncRegistryDefinition(input)) {
     for (const entry of getRegistryEntries(input.tables)) {
       validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
