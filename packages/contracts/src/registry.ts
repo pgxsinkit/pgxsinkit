@@ -5,7 +5,9 @@ import {
   pgTable,
   pgView,
   type AnyPgTable,
+  type PgBuildExtraConfigColumns,
   type PgPolicy,
+  type PgTableExtraConfigValue,
   type PgView,
 } from "drizzle-orm/pg-core";
 import type { pgSchema } from "drizzle-orm/pg-core";
@@ -137,6 +139,12 @@ export type SyncTableInput<
   makeColumns: () => TColumns;
   /** RLS policies (or other table extras) attached to the Postgres table. */
   policies?: PgPolicy[];
+  /**
+   * Extra constraints or indexes on the server-side Postgres table (unique, index, etc.).
+   * Receives the built column map — same signature as `pgTable`'s third argument.
+   * Not applied to `localTable`.
+   */
+  extras?: (self: PgBuildExtraConfigColumns<TColumns>) => PgTableExtraConfigValue[];
   /** Place the table in this schema (e.g. for perf-lab schemed tables). */
   schema?: PgSchemaType;
   /** @default "readonly" */
@@ -217,14 +225,30 @@ export function defineSyncTable<
   TUpdate = unknown,
   TRecord = unknown,
 >(input: SyncTableInput<TName, TColumns, TCreate, TUpdate, TRecord>) {
-  const { tableName, makeColumns, policies, schema, mode, primaryKey, governance, clientProjection, ...otherRest } =
-    input;
+  const {
+    tableName,
+    makeColumns,
+    policies,
+    extras,
+    schema,
+    mode,
+    primaryKey,
+    governance,
+    clientProjection,
+    ...otherRest
+  } = input;
 
   const resolvedMode: TableMode = mode ?? "readonly";
   const resolvedPrimaryKey: PrimaryKeySpec = { columns: primaryKey ?? ["id"] };
 
   // biome-ignore lint: intentional any for policy/extras passthrough
-  const extrasFn = policies ? () => policies as any : undefined;
+  const extrasFn =
+    policies || extras
+      ? (self: PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>) => [
+          ...(policies ?? []),
+          ...(extras ? extras(self) : []),
+        ]
+      : undefined;
   const table = schema
     ? schema.table(tableName, makeColumns(), extrasFn as any)
     : pgTable(tableName, makeColumns(), extrasFn as any);
