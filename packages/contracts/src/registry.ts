@@ -82,6 +82,14 @@ export interface SyncTableEntry<
   TRecord = unknown,
 > {
   table: TTable;
+  /**
+   * Projected client-side table for PGlite use. Columns listed in
+   * `clientProjection.omitColumns` (e.g. `created_by_id`) are absent at
+   * runtime even though the TypeScript type mirrors `table` due to the
+   * `viewColumnsForProjection` cast. Never access omitted columns on this
+   * object.
+   */
+  localTable: TTable;
   view?: AnyPgView;
   mode: TableMode;
   primaryKey: PrimaryKeySpec;
@@ -222,6 +230,12 @@ export function defineSyncTable<
     : pgTable(tableName, makeColumns(), extrasFn as any);
 
   const omitSet = new Set<string>(clientProjection?.omitColumns ?? []);
+  const projectedCols = viewColumnsForProjection(makeColumns(), omitSet);
+  // biome-ignore lint: localTable shares the same TS type as table; omitted columns are absent at runtime only
+  const localTable = (
+    schema ? schema.table(tableName, projectedCols) : pgTable(tableName, projectedCols)
+  ) as typeof table;
+
   const viewColumns = viewColumnsForProjection(makeColumns(), omitSet);
   const view =
     resolvedMode === "readwrite"
@@ -241,6 +255,7 @@ export function defineSyncTable<
     ...(governance != null ? { governance: governance as any } : {}),
     ...(clientProjection != null ? { clientProjection: clientProjection as any } : {}),
     table,
+    localTable,
     ...(view != null ? { view } : {}),
   };
   validateSyncTableEntry(entry as unknown as SyncTableEntry<AnyPgTable>);

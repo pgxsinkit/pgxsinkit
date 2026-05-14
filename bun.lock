@@ -76,10 +76,10 @@
     },
     "packages/client": {
       "name": "@pgxsinkit/client",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "dependencies": {
-        "@pgxsinkit/contracts": "^0.1.18",
-        "@pgxsinkit/sync-engine": "^0.1.18",
+        "@pgxsinkit/contracts": "^0.1.19",
+        "@pgxsinkit/sync-engine": "^0.1.19",
       },
       "peerDependencies": {
         "@electric-sql/pglite": "0.4.5",
@@ -89,7 +89,7 @@
     },
     "packages/contracts": {
       "name": "@pgxsinkit/contracts",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "peerDependencies": {
         "drizzle-orm": "1.0.0-rc.2",
         "zod": "^4.4.3",
@@ -97,7 +97,7 @@
     },
     "packages/pglite-sync": {
       "name": "@pgxsinkit/pglite-sync",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "peerDependencies": {
         "@electric-sql/client": "^1.5.17",
         "@electric-sql/experimental": "^6.0.17",
@@ -106,10 +106,10 @@
     },
     "packages/react": {
       "name": "@pgxsinkit/react",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "dependencies": {
-        "@pgxsinkit/client": "^0.1.17",
-        "@pgxsinkit/contracts": "^0.1.17",
+        "@pgxsinkit/client": "^0.1.19",
+        "@pgxsinkit/contracts": "^0.1.19",
       },
       "peerDependencies": {
         "@electric-sql/pglite": "0.4.5",
@@ -127,12 +127,12 @@
     },
     "packages/server": {
       "name": "@pgxsinkit/server",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "bin": {
         "pgxsinkit-generate": "src/cli/generate.ts",
       },
       "dependencies": {
-        "@pgxsinkit/contracts": "^0.1.18",
+        "@pgxsinkit/contracts": "^0.1.19",
       },
       "peerDependencies": {
         "drizzle-orm": "1.0.0-rc.2",
@@ -142,10 +142,10 @@
     },
     "packages/sync-engine": {
       "name": "@pgxsinkit/sync-engine",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "dependencies": {
-        "@pgxsinkit/contracts": "^0.1.18",
-        "@pgxsinkit/pglite-sync": "0.1.18",
+        "@pgxsinkit/contracts": "^0.1.19",
+        "@pgxsinkit/pglite-sync": "0.1.19",
       },
       "peerDependencies": {
         "@electric-sql/pglite": "0.4.5",
