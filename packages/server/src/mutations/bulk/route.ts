@@ -2,7 +2,7 @@ import { getTableName, sql } from "drizzle-orm";
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
-import { createInsertSchema } from "drizzle-orm/zod";
+import { createSchemaFactory } from "drizzle-orm/zod";
 import type { Context, Hono } from "hono";
 
 import type {
@@ -21,6 +21,10 @@ import type { OperationsLogConfig } from "../../operations-log/types";
 import { logOperation, logOperationSafely } from "../../operations-log/writer";
 import { executePlpgsqlBatch, verifyArtifactRlsAuthHelpers, verifyPlpgsqlBatchFunction } from "./plpgsql-strategy";
 import type { BulkMutationBackend, TransactionClient } from "./types";
+
+const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
+  coerce: { date: true },
+});
 
 export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
   app: Hono,
@@ -143,11 +147,11 @@ export function registerBulkMutationRoute<TRegistry extends SyncTableRegistry>(
           if (payloadKeys.length === 0) {
             throw new Error("At least one field must be provided");
           }
-          createInsertSchema(syncEntry.table as AnyPgTable)
+          createMutationInsertSchema(syncEntry.table as AnyPgTable)
             .partial()
             .parse(normalizedPayload);
         } else if (mutation.kind === "create") {
-          createInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
+          createMutationInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
         }
         // delete has no payload to validate
       } catch (error) {

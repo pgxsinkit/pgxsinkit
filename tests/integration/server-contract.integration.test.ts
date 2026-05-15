@@ -178,6 +178,62 @@ describe("server facade contract", () => {
     });
   });
 
+  it("accepts ISO timestamp strings in /api/mutations payloads", async () => {
+    const id = "02000001-0000-4001-8001-000000000031";
+    const createdAt = "2026-05-15T10:11:12.345Z";
+    const updatedAt = "2026-05-16T11:12:13.456Z";
+
+    const createResponse = await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          {
+            tableName: "projects",
+            entityKey: { id },
+            mutationId: "12345678-1234-1234-8234-123456780031",
+            mutationSeq: 1,
+            kind: "create",
+            payload: {
+              id,
+              name: "Timestamp-coerced project",
+              scheduled_at: createdAt,
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
+      }),
+    });
+
+    expect(createResponse.status).toBe(200);
+
+    const updateResponse = await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          {
+            tableName: "projects",
+            entityKey: { id },
+            mutationId: "12345678-1234-1234-8234-123456780032",
+            mutationSeq: 2,
+            kind: "update",
+            payload: {
+              scheduled_at: updatedAt,
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
+      }),
+    });
+
+    expect(updateResponse.status).toBe(200);
+
+    const rows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.scheduledAt?.toISOString()).toBe(updatedAt);
+  });
+
   it("per-table CRUD routes are not registered — all writes go through /api/mutations", async () => {
     const createResponse = await server.request("/api/projects", {
       method: "POST",

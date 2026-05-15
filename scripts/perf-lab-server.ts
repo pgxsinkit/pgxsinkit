@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
-import { createInsertSchema } from "drizzle-orm/zod";
+import { createSchemaFactory } from "drizzle-orm/zod";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import postgres from "postgres";
@@ -42,6 +42,10 @@ import {
   PERF_LAB_HOST,
   PERF_LAB_WRITE_API_PORT,
 } from "./perf-lab-config";
+
+const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
+  coerce: { date: true },
+});
 
 const allowedOrigins = ["http://localhost:5174", "http://127.0.0.1:5174"];
 
@@ -215,11 +219,11 @@ app.post("/api/mutations", async (context) => {
         if (payloadKeys.length === 0) {
           throw new Error("At least one field must be provided");
         }
-        createInsertSchema(syncEntry.table as AnyPgTable)
+        createMutationInsertSchema(syncEntry.table as AnyPgTable)
           .partial()
           .parse(normalizedPayload);
       } else if (mutation.kind === "create") {
-        createInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
+        createMutationInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
       }
       // delete has no payload to validate
     } catch (error) {

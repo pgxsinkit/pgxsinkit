@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable, type TableSpecInput } from "@pgxsinkit/contracts";
 
@@ -8,6 +8,7 @@ const nowMicrosecondsSql = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) 
 const makeProjectsColumns = () => ({
   id: uuid("id").primaryKey(),
   name: varchar("name", { length: 120 }).notNull(),
+  scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
   createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
 });
@@ -46,6 +47,7 @@ export const ensureProjectsTableSql = sql.raw(`
       CREATE TABLE projects (
         id UUID PRIMARY KEY,
         name VARCHAR(120) NOT NULL,
+        scheduled_at TIMESTAMPTZ,
         created_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT),
         updated_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
       );

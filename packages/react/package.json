@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/react",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "files": [
     "dist",
     "src",
@@ -22,8 +22,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/client": "^0.1.23",
-    "@pgxsinkit/contracts": "^0.1.23"
+    "@pgxsinkit/client": "^0.1.24",
+    "@pgxsinkit/contracts": "^0.1.24"
   },
   "peerDependencies": {
     "@electric-sql/pglite": "0.4.5",
