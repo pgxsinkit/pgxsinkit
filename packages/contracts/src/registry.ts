@@ -76,16 +76,14 @@ export type TableGovernanceSpecForTable<TTable extends AnyPgTable> = Omit<
   managedFields?: Array<ManagedFieldSpecForTable<TTable>>;
 };
 
-export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable> {
+export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTable extends AnyPgTable = TTable> {
   table: TTable;
   /**
    * Projected client-side table for PGlite use. Columns listed in
-   * `clientProjection.omitColumns` (e.g. `created_by_id`) are absent at
-   * runtime even though the TypeScript type mirrors `table` due to the
-   * `viewColumnsForProjection` cast. Never access omitted columns on this
-   * object.
+   * `clientProjection.omitColumns` (e.g. `created_by_id`) are absent from
+   * both the runtime table definition and the TypeScript shape of this table.
    */
-  localTable: TTable;
+  localTable: TLocalTable;
   view?: AnyPgView;
   mode: TableMode;
   primaryKey: PrimaryKeySpec;
@@ -97,6 +95,11 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable> {
 /** Column property key names from a `makeColumns` factory function. */
 type ColumnKeys<TColumns extends Record<string, ColumnBuilderBase>> = keyof TColumns & string;
 
+type ProjectedColumnsShape<
+  TColumns extends Record<string, ColumnBuilderBase>,
+  TOmittedColumns extends readonly ColumnKeys<TColumns>[],
+> = ColumnKeys<TColumns> extends TOmittedColumns[number] ? TColumns : Omit<TColumns, TOmittedColumns[number]>;
+
 /** Governance spec for `defineSyncTable` — columns are typed from `makeColumns`. */
 export type SyncTableInputGovernance<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
   TableGovernanceSpecBase,
@@ -107,11 +110,11 @@ export type SyncTableInputGovernance<TColumns extends Record<string, ColumnBuild
 };
 
 /** Projection spec for `defineSyncTable` — omitColumns typed from `makeColumns`. */
-export type SyncTableInputProjection<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
-  ClientProjectionSpec,
-  "omitColumns"
-> & {
-  omitColumns?: Array<ColumnKeys<TColumns>>;
+export type SyncTableInputProjection<
+  TColumns extends Record<string, ColumnBuilderBase>,
+  TOmittedColumns extends readonly ColumnKeys<TColumns>[] = [],
+> = Omit<ClientProjectionSpec, "omitColumns"> & {
+  omitColumns?: TOmittedColumns;
 };
 
 /**
@@ -120,7 +123,11 @@ export type SyncTableInputProjection<TColumns extends Record<string, ColumnBuild
  *
  * Access the built objects via `.table` and `.view` on the returned entry.
  */
-export type SyncTableInput<TName extends string, TColumns extends Record<string, ColumnBuilderBase>> = {
+export type SyncTableInput<
+  TName extends string,
+  TColumns extends Record<string, ColumnBuilderBase>,
+  TOmittedColumns extends readonly ColumnKeys<TColumns>[] = [],
+> = {
   tableName: TName;
   makeColumns: () => TColumns;
   /** RLS policies (or other table extras) attached to the Postgres table. */
@@ -141,7 +148,7 @@ export type SyncTableInput<TName extends string, TColumns extends Record<string,
    */
   primaryKey?: string[];
   shape?: ShapeSpecInput;
-  clientProjection?: SyncTableInputProjection<TColumns>;
+  clientProjection?: SyncTableInputProjection<TColumns, TOmittedColumns>;
   governance?: SyncTableInputGovernance<TColumns>;
 };
 
@@ -172,25 +179,34 @@ export type RegistryRelations<TRegistry extends SyncTableRegistry> = ExtractTabl
 export type SyncTableName<TRegistry extends SyncTableRegistry> = keyof TRegistry & string;
 
 export type SyncTableCreateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable> ? InferInsertModel<TTable> : never;
+  TRegistry[TKey] extends SyncTableEntry<any, infer TLocalTable extends AnyPgTable>
+    ? InferInsertModel<TLocalTable>
+    : never;
 
 export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> = Partial<
   SyncTableCreateInput<TRegistry, TKey>
 >;
 
 export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
-  TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable> ? InferSelectModel<TTable> : never;
+  TRegistry[TKey] extends SyncTableEntry<infer TTable extends AnyPgTable, any> ? InferSelectModel<TTable> : never;
 
 /**
  * Filters a columns object, omitting keys in `omitSet`, while preserving TypeScript column types.
  * When `omitSet` is empty the original object is returned unchanged (no copy, no type loss).
  */
-function viewColumnsForProjection<TColumns extends Record<string, ColumnBuilderBase>>(
-  columns: TColumns,
-  omitSet: Set<string>,
-): TColumns {
-  if (omitSet.size === 0) return columns;
-  return Object.fromEntries(Object.entries(columns).filter(([key]) => !omitSet.has(key))) as TColumns;
+function viewColumnsForProjection<
+  TColumns extends Record<string, ColumnBuilderBase>,
+  const TOmittedColumns extends readonly ColumnKeys<TColumns>[],
+>(columns: TColumns, omittedColumns: TOmittedColumns): ProjectedColumnsShape<TColumns, TOmittedColumns> {
+  if (omittedColumns.length === 0) {
+    return columns as ProjectedColumnsShape<TColumns, TOmittedColumns>;
+  }
+
+  const omitSet = new Set<string>(omittedColumns);
+  return Object.fromEntries(Object.entries(columns).filter(([key]) => !omitSet.has(key))) as ProjectedColumnsShape<
+    TColumns,
+    TOmittedColumns
+  >;
 }
 
 /**
@@ -199,9 +215,11 @@ function viewColumnsForProjection<TColumns extends Record<string, ColumnBuilderB
  *
  * Access the built objects via `.table` and `.view` on the returned entry.
  */
-export function defineSyncTable<const TName extends string, const TColumns extends Record<string, ColumnBuilderBase>>(
-  input: SyncTableInput<TName, TColumns>,
-) {
+export function defineSyncTable<
+  const TName extends string,
+  const TColumns extends Record<string, ColumnBuilderBase>,
+  const TOmittedColumns extends readonly ColumnKeys<TColumns>[] = [],
+>(input: SyncTableInput<TName, TColumns, TOmittedColumns>) {
   const {
     tableName,
     makeColumns,
@@ -255,14 +273,11 @@ export function defineSyncTable<const TName extends string, const TColumns exten
     ? schema.table(tableName, makeColumns(), extrasFn as any)
     : pgTable(tableName, makeColumns(), extrasFn as any);
 
-  const omitSet = new Set<string>(clientProjection?.omitColumns ?? []);
-  const projectedCols = viewColumnsForProjection(makeColumns(), omitSet);
-  // biome-ignore lint: localTable shares the same TS type as table; omitted columns are absent at runtime only
-  const localTable = (
-    schema ? schema.table(tableName, projectedCols) : pgTable(tableName, projectedCols)
-  ) as typeof table;
+  const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
+  const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);
+  const localTable = schema ? schema.table(tableName, projectedCols) : pgTable(tableName, projectedCols);
 
-  const viewColumns = viewColumnsForProjection(makeColumns(), omitSet);
+  const viewColumns = viewColumnsForProjection(makeColumns(), omittedColumns);
   const view =
     resolvedMode === "readwrite"
       ? pgView(`${tableName}_read_model`, {

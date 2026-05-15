@@ -1,4 +1,5 @@
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+import { getColumns } from "drizzle-orm/utils";
 
 import {
   defineSyncRegistry,
@@ -76,6 +77,29 @@ describe("sync config contracts", () => {
         clientProjection: { omitColumns: ["title"] },
       }),
     ).toThrow(/must only omit create-safe columns/);
+  });
+
+  it("builds projected local tables without omitted managed columns", () => {
+    const projectedEntry = defineSyncTable({
+      tableName: "projected_contracts_items",
+      makeColumns: makeProjectedContractsColumns,
+      mode: "readwrite",
+      clientProjection: { omitColumns: ["ownerId", "modifiedBy"] },
+      governance: {
+        managedFields: [
+          { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+          { column: "modifiedBy", applyOn: ["create", "update"], strategy: "authUid" },
+        ],
+      },
+    });
+
+    const localColumns = getColumns(projectedEntry.localTable);
+
+    expect(localColumns).not.toHaveProperty("ownerId");
+    expect(localColumns).not.toHaveProperty("modifiedBy");
+    expect(localColumns.id).toBeDefined();
+    expect(localColumns.title).toBeDefined();
+    expect(localColumns.createdAtUs).toBeDefined();
   });
 
   it("parses generic mutation envelopes and acks", () => {
