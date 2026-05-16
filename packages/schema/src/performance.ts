@@ -154,13 +154,8 @@ export function buildSyntheticServerSchemaSql(registry: SyncTableRegistry): stri
   return [...schemaStatements, ...tableStatements].join("\n\n");
 }
 
-export function buildSyntheticGovernanceSql(
-  registry: SyncTableRegistry,
-  options: {
-    includeAuthHelpers?: boolean;
-  } = {},
-): string {
-  const statements = options.includeAuthHelpers === false ? [] : [buildAuthHelpersSql()];
+export function buildSyntheticGovernanceSql(registry: SyncTableRegistry): string {
+  const statements = [];
 
   for (const schemaName of collectSyntheticSchemas(registry)) {
     statements.push(
@@ -378,81 +373,6 @@ function quoteIdent(value: string): string {
 
 function escapeSqlString(value: string): string {
   return value.replace(/'/g, "''");
-}
-
-function buildAuthHelpersSql(): string {
-  return [
-    "CREATE SCHEMA IF NOT EXISTS auth;",
-    "DO $$",
-    "BEGIN",
-    "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN",
-    "    BEGIN",
-    "      CREATE ROLE authenticated NOLOGIN;",
-    "    EXCEPTION",
-    "      WHEN insufficient_privilege THEN",
-    "        NULL;",
-    "    END;",
-    "  END IF;",
-    "END;",
-    "$$;",
-    "CREATE OR REPLACE FUNCTION auth.set_auth_context(claims jsonb)",
-    "RETURNS void",
-    "LANGUAGE plpgsql",
-    "AS $$",
-    "DECLARE",
-    "  normalized_claims jsonb := COALESCE(claims, '{}'::jsonb);",
-    "  target_role text := COALESCE(NULLIF(normalized_claims ->> 'role', ''), 'authenticated');",
-    "BEGIN",
-    "  BEGIN",
-    "    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = target_role) THEN",
-    "      PERFORM set_config('role', target_role, true);",
-    "    ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN",
-    "      PERFORM set_config('role', 'authenticated', true);",
-    "    END IF;",
-    "  EXCEPTION",
-    "    WHEN insufficient_privilege THEN",
-    "      NULL;",
-    "  END;",
-    "  PERFORM set_config('request.jwt.claims', normalized_claims::text, true);",
-    "  IF normalized_claims ? 'sub' THEN",
-    "    PERFORM set_config('request.jwt.claim.sub', normalized_claims ->> 'sub', true);",
-    "  END IF;",
-    "END;",
-    "$$;",
-    "CREATE OR REPLACE FUNCTION auth.uid()",
-    "RETURNS uuid",
-    "LANGUAGE sql",
-    "STABLE",
-    "AS $$",
-    "  SELECT coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid",
-    "$$;",
-    "CREATE OR REPLACE FUNCTION auth.jwt()",
-    "RETURNS jsonb",
-    "LANGUAGE sql",
-    "STABLE",
-    "AS $$",
-    "  SELECT coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb",
-    "$$;",
-    "CREATE OR REPLACE FUNCTION auth.has_role(role_name text)",
-    "RETURNS boolean",
-    "LANGUAGE sql",
-    "STABLE",
-    "AS $$",
-    "  SELECT EXISTS (",
-    "    SELECT 1",
-    "    FROM jsonb_array_elements_text(COALESCE(auth.jwt() -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS assigned_role(role_name_value)",
-    "    WHERE assigned_role.role_name_value = role_name",
-    "  )",
-    "$$;",
-    "DO $$",
-    "BEGIN",
-    "  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN",
-    "    EXECUTE 'GRANT USAGE ON SCHEMA auth TO authenticated';",
-    "    EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO authenticated';",
-    "  END IF;",
-    "END;",
-    "$$;",
-  ].join("\n");
 }
 
 function buildFieldValue(tableIndex: number, rowIndex: number, columnIndex: number): string {

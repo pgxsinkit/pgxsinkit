@@ -400,7 +400,7 @@ async function ensurePreparedRegistry(options: { tableCount: number; extraColumn
   );
 
   await adminClient.unsafe(buildSyntheticServerSchemaSql(bundle.registry));
-  await adminClient.unsafe(buildSyntheticGovernanceSql(bundle.registry, { includeAuthHelpers: false }));
+  await adminClient.unsafe(buildSyntheticGovernanceSql(bundle.registry));
   await adminClient.unsafe(
     buildPlpgsqlBatchFunctionDdl(bundle.registry, {
       functionSchema: schemaName,

@@ -11,13 +11,9 @@ This document defines how to manage SQL artifacts required by WRITE_API_BACKEND=
 ## RLS contract for artifact mode
 
 1. When any registry table enables governance RLS, the artifact backend expects validated JWT claims from the server runtime.
-2. The write API must provide claims through createSyncServer resolveAuthClaims so the batch function can call auth.set_auth_context(claims).
+2. The write API must provide claims through createSyncServer resolveAuthClaims so the batch function can validate them.
 3. If RLS is enabled and claims are missing/invalid, POST /api/mutations returns 401.
-4. Governance migrations generate Supabase-compatible auth helpers when RLS is enabled:
-   - auth.set_auth_context(claims jsonb)
-   - auth.uid()
-   - auth.jwt()
-5. The write API enriches batch payloads with ownership/audit fields only when the target table declares those columns, avoiding invalid-column writes for unrelated tables.
+4. The write API enriches batch payloads with ownership/audit fields only when the target table declares those columns, avoiding invalid-column writes for unrelated tables.
 
 ## Artifact location
 
@@ -60,7 +56,7 @@ This document defines how to manage SQL artifacts required by WRITE_API_BACKEND=
    - Symptom: write-api startup fails verification for bulk-plpgsql-artifact.
    - Resolution: apply artifact SQL, then rerun verification.
 2. Missing governance auth helpers:
-   - Symptom: POST /api/mutations returns a clear 500 about missing auth.set_auth_context/auth.uid/auth.jwt.
+   - Symptom: POST /api/mutations returns a clear 500 about missing auth.uid/auth.jwt.
    - Resolution: apply governance SQL, then retry the request.
 3. Drift between code and artifact:
    - Symptom: behavior mismatch after deployment.

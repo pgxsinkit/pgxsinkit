@@ -70,6 +70,7 @@ describe("contracts supabase RLS helpers", () => {
 
     expect(predicate).toContain("owner_id = coalesce(");
     expect(predicate).toContain("::uuid");
+    expect(predicate).toContain("jsonb_array_elements_text(");
     expect(predicate).toContain("assigned_role.role_name_value = 'admin'");
     expect(predicate).toContain("current_setting('request.jwt.claim.sub', true)");
     expect(predicate).toContain("current_setting('request.jwt.claims', true)");

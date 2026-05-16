@@ -23,7 +23,7 @@ The repository is split into four boundaries:
 3. Browser creates are written first into a local overlay table and a durable mutation journal in PGlite.
 4. The browser may enqueue mutations one at a time or atomically stage a local batch into the same overlay and journal tables.
 5. The browser flushes journal entries through the write API.
-6. In artifact mode with RLS enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims` and `auth.set_auth_context`.
+6. In artifact mode with RLS enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims`.
 7. The API writes to PostgreSQL through the artifact batch function (`POST /api/mutations`).
 8. ElectricSQL exposes shape data from PostgreSQL.
 9. The write API shape proxy (`/v1/electric-proxy`) forwards read requests to Electric and enforces owner filtering for protected tables unless caller role is admin.

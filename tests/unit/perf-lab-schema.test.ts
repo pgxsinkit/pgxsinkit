@@ -45,9 +45,7 @@ describe("perf-lab scenario schemas", () => {
       schemaName,
     });
     const schemaSql = buildSyntheticServerSchemaSql(bundle.registry);
-    const governanceSql = buildSyntheticGovernanceSql(bundle.registry, {
-      includeAuthHelpers: false,
-    });
+    const governanceSql = buildSyntheticGovernanceSql(bundle.registry);
 
     expect(schemaSql).toContain(`CREATE SCHEMA IF NOT EXISTS "${schemaName}";`);
     expect(schemaSql).toContain(`CREATE TABLE "${schemaName}"."perf_items_000"`);

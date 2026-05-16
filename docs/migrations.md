@@ -82,11 +82,7 @@ This document defines the canonical path from Drizzle table definitions to provi
 ## Supabase-compatible auth helpers
 
 1. Governance generation emits auth helper SQL when any governance RLS config is enabled.
-2. Generated helpers are compatible with Supabase policy expectations and include:
-   - auth.set_auth_context(claims jsonb)
-   - auth.uid()
-   - auth.jwt()
-3. The artifact batch function calls auth.set_auth_context when p_rls_enabled=true.
+2. The artifact batch function calls validates claims when p_rls_enabled=true.
 
 ## Proof coverage
 
