@@ -1,7 +1,7 @@
 import { authorsTable, buildDemoSyncConfig, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-engine";
-import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
@@ -44,11 +44,12 @@ async function startTestSync(localPg: Awaited<ReturnType<typeof createLocalTodoS
 
 describe("electric -> pglite sync integration", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -59,7 +60,7 @@ describe("electric -> pglite sync integration", () => {
 
     server = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       resolveAuthClaims: () => ({
         role: "authenticated",
         sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d",
@@ -74,6 +75,7 @@ describe("electric -> pglite sync integration", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("syncs seeded postgres rows into pglite", async () => {

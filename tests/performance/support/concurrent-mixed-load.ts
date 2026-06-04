@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { sql } from "drizzle-orm";
+import { drizzle as bunDrizzle } from "drizzle-orm/bun-sql";
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
-import postgres from "postgres";
 
 import { createSyncClient, type MutationBatchItem } from "@pgxsinkit/client";
 import {
@@ -68,7 +68,7 @@ import {
   buildSyntheticUpdatePatch,
 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../../apps/write-api/src/demo-auth";
 import {
@@ -388,11 +388,12 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
     ConcurrentClientHandle & { client: Awaited<ReturnType<typeof createSyncClient<typeof registry>>> }
   > = [];
   const sharedRowPoolsByUser = new Map<string, SharedConcurrentRowPoolState>();
+  const serverDb = createServerDb(registry, env.databaseUrl);
 
   try {
     const provisioningServer = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -415,7 +416,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
     server = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
@@ -512,6 +513,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
     await Promise.all(clientHandles.map((handle) => handle.client.destroy()));
     await stopHttpServer(httpServer);
     await server?.stop();
+    await serverDb.close();
     await Promise.all(dataDirs.map((dataDir) => rm(dataDir, { recursive: true, force: true })));
   }
 }
@@ -530,11 +532,12 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
   let coordinatorServer: Server | undefined;
   const dataDirs: string[] = [];
   const sharedRowPoolsByUser = new Map<string, SharedConcurrentRowPoolState>();
+  const serverDb = createServerDb(registry, env.databaseUrl);
 
   try {
     const provisioningServer = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -557,7 +560,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
 
     server = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
@@ -642,6 +645,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
     await stopHttpServer(coordinatorServer);
     await stopHttpServer(httpServer);
     await server?.stop();
+    await serverDb.close();
     await Promise.all(dataDirs.map((dataDir) => rm(dataDir, { recursive: true, force: true })));
   }
 }
@@ -1867,9 +1871,7 @@ async function readServerEntityStateDiagnostics(
     return [];
   }
 
-  const sqlClient = postgres(env.databaseUrl, {
-    max: 1,
-  });
+  const diagnosticDb = bunDrizzle(env.databaseUrl);
 
   try {
     const diagnostics: Array<{
@@ -1890,43 +1892,43 @@ async function readServerEntityStateDiagnostics(
         continue;
       }
 
-      const result = await sqlClient.unsafe<
-        {
-          row_count: number;
-          owner_id: string | null;
-          modified_by: string | null;
-          created_at_us: string | null;
-          updated_at_us: string | null;
-        }[]
-      >(
-        `
+      type DiagRow = {
+        row_count: number;
+        owner_id: string | null;
+        modified_by: string | null;
+        created_at_us: string | null;
+        updated_at_us: string | null;
+      };
+
+      const result = await diagnosticDb.execute<DiagRow>(
+        sql`
           SELECT
             COUNT(*)::int AS row_count,
             MAX(owner_id::text) AS owner_id,
             MAX(modified_by::text) AS modified_by,
             MAX(created_at_us::text) AS created_at_us,
             MAX(updated_at_us::text) AS updated_at_us
-          FROM ${mutation.tableName}
-          WHERE id = $1
+          FROM ${sql.raw(mutation.tableName)}
+          WHERE id = ${entityId}::uuid
         `,
-        [entityId],
       );
 
+      const row = Array.from(result)[0] as DiagRow | undefined;
       diagnostics.push({
         tableName: mutation.tableName,
         entityKey: mutation.entityKey,
         serverUpdatedAtUs: mutation.serverUpdatedAtUs ?? null,
-        rowCount: result[0]?.row_count ?? 0,
-        ownerId: result[0]?.owner_id ?? null,
-        modifiedBy: result[0]?.modified_by ?? null,
-        createdAtUs: result[0]?.created_at_us ?? null,
-        updatedAtUs: result[0]?.updated_at_us ?? null,
+        rowCount: row?.row_count ?? 0,
+        ownerId: row?.owner_id ?? null,
+        modifiedBy: row?.modified_by ?? null,
+        createdAtUs: row?.created_at_us ?? null,
+        updatedAtUs: row?.updated_at_us ?? null,
       });
     }
 
     return diagnostics;
   } finally {
-    await sqlClient.end({ timeout: 5 });
+    await (diagnosticDb as any).$client?.close();
   }
 }
 

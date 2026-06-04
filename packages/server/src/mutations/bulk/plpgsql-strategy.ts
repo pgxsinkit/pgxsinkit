@@ -1,6 +1,5 @@
 import { getTableName, sql } from "drizzle-orm";
-import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
-import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import { getTableConfig, type AnyPgTable, type PgAsyncDatabase } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 
 import {
@@ -273,7 +272,7 @@ $$;
 }
 
 export async function installPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
   registry: TRegistry,
   options: {
     functionSchema?: string;
@@ -288,7 +287,7 @@ type FunctionPresenceRow = {
 };
 
 export async function verifyPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
   options: {
     functionSchema?: string;
   } = {},
@@ -312,7 +311,7 @@ type AuthHelperPresenceRow = {
 };
 
 export async function verifyArtifactRlsAuthHelpers<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
 ): Promise<void> {
   const result = await db.execute<AuthHelperPresenceRow>(sql`
     SELECT
@@ -345,6 +344,6 @@ export async function executePlpgsqlBatch(
   const functionName = qualifyIdent(options.functionSchema, "pgxsinkit_apply_batch_mutations");
 
   await tx.execute(
-    sql`SELECT ${sql.raw(functionName)}(${JSON.stringify(batch)}::jsonb, ${requestPath}, ${logEnabled}, ${rlsEnabled}, ${JSON.stringify(normalizedClaims)}::jsonb)`,
+    sql`SELECT ${sql.raw(functionName)}(${JSON.stringify(batch)}::text::jsonb, ${requestPath}, ${logEnabled}, ${rlsEnabled}, ${JSON.stringify(normalizedClaims)}::text::jsonb)`,
   );
 }

@@ -1,9 +1,6 @@
-import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
-import { drizzle } from "drizzle-orm/postgres-js";
-import { defineRelations } from "drizzle-orm/relations";
+import type { PgAsyncDatabase } from "drizzle-orm/pg-core";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import postgres from "postgres";
 
 import type {
   RegistryRelations,
@@ -33,12 +30,12 @@ interface BunNamespace {
   }) => BunServerHandle;
 }
 
-export interface CreateSyncServerOptions<TRegistry extends SyncTableRegistry> {
+export interface CreateSyncServerOptions<
+  TRegistry extends SyncTableRegistry,
+  TDb extends PgAsyncDatabase<any, RegistryRelations<TRegistry>> = PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+> {
   registry: TRegistry;
-  /** Existing Drizzle database instance. Mutually exclusive with databaseUrl. */
-  db?: PostgresJsDatabase<RegistryRelations<TRegistry>>;
-  /** PostgreSQL connection URL. Mutually exclusive with db. */
-  databaseUrl?: string;
+  db: TDb;
   /** Existing Hono app to register routes on. If omitted, a new Hono app is created. */
   app?: Hono;
   backend?: BulkMutationBackend;
@@ -60,8 +57,11 @@ export interface ServerDiagnostics<TRegistry extends SyncTableRegistry> {
   modes: Record<string, TRegistry[keyof TRegistry]["mode"]>;
 }
 
-export interface SyncServer<TRegistry extends SyncTableRegistry> {
-  drizzle: PostgresJsDatabase<RegistryRelations<TRegistry>>;
+export interface SyncServer<
+  TRegistry extends SyncTableRegistry,
+  TDb extends PgAsyncDatabase<any, RegistryRelations<TRegistry>> = PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+> {
+  drizzle: TDb;
   fetch: (request: Request) => Promise<Response>;
   request: (path: string, init?: RequestInit) => Promise<Response>;
   start: () => Promise<void>;
@@ -71,28 +71,12 @@ export interface SyncServer<TRegistry extends SyncTableRegistry> {
   diagnostics: () => ServerDiagnostics<TRegistry>;
 }
 
-export function createSyncServer<TRegistry extends SyncTableRegistry>(
-  options: CreateSyncServerOptions<TRegistry>,
-): SyncServer<TRegistry> {
+export function createSyncServer<
+  TRegistry extends SyncTableRegistry,
+  TDb extends PgAsyncDatabase<any, RegistryRelations<TRegistry>> = PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
+>(options: CreateSyncServerOptions<TRegistry, TDb>): SyncServer<TRegistry, TDb> {
   const ownsApp = !options.app;
-  const ownsDb = !options.db;
-
-  if (!ownsDb && !options.databaseUrl) {
-    throw new Error("createSyncServer requires either db or databaseUrl");
-  }
-
-  let pgClient: ReturnType<typeof postgres> | undefined;
-  let db: PostgresJsDatabase<RegistryRelations<TRegistry>>;
-
-  if (options.db) {
-    db = options.db;
-  } else {
-    pgClient = createPostgresClient(options.databaseUrl!);
-    const schema = buildSchema(options.registry);
-    const relations = defineRelations(schema) as RegistryRelations<TRegistry>;
-    db = drizzle({ client: pgClient, relations }) as unknown as PostgresJsDatabase<RegistryRelations<TRegistry>>;
-  }
-
+  const db = options.db;
   const app = options.app ?? new Hono();
   let bunServer: BunServerHandle | undefined;
 
@@ -203,7 +187,6 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
       bunServer?.stop();
       bunServer = undefined;
       status.isRunning = false;
-      await pgClient?.end();
       options.onStatusChange?.(status);
     },
     status,
@@ -217,22 +200,9 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
   };
 }
 
-function createPostgresClient(connectionString: string) {
-  const url = new URL(connectionString);
-  const sslmode = url.searchParams.get("sslmode");
-
-  return postgres({
-    host: url.hostname,
-    port: Number(url.port || "5432"),
-    database: url.pathname.replace(/^\//, ""),
-    user: decodeURIComponent(url.username),
-    password: decodeURIComponent(url.password),
-    ssl: sslmode === "disable" ? false : "prefer",
-    max: 10,
-  });
-}
-
-function buildSchema<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
+export function buildRegistrySchema<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+): RegistryTables<TRegistry> {
   return Object.fromEntries(
     Object.entries(registry).map(([key, entry]) => [key, entry.table]),
   ) as RegistryTables<TRegistry>;

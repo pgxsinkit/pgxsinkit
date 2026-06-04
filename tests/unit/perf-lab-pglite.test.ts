@@ -1,19 +1,23 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-const destroyMock = vi.fn<() => Promise<void>>(async () => undefined);
-const createSyncClientMock = vi.fn<
-  () => Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: () => Promise<void> }>
->(async () => ({
-  pglite: { name: "perf-lab-db" },
-  ready: Promise.resolve(),
-  destroy: destroyMock,
-}));
-
-vi.mock("@pgxsinkit/client", () => ({
-  createSyncClient: createSyncClientMock,
-}));
+const destroyMock = mock(async (): Promise<void> => undefined);
+const createSyncClientMock = mock(
+  async (): Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: () => Promise<void> }> => ({
+    pglite: { name: "perf-lab-db" },
+    ready: Promise.resolve(),
+    destroy: destroyMock,
+  }),
+);
 
 describe("perf-lab pglite loader", () => {
+  beforeAll(async () => {
+    await mock.module("@pgxsinkit/client", () => ({
+      createSyncClient: createSyncClientMock,
+    }));
+  });
+
+  afterAll(() => mock.restore());
+
   beforeEach(() => {
     destroyMock.mockClear();
     createSyncClientMock.mockClear();
@@ -90,7 +94,7 @@ describe("perf-lab pglite loader", () => {
 
   it("passes the local database preparation hook through to the sync client", async () => {
     const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
-    const prepareLocalDb = vi.fn<(db: unknown) => Promise<void>>(async (_db) => undefined);
+    const prepareLocalDb = mock(async (_db: unknown): Promise<void> => undefined);
 
     await loadPerfClient(
       {
@@ -123,7 +127,7 @@ describe("perf-lab pglite loader", () => {
 
   it("passes the pre-schema local database preparation hook through to the sync client", async () => {
     const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
-    const prepareLocalDbBeforeSchema = vi.fn<(db: unknown) => Promise<void>>(async (_db) => undefined);
+    const prepareLocalDbBeforeSchema = mock(async (_db: unknown): Promise<void> => undefined);
 
     await loadPerfClient(
       {

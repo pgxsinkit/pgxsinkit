@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import net from "node:net";
 
-import postgres from "postgres";
+import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/bun-sql";
 
 // ─── Port helpers ─────────────────────────────────────────────────────────────
 
@@ -74,12 +75,12 @@ export async function waitForTcpService(
 
 export async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): Promise<void> {
   const start = Date.now();
-  const client = postgres(databaseUrl, { connect_timeout: 2, idle_timeout: 2 });
+  const db = drizzle(databaseUrl);
 
   try {
     while (Date.now() - start < timeoutMs) {
       try {
-        await client`SELECT 1`;
+        await db.execute(sql`SELECT 1`);
         return;
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -87,7 +88,7 @@ export async function waitForPgReady(databaseUrl: string, timeoutMs = 30_000): P
     }
     throw new Error("Timed out waiting for PostgreSQL to accept queries");
   } finally {
-    await client.end();
+    await (db as any).$client?.close();
   }
 }
 

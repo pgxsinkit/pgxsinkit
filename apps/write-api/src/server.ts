@@ -1,8 +1,10 @@
+import { drizzle } from "drizzle-orm/bun-sql";
+import { defineRelations } from "drizzle-orm/relations";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
 import { demoSyncRegistry } from "@pgxsinkit/schema";
-import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
+import { buildRegistrySchema, createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
 
 import { composeCredentials } from "../../../infra/compose-credentials";
 import { parseDemoAuthClaimsFromRequest } from "./demo-auth";
@@ -16,9 +18,13 @@ const idleTimeoutSeconds = readPositiveIntEnv(process.env.WRITE_API_IDLE_TIMEOUT
 
 console.log("Starting write-api...", { databaseUrl, electricUrl, backend, operationsLogEnabled, idleTimeoutSeconds });
 
+const schema = buildRegistrySchema(demoSyncRegistry);
+const relations = defineRelations(schema);
+const db = drizzle({ connection: databaseUrl, relations });
+
 const server = createSyncServer({
   registry: demoSyncRegistry,
-  databaseUrl,
+  db,
   backend,
   resolveAuthClaims: (request) => {
     const claims = parseDemoAuthClaimsFromRequest(request);

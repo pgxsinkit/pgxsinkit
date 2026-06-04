@@ -1,21 +1,26 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-const destroyMock = vi.fn<() => Promise<void>>(async () => undefined);
-const createSyncClientMock = vi.fn<
-  (options: unknown) => Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: typeof destroyMock }>
->(async (_options) => ({
-  pglite: { name: "mock-db" },
-  ready: Promise.resolve(),
-  destroy: destroyMock,
-}));
-
-vi.mock("@pgxsinkit/client", () => ({
-  createSyncClient: createSyncClientMock,
-}));
+const destroyMock = mock(async (): Promise<void> => undefined);
+const createSyncClientMock = mock(
+  async (
+    _options: unknown,
+  ): Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: typeof destroyMock }> => ({
+    pglite: { name: "mock-db" },
+    ready: Promise.resolve(),
+    destroy: destroyMock,
+  }),
+);
 
 describe("web pglite loader", () => {
+  beforeAll(async () => {
+    await mock.module("@pgxsinkit/client", () => ({
+      createSyncClient: createSyncClientMock,
+    }));
+  });
+
+  afterAll(() => mock.restore());
+
   beforeEach(() => {
-    vi.resetModules();
     destroyMock.mockClear();
     createSyncClientMock.mockClear();
   });

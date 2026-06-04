@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { createSyncClient } from "@pgxsinkit/client";
 import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 
@@ -105,11 +105,12 @@ async function stopHttpServer(server: Server | undefined) {
 describe("client facade contract", () => {
   let server!: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>;
   let httpServer!: Server;
+  const serverDb = createServerDb(projectsSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     server = createSyncServer({
       registry: projectsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     await installPlpgsqlBatchFunction(server.drizzle, projectsSyncRegistry);
@@ -125,6 +126,7 @@ describe("client facade contract", () => {
   afterAll(async () => {
     await stopHttpServer(httpServer);
     await server.stop();
+    await serverDb.close();
   });
 
   it("syncs a non-demo registry into local typed access", async () => {

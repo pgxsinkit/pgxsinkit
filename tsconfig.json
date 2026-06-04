@@ -1,7 +1,7 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "bun-types", "bun-types/test-globals"]
   },
   "include": [
     "apps/**/*.ts",
@@ -10,7 +10,6 @@
     "packages/**/*.tsx",
     "scripts/**/*.ts",
     "tests/**/*.ts",
-    "vitest.config.ts",
     "drizzle.config.ts"
   ]
 }

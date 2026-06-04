@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 
 import { DEMO_JWT_USER1, DEMO_JWT_USER2 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { readIntegrationEnv } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../apps/write-api/src/demo-auth";
 import {
@@ -39,9 +39,11 @@ describe("performance: artifact write load", () => {
         extraColumnCount: config.extraColumnCount,
       });
 
+      const serverDb = createServerDb(registry, env.databaseUrl);
+
       const provisioningServer = createSyncServer({
         registry,
-        databaseUrl: env.databaseUrl,
+        db: serverDb.db,
       });
 
       try {
@@ -55,7 +57,7 @@ describe("performance: artifact write load", () => {
 
       const server = createSyncServer({
         registry,
-        databaseUrl: env.databaseUrl,
+        db: serverDb.db,
         backend: "bulk-plpgsql-artifact",
         resolveAuthClaims: (request) => {
           const claims = parseDemoAuthClaimsFromRequest(request);
@@ -142,6 +144,7 @@ describe("performance: artifact write load", () => {
         assertPerfBudgets(budgetResults);
       } finally {
         await server.stop();
+        await serverDb.close();
       }
     },
     15 * 60_000,

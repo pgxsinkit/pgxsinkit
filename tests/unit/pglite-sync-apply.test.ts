@@ -1,7 +1,6 @@
 import { performance } from "node:perf_hooks";
 
 import type { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { applyInsertsToTable, applyMessageToTable } from "../../packages/pglite-sync/src/apply";
 import { createFreshTestPGlite } from "../support/pglite";
@@ -81,7 +80,7 @@ describe("pglite-sync apply", () => {
       }),
     );
 
-    const result = await pg.query<{ id: string; name: string; updated_at_us: string }>(
+    const result = await pg.query<{ id: string; name: string; updated_at_us: number }>(
       `SELECT id, name, updated_at_us FROM public.authors`,
     );
 

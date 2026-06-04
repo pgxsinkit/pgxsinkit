@@ -75,7 +75,9 @@ async function main() {
     await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL", SERVICE_START_TIMEOUT_MS);
 
     runCommand("bun", ["run", "db:migrate"], testEnv);
-    runCommand("bun", ["run", "vitest", "run", "--no-file-parallelism", ...testFiles], testEnv);
+    for (const testFile of testFiles) {
+      runCommand("bun", ["test", "--bail", testFile], testEnv);
+    }
   } catch (error) {
     suiteError = error;
   } finally {

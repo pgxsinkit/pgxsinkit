@@ -2,7 +2,7 @@ import { asc, eq } from "drizzle-orm";
 
 import { projectsSyncRegistry, projectsTable } from "@pgxsinkit/schema";
 import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
-import { readIntegrationEnv } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
 
@@ -10,11 +10,12 @@ const env = readIntegrationEnv();
 
 describe("server facade contract", () => {
   let server!: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>;
+  const serverDb = createServerDb(projectsSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: projectsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -25,7 +26,7 @@ describe("server facade contract", () => {
 
     server = createSyncServer({
       registry: projectsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
   });
 
@@ -36,6 +37,7 @@ describe("server facade contract", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("exposes diagnostics and serves health without starting a listener", async () => {

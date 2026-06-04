@@ -1,11 +1,10 @@
 import { and, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/bun-sql";
 import { type AnyPgTable } from "drizzle-orm/pg-core";
-import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { getColumns } from "drizzle-orm/utils";
 import { createSchemaFactory } from "drizzle-orm/zod";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import postgres from "postgres";
 import { z } from "zod";
 
 import {
@@ -47,7 +46,7 @@ const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
   coerce: { date: true },
 });
 
-type PerfLabReadQueryClient = Pick<PostgresJsDatabase<any>, "select">;
+type PerfLabReadQueryClient = Pick<typeof adminDb, "select">;
 
 const allowedOrigins = ["http://localhost:5174", "http://127.0.0.1:5174"];
 
@@ -87,8 +86,7 @@ const electricUrl = process.env.ELECTRIC_URL ?? PERF_LAB_ELECTRIC_URL;
 const host = process.env.WRITE_API_HOST ?? PERF_LAB_HOST;
 const port = readPort(process.env.WRITE_API_PORT, PERF_LAB_WRITE_API_PORT);
 
-const adminClient = postgres(databaseUrl, { max: 6 });
-const adminDb = drizzle({ client: adminClient });
+const adminDb = drizzle({ connection: databaseUrl });
 const app = new Hono();
 
 const preparedRegistries = new Map<string, PreparedPerfRegistry>();
@@ -768,6 +766,6 @@ async function shutdown() {
 
   shuttingDown = true;
   server.stop();
-  await adminClient.end();
+  await (adminDb as any).$client?.close();
   process.exit(0);
 }

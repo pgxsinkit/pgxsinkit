@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["eslint", "typescript", "react", "import", "node", "vitest", "oxc"],
+  "plugins": ["eslint", "typescript", "react", "import", "node", "oxc"],
   "env": {
     "browser": true,
     "node": true,
@@ -33,8 +33,8 @@
   "overrides": [
     {
       "files": ["tests/**/*.ts"],
-      "env": {
-        "vitest": true,
+      "rules": {
+        "typescript/await-thenable": "off",
       },
     },
   ],

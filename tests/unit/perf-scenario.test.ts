@@ -1,5 +1,3 @@
-import { describe, expect, it } from "vitest";
-
 import { computeDefaultConcurrentFlushBudgetMs } from "../performance/support/scenario";
 
 function buildBudgetInputs(overrides: Partial<Parameters<typeof computeDefaultConcurrentFlushBudgetMs>[0]> = {}) {

@@ -15,7 +15,7 @@ import {
   todosTable,
 } from "@pgxsinkit/schema";
 import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
-import { readIntegrationEnv } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../apps/write-api/src/demo-auth";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
@@ -24,11 +24,12 @@ const env = readIntegrationEnv();
 
 describe("write api implementation integration", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     server = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       resolveAuthClaims: () => ({
         role: "authenticated",
         sub: DEMO_USER1_ID,
@@ -44,6 +45,7 @@ describe("write api implementation integration", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("rejects invalid payloads", async () => {
@@ -265,7 +267,7 @@ describe("write api implementation integration", () => {
 
     const disabledServer = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       resolveAuthClaims: () => ({
         role: "authenticated",
         sub: DEMO_USER1_ID,
@@ -321,11 +323,12 @@ describe("write api implementation integration", () => {
 
 describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
   let server!: ReturnType<typeof createSyncServer<typeof fkSyncRegistry>>;
+  const serverDb = createServerDb(fkSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: fkSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -336,7 +339,7 @@ describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
 
     server = createSyncServer({
       registry: fkSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       backend: "bulk-plpgsql-artifact",
     });
   });
@@ -348,6 +351,7 @@ describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("handles out-of-order parent/child creates in one batch", async () => {
@@ -403,11 +407,12 @@ describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
 
 describe("write api artifact backend RLS auth context", () => {
   let server!: ReturnType<typeof createSyncServer<typeof rlsSyncRegistry>>;
+  const serverDb = createServerDb(rlsSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: rlsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -418,7 +423,7 @@ describe("write api artifact backend RLS auth context", () => {
 
     server = createSyncServer({
       registry: rlsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: () => ({
         role: "authenticated",
@@ -433,12 +438,13 @@ describe("write api artifact backend RLS auth context", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("returns 401 when claims are missing in RLS mode", async () => {
     const unauthorizedServer = createSyncServer({
       registry: rlsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: () => null,
     });
@@ -510,11 +516,12 @@ describe("write api artifact backend RLS auth context", () => {
 
 describe("write api artifact backend missing governance prerequisites", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -525,7 +532,7 @@ describe("write api artifact backend missing governance prerequisites", () => {
 
     server = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
@@ -536,6 +543,7 @@ describe("write api artifact backend missing governance prerequisites", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("fails with 500 when auth.uid() is unavailable", async () => {
@@ -575,13 +583,14 @@ describe("write api artifact backend missing governance prerequisites", () => {
 
 describe("write api artifact backend demo auth RLS", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
   const demoAdminId = "22222222-2222-4222-8222-222222222222";
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
@@ -592,7 +601,7 @@ describe("write api artifact backend demo auth RLS", () => {
 
     server = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
       backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
@@ -608,6 +617,7 @@ describe("write api artifact backend demo auth RLS", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("returns 401 when demo jwt claims are missing", async () => {

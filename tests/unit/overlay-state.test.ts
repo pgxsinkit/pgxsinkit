@@ -1,3 +1,6 @@
+import { describe, expect, it } from "bun:test";
+import { mock } from "bun:test";
+
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
@@ -962,7 +965,7 @@ describe("overlay state helpers", () => {
     });
 
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+    const fetchMock = mock(async (input) => {
       const bodyText =
         typeof input === "string"
           ? null
@@ -989,7 +992,7 @@ describe("overlay state helpers", () => {
       );
     });
 
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       await runtime.create("authors", {
@@ -1028,7 +1031,7 @@ describe("overlay state helpers", () => {
     const fetchRelease = new Promise<void>((resolve) => {
       resolveFetch = resolve;
     });
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+    const fetchMock = mock(async (input) => {
       const bodyText =
         typeof input === "string"
           ? null
@@ -1057,7 +1060,7 @@ describe("overlay state helpers", () => {
       );
     });
 
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       await runtime.create("authors", {
@@ -1088,7 +1091,7 @@ describe("overlay state helpers", () => {
     });
 
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+    const fetchMock = mock(async (_input, init) => {
       const bodyText = typeof init?.body === "string" ? init.body : null;
       const requestBody = bodyText
         ? (JSON.parse(bodyText) as { mutations: Array<{ mutationId: string }> })
@@ -1107,7 +1110,7 @@ describe("overlay state helpers", () => {
       );
     });
 
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       await runtime.create("authors", {
@@ -1137,7 +1140,7 @@ describe("overlay state helpers", () => {
     });
 
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+    const fetchMock = mock(async (_input, init) => {
       const bodyText = typeof init?.body === "string" ? init.body : null;
       const requestBody = bodyText
         ? (JSON.parse(bodyText) as { mutations: Array<{ mutationId: string }> })
@@ -1156,7 +1159,7 @@ describe("overlay state helpers", () => {
       );
     });
 
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       const mutationCount = DEFAULT_FLUSH_BATCH_SIZE * 2 + 5;
@@ -1211,7 +1214,7 @@ describe("overlay state helpers", () => {
     }
 
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+    const fetchMock = mock(async (_input, init) => {
       const bodyText = typeof init?.body === "string" ? init.body : null;
       const requestBody = bodyText
         ? (JSON.parse(bodyText) as { mutations: Array<{ mutationId: string }> })
@@ -1230,7 +1233,7 @@ describe("overlay state helpers", () => {
       );
     });
 
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       await runtime.flush("authors");
@@ -1259,7 +1262,7 @@ describe("overlay state helpers", () => {
     });
 
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+    const fetchMock = mock(async (_input, init) => {
       const bodyText = typeof init?.body === "string" ? init.body : null;
       const requestBody = bodyText
         ? (JSON.parse(bodyText) as { mutations: Array<{ mutationId: string; entityKey: { id: string } }> })
@@ -1293,7 +1296,7 @@ describe("overlay state helpers", () => {
       );
     });
 
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       await runtime.create("authors", {

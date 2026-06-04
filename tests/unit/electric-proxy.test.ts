@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 
 import { demoSyncRegistry, DEMO_USER1_ID } from "@pgxsinkit/schema";
 import { proxyElectricShapeRequest } from "@pgxsinkit/server";
 
-const fetchMock = vi.fn<typeof fetch>();
+const fetchMock = mock();
 const originalFetch = globalThis.fetch;
 
 describe("electric proxy", () => {
@@ -15,7 +15,7 @@ describe("electric proxy", () => {
   describe("URL param merging", () => {
     it("preserves pre-existing URL params like secret token when merging client params", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -40,7 +40,7 @@ describe("electric proxy", () => {
 
     it("preserves multiple pre-existing params when merging client params", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -65,7 +65,7 @@ describe("electric proxy", () => {
 
     it("does not leak pre-existing params if electricUrl has none", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -97,7 +97,7 @@ describe("electric proxy", () => {
           headers: { "Content-Type": "application/json", Vary: "Accept-Encoding" },
         }),
       );
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -121,7 +121,7 @@ describe("electric proxy", () => {
 
     it("blocks unauthenticated requests with 1=0 when ownership filter is configured", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -136,7 +136,7 @@ describe("electric proxy", () => {
 
     it("does not add ownership WHERE for admin users", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -153,7 +153,7 @@ describe("electric proxy", () => {
 
     it("merges registry rowFilter with existing WHERE clause from client", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1&where=active=true");
 
@@ -187,7 +187,7 @@ describe("electric proxy", () => {
           headers: { "Content-Type": "application/json" },
         }),
       );
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -213,7 +213,7 @@ describe("electric proxy", () => {
           headers: { "Content-Type": "application/octet-stream" },
         }),
       );
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -237,7 +237,7 @@ describe("electric proxy", () => {
       abortError.name = "AbortError";
       abortError.code = 20;
       fetchMock.mockRejectedValue(abortError);
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
@@ -256,7 +256,7 @@ describe("electric proxy", () => {
     it("re-throws non-abort fetch errors", async () => {
       const networkError = new Error("ECONNREFUSED");
       fetchMock.mockRejectedValue(networkError);
-      globalThis.fetch = fetchMock as typeof fetch;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 

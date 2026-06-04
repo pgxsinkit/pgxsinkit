@@ -1,16 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
 const order: string[] = [];
 
-const initMetadataTablesMock = vi.fn<() => Promise<void>>(async () => {
+const initMetadataTablesMock = mock(async (): Promise<void> => {
   order.push("initMetadataTables");
 });
 
-const deleteSubscriptionMock = vi.fn<(key: string) => Promise<void>>(async (key: string) => {
+const deleteSubscriptionMock = mock(async (key: string): Promise<void> => {
   order.push(`deleteSubscription:${key}`);
 });
 
-const execMock = vi.fn<(sql: string) => Promise<void>>(async (_sql) => {
+const execMock = mock(async (_sql: string): Promise<void> => {
   order.push("applyLocalSchema");
 });
 
@@ -18,66 +18,70 @@ type StartConfiguredSyncInput = {
   shapeHeaders?: Record<string, string>;
 };
 
-const startConfiguredSyncMock = vi.fn<
-  (
-    pglite: unknown,
-    input: StartConfiguredSyncInput,
-  ) => Promise<{ unsubscribe: () => void; tables: Record<string, never> }>
->(async (_pglite, _input) => {
-  order.push("startConfiguredSync");
-  return {
-    unsubscribe: () => undefined,
-    tables: {},
-  };
-});
-
-const recoverSendingMock = vi.fn<() => Promise<void>>(async () => undefined);
-
-vi.mock("@electric-sql/pglite", () => ({
-  PGlite: {
-    create: async () => ({
-      exec: execMock,
-      close: async () => undefined,
-      electric: {
-        initMetadataTables: initMetadataTablesMock,
-        deleteSubscription: deleteSubscriptionMock,
-      },
-    }),
+const startConfiguredSyncMock = mock(
+  async (
+    _pglite: unknown,
+    _input: StartConfiguredSyncInput,
+  ): Promise<{ unsubscribe: () => void; tables: Record<string, never> }> => {
+    order.push("startConfiguredSync");
+    return {
+      unsubscribe: () => undefined,
+      tables: {},
+    };
   },
-}));
+);
 
-vi.mock("@electric-sql/pglite/live", () => ({
-  live: {},
-}));
-
-vi.mock("drizzle-orm/pglite", () => ({
-  drizzle: () => ({ mocked: true }),
-}));
-
-vi.mock("@pgxsinkit/sync-engine", () => ({
-  createElectricExtension: () => ({}),
-  startConfiguredSync: startConfiguredSyncMock,
-}));
-
-vi.mock("../../packages/client/src/mutation", () => ({
-  createMutationRuntime: () => ({
-    recoverSending: recoverSendingMock,
-    create: async () => undefined,
-    update: async () => undefined,
-    delete: async () => undefined,
-    flush: async () => undefined,
-    reconcile: async () => undefined,
-    retryFailed: async () => undefined,
-    readMutationDetails: async () => [],
-    readMutationStats: async () => ({ pendingCount: 0, sendingCount: 0, failedCount: 0, ackedCount: 0 }),
-  }),
-}));
-
-vi.mock("../../packages/client/src/schema", () => ({
-  generateLocalSchemaSql: () => "SELECT 1;",
-}));
+const recoverSendingMock = mock(async (): Promise<void> => undefined);
 
 describe("createSyncClient subscription reset", () => {
+  beforeAll(async () => {
+    await mock.module("@electric-sql/pglite", () => ({
+      PGlite: {
+        create: async () => ({
+          exec: execMock,
+          close: async () => undefined,
+          electric: {
+            initMetadataTables: initMetadataTablesMock,
+            deleteSubscription: deleteSubscriptionMock,
+          },
+        }),
+      },
+    }));
+
+    await mock.module("@electric-sql/pglite/live", () => ({
+      live: {},
+    }));
+
+    await mock.module("drizzle-orm/pglite", () => ({
+      drizzle: () => ({ mocked: true }),
+    }));
+
+    await mock.module("@pgxsinkit/sync-engine", () => ({
+      createElectricExtension: () => ({}),
+      startConfiguredSync: startConfiguredSyncMock,
+    }));
+
+    await mock.module("../../packages/client/src/mutation", () => ({
+      createMutationRuntime: () => ({
+        recoverSending: recoverSendingMock,
+        create: async () => undefined,
+        update: async () => undefined,
+        delete: async () => undefined,
+        flush: async () => undefined,
+        reconcile: async () => undefined,
+        retryFailed: async () => undefined,
+        readMutationDetails: async () => [],
+        readMutationStats: async () => ({ pendingCount: 0, sendingCount: 0, failedCount: 0, ackedCount: 0 }),
+      }),
+    }));
+
+    await mock.module("../../packages/client/src/schema", () => ({
+      generateLocalSchemaSql: () => "SELECT 1;",
+    }));
+  });
+
+  afterAll(() => mock.restore());
+
   beforeEach(() => {
     order.length = 0;
     execMock.mockClear();
@@ -127,7 +131,7 @@ describe("createSyncClient subscription reset", () => {
 
   it("applies schema, then prepares the local database before starting sync", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
-    const prepareLocalDbMock = vi.fn<(db: unknown) => Promise<void>>(async (_db) => {
+    const prepareLocalDbMock = mock(async (_db: unknown): Promise<void> => {
       order.push("prepareLocalDb");
     });
 
@@ -166,7 +170,7 @@ describe("createSyncClient subscription reset", () => {
 
   it("calls prepareLocalDbBeforeSchema before applying schema", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
-    const prepareLocalDbBeforeSchemaMock = vi.fn<(db: unknown) => Promise<void>>(async (_db) => {
+    const prepareLocalDbBeforeSchemaMock = mock(async (_db: unknown): Promise<void> => {
       order.push("prepareLocalDbBeforeSchema");
     });
 
@@ -205,7 +209,7 @@ describe("createSyncClient subscription reset", () => {
 
   it("uses getAuthToken to set shape Authorization headers when authToken is omitted", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
-    const getAuthTokenMock = vi.fn<() => Promise<string | undefined>>(async () => "token-from-get-auth-token");
+    const getAuthTokenMock = mock(async (): Promise<string | undefined> => "token-from-get-auth-token");
 
     await createSyncClient({
       registry: {
@@ -236,7 +240,7 @@ describe("createSyncClient subscription reset", () => {
 
   it("does not set shape Authorization headers when getAuthToken returns undefined", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
-    const getAuthTokenMock = vi.fn<() => Promise<string | undefined>>(async () => undefined);
+    const getAuthTokenMock = mock(async (): Promise<string | undefined> => undefined);
 
     await createSyncClient({
       registry: {

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import type { PgAsyncDatabase } from "drizzle-orm/pg-core";
 
 import type { RegistryRelations, SyncTableRegistry } from "@pgxsinkit/contracts";
 
@@ -17,7 +17,7 @@ type OperationsLogPresenceRow = {
  * in their Drizzle schema so `drizzle-kit generate`/`push` creates it.
  */
 export async function ensureOperationsLogSchema<TRegistry extends SyncTableRegistry>(
-  db: PostgresJsDatabase<RegistryRelations<TRegistry>>,
+  db: PgAsyncDatabase<any, RegistryRelations<TRegistry>>,
   config: OperationsLogConfig,
 ): Promise<boolean> {
   if (!config.enabled) {
