@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/server",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "bin": {
     "pgxsinkit-generate": "src/cli/generate.ts"
   },

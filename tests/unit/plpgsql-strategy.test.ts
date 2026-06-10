@@ -53,4 +53,19 @@ describe("plpgsql batch function generator", () => {
     expect(ddl).not.toContain("internal_note");
     expect(ddl).not.toContain("($1->>'owner_id')::uuid");
   });
+
+  it("captures and restores the caller's role/claims so the RLS context does not leak", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry);
+
+    // The actor role/claims are snapshotted before switching into the RLS context...
+    expect(ddl).toContain("_previous_role := current_setting('role', true)");
+    expect(ddl).toContain("_previous_claims := current_setting('request.jwt.claims', true)");
+    expect(ddl).toContain("_previous_claim_sub := current_setting('request.jwt.claim.sub', true)");
+
+    // ...and restored after the batch, so in-transaction callers (which cannot RESET ROLE
+    // around the call the way the HTTP route does) are left exactly as they were found.
+    expect(ddl).toContain("set_config('role', COALESCE(NULLIF(_previous_role, ''), 'none'), true)");
+    expect(ddl).toContain("set_config('request.jwt.claims', COALESCE(_previous_claims, ''), true)");
+    expect(ddl).toContain("set_config('request.jwt.claim.sub', COALESCE(_previous_claim_sub, ''), true)");
+  });
 });

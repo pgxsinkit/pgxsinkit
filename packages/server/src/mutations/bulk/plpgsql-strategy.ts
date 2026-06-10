@@ -190,8 +190,18 @@ DECLARE
   v_client_timestamp_us bigint;
   _claims jsonb;
   _target_role text;
+  _previous_role text;
+  _previous_claims text;
+  _previous_claim_sub text;
 BEGIN
   IF p_rls_enabled THEN
+    -- Capture the caller's role/claims before switching into the RLS actor context, so the
+    -- batch does not leak that context into the rest of the caller's transaction. The HTTP
+    -- route RESET ROLEs after calling this function, but in-transaction callers cannot —
+    -- restoring here leaves every caller exactly as it was found.
+    _previous_role := current_setting('role', true);
+    _previous_claims := current_setting('request.jwt.claims', true);
+    _previous_claim_sub := current_setting('request.jwt.claim.sub', true);
     _claims := COALESCE(p_user_claims, '{}'::jsonb);
     _target_role := COALESCE(NULLIF(_claims ->> 'role', ''), 'authenticated');
     BEGIN
@@ -266,6 +276,17 @@ BEGIN
       );
     END IF;
   END LOOP;
+
+  IF p_rls_enabled THEN
+    -- Restore the caller's prior role/claims captured above, so the RLS context applied for
+    -- the batch does not persist into subsequent statements of the caller's transaction.
+    BEGIN
+      PERFORM set_config('role', COALESCE(NULLIF(_previous_role, ''), 'none'), true);
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    PERFORM set_config('request.jwt.claims', COALESCE(_previous_claims, ''), true);
+    PERFORM set_config('request.jwt.claim.sub', COALESCE(_previous_claim_sub, ''), true);
+  END IF;
 END;
 $$;
 `.trim();
