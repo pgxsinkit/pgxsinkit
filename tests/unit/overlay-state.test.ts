@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { mock } from "bun:test";
 
-import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, boolean, text, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, demoSyncRegistry } from "@pgxsinkit/schema";
@@ -25,6 +25,26 @@ const routeOptionalBatchRegistry = defineSyncRegistry({
     makeColumns: () => ({
       id: uuid("id").primaryKey(),
       title: varchar("title", { length: 120 }).notNull(),
+      createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
+    mode: "readwrite",
+  }),
+});
+
+const defaultedColumnRegistry = defineSyncRegistry({
+  defaultedColumnItems: defineSyncTable({
+    tableName: "defaulted_column_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+      // NOT NULL with a literal default the caller may omit (the regression case:
+      // `research_excluded boolean NOT NULL DEFAULT false`).
+      researchExcluded: boolean("research_excluded").notNull().default(false),
+      // NOT NULL with a value-returning defaultFn the caller may omit.
+      channel: text("channel")
+        .notNull()
+        .$defaultFn(() => "default-channel"),
       createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
@@ -99,6 +119,79 @@ describe("overlay state helpers", () => {
         updatedAtUs: 100n,
       }),
     ).resolves.toBeUndefined();
+
+    await db.close();
+  });
+
+  it("materialises NOT NULL column defaults into the optimistic overlay row on create", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(generateLocalSchemaSql(defaultedColumnRegistry));
+
+    const runtime = createMutationRuntime({
+      db,
+      registry: defaultedColumnRegistry,
+      writeUrl,
+    });
+
+    // Omit `researchExcluded` and `channel` — both are NOT NULL with defaults. Before the
+    // fix the overlay INSERT passed explicit NULLs and violated the NOT NULL constraint.
+    await runtime.create("defaultedColumnItems", {
+      id: "01963227-d4c7-72db-b858-f89f6af8fa01",
+      title: "Defaults filled locally",
+      createdAtUs: 100n,
+      updatedAtUs: 100n,
+    });
+
+    const overlayRows = await db.query<{ researchExcluded: boolean; channel: string; overlayKind: string }>(
+      `
+        SELECT research_excluded AS "researchExcluded", channel, overlay_kind AS "overlayKind"
+        FROM defaulted_column_items_overlay
+        WHERE id = $1
+      `,
+      ["01963227-d4c7-72db-b858-f89f6af8fa01"],
+    );
+
+    expect(overlayRows.rows[0]).toEqual({
+      researchExcluded: false,
+      channel: "default-channel",
+      overlayKind: "pending_create",
+    });
+
+    await db.close();
+  });
+
+  it("keeps caller-supplied values over column defaults on create", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(generateLocalSchemaSql(defaultedColumnRegistry));
+
+    const runtime = createMutationRuntime({
+      db,
+      registry: defaultedColumnRegistry,
+      writeUrl,
+    });
+
+    await runtime.create("defaultedColumnItems", {
+      id: "01963227-d4c7-72db-b858-f89f6af8fa02",
+      title: "Explicit values win",
+      researchExcluded: true,
+      channel: "explicit-channel",
+      createdAtUs: 100n,
+      updatedAtUs: 100n,
+    });
+
+    const overlayRows = await db.query<{ researchExcluded: boolean; channel: string }>(
+      `
+        SELECT research_excluded AS "researchExcluded", channel
+        FROM defaulted_column_items_overlay
+        WHERE id = $1
+      `,
+      ["01963227-d4c7-72db-b858-f89f6af8fa02"],
+    );
+
+    expect(overlayRows.rows[0]).toEqual({
+      researchExcluded: true,
+      channel: "explicit-channel",
+    });
 
     await db.close();
   });

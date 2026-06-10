@@ -1,3 +1,4 @@
+import { is, SQL } from "drizzle-orm";
 import { getTableConfig, getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
 /**
@@ -801,6 +802,40 @@ function filterContexts<TRegistry extends SyncTableRegistry>(
   return Object.values(contexts).filter((context): context is TableContext => context !== undefined);
 }
 
+/**
+ * Materialise a column's default into a concrete JS value for the optimistic overlay
+ * row. The overlay INSERT writes an explicit value for every projected column (an
+ * omitted column becomes a literal `NULL`, which overrides any table-level DEFAULT), so
+ * a column declared `NOT NULL DEFAULT <x>` that the caller omits would violate the
+ * overlay's NOT NULL constraint unless we fill the default here — mirroring what the
+ * authoritative server applies on the base table.
+ *
+ * Only values we can produce client-side are materialised: a value-returning `defaultFn`
+ * (e.g. `$defaultFn`) or a literal `.default(value)`. SQL-expression defaults
+ * (`.default(sql\`…\`)`, `defaultRandom()`, `defaultNow()`) cannot be evaluated without
+ * the database, so they are left to the server (the column is then expected to be either
+ * caller-supplied or nullable in the optimistic row).
+ */
+function materializeColumnDefault(column: TableContext["columns"][number]["column"]): {
+  ok: boolean;
+  value?: unknown;
+} {
+  if (!column.hasDefault) {
+    return { ok: false };
+  }
+
+  if (typeof column.defaultFn === "function") {
+    const produced = column.defaultFn();
+    return is(produced, SQL) ? { ok: false } : { ok: true, value: produced };
+  }
+
+  if (column.default !== undefined && !is(column.default, SQL)) {
+    return { ok: true, value: column.default };
+  }
+
+  return { ok: false };
+}
+
 function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableContext, input: TCreate): TRecord {
   const record = {
     ...(isRecord(input) ? input : {}),
@@ -813,6 +848,17 @@ function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableConte
 
   if (hasProperty(context, "updatedAtUs") && record.updatedAtUs === undefined) {
     record.updatedAtUs = nowUs;
+  }
+
+  for (const { propertyKey, column } of context.columns) {
+    if (record[propertyKey] !== undefined) {
+      continue;
+    }
+
+    const materialized = materializeColumnDefault(column);
+    if (materialized.ok) {
+      record[propertyKey] = materialized.value;
+    }
   }
 
   return buildOptimisticRecord(context, record, {
