@@ -24,6 +24,7 @@ interface PublishOptions {
 
 interface PackageManifest {
   main?: unknown;
+  types?: unknown;
   exports?: unknown;
 }
 
@@ -94,56 +95,60 @@ function normalizeManifestPath(value: string): string {
   return value.replace(/^\.\//, "").replaceAll("\\", "/");
 }
 
-function collectExportRuntimePaths(value: unknown, key?: string): string[] {
+function collectExportEntryPaths(value: unknown): string[] {
   if (typeof value === "string") {
-    return key === "types" ? [] : [normalizeManifestPath(value)];
+    return [normalizeManifestPath(value)];
   }
 
   if (Array.isArray(value)) {
-    return value.flatMap((item) => collectExportRuntimePaths(item, key));
+    return value.flatMap((item) => collectExportEntryPaths(item));
   }
 
   if (value && typeof value === "object") {
     const objectValue = value as Record<string, unknown>;
-    return Object.entries(objectValue).flatMap(([childKey, childValue]) =>
-      collectExportRuntimePaths(childValue, childKey),
-    );
+    return Object.values(objectValue).flatMap((childValue) => collectExportEntryPaths(childValue));
   }
 
   return [];
 }
 
-function readRuntimeEntryPaths(packagePath: string): string[] {
+function readPackageEntryPaths(packagePath: string): string[] {
   const manifestPath = resolve(packagePath, "package.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as PackageManifest;
-  const runtimePaths = new Set<string>();
+  const entryPaths = new Set<string>();
 
   if (typeof manifest.main === "string") {
-    runtimePaths.add(normalizeManifestPath(manifest.main));
+    entryPaths.add(normalizeManifestPath(manifest.main));
   }
 
-  for (const exportPath of collectExportRuntimePaths(manifest.exports)) {
-    runtimePaths.add(exportPath);
+  if (typeof manifest.types === "string") {
+    entryPaths.add(normalizeManifestPath(manifest.types));
   }
 
-  return [...runtimePaths].filter((entryPath) => entryPath.endsWith(".js") || entryPath.endsWith(".mjs"));
+  for (const exportPath of collectExportEntryPaths(manifest.exports)) {
+    entryPaths.add(exportPath);
+  }
+
+  return [...entryPaths].filter(
+    (entryPath) => entryPath.endsWith(".js") || entryPath.endsWith(".mjs") || entryPath.endsWith(".d.ts"),
+  );
 }
 
-function verifyRuntimeFilesExist(packageDir: string, packagePath: string): string[] {
-  const runtimeEntryPaths = readRuntimeEntryPaths(packagePath);
+function verifyEntryFilesExist(packageDir: string, packagePath: string): string[] {
+  const entryPaths = readPackageEntryPaths(packagePath);
 
-  if (runtimeEntryPaths.length === 0) {
-    throw new Error(`No runtime entrypoints were discovered for ${packageDir}`);
+  if (entryPaths.length === 0) {
+    throw new Error(`No package entrypoints were discovered for ${packageDir}`);
   }
 
-  for (const entryPath of runtimeEntryPaths) {
+  for (const entryPath of entryPaths) {
     const absoluteEntryPath = resolve(packagePath, entryPath);
     if (!existsSync(absoluteEntryPath)) {
-      throw new Error(`Missing runtime entrypoint for ${packageDir}: ${entryPath}`);
+      throw new Error(`Missing package entrypoint for ${packageDir}: ${entryPath}`);
     }
   }
 
-  return runtimeEntryPaths;
+  return entryPaths;
 }
 
 function listTarEntries(tarballPath: string): Set<string> {
@@ -164,18 +169,18 @@ function listTarEntries(tarballPath: string): Set<string> {
   );
 }
 
-function verifyTarballRuntimeEntries(packageDir: string, tarballPath: string, runtimeEntryPaths: string[]): void {
+function verifyTarballEntries(packageDir: string, tarballPath: string, entryPaths: string[]): void {
   const tarEntries = listTarEntries(tarballPath);
 
-  for (const entryPath of runtimeEntryPaths) {
+  for (const entryPath of entryPaths) {
     const tarEntryPath = `package/${entryPath}`;
     if (!tarEntries.has(tarEntryPath)) {
-      throw new Error(`Tarball for ${packageDir} is missing runtime entrypoint: ${tarEntryPath}`);
+      throw new Error(`Tarball for ${packageDir} is missing package entrypoint: ${tarEntryPath}`);
     }
   }
 }
 
-function runPackPreflight(packageDir: string, packagePath: string, runtimeEntryPaths: string[]): void {
+function runPackPreflight(packageDir: string, packagePath: string, entryPaths: string[]): void {
   const filesBefore = new Set(readdirSync(packagePath));
 
   const result = spawnSync("bun", ["pm", "pack", "--quiet"], {
@@ -198,7 +203,7 @@ function runPackPreflight(packageDir: string, packagePath: string, runtimeEntryP
   const tarballPath = resolve(packagePath, newTarballs[0]!);
 
   try {
-    verifyTarballRuntimeEntries(packageDir, tarballPath, runtimeEntryPaths);
+    verifyTarballEntries(packageDir, tarballPath, entryPaths);
   } finally {
     rmSync(tarballPath, { force: true });
   }
@@ -206,8 +211,8 @@ function runPackPreflight(packageDir: string, packagePath: string, runtimeEntryP
 
 function publishPackage(packageDir: string, options: PublishOptions): void {
   const packagePath = resolve(repoRoot, packageDir);
-  const runtimeEntryPaths = verifyRuntimeFilesExist(packageDir, packagePath);
-  runPackPreflight(packageDir, packagePath, runtimeEntryPaths);
+  const entryPaths = verifyEntryFilesExist(packageDir, packagePath);
+  runPackPreflight(packageDir, packagePath, entryPaths);
 
   console.log(`Publishing ${packageDir} with dist-tag '${options.tag}'`);
 

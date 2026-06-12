@@ -5,10 +5,16 @@ import {
   pgTable,
   pgView,
   type AnyPgTable,
+  type PgBigInt64Builder,
+  type PgBuildColumns,
   type PgBuildExtraConfigColumns,
   type PgPolicy,
   type PgTableExtraConfigValue,
+  type PgTableWithColumns,
+  type PgVarcharBuilder,
   type PgView,
+  type PgViewWithSelection,
+  type SetNotNull,
 } from "drizzle-orm/pg-core";
 import type { pgSchema } from "drizzle-orm/pg-core";
 import { varchar } from "drizzle-orm/pg-core";
@@ -105,6 +111,38 @@ type ProjectedColumnsShape<
   TColumns extends Record<string, ColumnBuilderBase>,
   TOmittedColumns extends readonly ColumnKeys<TColumns>[],
 > = ColumnKeys<TColumns> extends TOmittedColumns[number] ? TColumns : Omit<TColumns, TOmittedColumns[number]>;
+
+// Explicit shapes for the projected local table and the read-model view.
+// Their drizzle-inferred types cannot survive declaration emit: the printer
+// reproduces pgTable/pgView internals as `PgBuildColumn<TTableName, ...>` with
+// drizzle's own out-of-scope generic, breaking the published .d.ts. The
+// constructed values are cast to these equivalent, printable types instead.
+type ProjectedLocalTable<
+  TName extends string,
+  TColumns extends Record<string, ColumnBuilderBase>,
+  TOmittedColumns extends readonly ColumnKeys<TColumns>[],
+> = PgTableWithColumns<{
+  name: TName;
+  schema: string | undefined;
+  columns: PgBuildColumns<TName, ProjectedColumnsShape<TColumns, TOmittedColumns>>;
+  dialect: "pg";
+}>;
+
+type ReadModelView<
+  TName extends string,
+  TColumns extends Record<string, ColumnBuilderBase>,
+  TOmittedColumns extends readonly ColumnKeys<TColumns>[],
+> = PgViewWithSelection<
+  `${TName}_read_model`,
+  true,
+  PgBuildColumns<
+    `${TName}_read_model`,
+    ProjectedColumnsShape<TColumns, TOmittedColumns> & {
+      overlay_kind: SetNotNull<PgVarcharBuilder<[string, ...string[]]>>;
+      local_updated_at_us: SetNotNull<PgBigInt64Builder>;
+    }
+  >
+>;
 
 /** Governance spec for `defineSyncTable` — columns are typed from `makeColumns`. */
 export type SyncTableInputGovernance<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
@@ -304,16 +342,18 @@ export function defineSyncTable<
 
   const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
   const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);
-  const localTable = schema ? schema.table(tableName, projectedCols) : pgTable(tableName, projectedCols);
+  const localTable = (
+    schema ? schema.table(tableName, projectedCols) : pgTable(tableName, projectedCols)
+  ) as ProjectedLocalTable<TName, TColumns, TOmittedColumns>;
 
   const viewColumns = viewColumnsForProjection(makeColumns(), omittedColumns);
   const view =
     resolvedMode === "readwrite"
-      ? pgView(`${tableName}_read_model`, {
+      ? (pgView(`${tableName}_read_model`, {
           ...viewColumns,
           overlay_kind: varchar("overlay_kind", { length: 24 }).notNull(),
           local_updated_at_us: bigint("local_updated_at_us", { mode: "bigint" }).notNull(),
-        }).existing()
+        }).existing() as ReadModelView<TName, TColumns, TOmittedColumns>)
       : undefined;
 
   const entry = {
