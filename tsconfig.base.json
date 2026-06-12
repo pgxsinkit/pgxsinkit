@@ -3,6 +3,7 @@
     "target": "ES2024",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "module": "ESNext",
+    "moduleDetection": "force",
     "moduleResolution": "Bundler",
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
