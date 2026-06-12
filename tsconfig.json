@@ -10,6 +10,7 @@
     "packages/**/*.tsx",
     "scripts/**/*.ts",
     "tests/**/*.ts",
+    "infra/**/*.ts",
     "drizzle.config.ts"
   ]
 }

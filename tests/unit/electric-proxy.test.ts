@@ -101,7 +101,7 @@ describe("electric proxy", () => {
 
       const request = new Request("http://localhost:3001/v1/electric-proxy?table=authors&offset=-1");
 
-      const _response = await proxyElectricShapeRequest(
+      await proxyElectricShapeRequest(
         request,
         { sub: DEMO_USER1_ID },
         {
