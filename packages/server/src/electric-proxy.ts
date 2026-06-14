@@ -2,6 +2,8 @@ import {
   buildRowFilterWhere,
   getOmittedProjectedColumnNames,
   type JwtClaims,
+  type RowTransform,
+  type RowTransformContext,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
@@ -46,17 +48,22 @@ export async function proxyElectricShapeRequest(
 
   const table = new URL(request.url).searchParams.get("table");
   const omittedColumns = table ? getOmittedProjectedColumnsForTable(options.registry, table) : [];
+  const rowTransform = table ? getRowTransformForTable(options.registry, table) : undefined;
   const contentType = responseHeaders.get("content-type") ?? "";
 
-  if (omittedColumns.length > 0 && contentType.includes("application/json")) {
+  // Re-serialize the shape log when this table needs any row-level rewriting: column
+  // omission and/or a registry-declared row transform. The transform runs first so it can
+  // read a column (e.g. a control flag) that omission then strips from the client row.
+  if ((omittedColumns.length > 0 || rowTransform) && contentType.includes("application/json")) {
     const payload = await response
       .clone()
       .json()
       .catch(() => undefined);
 
     if (Array.isArray(payload)) {
-      const stripped = stripOmittedColumnsFromShapeLogEntries(payload, omittedColumns);
-      return new Response(JSON.stringify(stripped), {
+      const context: RowTransformContext = { claims, ...(options.extraParams ? { params: options.extraParams } : {}) };
+      const rewritten = rewriteShapeLogEntries(payload, omittedColumns, rowTransform, context);
+      return new Response(JSON.stringify(rewritten), {
         status: response.status,
         statusText: response.statusText,
         headers: responseHeaders,
@@ -133,6 +140,10 @@ function getOmittedProjectedColumnsForTable(registry: SyncTableRegistry, table: 
   return entry ? getOmittedProjectedColumnNames(entry) : [];
 }
 
+function getRowTransformForTable(registry: SyncTableRegistry, table: string): RowTransform | undefined {
+  return getRegistryEntry(registry, table)?.clientProjection?.rowTransform;
+}
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -152,26 +163,45 @@ function isShapeLogEntry(value: unknown): value is ShapeLogEntry {
   return isObjectRecord(value);
 }
 
-function stripOmittedColumnsFromShapeLogEntries(payload: unknown[], omittedColumns: readonly string[]): unknown[] {
+/**
+ * Rewrite each shape-log row: apply the registry row transform (if any), then strip
+ * omitted columns. Both passes preserve object identity when nothing changes, so an
+ * untouched entry flows through unmodified.
+ */
+function rewriteRow(
+  row: Record<string, unknown>,
+  omittedColumns: readonly string[],
+  rowTransform: RowTransform | undefined,
+  context: RowTransformContext,
+): Record<string, unknown> {
+  const transformed = rowTransform ? rowTransform(row, context) : row;
+  return omittedColumns.length > 0 ? omitColumnsFromRow(transformed, omittedColumns) : transformed;
+}
+
+function rewriteShapeLogEntries(
+  payload: unknown[],
+  omittedColumns: readonly string[],
+  rowTransform: RowTransform | undefined,
+  context: RowTransformContext,
+): unknown[] {
   return payload.map((entry) => {
     if (!isShapeLogEntry(entry)) {
       return entry;
     }
 
-    let nextEntry: ShapeLogEntry | null = null;
+    let currentEntry: ShapeLogEntry = entry;
 
     if (isObjectRecord(entry.value)) {
-      const nextValue = omitColumnsFromRow(entry.value, omittedColumns);
+      const nextValue = rewriteRow(entry.value, omittedColumns, rowTransform, context);
       if (nextValue !== entry.value) {
-        nextEntry = { ...entry, value: nextValue };
+        currentEntry = { ...currentEntry, value: nextValue };
       }
     }
 
-    const currentEntry = nextEntry ?? entry;
     if (isObjectRecord(currentEntry.old_value)) {
-      const nextOldValue = omitColumnsFromRow(currentEntry.old_value, omittedColumns);
+      const nextOldValue = rewriteRow(currentEntry.old_value, omittedColumns, rowTransform, context);
       if (nextOldValue !== currentEntry.old_value) {
-        return { ...currentEntry, old_value: nextOldValue };
+        currentEntry = { ...currentEntry, old_value: nextOldValue };
       }
     }
 

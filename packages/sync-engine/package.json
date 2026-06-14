@@ -1,6 +1,6 @@
 {
   "name": "@pgxsinkit/sync-engine",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "files": [
     "dist",
     "src",
@@ -22,8 +22,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "^0.1.30",
-    "@pgxsinkit/pglite-sync": "0.1.30"
+    "@pgxsinkit/contracts": "^0.1.31",
+    "@pgxsinkit/pglite-sync": "0.1.31"
   },
   "peerDependencies": {
     "@electric-sql/pglite": "0.5.2"

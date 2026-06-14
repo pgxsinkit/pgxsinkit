@@ -37,11 +37,36 @@ export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey"> & {
   shapeKey?: string;
 };
 
+/** Context available to a {@link RowTransform}: the verified claims and any extra runtime params. */
+export interface RowTransformContext {
+  claims: JwtClaims | null;
+  params?: Record<string, unknown>;
+}
+
+/**
+ * Per-row rewrite applied in the proxy response path (after the row filter, before
+ * column omission). Receives a shape-log row's column map (keys are wire/column names)
+ * and returns a possibly-rewritten one — letting the server strip a *sub-document* of a
+ * jsonb column, or otherwise rewrite a value, *conditionally on row data*. This expresses
+ * what a static, whole-column `omitColumns` cannot.
+ *
+ * It runs only in the proxy's per-response path: it never alters the local PGlite schema,
+ * never changes the Electric shape URL, and so never pollutes Electric's shared shape
+ * cache. Return the same `row` reference to signal "no change".
+ */
+export type RowTransform = (row: Record<string, unknown>, context: RowTransformContext) => Record<string, unknown>;
+
 export interface ClientProjectionSpec {
   syncedTable?: string;
   overlayTable?: string;
   journalTable?: string;
   omitColumns?: readonly string[];
+  /**
+   * Optional per-row rewrite applied in the proxy response path. Runs before column
+   * omission, so it may read a column (e.g. a control flag) that `omitColumns` then
+   * removes from the client-visible row. See {@link RowTransform}.
+   */
+  rowTransform?: RowTransform;
   localPrimaryKey?: PrimaryKeySpec;
 }
 

@@ -1,7 +1,29 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 
+import { boolean, jsonb, uuid } from "drizzle-orm/pg-core";
+
+import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { demoSyncRegistry, DEMO_USER1_ID } from "@pgxsinkit/schema";
 import { proxyElectricShapeRequest } from "@pgxsinkit/server";
+
+// A table whose synced jsonb `payload` carries sensitive sub-documents withheld per-row
+// via a `keys_withheld` control flag (which is itself omitted from the client row). The
+// row transform strips the sub-document only when the flag is set — something a static
+// whole-column `omitColumns` cannot express.
+const secureItemsRegistry = defineSyncRegistry({
+  secure_items: defineSyncTable({
+    tableName: "secure_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      payload: jsonb("payload").$type<Record<string, unknown>>(),
+      keysWithheld: boolean("keys_withheld").notNull().default(false),
+    }),
+    clientProjection: {
+      omitColumns: ["keysWithheld"],
+      rowTransform: (row) => (row["keys_withheld"] === true ? { ...row, payload: { stripped: true } } : row),
+    },
+  }),
+});
 
 const fetchMock = mock();
 const originalFetch = globalThis.fetch;
@@ -228,6 +250,76 @@ describe("electric proxy", () => {
 
       expect(response.status).toBe(200);
       expect(await response.text()).toBe("binary-data");
+    });
+  });
+
+  describe("row transform (conditional sub-document projection)", () => {
+    function mockShapeResponse(entries: unknown[]): void {
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify(entries), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+    }
+
+    async function proxySecureItems(): Promise<Array<Record<string, unknown>>> {
+      const request = new Request("http://localhost:3001/v1/electric-proxy?table=secure_items&offset=-1");
+      const response = await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        { registry: secureItemsRegistry, electricUrl: "http://localhost:3000/v1/shape" },
+      );
+      return (await response.json()) as Array<Record<string, unknown>>;
+    }
+
+    it("strips the gated sub-document and drops the control flag when keys_withheld is set", async () => {
+      mockShapeResponse([
+        {
+          headers: { operation: "insert" },
+          value: { id: "i1", payload: { secret: "answer-key" }, keys_withheld: true },
+        },
+      ]);
+
+      const payload = await proxySecureItems();
+
+      expect(payload).toEqual([{ headers: { operation: "insert" }, value: { id: "i1", payload: { stripped: true } } }]);
+    });
+
+    it("keeps the sub-document when keys_withheld is unset, still dropping the control flag", async () => {
+      mockShapeResponse([
+        {
+          headers: { operation: "insert" },
+          value: { id: "i2", payload: { secret: "answer-key" }, keys_withheld: false },
+        },
+      ]);
+
+      const payload = await proxySecureItems();
+
+      expect(payload).toEqual([
+        { headers: { operation: "insert" }, value: { id: "i2", payload: { secret: "answer-key" } } },
+      ]);
+    });
+
+    it("applies the transform to old_value on updates too", async () => {
+      mockShapeResponse([
+        {
+          headers: { operation: "update" },
+          value: { id: "i3", payload: { secret: "new" }, keys_withheld: true },
+          old_value: { id: "i3", payload: { secret: "old" }, keys_withheld: true },
+        },
+      ]);
+
+      const payload = await proxySecureItems();
+
+      expect(payload).toEqual([
+        {
+          headers: { operation: "update" },
+          value: { id: "i3", payload: { stripped: true } },
+          old_value: { id: "i3", payload: { stripped: true } },
+        },
+      ]);
     });
   });
 
