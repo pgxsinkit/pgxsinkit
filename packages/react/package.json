@@ -26,7 +26,7 @@
     "@pgxsinkit/contracts": "^0.1.30"
   },
   "peerDependencies": {
-    "@electric-sql/pglite": "0.5.1",
+    "@electric-sql/pglite": "0.5.2",
     "drizzle-orm": "1.0.0-rc.2",
     "react": ">=19.2.7"
   }

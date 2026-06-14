@@ -22,8 +22,8 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "peerDependencies": {
-    "@electric-sql/client": "^1.5.20",
-    "@electric-sql/experimental": "^6.0.20",
-    "@electric-sql/pglite": "0.5.1"
+    "@electric-sql/client": "^1.5.21",
+    "@electric-sql/experimental": "^6.0.21",
+    "@electric-sql/pglite": "0.5.2"
   }
 }
