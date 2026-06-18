@@ -8,3 +8,5 @@ dist/*
 packages/*/dist/*
 apps/perf-lab/dist/*
 .env
+# CI-written GitHub Packages auth — never commit a token
+.npmrc

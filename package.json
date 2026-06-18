@@ -22,6 +22,7 @@
     "lint": "oxlint --fix -c .oxlintrc.jsonc apps/*/src packages/*/src scripts tests infra *.ts",
     "lint:check": "oxlint -c .oxlintrc.jsonc apps/*/src packages/*/src scripts tests infra *.ts",
     "perf:lab": "bun scripts/run-perf-lab.ts",
+    "publish:github-packages": "bun run scripts/publish-github-packages.ts",
     "release:public:dry-run": "bun run build:public-packages && bun scripts/release-public-dry-run.ts",
     "release:public:publish": "bun run build:public-packages && bun scripts/publish-public-packages.ts --tag next",
     "release:public:publish:latest": "bun run build:public-packages && bun scripts/publish-public-packages.ts --tag latest",
