@@ -30,7 +30,7 @@
     "test": "bun run test:unit",
     "test:integration": "bun run test:integration:contract && bun run test:integration:implementation",
     "test:integration:contract": "bun scripts/run-integration-suite.ts tests/integration/client-contract.integration.test.ts tests/integration/server-contract.integration.test.ts",
-    "test:integration:implementation": "bun scripts/run-integration-suite.ts tests/integration/electric-pglite-sync.integration.test.ts tests/integration/write-api.integration.test.ts",
+    "test:integration:implementation": "bun scripts/run-integration-suite.ts tests/integration/electric-pglite-sync.integration.test.ts tests/integration/write-api.integration.test.ts tests/integration/membership-fanout.integration.test.ts",
     "test:performance": "bun scripts/run-performance-suite.ts tests/performance/client-local-optimistic.perf.test.ts tests/performance/client-concurrent-mixed-load.perf.test.ts tests/performance/artifact-write-load.perf.test.ts",
     "test:performance:client": "bun scripts/run-performance-suite.ts tests/performance/client-local-optimistic.perf.test.ts",
     "test:performance:concurrent": "bun scripts/run-performance-suite.ts tests/performance/client-concurrent-mixed-load.perf.test.ts",

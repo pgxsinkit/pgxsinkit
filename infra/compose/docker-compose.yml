@@ -19,11 +19,15 @@ services:
       retries: 20
 
   electric:
-    image: docker.io/electricsql/electric:latest
+    image: docker.io/electricsql/electric:1.7.2
     environment:
       DATABASE_URL: postgresql://supabase_admin:your-super-secret-and-long-postgres-password@postgres:5432/postgres?sslmode=disable
       ELECTRIC_INSECURE: "true"
       ELECTRIC_ENABLE_INTEGRATION_TESTING: "true"
+      # Preview feature: cross-table subquery `where` clauses in shapes (Electric 1.6+).
+      # Required for membership-style row filters of the form
+      # `container_id IN (SELECT container_id FROM memberships WHERE member_id = <sub>)`.
+      ELECTRIC_FEATURE_FLAGS: allow_subqueries,tagged_subqueries
     ports:
       - "${PGXSINKIT_ELECTRIC_PORT:-3000}:3000"
     depends_on:

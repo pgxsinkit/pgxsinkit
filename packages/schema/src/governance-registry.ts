@@ -1,6 +1,6 @@
 import { defineSyncRegistry } from "@pgxsinkit/contracts";
 
-import { fkSyncRegistry, projectsSyncRegistry, rlsSyncRegistry } from "./integration";
+import { fkSyncRegistry, membershipFanoutSyncRegistry, projectsSyncRegistry, rlsSyncRegistry } from "./integration";
 import { demoSyncRegistry } from "./registry";
 
 export const governanceSyncRegistry = defineSyncRegistry({
@@ -8,4 +8,5 @@ export const governanceSyncRegistry = defineSyncRegistry({
   ...projectsSyncRegistry,
   ...fkSyncRegistry,
   ...rlsSyncRegistry,
+  ...membershipFanoutSyncRegistry,
 });

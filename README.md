@@ -4,6 +4,36 @@
 
 Canonical timestamps are stored as bigint microseconds since unix epoch and cross API/sync boundaries as decimal strings.
 
+## Requirements
+
+`pgxsinkit` row filters may use cross-table subquery `where` clauses — for example membership
+fan-out, where a row in a container streams to every member of that container:
+
+```sql
+container_id IN (SELECT container_id FROM memberships WHERE member_id = <subject>)
+```
+
+The electric-proxy forwards this verbatim as the Electric shape `where`, so streaming it relies on
+a **required** ElectricSQL capability:
+
+- **ElectricSQL >= 1.6** running with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`.
+
+This is a hard prerequisite of using pgxsinkit, not an optional optimisation. Subquery `where`
+support is a flagged preview feature (still flagged as of 1.7.2); without the flag Electric rejects
+any subquery `where` with HTTP 400 (`{"where":["Subqueries are not supported"]}`). The sync then
+fails **closed** — no rows stream — it never silently fans out unfiltered data. `infra/compose`
+pins `electricsql/electric:1.7.2` and sets the flag; any deployment consuming pgxsinkit must do the
+same.
+
+A second point follows from the same grammar: **a PostgreSQL `enum` column referenced in a shape
+`where` must be cast to `text`** — `"role"::text = 'manager'`, not `"role" = 'manager'`. Electric's
+where-grammar does not accept a bare enum comparison (`invalid syntax for type enum …`) nor a literal
+cast to the enum (`unsupported type …`); casting the _column_ to text is the supported form (per the
+[Electric shapes docs](https://electric.ax/docs/sync/guides/shapes): enums are allowed "when
+explicitly casting them to text"). The enum column itself stays an enum — RLS and the write path keep
+using it natively, so there is no enum→text migration (which would in any case fail while an RLS
+policy depends on the column).
+
 ## Goals
 
 - Keep the downward sync path aligned with upstream `@electric-sql/pglite-sync`, while vendoring locally for hardening.
