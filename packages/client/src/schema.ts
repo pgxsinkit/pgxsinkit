@@ -378,10 +378,37 @@ function baseProjection(entry: SyncTableEntry, tableKey: string) {
 
 function qualifyIdentifier(schemaName: string, objectName: string) {
   if (schemaName === "public") {
-    return objectName;
+    // Quote only when required so existing generated SQL stays stable, but a table/view named
+    // after a reserved word (e.g. `group`) is a valid Postgres identifier and MUST be quoted or
+    // the generated DDL and read queries fail to parse. The row-applier (pglite-sync) always quotes.
+    return maybeQuoteIdentifier(objectName);
   }
 
   return `${quoteIdentifier(schemaName)}.${quoteIdentifier(objectName)}`;
+}
+
+// PostgreSQL fully-reserved keywords (cannot be used as a bare identifier). A name that is reserved,
+// or not a simple lowercase identifier, is quoted; everything else is left bare to keep generated
+// SQL stable for the common case.
+const RESERVED_SQL_KEYWORDS = new Set([
+  "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric", "both", "case",
+  "cast", "check", "collate", "column", "constraint", "create", "current_catalog", "current_date",
+  "current_role", "current_time", "current_timestamp", "current_user", "default", "deferrable",
+  "desc", "distinct", "do", "else", "end", "except", "false", "fetch", "for", "foreign", "from",
+  "grant", "group", "having", "in", "initially", "intersect", "into", "lateral", "leading", "limit",
+  "localtime", "localtimestamp", "not", "null", "offset", "on", "only", "or", "order", "placing",
+  "primary", "references", "returning", "select", "session_user", "some", "symmetric", "table",
+  "then", "to", "trailing", "true", "union", "unique", "user", "using", "variadic", "when", "where",
+  "window", "with",
+]);
+
+function maybeQuoteIdentifier(value: string) {
+  const isSimpleIdentifier = /^[a-z_][a-z0-9_]*$/.test(value);
+  if (isSimpleIdentifier && !RESERVED_SQL_KEYWORDS.has(value)) {
+    return value;
+  }
+
+  return quoteIdentifier(value);
 }
 
 function quoteIdentifier(value: string) {
