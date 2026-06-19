@@ -35,6 +35,10 @@ Canonical timestamps are stored as bigint microseconds since unix epoch and cros
 
 `bun run infra:up` now applies the latest committed infra/drizzle migration history, including governance and sync-function migrations.
 
+## Releasing
+
+See [RELEASING.md](./RELEASING.md) for publishing the `@pgxsinkit/*` packages to npm and GitHub Packages (bump → tag → publish, one tag at a time).
+
 ## Provisioning workflow
 
 1. Edit schema sources in `packages/schema/src/schema.ts`, `packages/schema/src/integration.ts`, and/or `packages/server/src/operations-log/schema.ts`.
