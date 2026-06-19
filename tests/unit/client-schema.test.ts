@@ -172,4 +172,26 @@ describe("client local schema generation", () => {
     expect(sql).toContain("CREATE TYPE \"workspace_local\".\"workspace_readonly_status\" AS ENUM ('queued', 'done');");
     expect(sql).toContain('status "workspace_local"."workspace_readonly_status" NOT NULL');
   });
+
+  it("quotes a public-schema table name that collides with a reserved SQL keyword", () => {
+    // `group` is a valid Postgres identifier but a reserved keyword, so it must be quoted in the
+    // generated DDL or it fails to parse. Simple non-reserved names stay bare (output stays stable).
+    const reservedWordRegistry = defineSyncRegistry({
+      group: defineSyncTable({
+        tableName: "group",
+        makeColumns: () => ({
+          id: uuid("id").primaryKey(),
+          ownerId: uuid("owner_id").notNull(),
+        }),
+        primaryKey: ["id"],
+      }),
+    });
+
+    const sql = generateLocalSchemaSql(reservedWordRegistry);
+
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS "group" (');
+    // The bare reserved word is never emitted unquoted as a table reference.
+    expect(sql).not.toContain("CREATE TABLE IF NOT EXISTS group ");
+    expect(sql).not.toContain("CREATE TABLE IF NOT EXISTS group(");
+  });
 });
