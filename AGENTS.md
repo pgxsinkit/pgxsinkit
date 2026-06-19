@@ -1,5 +1,22 @@
 # pgxsinkit Agent Instructions
 
+## Release, versioning & tooling standard
+
+This repo follows the **Cross-repo TypeScript release & versioning standard** (defined in the global
+agent guide, `~/.claude/CLAUDE.md`; full rationale in
+[docs/adr/0001](docs/adr/0001-unified-ts-release-versioning-tooling-standard.md)). The essentials:
+
+- **Scripts are check-default.** `bun run format` / `bun run lint` **check** (non-mutating); use
+  `format:write` / `lint:fix` to change files. `bun run validate` (format, typecheck, lint, then unit
+  `test`) is the pre-commit gate, auto-installed via the `prepare` script. `test` is unit-only;
+  container lanes are `test:integration` (CI on release + on demand), never in the commit path.
+- **Versions are tag-derived, never hand-edited.** Every publishable `package.json` carries
+  `"version": "0.0.0"` as a placeholder — the most recent semver tag is the _only_ version input,
+  and CI derives the real dev/release version at publish time. There is no version-bump script.
+- **Publishing.** A push to `main` publishes a `@dev` build to GitHub Packages; a semver tag
+  publishes release-parity at `@latest` (both gated on validation). The public npm mirror is a
+  separate, human-gated step on your machine: `bun run release:npm <tag>`.
+
 # Project Constraints & Rules
 
 ## Build System
@@ -43,7 +60,7 @@ Build and maintain a battle-hardened demo and verification harness for `PostgreS
 - Keep Drizzle schema authoritative for server-side PostgreSQL structure.
 - Preserve Zod v4 validation on all user-controlled payloads.
 - Type checking: use `bun run typecheck` — not `tsgo` or `tsc` directly.
-- Lint and format: use `bun run lint` and `bun run format` — not `oxlint` or `oxfmt` directly.
+- Lint and format: use `bun run lint` and `bun run format` (both **check** only) — not `oxlint` or `oxfmt` directly. To mutate, use `bun run lint:fix` / `bun run format:write`.
 - Always prefer package scripts over direct tool invocation. Package scripts encode project-specific flags that direct invocation silently skips.
 - Pure JavaScript is forbidden for project code and ad-hoc scripts; use TypeScript with repository typecheck coverage, or use bash when TypeScript coverage cannot be made robust.
 
