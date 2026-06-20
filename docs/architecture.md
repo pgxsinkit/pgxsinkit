@@ -14,7 +14,7 @@ The repository is split into four boundaries:
 
 ## 3. Verification harness
 
-`tests/integration` proves the topology against real services. This is the main value of the repo. The demo UI is deliberately smaller than the harness.
+`tests/integration` proves the topology against real services. The harness and the demo app exist to prove and harden the `@pgxsinkit/*` toolkit — which is the product — not the other way round.
 
 ## Current data flow
 
@@ -23,23 +23,19 @@ The repository is split into four boundaries:
 3. Browser creates are written first into a local overlay table and a durable mutation journal in PGlite.
 4. The browser may enqueue mutations one at a time or atomically stage a local batch into the same overlay and journal tables.
 5. The browser flushes journal entries through the write API.
-6. In artifact mode with RLS enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims`.
-7. The API writes to PostgreSQL through the artifact batch function (`POST /api/mutations`).
+6. When RLS is enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims`.
+7. The API writes to PostgreSQL through the in-database apply function `pgxsinkit_apply_mutations` (`POST /api/mutations`).
 8. ElectricSQL exposes shape data from PostgreSQL.
 9. The write API shape proxy (`/v1/electric-proxy`) forwards read requests to Electric and enforces owner filtering for protected tables unless caller role is admin.
 10. PGlite subscribes through the vendored `packages/pglite-sync` implementation.
 11. Acked overlay rows are cleared only after the synced echo reaches the acknowledged server `updated_at_us` value.
 12. The integration tests assert eventual convergence inside local PGlite.
 
-## Stable write mode
+## The write path
 
-Stable write behavior is `WRITE_API_BACKEND=bulk-plpgsql-artifact`.
+There is exactly one write path (see [adr/0002](adr/0002-single-in-database-write-path.md)). It requires a preinstalled PL/pgSQL entry function (`pgxsinkit_apply_mutations`) managed by migrations, defers constraints during execution (`SET CONSTRAINTS ALL DEFERRED`), and applies Supabase-compatible auth claim context for RLS-enabled registries.
 
-This mode requires a preinstalled PL/pgSQL entry function managed by migrations/artifacts, defers constraints during execution (`SET CONSTRAINTS ALL DEFERRED`), and applies Supabase-compatible auth claim context for RLS-enabled registries.
-
-Stable client flush behavior uses `POST /api/mutations`. `VITE_BATCH_WRITE_URL` may override the base URL, and otherwise the client uses `writeUrl` for batch flushes.
-
-Legacy backend/transport utilities are isolated under experimental exports (`@pgxsinkit/server/experimental`, `@pgxsinkit/client/experimental`).
+Client flush behavior uses `POST /api/mutations`. `VITE_BATCH_WRITE_URL` may override the base URL, and otherwise the client uses `writeUrl` for batch flushes. There is no selectable backend.
 
 The write API also supports startup-time control of server-side operations logging via `WRITE_API_OPS_LOG_ENABLED`. This flag is read at process start and requires a restart to change.
 
@@ -50,7 +46,7 @@ The `operations_log` table is a Drizzle-managed internal server table included i
 ## Provisioning runbooks
 
 - `docs/migrations.md` defines the canonical schema-to-environment workflow.
-- `docs/function-artifacts.md` defines support-function artifact generation, apply, and verification for `bulk-plpgsql-artifact`.
+- `docs/function-artifacts.md` defines generation, apply, and verification of the write path's apply function (`pgxsinkit_apply_mutations`).
 
 ## Timestamp model
 
@@ -72,9 +68,16 @@ The `operations_log` table is a Drizzle-managed internal server table included i
 - Use this hook to provision prerequisite local objects required by generated schema SQL.
 - Existing `prepareLocalDb` remains a post-schema hook for compatibility.
 
-## Intentionally out of scope
+## The parity boundary
 
-- Automatic provisioning for non-enum prerequisite objects beyond what callers explicitly provide through `prepareLocalDbBeforeSchema`.
-- Full local DDL parity for defaults, generated columns, identity semantics, and non-primary-key constraints.
-- Local governance and RLS enforcement parity with server-side PostgreSQL policy behavior.
-- Local trigger/function/materialized-view parity with server-side database behavior.
+The local schema is a read cache plus write-staging buffer, not a mirror of Postgres. The full,
+canonical boundary — what is **never** local (server authority) versus what is **not yet** local
+(best-effort gaps to narrow) — is defined in [CONTEXT.md](../CONTEXT.md) (the _Parity boundary_
+term) and explained on the docs site's "Local schema & DDL parity" page. In short:
+
+- **Never local (server authority):** RLS/governance enforcement, triggers, functions, materialized
+  views, and managed-field values.
+- **Not yet local (best-effort gaps):** static defaults, generated columns, CHECK, FOREIGN KEY, and
+  UNIQUE — enforceable only against the synced subset, never a substitute for the server.
+- Automatic provisioning is limited to enum types; other prerequisite objects go through
+  `prepareLocalDbBeforeSchema`.

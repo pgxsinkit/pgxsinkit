@@ -21,7 +21,7 @@ import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-en
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const env = readIntegrationEnv();
@@ -82,7 +82,6 @@ describe("demo membership sync (readonly workspaces + members + work_items) inte
       app,
       registry: membershipFanoutSyncRegistry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => claimsFromHeader(request),
     });
 

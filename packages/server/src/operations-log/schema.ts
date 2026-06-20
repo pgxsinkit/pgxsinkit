@@ -7,8 +7,6 @@ export const operationsLogTable = pgTable(
   "operations_log",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
-    source: varchar("source", { length: 24 }).notNull(),
-    backend: varchar("backend", { length: 24 }).notNull(),
     tableName: varchar("table_name", { length: 255 }),
     operationKind: varchar("operation_kind", { length: 24 }),
     userId: uuid("user_id"),

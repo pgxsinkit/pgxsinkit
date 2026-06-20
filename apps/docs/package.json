@@ -1,0 +1,24 @@
+{
+  "name": "@pgxsinkit/docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "astro": "astro",
+    "build": "astro build",
+    "dev": "astro dev",
+    "format": "oxfmt --config ../../.oxfmtrc.jsonc --check .",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.40.0",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "astro": "^6.4.8",
+    "sharp": "^0.35.1",
+    "starlight-llms-txt": "^0.10.0"
+  },
+  "devDependencies": {
+    "starlight-typedoc": "^0.23.0",
+    "typedoc": "^0.28.19",
+    "typedoc-plugin-markdown": "^4.12.0"
+  }
+}

@@ -43,7 +43,12 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 
 ## Project intent
 
-Build and maintain a battle-hardened demo and verification harness for `PostgreSQL -> ElectricSQL -> PGlite` sync.
+Build and maintain the `@pgxsinkit/*` **toolkit** — an offline-first sync library for the
+`PostgreSQL -> ElectricSQL -> PGlite` read path and the `client -> write API -> PostgreSQL` write
+path. The toolkit is the product; the demo app (`apps/web`) and the integration + performance
+harness exist to prove and harden it. pgxsinkit is a standalone open-source library — never treat it
+as any particular downstream application's data layer. See [CONTEXT.md](CONTEXT.md) for the canonical
+vocabulary.
 
 ## Working rules
 

@@ -11,8 +11,7 @@ import type {
   SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
-import { registerBulkMutationRoute } from "./mutations/bulk/route";
-import type { BulkMutationBackend } from "./mutations/bulk/types";
+import { registerMutationRoute } from "./mutations/route";
 import { ensureOperationsLogSchema } from "./operations-log/ddl";
 import type { OperationsLogConfig } from "./operations-log/types";
 
@@ -42,7 +41,6 @@ export interface CreateSyncServerOptions<
   db: TDb;
   /** Existing Hono app to register routes on. If omitted, a new Hono app is created. */
   app?: Hono;
-  backend?: BulkMutationBackend;
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
   operationsLog?: {
     enabled?: boolean;
@@ -98,7 +96,6 @@ export function createSyncServer<
   let address: SyncServerAddress | null = null;
   const operationsLogConfig = resolveOperationsLogConfig(options.operationsLog);
   const operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig).then(() => {});
-  const backend = options.backend ?? "bulk-plpgsql-artifact";
 
   if (ownsApp) {
     const corsMiddleware = cors({
@@ -143,15 +140,7 @@ export function createSyncServer<
   }
 
   // The single mutation ingress point — all writes go through POST /api/mutations
-  registerBulkMutationRoute(
-    app,
-    db,
-    options.registry,
-    backend,
-    operationsLogConfig,
-    operationsLogReady,
-    options.resolveAuthClaims,
-  );
+  registerMutationRoute(app, db, options.registry, operationsLogConfig, operationsLogReady, options.resolveAuthClaims);
 
   const fetch = async (request: Request) => app.fetch(request);
 
@@ -249,8 +238,8 @@ function resolveOperationsLogConfig(options?: { enabled?: boolean }): Operations
   };
 }
 
-export { registerBulkMutationRoute } from "./mutations/bulk/route";
-export { buildPlpgsqlBatchFunctionDdl } from "./mutations/bulk/plpgsql-strategy";
+export { registerMutationRoute } from "./mutations/route";
+export { buildPlpgsqlBatchFunctionDdl } from "./mutations/plpgsql-apply";
 export { ensureOperationsLogSchema } from "./operations-log/ddl";
 export { operationsLogTable } from "./operations-log/schema";
 export { proxyElectricShapeRequest } from "./electric-proxy";

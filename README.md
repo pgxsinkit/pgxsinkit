@@ -1,6 +1,16 @@
+<p align="center">
+  <a href="https://pgxsinkit.github.io">
+    <picture>
+      <source srcset="./brand/banner/banner.avif" type="image/avif" />
+      <source srcset="./brand/banner/banner.webp" type="image/webp" />
+      <img src="./brand/banner/banner.png" alt="pgxsinkit" width="720" />
+    </picture>
+  </a>
+</p>
+
 # pgxsinkit
 
-`pgxsinkit` is a hardened demo repository for a `PostgreSQL -> ElectricSQL -> PGlite` read path and a `client -> write API -> PostgreSQL` write path.
+`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> ElectricSQL -> PGlite` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/web`) and the integration + performance harness exist to prove and harden them. See [CONTEXT.md](./CONTEXT.md) for the canonical vocabulary.
 
 Canonical timestamps are stored as bigint microseconds since unix epoch and cross API/sync boundaries as decimal strings.
 
@@ -130,16 +140,12 @@ The performance runner provisions its own isolated PostgreSQL and ElectricSQL st
 
 More detailed performance configuration, including the full env var list and matrix runner options, lives in `tests/performance/README.md`.
 
-## Stable backend contract
+## The write path
 
-Stable write mode is artifact-only:
-
-- `WRITE_API_BACKEND=bulk-plpgsql-artifact`
-
-Legacy backend strategy utilities are isolated under experimental exports:
-
-- `@pgxsinkit/server/experimental`
-- `@pgxsinkit/client/experimental`
+There is exactly one write path: client writes are staged locally, flushed through the write API,
+and applied to PostgreSQL in a single in-database PL/pgSQL function (`pgxsinkit_apply_mutations`).
+There is no selectable backend — the in-database bulk apply is the only strategy (see
+[docs/adr/0002](./docs/adr/0002-single-in-database-write-path.md)).
 
 Long-polling shape proxy requests may need a higher Bun idle timeout than the default 10 seconds.
 

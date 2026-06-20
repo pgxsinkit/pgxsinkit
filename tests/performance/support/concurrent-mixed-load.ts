@@ -74,7 +74,7 @@ import { parseDemoAuthClaimsFromRequest } from "../../../apps/write-api/src/demo
 import {
   installPlpgsqlBatchFunction,
   verifyPlpgsqlBatchFunction,
-} from "../../../packages/server/src/mutations/bulk/plpgsql-strategy";
+} from "../../../packages/server/src/mutations/plpgsql-apply";
 import {
   applyConcurrentMutationToRowPool,
   buildConcurrentMutationPlan,
@@ -417,7 +417,6 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
     server = createSyncServer({
       registry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
@@ -561,7 +560,6 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
     server = createSyncServer({
       registry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;

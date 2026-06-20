@@ -12,11 +12,10 @@ import { writeApiEnv } from "./env";
 const databaseUrl = writeApiEnv.DATABASE_URL;
 const electricUrl = writeApiEnv.ELECTRIC_URL;
 const allowedOrigins = ["http://localhost:5173", "http://localhost:5174"];
-const backend = writeApiEnv.WRITE_API_BACKEND;
 const operationsLogEnabled = writeApiEnv.WRITE_API_OPS_LOG_ENABLED;
 const idleTimeoutSeconds = writeApiEnv.WRITE_API_IDLE_TIMEOUT_SECONDS;
 
-console.log("Starting write-api...", { databaseUrl, electricUrl, backend, operationsLogEnabled, idleTimeoutSeconds });
+console.log("Starting write-api...", { databaseUrl, electricUrl, operationsLogEnabled, idleTimeoutSeconds });
 
 const schema = buildRegistrySchema(demoMembershipSyncRegistry);
 const relations = defineRelations(schema);
@@ -25,7 +24,6 @@ const db = drizzle({ connection: databaseUrl, relations });
 const server = createSyncServer({
   registry: demoMembershipSyncRegistry,
   db,
-  backend,
   resolveAuthClaims: (request) => {
     const claims = parseDemoAuthClaimsFromRequest(request);
     return claims ? { ...claims } : null;

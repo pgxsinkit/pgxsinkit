@@ -7,6 +7,10 @@ coverage/*
 dist/*
 packages/*/dist/*
 apps/perf-lab/dist/*
+apps/docs/dist/*
+apps/docs/.astro/*
+# starlight-typedoc generated API reference (regenerated on every docs build)
+apps/docs/src/content/docs/api/
 .env
 # CI-written GitHub Packages auth — never commit a token
 .npmrc

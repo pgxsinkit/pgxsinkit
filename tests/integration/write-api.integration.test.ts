@@ -20,7 +20,7 @@ import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../apps/write-api/src/demo-auth";
-import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
 
 const env = readIntegrationEnv();
 
@@ -323,7 +323,7 @@ describe("write api implementation integration", () => {
   });
 });
 
-describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
+describe("write api deferred FK behavior", () => {
   let server!: ReturnType<typeof createSyncServer<typeof fkSyncRegistry>>;
   const serverDb = createServerDb(fkSyncRegistry, env.databaseUrl);
 
@@ -342,7 +342,6 @@ describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
     server = createSyncServer({
       registry: fkSyncRegistry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
     });
   });
 
@@ -407,7 +406,7 @@ describe("write api deferred FK behavior — bulk-plpgsql-artifact", () => {
   });
 });
 
-describe("write api artifact backend RLS auth context", () => {
+describe("write api RLS auth context", () => {
   let server!: ReturnType<typeof createSyncServer<typeof rlsSyncRegistry>>;
   const serverDb = createServerDb(rlsSyncRegistry, env.databaseUrl);
 
@@ -426,7 +425,6 @@ describe("write api artifact backend RLS auth context", () => {
     server = createSyncServer({
       registry: rlsSyncRegistry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: () => ({
         role: "authenticated",
         sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d",
@@ -447,7 +445,6 @@ describe("write api artifact backend RLS auth context", () => {
     const unauthorizedServer = createSyncServer({
       registry: rlsSyncRegistry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: () => null,
     });
 
@@ -516,7 +513,7 @@ describe("write api artifact backend RLS auth context", () => {
   });
 });
 
-describe("write api artifact backend missing governance prerequisites", () => {
+describe("write api missing governance prerequisites", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
   const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
@@ -535,7 +532,6 @@ describe("write api artifact backend missing governance prerequisites", () => {
     server = createSyncServer({
       registry: demoSyncRegistry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
@@ -573,7 +569,7 @@ describe("write api artifact backend missing governance prerequisites", () => {
     );
 
     // With Supabase-native auth.uid(), this should succeed.
-    // The verifyArtifactRlsAuthHelpers check only requires auth.uid()
+    // The verifyRlsAuthHelpers check only requires auth.uid()
     // which is always present in a Supabase-compatible database.
     await expectResponseStatus(response, 200);
     const body = (await response.json()) as { acks: Array<{ status?: string }> };
@@ -583,7 +579,7 @@ describe("write api artifact backend missing governance prerequisites", () => {
   });
 });
 
-describe("write api artifact backend demo auth RLS", () => {
+describe("write api demo auth RLS", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
   const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
@@ -604,7 +600,6 @@ describe("write api artifact backend demo auth RLS", () => {
     server = createSyncServer({
       registry: demoSyncRegistry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
@@ -640,42 +635,6 @@ describe("write api artifact backend demo auth RLS", () => {
     ]);
 
     await expectResponseStatus(response, 401);
-  });
-
-  it("per-table CRUD routes are not registered in bulk-plpgsql-artifact mode", async () => {
-    const createResponse = await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${DEMO_JWT_USER1}`,
-      },
-      body: JSON.stringify({
-        id: "9531dc53-78c6-4e1e-a0a1-1db2b48e0127",
-        name: "Should not exist",
-      }),
-    });
-
-    expect(createResponse.status).toBe(404);
-
-    const patchResponse = await server.request("/api/todos/any-id", {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${DEMO_JWT_USER1}`,
-      },
-      body: JSON.stringify({ title: "No route" }),
-    });
-
-    expect(patchResponse.status).toBe(404);
-
-    const deleteResponse = await server.request("/api/todos/any-id", {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${DEMO_JWT_USER1}`,
-      },
-    });
-
-    expect(deleteResponse.status).toBe(404);
   });
 
   it("applies owner and audit fields from demo jwt claims for authors and todos", async () => {
@@ -744,7 +703,7 @@ describe("write api artifact backend demo auth RLS", () => {
     expect(todos[0]?.updatedAtUs).toBeGreaterThanOrEqual(todos[0]?.createdAtUs ?? 0n);
   });
 
-  it("rejects client-supplied managed fields in artifact mode", async () => {
+  it("rejects client-supplied managed fields", async () => {
     const authorId = "f3e55040-1b89-4ea2-9983-b13074184e78";
 
     const response = await postBatchMutations(

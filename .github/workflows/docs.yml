@@ -1,0 +1,46 @@
+name: Docs
+
+# Builds the Astro Starlight site (apps/docs) and deploys the static output to the
+# pgxsinkit/pgxsinkit.github.io repo (served at the bare root https://pgxsinkit.github.io)
+# via a least-privilege deploy key. Mirrors conform-ed's docs deploy (conform-ed ADR-0014):
+# the bare-root org-pages URL must come from the `<owner>.github.io` repo, so the build is
+# pushed there rather than served from this repo.
+#
+# Prerequisites (one-time, GitHub-side):
+#   - a `pgxsinkit/pgxsinkit.github.io` repo exists
+#   - this repo has a `PGXSINKIT_PAGES_DEPLOY_KEY` secret (an SSH deploy key whose public half
+#     is registered as a write-enabled deploy key on pgxsinkit.github.io)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/docs/**"
+      - "brand/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install
+      - run: bun run --cwd apps/docs build
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.PGXSINKIT_PAGES_DEPLOY_KEY }}
+          external_repository: pgxsinkit/pgxsinkit.github.io
+          publish_dir: ./apps/docs/dist
+          publish_branch: main
+          force_orphan: true
+          commit_message: "deploy docs from pgxsinkit/pgxsinkit@${{ github.sha }}"

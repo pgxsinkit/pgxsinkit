@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * pgxsinkit-generate — Generates a drizzle-kit migration with the
- * pgxsinkit_apply_batch_mutations PL/pgSQL function.
+ * pgxsinkit_apply_mutations PL/pgSQL function.
  *
  * External consumers (e.g. transcrobes) invoke this from their own project:
  *
@@ -21,7 +21,7 @@ import { join } from "node:path";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
-import { buildPlpgsqlBatchFunctionDdl } from "../mutations/bulk/plpgsql-strategy";
+import { buildPlpgsqlBatchFunctionDdl } from "../mutations/plpgsql-apply";
 
 function parseArgs(argv: string[]) {
   let registryPath = "";

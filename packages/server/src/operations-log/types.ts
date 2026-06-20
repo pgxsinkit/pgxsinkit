@@ -1,10 +1,6 @@
 import type { SQLWrapper } from "drizzle-orm";
 import type { AnyPgTable } from "drizzle-orm/pg-core";
 
-export type OpsLogSource = "crud" | "batch";
-
-export type OpsLogBackend = "bulk-plpgsql-artifact";
-
 export type OpsLogStatus = "succeeded" | "validation_failed" | "not_found" | "execution_failed";
 
 export interface OperationsLogConfig {
@@ -12,8 +8,6 @@ export interface OperationsLogConfig {
 }
 
 export interface OpsLogEntry {
-  source: OpsLogSource;
-  backend: OpsLogBackend;
   tableName?: string | null;
   operationKind?: "create" | "update" | "delete" | null;
   userId?: string | null;

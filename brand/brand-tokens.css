@@ -1,0 +1,10 @@
+:root {
+  --pgx-ink: #11181c;
+  --pgx-paper: #f8f9fa;
+  --pgx-mute: #8a94a0;
+  --pgx-pg: #336791; /* Postgres blue — "pg" on light */
+  --pgx-pg-light: #008bb9; /* Postgres light blue — "pg" on dark */
+  --pgx-pg-deep: #0064a5;
+  --pgx-green: #249361; /* Supabase green (deep) — the "x" on light */
+  --pgx-green-bright: #3ecf8e; /* Supabase green — the "x" on dark */
+}

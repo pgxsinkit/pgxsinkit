@@ -10,7 +10,7 @@ import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@p
 import { createSyncServer } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
-import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
 
 const env = readIntegrationEnv();
 let writeApiPort!: number;

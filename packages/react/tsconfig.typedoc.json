@@ -1,0 +1,10 @@
+{
+  // TypeDoc-only (apps/docs API reference). Inherits the root base `paths` to resolve workspace
+  // deps to `src`, so docs generate from source without a `dist` build. Limited to `src`.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "bun-types"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src"]
+}

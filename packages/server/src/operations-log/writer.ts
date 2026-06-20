@@ -27,8 +27,6 @@ export async function logOperation(
   }
 
   await executor.insert(operationsLogTable).values({
-    source: entry.source,
-    backend: entry.backend,
     tableName: entry.tableName ?? null,
     operationKind: entry.operationKind ?? null,
     userId: entry.userId ?? null,

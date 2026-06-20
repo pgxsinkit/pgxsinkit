@@ -12,7 +12,7 @@ import {
 import { createSyncServer } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
-import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
 
 const env = readIntegrationEnv();
 
@@ -67,7 +67,6 @@ describe("write-state gating (locked container + muted member) integration", () 
     server = createSyncServer({
       registry: membershipFanoutSyncRegistry,
       db: serverDb.db,
-      backend: "bulk-plpgsql-artifact",
       resolveAuthClaims: (request) => claimsFromHeader(request),
     });
   });

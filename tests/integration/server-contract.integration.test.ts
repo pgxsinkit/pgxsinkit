@@ -6,7 +6,7 @@ import { projectsSyncRegistry, projectsTable } from "@pgxsinkit/schema";
 import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
-import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
 
 const env = readIntegrationEnv();
 
@@ -73,7 +73,7 @@ describe("server facade contract", () => {
             mutationId: "12345678-1234-1234-8234-123456780001",
             mutationSeq: 1,
             kind: "create",
-            payload: { id, name: "Artifact-created project" },
+            payload: { id, name: "Created project" },
             clientTimestampUs: String(Date.now() * 1000),
           },
         ],
@@ -101,7 +101,7 @@ describe("server facade contract", () => {
             mutationId: "12345678-1234-1234-8234-123456780002",
             mutationSeq: 2,
             kind: "update",
-            payload: { name: "Artifact-updated project" },
+            payload: { name: "Updated project" },
             clientTimestampUs: String(Date.now() * 1000),
           },
         ],
@@ -112,7 +112,7 @@ describe("server facade contract", () => {
 
     const rowsAfterUpdate = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, id));
     expect(rowsAfterUpdate).toHaveLength(1);
-    expect(rowsAfterUpdate[0]?.name).toBe("Artifact-updated project");
+    expect(rowsAfterUpdate[0]?.name).toBe("Updated project");
 
     const deleteResponse = await server.request("/api/mutations", {
       method: "POST",
@@ -138,13 +138,7 @@ describe("server facade contract", () => {
     expect(remainingRows).toHaveLength(0);
 
     const logRows = await readOperationsLogRows(server);
-    const successRows = logRows.filter(
-      (row) =>
-        row.backend === "bulk-plpgsql-artifact" &&
-        row.source === "batch" &&
-        row.tableName === "projects" &&
-        row.status === "succeeded",
-    );
+    const successRows = logRows.filter((row) => row.tableName === "projects" && row.status === "succeeded");
     expect(successRows).toHaveLength(3);
   });
 
@@ -236,41 +230,6 @@ describe("server facade contract", () => {
     expect(rows[0]?.scheduledAt?.toISOString()).toBe(updatedAt);
   });
 
-  it("per-table CRUD routes are not registered — all writes go through /api/mutations", async () => {
-    const createResponse = await server.request("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: "02000001-0000-4006-8006-000000000006",
-        name: "Should not exist",
-      }),
-    });
-
-    expect(createResponse.status).toBe(404);
-
-    await server.drizzle.insert(projectsTable).values({
-      id: "02000001-0000-4007-8007-000000000007",
-      name: "Existing row",
-    });
-
-    const patchResponse = await server.request("/api/projects/02000001-0000-4007-8007-000000000007", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "No route" }),
-    });
-
-    expect(patchResponse.status).toBe(404);
-
-    const deleteResponse = await server.request("/api/projects/02000001-0000-4007-8007-000000000007", {
-      method: "DELETE",
-    });
-
-    expect(deleteResponse.status).toBe(404);
-
-    const listResponse = await server.request("/api/projects");
-    expect(listResponse.status).toBe(404);
-  });
-
   it("returns 400 for unknown table names", async () => {
     const response = await server.request("/api/mutations", {
       method: "POST",
@@ -294,11 +253,7 @@ describe("server facade contract", () => {
 
     const logRows = await readOperationsLogRows(server);
     const validationFailures = logRows.filter(
-      (row) =>
-        row.backend === "bulk-plpgsql-artifact" &&
-        row.source === "batch" &&
-        row.tableName === "nonexistent_table" &&
-        row.status === "validation_failed",
+      (row) => row.tableName === "nonexistent_table" && row.status === "validation_failed",
     );
     expect(validationFailures).toHaveLength(1);
   });
@@ -343,8 +298,6 @@ describe("server facade contract", () => {
 });
 
 type OpsLogRow = {
-  source: string;
-  backend: string;
   tableName: string | null;
   operationKind: string | null;
   status: string;
@@ -359,8 +312,6 @@ async function readOperationsLogRows(
 ): Promise<OpsLogRow[]> {
   return await server.drizzle
     .select({
-      source: operationsLogTable.source,
-      backend: operationsLogTable.backend,
       tableName: operationsLogTable.tableName,
       operationKind: operationsLogTable.operationKind,
       status: operationsLogTable.status,

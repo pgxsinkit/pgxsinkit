@@ -11,7 +11,7 @@ import { parseDemoAuthClaimsFromRequest } from "../../apps/write-api/src/demo-au
 import {
   installPlpgsqlBatchFunction,
   verifyPlpgsqlBatchFunction,
-} from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+} from "../../packages/server/src/mutations/plpgsql-apply";
 import {
   assertPerfBudgets,
   computePercentiles,
@@ -59,7 +59,6 @@ describe("performance: artifact write load", () => {
       const server = createSyncServer({
         registry,
         db: serverDb.db,
-        backend: "bulk-plpgsql-artifact",
         resolveAuthClaims: (request) => {
           const claims = parseDemoAuthClaimsFromRequest(request);
           return claims ? { ...claims } : null;

@@ -56,7 +56,7 @@ The canonical scenarios are:
 - server-side writes becoming visible to a running PGlite subscriber
 - write API validation failures and successful persistence
 - local batch submission through the public client facade, including create-plus-update chains before flush
-- deferred foreign-key behavior for out-of-order batch writes in `bulk-plpgsql-artifact`
+- deferred foreign-key behavior for out-of-order batch writes
 - repeated polling without fixed sleeps
 
 ## Upgrade gates
@@ -91,7 +91,7 @@ They must not be added to `validate`, `test`, `test:unit`, or `test:integration`
 
 The main goals are:
 
-- backend abuse testing for `bulk-plpgsql-artifact`
+- apply-function abuse testing
 - large-schema and large-row-count scenarios
 - optimistic local read performance with 100k+ local rows and large pending journals
 - flush throughput under realistic journal sizes so query-shape and index changes can be measured independently from local enqueue costs
@@ -101,7 +101,7 @@ The performance lanes are intentionally distinct:
 
 - `test:performance:client`: local-only optimistic staging and read costs inside one client
 - `test:performance:concurrent`: end-to-end multi-client mutate, flush, sync-echo, and convergence behavior under contention
-- `test:performance:server`: server-only concurrent `/api/mutations` pressure against `bulk-plpgsql-artifact`
+- `test:performance:server`: server-only concurrent `/api/mutations` pressure
 
 The browser lab at `apps/perf-lab/` is the manual companion for those client-runtime scenarios. `bun run perf:lab` launches a dedicated fixed-name stack for the lab itself, tears any prior `pgxsinkit-perf-lab` processes and containers down first, and writes browser-lab logs under `tmp/perf-lab/`. Its default live mode reprovisions the active synthetic registry on the dedicated write server, seeds PostgreSQL, waits for those rows to sync into browser PGlite through Electric, stages local mutations, flushes them upstream, and waits for the Electric echo plus reconcile pass to settle before calling the full cycle complete.
 
@@ -120,4 +120,4 @@ Integration coverage should reflect the provisioning workflow described in:
 - `docs/migrations.md`
 - `docs/function-artifacts.md`
 
-When `bulk-plpgsql-artifact` is used in staging/prod, keep at least one contract suite path running against preinstalled function artifacts, not startup-generated SQL.
+In staging/prod, keep at least one contract suite path running against the preinstalled function migration, not startup-generated SQL.

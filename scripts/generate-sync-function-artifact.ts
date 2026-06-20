@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Generates a proper drizzle-kit migration containing the
- * pgxsinkit_apply_batch_mutations PL/pgSQL function.
+ * pgxsinkit_apply_mutations PL/pgSQL function.
  *
  * Steps:
  *   1. Runs `drizzle-kit generate --custom --name sync_artifact` to create
@@ -19,7 +19,7 @@ import { join } from "node:path";
 
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
-import { buildPlpgsqlBatchFunctionDdl } from "../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { buildPlpgsqlBatchFunctionDdl } from "../packages/server/src/mutations/plpgsql-apply";
 
 const MIGRATION_NAME = "sync_artifact";
 const DRIZZLE_OUT = "infra/drizzle";

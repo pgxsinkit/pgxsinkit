@@ -9,11 +9,6 @@ import { composeCredentials } from "../../../infra/compose-credentials";
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1).default(composeCredentials.DEFAULT_DATABASE_URL),
   ELECTRIC_URL: z.string().min(1).default("http://localhost:3000/v1/shape"),
-  WRITE_API_BACKEND: z
-    .literal("bulk-plpgsql-artifact", {
-      error: "Only bulk-plpgsql-artifact is supported. Legacy backends have been removed.",
-    })
-    .default("bulk-plpgsql-artifact"),
   WRITE_API_OPS_LOG_ENABLED: z.stringbool().default(true),
   WRITE_API_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
   WRITE_API_PORT: z.coerce.number().int().positive().default(3001),

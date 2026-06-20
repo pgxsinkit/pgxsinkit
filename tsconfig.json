@@ -17,6 +17,7 @@
     "apps/web/src/App.tsx",
     "apps/web/src/main.tsx",
     "apps/perf-lab/src/App.tsx",
-    "apps/perf-lab/src/main.tsx"
+    "apps/perf-lab/src/main.tsx",
+    "apps/docs"
   ]
 }

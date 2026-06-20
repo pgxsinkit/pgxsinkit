@@ -30,11 +30,8 @@ import {
 } from "@pgxsinkit/schema";
 
 import { parseDemoAuthClaimsFromRequest } from "../apps/write-api/src/demo-auth";
-import {
-  buildPlpgsqlBatchFunctionDdl,
-  executePlpgsqlBatch,
-} from "../packages/server/src/mutations/bulk/plpgsql-strategy";
-import type { TransactionClient } from "../packages/server/src/mutations/bulk/types";
+import { buildPlpgsqlBatchFunctionDdl, executePlpgsqlBatch } from "../packages/server/src/mutations/plpgsql-apply";
+import type { TransactionClient } from "../packages/server/src/mutations/types";
 import {
   PERF_LAB_DATABASE_URL,
   PERF_LAB_ELECTRIC_URL,
@@ -242,7 +239,7 @@ app.post("/api/mutations", async (context) => {
     return context.json({ message: "Perf-lab mutations require a demo auth token." }, 401);
   }
 
-  const sanitizedBatch = sanitizeArtifactManagedFields(body, currentRegistry.registry);
+  const sanitizedBatch = sanitizeManagedFields(body, currentRegistry.registry);
 
   try {
     const acks = await adminDb.transaction(async (tx) => {
@@ -540,7 +537,7 @@ function findManagedFieldViolations(
   return managedFields.filter((field) => payloadKeys.has(field.propertyKey)).map((field) => field.propertyKey);
 }
 
-function sanitizeArtifactManagedFields(batch: BatchMutationRequest, registry: SyncTableRegistry): BatchMutationRequest {
+function sanitizeManagedFields(batch: BatchMutationRequest, registry: SyncTableRegistry): BatchMutationRequest {
   return {
     mutations: batch.mutations.map((mutation) => {
       if (mutation.kind === "delete") {

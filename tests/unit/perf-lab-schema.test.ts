@@ -15,7 +15,7 @@ import {
   syntheticPerfLabPresets,
 } from "@pgxsinkit/schema";
 
-import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/plpgsql-apply";
 
 describe("perf-lab scenario schemas", () => {
   it("builds schema-qualified synthetic tables and shape targets", () => {
@@ -75,7 +75,7 @@ describe("perf-lab scenario schemas", () => {
     });
 
     expect(truncateSql).toBe(`TRUNCATE TABLE "${schemaName}"."perf_items_000", "${schemaName}"."perf_items_001";`);
-    expect(functionDdl).toContain(`CREATE OR REPLACE FUNCTION "${schemaName}"."pgxsinkit_apply_batch_mutations"(`);
+    expect(functionDdl).toContain(`CREATE OR REPLACE FUNCTION "${schemaName}"."pgxsinkit_apply_mutations"(`);
     expect(functionDdl).toContain(`INSERT INTO "${schemaName}"."perf_items_000" (%s) VALUES (%s)`);
   });
 

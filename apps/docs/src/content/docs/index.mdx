@@ -1,0 +1,54 @@
+---
+title: pgxsinkit
+description: An offline-first sync toolkit for PostgreSQL/Supabase, ElectricSQL, Drizzle, and PGlite.
+template: splash
+hero:
+  tagline: Opinionated, Offline-first, RLS-aware sync between PostgreSQL/Supabase and Drizzle/PGlite at the edge.
+  image:
+    html: |
+      <picture>
+        <source srcset="/banner.avif" type="image/avif" />
+        <source srcset="/banner.webp" type="image/webp" />
+        <img src="/banner.png" alt="An elephant with vast ears flying through a storm, lightning arcing from its trunk" style="width:100%;height:auto;display:block" />
+      </picture>
+  actions:
+    - text: What is pgxsinkit?
+      link: /start/overview/
+      icon: right-arrow
+    - text: Getting started
+      link: /start/getting-started/
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/pgxsinkit/pgxsinkit
+      variant: minimal
+      icon: external
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## Two paths, one toolkit
+
+pgxsinkit is the **`@pgxsinkit/*`** library set. It gives a local-first app a read path that
+streams Postgres rows to PGlite through ElectricSQL, and a write path that takes local edits back
+to Postgres through a typed write API — with row-level security honoured on both.
+
+<CardGrid>
+  <Card title="Read path" icon="seti:db">
+    `PostgreSQL -> ElectricSQL -> PGlite`. Shapes (including membership fan-out via subquery
+    `where`) stream into local PGlite. Reads never hit Electric directly — they go through the
+    write API's shape proxy, which enforces ownership.
+  </Card>
+  <Card title="Write path" icon="pencil">
+    `client -> write API -> PostgreSQL`. Edits are staged locally, flushed as a batch, and applied
+    in a single in-database PL/pgSQL function. There is exactly one write path — no selectable
+    backend.
+  </Card>
+  <Card title="Proven, not promised" icon="approve-check">
+    The product is the toolkit. A demo app and a container-backed integration + performance harness
+    exist to prove and harden it against real PostgreSQL, Electric, and PGlite.
+  </Card>
+  <Card title="AI-ready docs" icon="open-book">
+    These docs publish `llms.txt` so your coding assistant can load the correct mental model fast.
+    See [Use these docs with your AI assistant](/start/ai-assistants/).
+  </Card>
+</CardGrid>
