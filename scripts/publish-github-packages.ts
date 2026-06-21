@@ -22,17 +22,11 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
-const DRY_RUN = process.env["DRY_RUN"] === "1";
 const REGISTRY = "https://npm.pkg.github.com";
-
-const repository = process.env["GITHUB_REPOSITORY"] ?? "";
-const refType = process.env["GITHUB_REF_TYPE"] ?? "branch";
-const refName = process.env["GITHUB_REF_NAME"] ?? "";
-const shortSha = (process.env["GITHUB_SHA"] ?? "").slice(0, 7);
 
 const SEMVER_TAG_RE = /^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._+-]+)?$/;
 
-interface Manifest {
+export interface Manifest {
   name?: string;
   version?: string;
   private?: boolean;
@@ -76,7 +70,7 @@ function findPublishablePackages(): { dir: string; pkgPath: string; pkg: Manifes
 // release tag + 1 patch). Reading tags requires the workflow to check out with `fetch-depth: 0`.
 const RELEASE_TAG_RE = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 
-function parseSemverCore(v: string): [number, number, number] {
+export function parseSemverCore(v: string): [number, number, number] {
   const parts = v.split(".");
   return [
     Number.parseInt(parts[0] ?? "0", 10) || 0,
@@ -85,7 +79,7 @@ function parseSemverCore(v: string): [number, number, number] {
   ];
 }
 
-function compareSemverCore(a: string, b: string): number {
+export function compareSemverCore(a: string, b: string): number {
   const [aMaj, aMin, aPat] = parseSemverCore(a);
   const [bMaj, bMin, bPat] = parseSemverCore(b);
   if (aMaj !== bMaj) return aMaj - bMaj;
@@ -93,12 +87,12 @@ function compareSemverCore(a: string, b: string): number {
   return aPat - bPat;
 }
 
-function nextPatch(v: string): string {
+export function nextPatch(v: string): string {
   const [maj, min, pat] = parseSemverCore(v);
   return `${maj}.${min}.${pat + 1}`;
 }
 
-function maxCore(a: string, b: string): string {
+export function maxCore(a: string, b: string): string {
   return compareSemverCore(a, b) >= 0 ? a : b;
 }
 
@@ -118,29 +112,52 @@ function latestReleaseTag(): string | null {
   return tags.reduce((hi, t) => (compareSemverCore(t, hi) > 0 ? t : hi));
 }
 
-const isReleaseTag = refType === "tag" && SEMVER_TAG_RE.test(refName);
-const distTag = isReleaseTag ? "latest" : "dev";
-
-// Computed once so every package in this run shares the same dev version (siblings must match for
-// cross-deps to resolve). The pre-release id leads with a unix-seconds stamp (a numeric SemVer
-// identifier => chronological ordering between dev builds) and keeps the short sha for traceability.
-const latestRelease = isReleaseTag ? null : latestReleaseTag();
-const devBaseFloor = latestRelease ? nextPatch(latestRelease) : null;
-const devStamp = Math.floor(Date.now() / 1000);
-const devPreId = shortSha ? `${devStamp}.${shortSha}` : String(devStamp);
-
-function targetVersion(baseVersion: string): string {
-  if (isReleaseTag) return refName;
-  const base = devBaseFloor ? maxCore(baseVersion, devBaseFloor) : baseVersion;
-  return `${base}-dev.${devPreId}`;
+export interface VersionContext {
+  /** Release-parity mode (a bare semver tag push); otherwise the dev channel. */
+  isReleaseTag: boolean;
+  /** The exact version to publish when in release-parity mode (the tag name). */
+  refName: string;
+  /** Lower bound for dev versions — nextPatch(latest release tag), or null if no tags are reachable. */
+  devBaseFloor: string | null;
+  /** Pre-release identifier shared by every sibling in one dev run (chronological + traceable). */
+  devPreId: string;
 }
 
-// Pin sibling (same-scope) runtime deps to the exact version being published, so a `@dev` (or
-// `@latest`) install resolves its siblings from the same channel. Handles both `workspace:*`
-// (conform-ed) and fixed-range (e.g. `^0.1.31`) declarations uniformly. Peer/dev deps are left
-// alone — peer ranges must stay ranges.
-function pinSiblingDeps(pkg: Manifest, scopePrefix: string, version: string): void {
-  for (const key of ["dependencies", "optionalDependencies"] as const) {
+// Derive the run context from the GitHub Actions environment + git tags. Does git I/O, so it is only
+// called from the executable entrypoint, never at import time.
+function resolveVersionContext(): VersionContext {
+  const refType = process.env["GITHUB_REF_TYPE"] ?? "branch";
+  const refName = process.env["GITHUB_REF_NAME"] ?? "";
+  const shortSha = (process.env["GITHUB_SHA"] ?? "").slice(0, 7);
+  const isReleaseTag = refType === "tag" && SEMVER_TAG_RE.test(refName);
+  // Computed once so every package in this run shares the same dev version (siblings must match for
+  // cross-deps to resolve). The pre-release id leads with a unix-seconds stamp (a numeric SemVer
+  // identifier => chronological ordering between dev builds) and keeps the short sha for traceability.
+  const latestRelease = isReleaseTag ? null : latestReleaseTag();
+  const devBaseFloor = latestRelease ? nextPatch(latestRelease) : null;
+  const devStamp = Math.floor(Date.now() / 1000);
+  const devPreId = shortSha ? `${devStamp}.${shortSha}` : String(devStamp);
+  return { isReleaseTag, refName, devBaseFloor, devPreId };
+}
+
+// The published version for a package, given its package.json base version and the run context.
+// Release-parity uses the tag verbatim; the dev channel anchors above the latest release (so `@dev`
+// always sorts above `@latest`) and stamps the shared pre-release id.
+export function targetVersion(baseVersion: string, ctx: VersionContext): string {
+  if (ctx.isReleaseTag) return ctx.refName;
+  const base = ctx.devBaseFloor ? maxCore(baseVersion, ctx.devBaseFloor) : baseVersion;
+  return `${base}-dev.${ctx.devPreId}`;
+}
+
+// Pin every same-scope (sibling) dep to the exact version being published, so a `@dev` (or
+// `@latest`) install resolves its siblings from the same channel. This MUST include
+// `peerDependencies`: siblings are released in lockstep at one identical version, and a left-alone
+// peer range (e.g. `>=0.0.12`) does NOT match a pre-release dev version under SemVer's prerelease
+// rule — so a dev consumer would silently back-fill the latest *release* of that sibling, mixing a
+// dev package with a release peer. Foreign-scope peers (react, zod, …) are a different scope and
+// stay ranges; only same-scope siblings are pinned. Handles `workspace:*` and fixed ranges uniformly.
+export function pinSiblingDeps(pkg: Manifest, scopePrefix: string, version: string): void {
+  for (const key of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
     const deps = pkg[key];
     if (deps === undefined || typeof deps !== "object") continue;
     const record = deps as Record<string, string>;
@@ -150,60 +167,69 @@ function pinSiblingDeps(pkg: Manifest, scopePrefix: string, version: string): vo
   }
 }
 
-const publishable = findPublishablePackages();
-if (publishable.length === 0) {
-  console.error("No publishable packages found.");
-  process.exit(1);
-}
-
 function scopePrefixOf(name: string | undefined): string {
   if (typeof name !== "string" || !name.startsWith("@")) return "";
   const scope = name.split("/")[0] ?? "";
   return scope ? `${scope}/` : "";
 }
 
-const repoUrl = `git+https://github.com/${repository}.git`;
-const scopePrefix = scopePrefixOf(publishable[0]?.pkg.name);
+function main(): void {
+  const DRY_RUN = process.env["DRY_RUN"] === "1";
+  const repository = process.env["GITHUB_REPOSITORY"] ?? "";
+  const ctx = resolveVersionContext();
+  const distTag = ctx.isReleaseTag ? "latest" : "dev";
 
-console.log(`GitHub Packages publish — mode: ${isReleaseTag ? "release parity" : "dev channel"}`);
-console.log(`  registry: ${REGISTRY}`);
-console.log(`  dist-tag: ${distTag}${DRY_RUN ? "  (DRY RUN)" : ""}\n`);
-
-const failures: string[] = [];
-
-for (const { dir, pkgPath, pkg } of publishable) {
-  const version = targetVersion(pkg.version as string);
-  const label = `${String(pkg.name)}@${version}`;
-
-  pkg.version = version;
-  // GitHub Packages links a package to its source repo via the `repository` field.
-  pkg.repository = { type: "git", url: repoUrl };
-  if (scopePrefix) pinSiblingDeps(pkg, scopePrefix, version);
-
-  if (DRY_RUN) {
-    console.log(`[dry-run] would publish ${label} (tag ${distTag}) from ${dir}`);
-    continue;
+  const publishable = findPublishablePackages();
+  if (publishable.length === 0) {
+    console.error("No publishable packages found.");
+    process.exit(1);
   }
 
-  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
+  const repoUrl = `git+https://github.com/${repository}.git`;
+  const scopePrefix = scopePrefixOf(publishable[0]?.pkg.name);
 
-  const proc = Bun.spawnSync(["bun", "publish", "--tag", distTag], {
-    cwd: dir,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (proc.exitCode === 0) {
-    console.log(`  published ${label}`);
-  } else {
-    const err = new TextDecoder().decode(proc.stderr) + new TextDecoder().decode(proc.stdout);
-    console.error(`  FAILED ${label}\n${err}`);
-    failures.push(label);
+  console.log(`GitHub Packages publish — mode: ${ctx.isReleaseTag ? "release parity" : "dev channel"}`);
+  console.log(`  registry: ${REGISTRY}`);
+  console.log(`  dist-tag: ${distTag}${DRY_RUN ? "  (DRY RUN)" : ""}\n`);
+
+  const failures: string[] = [];
+
+  for (const { dir, pkgPath, pkg } of publishable) {
+    const version = targetVersion(pkg.version as string, ctx);
+    const label = `${String(pkg.name)}@${version}`;
+
+    pkg.version = version;
+    // GitHub Packages links a package to its source repo via the `repository` field.
+    pkg.repository = { type: "git", url: repoUrl };
+    if (scopePrefix) pinSiblingDeps(pkg, scopePrefix, version);
+
+    if (DRY_RUN) {
+      console.log(`[dry-run] would publish ${label} (tag ${distTag}) from ${dir}`);
+      continue;
+    }
+
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
+
+    const proc = Bun.spawnSync(["bun", "publish", "--tag", distTag], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (proc.exitCode === 0) {
+      console.log(`  published ${label}`);
+    } else {
+      const err = new TextDecoder().decode(proc.stderr) + new TextDecoder().decode(proc.stdout);
+      console.error(`  FAILED ${label}\n${err}`);
+      failures.push(label);
+    }
   }
+
+  if (failures.length > 0) {
+    console.error(`\n${failures.length} package(s) failed to publish to GitHub Packages.`);
+    process.exit(1);
+  }
+
+  console.log(`\nDone. Published ${publishable.length} package(s) to GitHub Packages at @${distTag}.`);
 }
 
-if (failures.length > 0) {
-  console.error(`\n${failures.length} package(s) failed to publish to GitHub Packages.`);
-  process.exit(1);
-}
-
-console.log(`\nDone. Published ${publishable.length} package(s) to GitHub Packages at @${distTag}.`);
+if (import.meta.main) main();
