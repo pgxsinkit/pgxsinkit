@@ -64,12 +64,24 @@ all of this drifts invisibly.
   `@pgxsinkit/sync-engine` (removed by [ADR-0007](0007-absorb-sync-engine.md)); and the
   five `files`-declared package READMEs now exist (`contracts`, `client`, `server`,
   `react` gained minimal stubs; `pglite-sync` already had one).
-- **Decisions 1, 2, 4 (packed downstream fixture, the docs-build / fixture-smoke gate,
-  and the `target: "bun"` investigation) — deferred.** They require packing and
-  installing the built artifacts and a CI/docs-build step to verify; they land with the
-  same build/integration work as the deferred runtime cluster. Generating package
-  READMEs at packaging time (rather than the committed stubs) is the richer option to
-  revisit then.
+- **Decisions 1, 2 (packed downstream fixture + the gate) — done.**
+  `scripts/fixture-smoke.ts` (`bun run fixture:smoke`) builds the public packages, packs
+  them with `bun pm pack`, installs the tarballs into a throwaway consumer workspace
+  (sibling `workspace:*` deps redirected to the local tarballs via bun `overrides`), and
+  runs a smoke that imports from **every** published entry point (`contracts` / `client` /
+  `server` / `react`) and exercises the offline surface (registry definition →
+  `generateLocalSchemaSql` → `fingerprintRegistry` → `buildRegistryLock`/`runRegistryCheck`
+  → convergence driver). This proves the published `exports`/`types`/`main` and dependency
+  graph, not the in-repo source. A new `docs-and-fixture` CI job builds the docs site (the
+  TypeDoc API reference + Starlight) and runs the fixture smoke; neither needs
+  Postgres/Electric. The committed package-README stubs are kept (generating them at
+  packaging time remains a future refinement, not a correctness gap).
+- **Decision 4 (`target: "bun"` investigation) — done; no change needed.** The built dist
+  contains **no** `bun:` imports and **no** `node:` builtins in the browser-facing packages
+  (`client` / `contracts` / `pglite-sync`); with `packages: "external"` the output is clean
+  portable ESM. The fixture (run under Bun) proves Bun consumption, and the absence of
+  runtime-specific imports means a Vite / React Native bundler can consume it unchanged, so
+  `target: "bun"` stays.
 
 References: [ADR-0001](0001-unified-ts-release-versioning-tooling-standard.md)
 (release model); [ADR-0006](0006-local-schema-evolution.md) (registry-diff check);

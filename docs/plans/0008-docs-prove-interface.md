@@ -52,6 +52,7 @@ check in the check surface).
 - Standing contradictions fixed; getting-started reflects reality; the five package
   READMEs exist. **(Phase 1 done)**
 - A packed-fixture smoke test proves the published install path; CI builds the docs.
-  **(Phases 2–3 — deferred; need packing the built artifacts + a CI/docs-build step)**
-- `target` decision made on fixture evidence. **(Phase 4 — deferred; depends on the
-  fixture)**
+  **(Phases 2–3 done — `scripts/fixture-smoke.ts` (`bun run fixture:smoke`) + the
+  `docs-and-fixture` CI job building the docs site and running the smoke)**
+- `target` decision made on fixture evidence. **(Phase 4 done — built dist has no
+  `bun:`/`node:` imports in the browser-facing packages; `target: "bun"` stays.)**

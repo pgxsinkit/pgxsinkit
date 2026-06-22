@@ -15,6 +15,7 @@
     "db:push": "drizzle-kit push --config=infra/drizzle.config.ts",
     "dev:api": "cd apps/write-api && bun run dev",
     "dev:web": "cd apps/web && bun run dev",
+    "fixture:smoke": "bun scripts/fixture-smoke.ts",
     "format": "oxfmt --config .oxfmtrc.jsonc --check .",
     "format:write": "oxfmt --config .oxfmtrc.jsonc --write .",
     "guard:tmp-files": "bun scripts/check-temp-file-placement.ts",
