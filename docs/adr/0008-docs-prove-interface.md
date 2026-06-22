@@ -76,6 +76,18 @@ all of this drifts invisibly.
   TypeDoc API reference + Starlight) and runs the fixture smoke; neither needs
   Postgres/Electric. The committed package-README stubs are kept (generating them at
   packaging time remains a future refinement, not a correctness gap).
+
+  **Post-review strengthening (2026-06-22).** The smoke now *stands up* a real
+  `createSyncClient` (in-memory PGlite, `syncEnabled: false`) and performs a local
+  write→read round-trip through the published surface (`tables.*.create` → `diagnostics`
+  → `drizzle.select().from(views.*)`), rather than only asserting the factories are
+  functions. The full DB+Electric server round-trip stays in the integration lane
+  (`tests/integration/client-contract.integration.test.ts`), which builds a real
+  `createSyncServer` — the fixture cannot, since `createSyncServer` touches its `db` at
+  construction. `getting-started` now carries runnable registry/server/client snippets
+  matching this fixture and points consumers at the published `pgxsinkit-generate` bin
+  instead of a repo-only script. The fixture workspace is created under the repo-local
+  `tmp/` (AGENTS.md forbids the global `/tmp`).
 - **Decision 4 (`target: "bun"` investigation) — done; no change needed.** The built dist
   contains **no** `bun:` imports and **no** `node:` builtins in the browser-facing packages
   (`client` / `contracts` / `pglite-sync`); with `packages: "external"` the output is clean

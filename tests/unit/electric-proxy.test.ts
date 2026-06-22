@@ -175,7 +175,7 @@ describe("electric proxy", () => {
       expect(urlStr).not.toContain("where=");
     });
 
-    it("merges registry rowFilter with existing WHERE clause from client", async () => {
+    it("ignores a client-supplied WHERE for a governed table — the row filter is the sole authority", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
       globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -191,9 +191,31 @@ describe("electric proxy", () => {
       );
 
       const [targetUrl] = fetchMock.mock.calls[0]!;
+      // The client `where` (active=true) does not participate — only the registry ownership filter.
       expect(readFetchTargetUrl(targetUrl)).toBe(
-        buildExpectedShapeUrl("authors", "offset=-1", `(active=true) AND ("owner_id" = '${DEMO_USER1_ID}')`),
+        buildExpectedShapeUrl("authors", "offset=-1", `"owner_id" = '${DEMO_USER1_ID}'`),
       );
+    });
+
+    it("does not let a crafted client WHERE widen access past the owner filter (precedence bypass)", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      // The classic attack: a merged `(1=1) OR (1=1) AND (owner=…)` reduces (AND binds tighter
+      // than OR) to all-rows. The client `where` must be dropped, never merged.
+      const request = new Request(
+        `http://localhost:3001/v1/electric-proxy?table=authors&offset=-1&where=${encodeURIComponent("1=1) OR (1=1")}`,
+      );
+
+      await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        { registry: demoSyncRegistry, electricUrl: "http://localhost:3000/v1/shape" },
+      );
+
+      const [targetUrl] = fetchMock.mock.calls[0]!;
+      const where = new URL(readFetchTargetUrl(targetUrl)).searchParams.get("where");
+      expect(where).toBe(`"owner_id" = '${DEMO_USER1_ID}'`);
     });
   });
 
@@ -343,6 +365,23 @@ describe("electric proxy", () => {
 
       expect(response.status).toBe(403);
       // The upstream Electric credentials must never be lent to an ungoverned table.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a schema-qualified target that is not the exact declared shape target", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      // `private.authors` is a different table; the `authors` entry must NOT authorize it.
+      const request = new Request("http://localhost:3001/v1/electric-proxy?table=private.authors&offset=-1");
+
+      const response = await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        { registry: demoSyncRegistry, electricUrl: "http://localhost:3000/v1/shape?secret=test-api-token" },
+      );
+
+      expect(response.status).toBe(403);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 

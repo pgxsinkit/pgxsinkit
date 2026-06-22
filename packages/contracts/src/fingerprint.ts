@@ -1,5 +1,6 @@
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
+import type { RowFilterSpec } from "./config";
 import type { SyncTableEntry, SyncTableRegistry } from "./registry";
 
 /**
@@ -7,10 +8,11 @@ import type { SyncTableEntry, SyncTableRegistry } from "./registry";
  * the shape-relevant registry metadata, plus a hash of it.
  *
  * This is the single source of "has the shape changed" — consumed as the local-DB
- * version key and as the basis of the registry-diff gate (ADR-0006). Functions
- * (`rowTransform`, `customWhere`, function-valued filter params) are deliberately
- * excluded: only the structural shape that affects the local schema and
- * server-compatibility participates.
+ * version key and as the basis of the registry-diff gate (ADR-0006). Function *bodies*
+ * (`rowTransform`, `customWhere`, a function-valued `sharedUserId`) cannot be fingerprinted
+ * and are excluded — but their *presence* and the surrounding **static** filter structure
+ * (ownership/shared columns, projected columns) participate, so swapping one static filter
+ * for another is detected.
  */
 
 export interface CanonicalColumn {
@@ -37,9 +39,23 @@ export interface CanonicalTable {
     tableName: string;
     shapeKey: string;
     electricTable: string | null;
-    hasRowFilter: boolean;
+    rowFilter: CanonicalRowFilter | null;
   } | null;
   managedFields: Array<{ field: string; strategy: string; applyOn: string[] }>;
+}
+
+/**
+ * The static, fingerprint-able structure of a row filter. A change here (a different
+ * ownership column, an added/removed shared rule, a different static `sharedUserId`, a
+ * changed projection) shifts the fingerprint, so the local store rebuilds and the diff gate
+ * flags it. `customWhere`'s body is invisible — only its presence (`hasCustomWhere`) is
+ * recorded — and a function-valued `sharedUserId` collapses to a sentinel.
+ */
+export interface CanonicalRowFilter {
+  ownership: { column: string; claim: string } | null;
+  shared: { ownerColumn: string | null; sharedColumn: string | null; sharedUserId: string } | null;
+  hasCustomWhere: boolean;
+  columns: string[] | null;
 }
 
 const byName = (a: { name: string }, b: { name: string }): number => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
@@ -74,6 +90,26 @@ function canonicalizeManagedFields(entry: SyncTableEntry): CanonicalTable["manag
     .sort((a, b) => asString(a.field, b.field));
 }
 
+function canonicalizeRowFilter(filter: RowFilterSpec | undefined): CanonicalRowFilter | null {
+  if (!filter) {
+    return null;
+  }
+  return {
+    ownership: filter.ownership ? { column: filter.ownership.column, claim: filter.ownership.claim ?? "sub" } : null,
+    shared: filter.shared
+      ? {
+          ownerColumn: filter.shared.ownerColumn ?? null,
+          sharedColumn: filter.shared.sharedColumn ?? null,
+          // A static sharedUserId is part of the shape; a function-valued one cannot be
+          // fingerprinted (as with customWhere) and collapses to a sentinel.
+          sharedUserId: typeof filter.shared.sharedUserId === "string" ? filter.shared.sharedUserId : "(fn)",
+        }
+      : null,
+    hasCustomWhere: filter.customWhere != null,
+    columns: filter.columns ? [...filter.columns].sort(asString) : null,
+  };
+}
+
 function canonicalizeTable(key: string, entry: SyncTableEntry): CanonicalTable {
   const projection = entry.clientProjection
     ? {
@@ -89,7 +125,7 @@ function canonicalizeTable(key: string, entry: SyncTableEntry): CanonicalTable {
         tableName: entry.shape.tableName,
         shapeKey: entry.shape.shapeKey,
         electricTable: entry.shape.electricTable ?? null,
-        hasRowFilter: entry.shape.rowFilter != null,
+        rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
       }
     : null;
 

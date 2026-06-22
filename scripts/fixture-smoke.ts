@@ -14,8 +14,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -67,6 +66,7 @@ import {
 import {
   createConvergenceDriver,
   createIntervalConvergenceTrigger,
+  createSyncClient,
   generateLocalSchemaSql,
 } from "@pgxsinkit/client";
 import { createSyncServer } from "@pgxsinkit/server";
@@ -100,7 +100,7 @@ assert.equal(runRegistryCheck({ registry, lock }).ok, true);
 
 // client: the convergence driver + trigger factories are exported and constructable.
 const driver = createConvergenceDriver({
-  client: { flush: async () => {}, reconcile: async () => {}, retryFailed: async () => {} },
+  client: { flush: async () => {}, reconcile: async () => {} },
   trigger: createIntervalConvergenceTrigger(1000),
 });
 assert.equal(typeof driver.start, "function");
@@ -109,6 +109,31 @@ assert.equal(typeof driver.start, "function");
 assert.equal(typeof createSyncServer, "function");
 assert.equal(typeof createSyncClientHooks, "function");
 
+// client: stand up a REAL offline client (in-memory PGlite, sync disabled) and prove a local
+// write/read round-trip through the published surface — not just that the factory exists. The
+// DB+Electric round-trip against live infra lives in the integration lane (and createSyncServer
+// touches its db at construction, so it is exercised there, not here).
+const client = await createSyncClient({
+  registry,
+  electricUrl: "http://localhost:3000/v1/shape",
+  writeUrl: "http://localhost:3001",
+  dataDir: "memory://",
+  syncEnabled: false,
+});
+await client.ready;
+await client.tables.widgets.create({
+  id: "01963227-0000-7000-8000-000000000001",
+  label: "Smoke",
+  createdAtUs: 1n,
+  updatedAtUs: 1n,
+});
+const queued = await client.diagnostics();
+assert.equal(queued.mutation.pendingCount, 1);
+const rows = await client.drizzle.select().from(client.views.widgets);
+assert.equal(rows.length, 1);
+assert.equal(rows[0].label, "Smoke");
+await client.stop();
+
 console.log("FIXTURE SMOKE OK");
 `;
 
@@ -116,7 +141,10 @@ async function main(): Promise<void> {
   console.log("[fixture-smoke] building public packages…");
   run("bun", ["run", "build:public-packages"], repoRoot);
 
-  const workspace = await mkdtemp(join(tmpdir(), "pgxsinkit-fixture-"));
+  // Repo-local tmp only — AGENTS.md forbids the global /tmp. (gitignored under tmp/*.)
+  const tmpRoot = join(repoRoot, "tmp");
+  await mkdir(tmpRoot, { recursive: true });
+  const workspace = await mkdtemp(join(tmpRoot, "fixture-smoke-"));
   const pkgsDir = join(workspace, "pkgs");
   const appDir = join(workspace, "app");
   await rm(pkgsDir, { recursive: true, force: true });

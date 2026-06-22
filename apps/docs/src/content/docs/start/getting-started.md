@@ -45,16 +45,62 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
 1. **Define your sync registry** — the tables, their sync mode, and governance (managed fields like
    owner/timestamps). This is the single source of truth both paths read from.
 
-2. **Provision the apply function.** The write path applies batches through one in-database PL/pgSQL
-   function, `pgxsinkit_apply_mutations`, installed by a migration. Generate it from your registry:
+   ```ts
+   // sync-registry.ts
+   import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+   import { uuid, varchar } from "drizzle-orm/pg-core";
 
-   ```bash
-   bun run sync:function:generate
+   export const registry = defineSyncRegistry({
+     widgets: defineSyncTable({
+       tableName: "widgets",
+       mode: "readwrite",
+       makeColumns: () => ({
+         id: uuid("id").primaryKey(),
+         label: varchar("label", { length: 120 }).notNull(),
+         ownerId: uuid("owner_id"),
+       }),
+       // Optionally add governance.managedFields (owner/timestamps) and a
+       // shape.rowFilter for ownership-based row filtering.
+     }),
+   });
    ```
 
-3. **Create the server** with `createSyncServer({ registry, db, resolveAuthClaims })` and serve its
-   `fetch`. All writes go through `POST /api/mutations`; there is no per-table CRUD and no backend to
-   choose.
+2. **Provision the apply function.** The write path applies batches through one in-database PL/pgSQL
+   function, `pgxsinkit_apply_mutations`. Generate a drizzle-kit migration that installs it from your
+   registry with the published `pgxsinkit-generate` CLI (a `bin` of `@pgxsinkit/server`), run from
+   your own project:
+
+   ```bash
+   bun run pgxsinkit-generate \
+     --registry ./sync-registry.ts \
+     --project-dir ./db \
+     --name sync_artifact
+   ```
+
+   This writes a standard drizzle-kit migration you commit and apply through your normal migration
+   flow. (`bun run sync:function:generate` is the equivalent script **inside this repository** for
+   the demo registry.)
+
+3. **Create the server** and serve its `fetch`. All writes go through `POST /api/mutations`; the
+   ownership-enforcing shape proxy is served from the same app. There is no per-table CRUD and no
+   backend to choose.
+
+   ```ts
+   import { createSyncServer } from "@pgxsinkit/server";
+   import { registry } from "./sync-registry";
+
+   const server = createSyncServer({
+     registry,
+     db, // your Drizzle database
+     electricUrl: process.env.ELECTRIC_URL!, // e.g. http://localhost:3000/v1/shape
+     resolveAuthClaims: async (_request) => {
+       // verify the request's JWT and return its claims, or null to block all rows
+       return null;
+     },
+   });
+
+   export default { fetch: server.fetch };
+   ```
 
 </Steps>
 
@@ -64,8 +110,29 @@ The client writes locally into an overlay + a durable journal, flushes the journ
 and subscribes to Electric shapes that land in local PGlite. Reads are served from PGlite; the write
 API's `/v1/electric-proxy` forwards shape requests to Electric and enforces ownership.
 
-See [The read path](/concepts/read-path/) and [The write path](/concepts/write-path/) for the full
-flow, and [Packages](/packages/) for the client entry points.
+```ts
+import { createSyncClient } from "@pgxsinkit/client";
+import { registry } from "./sync-registry";
+
+const client = await createSyncClient({
+  registry,
+  electricUrl: "/v1/electric-proxy", // your write API's shape-proxy path
+  writeUrl: "/api", // your write API base
+  getAuthToken: async () => currentJwt(),
+});
+await client.ready;
+
+// Optimistic local write — staged in the overlay + journal, flushed on the next pass.
+await client.tables.widgets.create({ id: crypto.randomUUID(), label: "Hello" });
+
+// Reads come from the local read model (the overlay unioned over synced rows).
+const widgets = await client.drizzle.select().from(client.views.widgets);
+```
+
+These snippets are the same surface the packed-fixture smoke (`bun run fixture:smoke`) compiles and
+runs against the published tarballs, so they cannot silently drift. See
+[The read path](/concepts/read-path/) and [The write path](/concepts/write-path/) for the full flow,
+and [Packages](/packages/) for the client entry points.
 
 ## Try the demo
 

@@ -77,7 +77,7 @@ export async function reconcileLocalStoreVersion<TRegistry extends SyncTableRegi
   runtime: VersionReconcileRuntime;
   onSchemaChange?: (event: LocalStoreVersionEvent) => void | Promise<void>;
 }): Promise<LocalStoreVersionEvent | null> {
-  const { db, registry, runtime, onSchemaChange } = args;
+  const { db, registry, runtime } = args;
   const stored = await readStoredRegistryFingerprint(db, registry);
   const current = runtime.registryVersion;
 
@@ -86,17 +86,48 @@ export async function reconcileLocalStoreVersion<TRegistry extends SyncTableRegi
   }
 
   if (stored === null) {
-    await writeStoredRegistryFingerprint(db, registry, current);
-    return null;
+    // An unstamped store is normally brand-new → just stamp it. The exception is a store
+    // provisioned *before* the fingerprint mechanism: it has no stamp AND a pre-fingerprint
+    // journal shape that `CREATE TABLE IF NOT EXISTS` at boot will not have upgraded.
+    // Stamping it as current would leave the stale shape in place and the next write would
+    // fail; treat it as a version change and rebuild (drain-guarded), as a mismatch does.
+    if (!(await journalPredatesFingerprint(db, registry))) {
+      await writeStoredRegistryFingerprint(db, registry, current);
+      return null;
+    }
+    return rebuildReadCacheOrDefer(args, PRE_FINGERPRINT_SENTINEL);
   }
 
+  return rebuildReadCacheOrDefer(args, stored);
+}
+
+/** Placeholder "previous" fingerprint for a store provisioned before the fingerprint existed. */
+const PRE_FINGERPRINT_SENTINEL = "(pre-fingerprint)";
+
+/**
+ * The drain-then-drop core (ADR-0006): rebuild the read cache at the current shape when
+ * nothing is owed locally, otherwise defer so un-flushed/quarantined writes are never
+ * dropped (the drain completes on a later boot). Shared by the fingerprint-mismatch and
+ * pre-fingerprint-store paths.
+ */
+async function rebuildReadCacheOrDefer<TRegistry extends SyncTableRegistry>(
+  args: {
+    db: MutationDb;
+    registry: TRegistry;
+    runtime: VersionReconcileRuntime;
+    onSchemaChange?: (event: LocalStoreVersionEvent) => void | Promise<void>;
+  },
+  previousFingerprint: string,
+): Promise<LocalStoreVersionEvent> {
+  const { db, registry, runtime, onSchemaChange } = args;
+  const current = runtime.registryVersion;
   const stats = await runtime.readMutationStats();
   const owedMutations = stats.pendingCount + stats.sendingCount + stats.failedCount + stats.quarantinedCount;
 
   if (owedMutations > 0) {
     const event: LocalStoreVersionEvent = {
       status: "deferred",
-      previousFingerprint: stored,
+      previousFingerprint,
       nextFingerprint: current,
       owedMutations,
     };
@@ -109,10 +140,40 @@ export async function reconcileLocalStoreVersion<TRegistry extends SyncTableRegi
   await writeStoredRegistryFingerprint(db, registry, current);
   const event: LocalStoreVersionEvent = {
     status: "rebuilt",
-    previousFingerprint: stored,
+    previousFingerprint,
     nextFingerprint: current,
     owedMutations: 0,
   };
   await onSchemaChange?.(event);
   return event;
+}
+
+/**
+ * Whether the local store was provisioned before the fingerprint mechanism: a journal table
+ * that already exists but lacks the `registry_version` column. Such a store is unstamped yet
+ * NOT fresh — `CREATE TABLE IF NOT EXISTS` at boot left its old shape untouched — so it must
+ * be rebuilt, not silently stamped. A genuinely fresh store has its journal created with the
+ * column this boot, so this returns false and the store is stamped as-is.
+ */
+async function journalPredatesFingerprint(db: MutationDb, registry: SyncTableRegistry): Promise<boolean> {
+  const schema = getSyncRegistrySchema(registry);
+  for (const entry of Object.values(registry)) {
+    const journalTable = entry.clientProjection?.journalTable;
+    if (!journalTable) {
+      continue;
+    }
+    const result = await db.query<{ stale: boolean }>(
+      `SELECT
+         EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)
+         AND NOT EXISTS (
+           SELECT 1 FROM information_schema.columns
+           WHERE table_schema = $1 AND table_name = $2 AND column_name = 'registry_version'
+         ) AS "stale"`,
+      [schema, journalTable],
+    );
+    if (result.rows[0]?.stale) {
+      return true;
+    }
+  }
+  return false;
 }

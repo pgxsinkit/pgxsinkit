@@ -93,6 +93,16 @@ injection warning and pins the safe-by-default `ownership`/`shared` escaping in
 `tests/unit/contracts.test.ts`. `proxyElectricShapeRequest` stays exported for
 advanced/manual hosting (the integration harnesses use it directly).
 
+**Post-review hardening (2026-06-22).** A review found the fail-closed gate did not fully
+secure *authorization*. The proxy merged the client-supplied `where` into the ownership
+predicate (`(<client>) AND (<owner>)`), so a crafted `where=1=1) OR (1=1` reduced — by
+`AND`/`OR` precedence — to all-rows; and table allowlisting stripped the schema, so
+`private.authors` was authorized by an `authors` entry. Both are fixed: the client `where`
+is **never** forwarded (raw untrusted SQL cannot be safely merged into an auth predicate —
+the registry row filter is the sole authority), and allowlisting now matches the **exact**
+declared Electric target with no schema stripping. Pinned by the precedence-bypass and
+schema-qualified-rejection cases in `tests/unit/electric-proxy.test.ts`.
+
 References: [ADR-0002](0002-single-in-database-write-path.md) (single write path);
 `CONTEXT.md` (Parity boundary, Read model);
 [docs/plans/0003-secured-sync-ingress.md](../plans/0003-secured-sync-ingress.md).

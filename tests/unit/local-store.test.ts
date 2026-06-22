@@ -101,6 +101,37 @@ describe("reconcileLocalStoreVersion (ADR-0006 drain-then-drop)", () => {
     expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe(runtime.registryVersion);
   });
 
+  it("rebuilds a pre-fingerprint store (unstamped + journal lacks registry_version) rather than stamping it", async () => {
+    const { db, runtime } = await provisioned();
+
+    // Simulate a store provisioned before the fingerprint mechanism: drop the stamp's
+    // backing column from a journal table and leave the store unstamped. A bare stamp would
+    // leave this stale shape in place and the next write would fail.
+    await db.exec(`ALTER TABLE authors_mutations DROP COLUMN registry_version`);
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBeNull();
+
+    const events: string[] = [];
+    await reconcileLocalStoreVersion({
+      db,
+      registry: demoSyncRegistry,
+      runtime,
+      onSchemaChange: (event) => {
+        events.push(event.status);
+      },
+    });
+
+    // It was rebuilt (not silently stamped): the journal is back at the current shape and stamped.
+    expect(events).toEqual(["rebuilt"]);
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe(runtime.registryVersion);
+    const hasColumn = await db.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'authors_mutations' AND column_name = 'registry_version'
+       ) AS "exists"`,
+    );
+    expect(hasColumn.rows[0]?.exists).toBe(true);
+  });
+
   it("is a no-op when the stored fingerprint already matches", async () => {
     const { db, runtime } = await provisioned();
     await writeStoredRegistryFingerprint(db, demoSyncRegistry, runtime.registryVersion);

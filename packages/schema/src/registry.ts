@@ -1,11 +1,7 @@
-import { defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
+import { defineSyncRegistry, escapeSqlLiteral, type JwtClaims } from "@pgxsinkit/contracts";
 
 import { membershipFanoutSyncRegistry } from "./integration";
 import { authorsSyncEntry, todosSyncEntry } from "./schema";
-
-function escapeSqlLiteral(value: string): string {
-  return value.replace(/'/g, "''");
-}
 
 function isAdmin(claims: JwtClaims): boolean {
   return claims.app_metadata?.roles?.includes("admin") ?? false;

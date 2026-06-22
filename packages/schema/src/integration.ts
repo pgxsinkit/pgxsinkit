@@ -7,6 +7,7 @@ import {
   buildSupabaseOwnerOrAdminNativePolicies,
   defineSyncRegistry,
   defineSyncTable,
+  escapeSqlLiteral,
   type JwtClaims,
   type SyncConfigInput,
   type TableSpecInput,
@@ -118,10 +119,6 @@ export const rlsSyncRegistry = defineSyncRegistry({
 // reference tables (seeded server-side, read only by the filter/policies); work_items
 // is the synced readwrite entry that members collaborate on.
 // ---------------------------------------------------------------------------
-
-function escapeSqlLiteral(value: string): string {
-  return value.replace(/'/g, "''");
-}
 
 export const workspaceMemberRoleEnum = pgEnum("workspace_member_role", ["member", "manager"]);
 export const workItemStatusEnum = pgEnum("work_item_status", ["open", "resolved"]);

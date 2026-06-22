@@ -100,6 +100,79 @@ describe("registry diff gate (ADR-0006)", () => {
     expect(compareRegistries(withOne, withTwo).severity).toBe("compatible");
   });
 
+  it("classifies a local primary key change as breaking (review #4)", () => {
+    const mk = (cols: string[]) =>
+      defineSyncRegistry({
+        items: defineSyncTable({
+          tableName: "items",
+          makeColumns: () => ({ id: uuid("id").primaryKey(), title: varchar("title", { length: 120 }).notNull() }),
+          clientProjection: { omitColumns: [], localPrimaryKey: { columns: cols } },
+        }),
+      });
+    const diff = compareRegistries(mk(["id"]), mk(["title"]));
+    expect(diff.severity).toBe("breaking");
+    expect(diff.changes.some((change) => /local primary key changed/.test(change.detail))).toBe(true);
+  });
+
+  it("classifies a journal-table rename as breaking (orphans local data) (review #4)", () => {
+    const mk = (journalTable: string) =>
+      defineSyncRegistry({
+        items: defineSyncTable({
+          tableName: "items",
+          makeColumns: () => ({ id: uuid("id").primaryKey() }),
+          clientProjection: { omitColumns: [], journalTable },
+        }),
+      });
+    const diff = compareRegistries(mk("items_mutations"), mk("items_journal"));
+    expect(diff.severity).toBe("breaking");
+    expect(diff.changes.some((change) => /projection journalTable changed/.test(change.detail))).toBe(true);
+  });
+
+  it("classifies an omitted-columns change as risky (review #4)", () => {
+    const mk = (omit: string[]) =>
+      defineSyncRegistry({
+        items: defineSyncTable({
+          tableName: "items",
+          makeColumns: () => ({ id: uuid("id").primaryKey(), note: varchar("note", { length: 200 }) }),
+          clientProjection: { omitColumns: omit as never },
+        }),
+      });
+    const diff = compareRegistries(mk([]), mk(["note"]));
+    expect(diff.severity).toBe("risky");
+    expect(diff.changes.some((change) => /omitted columns changed/.test(change.detail))).toBe(true);
+  });
+
+  it("classifies a managed-fields change as risky (review #4)", () => {
+    const mk = (strategy: string) =>
+      defineSyncRegistry({
+        items: defineSyncTable({
+          tableName: "items",
+          makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id") }),
+          clientProjection: { omitColumns: [] },
+          governance: { managedFields: [{ column: "ownerId", applyOn: ["create"], strategy: strategy as never }] },
+        }),
+      });
+    const diff = compareRegistries(mk("authUid"), mk("nowMicroseconds"));
+    expect(diff.severity).toBe("risky");
+    expect(diff.changes.some((change) => /managed fields changed/.test(change.detail))).toBe(true);
+  });
+
+  it("classifies a static row-filter change as risky (review #4/#5)", () => {
+    const mk = (ownerColumn: string) => {
+      const entry = defineSyncTable({
+        tableName: "items",
+        makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id"), teamId: uuid("team_id") }),
+        clientProjection: { omitColumns: [] },
+      });
+      return defineSyncRegistry({
+        items: { ...entry, shape: { ...entry.shape!, rowFilter: { ownership: { column: ownerColumn } } } },
+      });
+    };
+    const diff = compareRegistries(mk("owner_id"), mk("team_id"));
+    expect(diff.severity).toBe("risky");
+    expect(diff.changes.some((change) => /row filter changed/.test(change.detail))).toBe(true);
+  });
+
   it("round-trips a lock and gates a breaking change", () => {
     const lock = buildRegistryLock(base());
     expect(runRegistryCheck({ registry: base(), lock }).ok).toBe(true);

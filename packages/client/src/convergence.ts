@@ -6,13 +6,19 @@
  * foregrounded? on power?) and how it learns those conditions, while the library owns the
  * convergence pass and the congestion policy (jittered backoff + attempt cap, already in the
  * mutation runtime). Pass nothing to `createSyncClient` → fully manual, today's behaviour.
+ *
+ * A pass is `flush` → `reconcile`. It deliberately does NOT call `retryFailed`: `flush`
+ * already re-attempts `failed` mutations whose `next_retry_at_us` backoff has elapsed, so a
+ * pass leaves the jittered backoff intact. Calling `retryFailed` on every pass would reset
+ * every failed mutation to "due now" and, under a short trigger interval, burn the whole
+ * attempt budget during a transient outage and quarantine writes prematurely. `retryFailed`
+ * stays a manual, user-initiated primitive ("retry my failed writes now").
  */
 
 /** The mechanism primitives a convergence pass schedules. */
 export interface ConvergenceClient {
   flush: () => Promise<void>;
   reconcile: () => Promise<void>;
-  retryFailed: () => Promise<void>;
 }
 
 /**
@@ -36,23 +42,32 @@ export interface ConvergenceDriverOptions {
 
 export interface ConvergenceDriver {
   start: () => void;
-  stop: () => void;
+  /**
+   * Stop scheduling and **await any in-flight pass** before resolving, so a caller can then
+   * safely close or wipe the underlying database without a pass racing against it. Idempotent.
+   */
+  stop: () => Promise<void>;
 }
 
 /**
  * Drive convergence from a {@link ConvergenceTrigger}. Each signal runs at most one pass at a
- * time (`retryFailed` → `flush` → `reconcile`); a signal arriving mid-pass coalesces into a
- * single follow-up pass, so a burst of triggers never stampedes the server (the per-mutation
- * backoff in the runtime handles the rest).
+ * time (`flush` → `reconcile`); a signal arriving mid-pass coalesces into a single follow-up
+ * pass, so a burst of triggers never stampedes the server (the per-mutation backoff in the
+ * runtime handles the rest).
  */
 export function createConvergenceDriver(options: ConvergenceDriverOptions): ConvergenceDriver {
   let unsubscribe: (() => void) | null = null;
   let running = false;
   let queued = false;
+  let disposed = false;
+  // The promise of the pass currently in flight, so stop() can await it before teardown.
+  let currentPass: Promise<void> | null = null;
 
-  const runPass = async () => {
-    if (running) {
-      queued = true;
+  const runPass = async (): Promise<void> => {
+    if (disposed || running) {
+      if (!disposed) {
+        queued = true;
+      }
       return;
     }
 
@@ -62,27 +77,29 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions): Conv
 
     running = true;
     let error: unknown = null;
-
-    try {
-      await options.client.retryFailed();
-      await options.client.flush();
-      await options.client.reconcile();
-    } catch (passError) {
-      error = passError;
-    } finally {
-      running = false;
-      options.onPass?.(error);
-
-      if (queued) {
-        queued = false;
-        void runPass();
+    const pass = (async () => {
+      try {
+        await options.client.flush();
+        await options.client.reconcile();
+      } catch (passError) {
+        error = passError;
       }
+    })();
+    currentPass = pass;
+    await pass;
+    running = false;
+    currentPass = null;
+    options.onPass?.(error);
+
+    if (queued && !disposed) {
+      queued = false;
+      void runPass();
     }
   };
 
   return {
     start: () => {
-      if (unsubscribe) {
+      if (unsubscribe || disposed) {
         return;
       }
 
@@ -91,9 +108,13 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions): Conv
       });
       void runPass();
     },
-    stop: () => {
+    stop: async () => {
+      disposed = true;
+      queued = false;
       unsubscribe?.();
       unsubscribe = null;
+      // Await the in-flight pass (if any) so the DB is quiescent before the caller closes/wipes it.
+      await currentPass;
     },
   };
 }

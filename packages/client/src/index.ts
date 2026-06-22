@@ -241,7 +241,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       client: {
         flush: () => mutationRuntime.flush(),
         reconcile: () => mutationRuntime.reconcile(),
-        retryFailed: () => mutationRuntime.retryFailed(),
       },
       trigger: options.autoSync,
       ...(options.onConvergencePass ? { onPass: options.onConvergencePass } : {}),
@@ -283,7 +282,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       await ready;
     },
     stop: async () => {
-      convergenceDriver?.stop();
+      // Await any in-flight convergence pass before closing PGlite, so a pass never queries a
+      // closed handle.
+      await convergenceDriver?.stop();
       sync?.unsubscribe();
       status.isRunning = false;
       options.onStatusChange?.(status);
@@ -301,7 +302,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         }
       }
 
-      convergenceDriver?.stop();
+      // Drain any in-flight convergence pass before wiping, so a pass never writes into a store
+      // being torn down underneath it.
+      await convergenceDriver?.stop();
       sync?.unsubscribe();
       status.isRunning = false;
       options.onStatusChange?.(status);

@@ -1539,7 +1539,12 @@ async function flushBatch(
         rows[0]!.context,
         rows.map((row) => {
           const attemptCount = row.attemptCount + 1;
-          const outcome = resolveFailureOutcome(httpStatus, attemptCount, maxAttempts, failedAtUs);
+          // A batch-level failure is not attributable to any one mutation, so it must NOT
+          // quarantine on a structural 4xx (a stray 404/413/malformed envelope would
+          // permanently kill unrelated valid writes). It stays retryable; only the hard
+          // attempt cap escalates to quarantined. Per-mutation structural rejection is handled
+          // on the ack path below, where the server names the offending mutation.
+          const outcome = resolveBatchFailureOutcome(attemptCount, maxAttempts, failedAtUs);
 
           if (outcome.status === "quarantined") {
             quarantinedMutationIds.push(row.mutationId);
@@ -1659,6 +1664,26 @@ function resolveFailureOutcome(
   failedAtUs: string,
 ): { status: "failed" | "quarantined"; nextRetryAtUs: string | null } {
   if (classifyFailureStatus(httpStatus) === "quarantined" || attemptCount >= maxAttempts) {
+    return { status: "quarantined", nextRetryAtUs: null };
+  }
+
+  return { status: "failed", nextRetryAtUs: computeNextRetryAtUs(failedAtUs, attemptCount) };
+}
+
+/**
+ * Resolve a *batch-level* failure — the whole POST failed (transport error, 5xx, auth, or a
+ * non-2xx the server did not attribute to a specific mutation). Unlike a per-mutation ack
+ * rejection, the fault cannot be pinned on any one mutation, so a structural 4xx must NOT
+ * quarantine the batch (a stray 404/413/malformed envelope would permanently kill unrelated
+ * valid offline writes). These failures stay retryable `failed` with jittered backoff; only
+ * the hard attempt cap escalates to terminal `quarantined`.
+ */
+function resolveBatchFailureOutcome(
+  attemptCount: number,
+  maxAttempts: number,
+  failedAtUs: string,
+): { status: "failed" | "quarantined"; nextRetryAtUs: string | null } {
+  if (attemptCount >= maxAttempts) {
     return { status: "quarantined", nextRetryAtUs: null };
   }
 

@@ -4,6 +4,7 @@ import {
   type JwtClaims,
   type RowTransform,
   type RowTransformContext,
+  type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
@@ -91,10 +92,10 @@ type ProxyTargetDecision = { kind: "forward"; targetUrl: string } | { kind: "rej
 
 /**
  * Decide whether a shape request may be forwarded. The proxy serves only
- * registry-governed shapes (ADR-0003): a request with no `table`, or one naming a
- * table absent from the registry, is rejected and never reaches Electric. A table
- * that is in the registry but declares no `rowFilter` still forwards — the gate is
- * registry membership, not the presence of a filter.
+ * registry-governed shapes (ADR-0003): a request with no `table`, or one whose `table`
+ * does not match a declared Electric shape target **exactly**, is rejected and never
+ * reaches Electric. A table that is in the registry but declares no `rowFilter` still
+ * forwards — the gate is registry membership, not the presence of a filter.
  */
 function decideProxyTarget(
   request: Request,
@@ -107,7 +108,7 @@ function decideProxyTarget(
     return { kind: "reject", status: 400, message: "Shape request must specify a table" };
   }
 
-  if (!getRegistryEntry(options.registry, requestedTable)) {
+  if (!resolveEntryByElectricTarget(options.registry, requestedTable)) {
     return { kind: "reject", status: 403, message: `Table is not in the sync registry: ${requestedTable}` };
   }
 
@@ -118,11 +119,22 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(options.electricUrl);
 
-  // Merge incoming request params into the electric URL, preserving
-  // any pre-existing params (e.g. secret API token from electricUrl).
+  // Merge incoming request params into the electric URL, preserving any pre-existing
+  // params (e.g. the secret API token from electricUrl). The client-supplied `where` is
+  // deliberately NOT forwarded: authorization must never depend on client-controlled SQL
+  // (ADR-0003). There is no safe way to merge untrusted raw SQL into the ownership
+  // predicate — unbalanced parens/operators escape any wrapping (e.g. `1=1) OR (1=1`
+  // becomes `(1=1) OR (1=1) AND (owner=…)`, which precedence reduces to all-rows). The
+  // only `where` that reaches Electric is the registry-derived filter set below.
   requestUrl.searchParams.forEach((value, key) => {
+    if (key === "where") {
+      return;
+    }
     targetUrl.searchParams.set(key, value);
   });
+  // Belt-and-braces: never let a `where` from `electricUrl`'s own query string survive
+  // either — the row filter is the sole authority.
+  targetUrl.searchParams.delete("where");
 
   const table = targetUrl.searchParams.get("table");
 
@@ -130,13 +142,7 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
     return targetUrl.toString();
   }
 
-  const entry = getRegistryEntry(options.registry, table);
-
-  if (!entry) {
-    return targetUrl.toString();
-  }
-
-  const rowFilter = entry.shape?.rowFilter;
+  const rowFilter = resolveEntryByElectricTarget(options.registry, table)?.shape?.rowFilter;
 
   if (!rowFilter) {
     return targetUrl.toString();
@@ -144,16 +150,8 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
 
   const whereClause = buildRowFilterWhere(rowFilter, claims, options.extraParams);
 
-  if (!whereClause) {
-    return targetUrl.toString();
-  }
-
-  const existingWhere = targetUrl.searchParams.get("where");
-
-  if (!existingWhere) {
+  if (whereClause) {
     targetUrl.searchParams.set("where", whereClause);
-  } else {
-    targetUrl.searchParams.set("where", `(${existingWhere}) AND (${whereClause})`);
   }
 
   // Apply column projection from registry if configured
@@ -164,20 +162,42 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
   return targetUrl.toString();
 }
 
-function getRegistryEntry(registry: SyncTableRegistry, table: string) {
-  // Table names may be qualified (schema.table) — normalize to just the table name
-  const parts = table.split(".");
-  const key = parts.at(-1) ?? table;
-  return registry[key as keyof typeof registry];
+/**
+ * The exact Electric shape target an entry declares — `electricTable` if set, otherwise
+ * the Drizzle table name. This is the string a client puts in the `table` param and the
+ * one Electric receives, so it is the unit of allowlisting.
+ */
+function electricTargetForEntry(entry: SyncTableEntry | undefined): string | null {
+  const shape = entry?.shape;
+  if (!shape) {
+    return null;
+  }
+  return shape.electricTable ?? shape.tableName;
+}
+
+/**
+ * Resolve the registry entry whose declared Electric target equals `requestedTable`
+ * **exactly**. Schema qualification is significant: an `authors` entry does not authorize
+ * `private.authors` (a different table in a different schema). Returns undefined when no
+ * entry declares that exact target — the caller fails closed.
+ */
+function resolveEntryByElectricTarget(registry: SyncTableRegistry, requestedTable: string): SyncTableEntry | undefined {
+  for (const key of Object.keys(registry)) {
+    const entry = registry[key as keyof typeof registry] as SyncTableEntry | undefined;
+    if (electricTargetForEntry(entry) === requestedTable) {
+      return entry;
+    }
+  }
+  return undefined;
 }
 
 function getOmittedProjectedColumnsForTable(registry: SyncTableRegistry, table: string): readonly string[] {
-  const entry = getRegistryEntry(registry, table);
+  const entry = resolveEntryByElectricTarget(registry, table);
   return entry ? getOmittedProjectedColumnNames(entry) : [];
 }
 
 function getRowTransformForTable(registry: SyncTableRegistry, table: string): RowTransform | undefined {
-  return getRegistryEntry(registry, table)?.serverProjection?.rowTransform;
+  return resolveEntryByElectricTarget(registry, table)?.serverProjection?.rowTransform;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

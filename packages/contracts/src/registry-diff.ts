@@ -86,11 +86,64 @@ function diffTable(table: string, previous: CanonicalTable, next: CanonicalTable
   if (JSON.stringify(previous.primaryKey) !== JSON.stringify(next.primaryKey)) {
     changes.push({ severity: "breaking", table, detail: "primary key changed" });
   }
+  if (JSON.stringify(previous.localPrimaryKey) !== JSON.stringify(next.localPrimaryKey)) {
+    // The local identity the overlay + journal rows are keyed on; changing it orphans
+    // any owed (un-acked) writes — the runtime cannot re-key them.
+    changes.push({ severity: "breaking", table, detail: "local primary key changed" });
+  }
   if (previous.mode !== next.mode) {
     changes.push({ severity: "risky", table, detail: `mode changed: ${previous.mode} -> ${next.mode}` });
   }
-  if (JSON.stringify(previous.shape) !== JSON.stringify(next.shape)) {
-    changes.push({ severity: "risky", table, detail: "shape changed (re-sync required)" });
+  diffProjection(table, previous.projection, next.projection, changes);
+  diffShape(table, previous.shape, next.shape, changes);
+  if (JSON.stringify(previous.managedFields) !== JSON.stringify(next.managedFields)) {
+    // Managed-field governance changes how writes are constructed/owned; a returning client
+    // with owed writes authored under the old governance needs a conscious re-sync.
+    changes.push({ severity: "risky", table, detail: "managed fields changed (re-sync required)" });
+  }
+}
+
+/**
+ * Projection changes. Renaming the synced/overlay/journal tables orphans their
+ * name-coupled local data (ADR-0006) → breaking; changing the omitted-column set changes
+ * which columns exist locally → a re-sync (risky).
+ */
+function diffProjection(
+  table: string,
+  previous: CanonicalTable["projection"],
+  next: CanonicalTable["projection"],
+  changes: RegistryChange[],
+): void {
+  for (const key of ["syncedTable", "overlayTable", "journalTable"] as const) {
+    if ((previous?.[key] ?? null) !== (next?.[key] ?? null)) {
+      changes.push({ severity: "breaking", table, detail: `projection ${key} changed (orphans local data)` });
+    }
+  }
+  if (JSON.stringify(previous?.omitColumns ?? null) !== JSON.stringify(next?.omitColumns ?? null)) {
+    changes.push({ severity: "risky", table, detail: "omitted columns changed (re-sync required)" });
+  }
+}
+
+/**
+ * Shape changes. The Electric target (table/shapeKey/electricTable) and the row filter both
+ * govern which rows stream; a change to either needs a re-sync so the local cache is not left
+ * holding rows selected under the old definition (risky). The row filter's `customWhere` body
+ * is invisible to the fingerprint, so a change confined to it is not detectable here.
+ */
+function diffShape(
+  table: string,
+  previous: CanonicalTable["shape"],
+  next: CanonicalTable["shape"],
+  changes: RegistryChange[],
+): void {
+  const target = (shape: CanonicalTable["shape"]): string | null =>
+    shape ? `${shape.tableName}|${shape.shapeKey}|${shape.electricTable ?? ""}` : null;
+
+  if (target(previous) !== target(next)) {
+    changes.push({ severity: "risky", table, detail: "shape target changed (re-sync required)" });
+  }
+  if (JSON.stringify(previous?.rowFilter ?? null) !== JSON.stringify(next?.rowFilter ?? null)) {
+    changes.push({ severity: "risky", table, detail: "row filter changed (re-sync required)" });
   }
 }
 

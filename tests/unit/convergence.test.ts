@@ -28,8 +28,8 @@ function manualTrigger(shouldConverge = true) {
   };
 }
 
-function countingClient(): ConvergenceClient & { calls: { flush: number; reconcile: number; retryFailed: number } } {
-  const calls = { flush: 0, reconcile: 0, retryFailed: 0 };
+function countingClient(): ConvergenceClient & { calls: { flush: number; reconcile: number } } {
+  const calls = { flush: 0, reconcile: 0 };
   return {
     calls,
     flush: async () => {
@@ -37,9 +37,6 @@ function countingClient(): ConvergenceClient & { calls: { flush: number; reconci
     },
     reconcile: async () => {
       calls.reconcile += 1;
-    },
-    retryFailed: async () => {
-      calls.retryFailed += 1;
     },
   };
 }
@@ -54,13 +51,14 @@ describe("convergence driver (ADR-0005)", () => {
 
     driver.start();
     await tick();
-    expect(client.calls).toEqual({ flush: 1, reconcile: 1, retryFailed: 1 });
+    // A pass is flush -> reconcile only; retryFailed is NOT called (it would reset backoff).
+    expect(client.calls).toEqual({ flush: 1, reconcile: 1 });
 
     fire();
     await tick();
     expect(client.calls.flush).toBe(2);
 
-    driver.stop();
+    await driver.stop();
   });
 
   it("does not converge while shouldConverge() is false", async () => {
@@ -73,14 +71,13 @@ describe("convergence driver (ADR-0005)", () => {
     await tick();
 
     expect(client.calls.flush).toBe(0);
-    driver.stop();
+    await driver.stop();
   });
 
   it("coalesces signals that arrive mid-pass into a single follow-up pass", async () => {
     let flushCount = 0;
     let releaseFirstFlush!: () => void;
     const client: ConvergenceClient = {
-      retryFailed: async () => undefined,
       reconcile: async () => undefined,
       flush: async () => {
         flushCount += 1;
@@ -107,7 +104,7 @@ describe("convergence driver (ADR-0005)", () => {
 
     // Exactly one follow-up pass ran, not one per signal.
     expect(flushCount).toBe(2);
-    driver.stop();
+    await driver.stop();
   });
 
   it("stops driving after stop()", async () => {
@@ -119,7 +116,7 @@ describe("convergence driver (ADR-0005)", () => {
     await tick();
     const flushesAtStop = client.calls.flush;
 
-    driver.stop();
+    await driver.stop();
     expect(isSubscribed()).toBe(false);
 
     fire();
@@ -127,11 +124,42 @@ describe("convergence driver (ADR-0005)", () => {
     expect(client.calls.flush).toBe(flushesAtStop);
   });
 
+  it("stop() awaits an in-flight pass before resolving (no race with DB teardown)", async () => {
+    let releaseFlush!: () => void;
+    let flushSettled = false;
+    const client: ConvergenceClient = {
+      reconcile: async () => undefined,
+      flush: async () => {
+        await new Promise<void>((resolve) => {
+          releaseFlush = resolve;
+        });
+        flushSettled = true;
+      },
+    };
+    const { trigger } = manualTrigger();
+    const driver = createConvergenceDriver({ client, trigger });
+
+    driver.start();
+    await tick(); // a pass is now blocked inside flush
+
+    let stopResolved = false;
+    const stopping = driver.stop().then(() => {
+      stopResolved = true;
+    });
+
+    await tick();
+    expect(stopResolved).toBe(false); // stop() must not resolve while a pass is in flight
+
+    releaseFlush();
+    await stopping;
+    expect(stopResolved).toBe(true);
+    expect(flushSettled).toBe(true); // the in-flight pass completed before stop() resolved
+  });
+
   it("reports a pass error to onPass and keeps driving", async () => {
     const errors: unknown[] = [];
     let shouldThrow = true;
     const client: ConvergenceClient = {
-      retryFailed: async () => undefined,
       reconcile: async () => undefined,
       flush: async () => {
         if (shouldThrow) {
@@ -157,7 +185,7 @@ describe("convergence driver (ADR-0005)", () => {
     await tick();
     expect(errors[1]).toBeNull(); // recovered
 
-    driver.stop();
+    await driver.stop();
   });
 });
 

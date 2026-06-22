@@ -117,6 +117,33 @@ describe("mutation quarantine (ADR-0006)", () => {
     }
   });
 
+  it("keeps a batch-level 4xx retryable — does not quarantine unattributed writes", async () => {
+    const { runtime } = await createAuthorsRuntime();
+
+    // The whole POST fails with a structural-looking 4xx (e.g. a stray 404 / 413 / malformed
+    // envelope) that the server did NOT attribute to a specific mutation. Quarantining the
+    // batch here would permanently kill valid offline writes, so it must stay retryable.
+    const fetchMock = transportErrorFetch(404);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await runtime.create("authors", { id: "01963227-d4c7-72db-b858-f89f6af80004", name: "Valid write" });
+      await runtime.flush("authors");
+
+      const stats = await runtime.readMutationStats("authors");
+      expect(stats.quarantinedCount).toBe(0);
+      expect(stats.failedCount).toBe(1);
+
+      const [detail] = await runtime.readMutationDetails("authors");
+      expect(detail?.status).toBe("failed");
+      expect(detail?.lastHttpStatus).toBe(404);
+      expect(detail?.nextRetryAtUs).not.toBeNull(); // retried with backoff, not terminal
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("quarantines a still-failing mutation once it hits the hard attempt cap", async () => {
     const { runtime } = await createAuthorsRuntime({ maxMutationAttempts: 2 });
 

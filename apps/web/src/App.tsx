@@ -290,7 +290,8 @@ function TodoApp({
 
     return () => {
       isDisposed = true;
-      driver.stop();
+      // stop() now drains the in-flight pass; the effect cleanup is sync, so fire-and-forget.
+      void driver.stop();
     };
   }, [client]);
 
