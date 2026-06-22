@@ -46,10 +46,6 @@ const publicPackages = [
     entrypoints: ["src/index.ts"],
   },
   {
-    packageDir: "packages/sync-engine",
-    entrypoints: ["src/index.ts"],
-  },
-  {
     packageDir: "packages/client",
     entrypoints: ["src/index.ts"],
   },

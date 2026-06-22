@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
 import { buildDemoSyncConfig } from "@pgxsinkit/schema";
-import { buildConfiguredShapeSpecs, buildShapeConfig, buildShapeUrl } from "@pgxsinkit/sync-engine";
 
-describe("sync-engine", () => {
+import { buildConfiguredShapeSpecs, buildShapeConfig, buildShapeUrl } from "../../packages/client/src/shape-sync";
+
+describe("shape sync", () => {
   it("builds a shape URL with the table parameter", () => {
     expect(buildShapeUrl("http://localhost:3000/v1/shape", "todos")).toBe("http://localhost:3000/v1/shape?table=todos");
   });

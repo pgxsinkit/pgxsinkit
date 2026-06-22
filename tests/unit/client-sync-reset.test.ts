@@ -58,7 +58,7 @@ describe("createSyncClient subscription reset", () => {
       drizzle: () => ({ mocked: true }),
     }));
 
-    await mock.module("@pgxsinkit/sync-engine", () => ({
+    await mock.module("../../packages/client/src/shape-sync", () => ({
       createElectricExtension: () => ({}),
       startConfiguredSync: startConfiguredSyncMock,
     }));

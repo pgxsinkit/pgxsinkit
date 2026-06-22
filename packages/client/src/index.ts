@@ -18,10 +18,10 @@ import type {
   SyncTableUpdateInput,
 } from "@pgxsinkit/contracts";
 import { getSyncRegistrySchema } from "@pgxsinkit/contracts";
-import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-engine";
 
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
 import { generateLocalSchemaSql } from "./schema";
+import { createElectricExtension, startConfiguredSync } from "./shape-sync";
 
 export { generateLocalSchemaSql };
 

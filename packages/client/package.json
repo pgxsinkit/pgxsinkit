@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@pgxsinkit/contracts": "workspace:*",
-    "@pgxsinkit/sync-engine": "workspace:*"
+    "@pgxsinkit/pglite-sync": "workspace:*"
   },
   "peerDependencies": {
     "@electric-sql/pglite": "0.5.3",

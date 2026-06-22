@@ -30,7 +30,6 @@
       "@pgxsinkit/contracts": ["./packages/contracts/src/index.ts"],
       "@pgxsinkit/pglite-sync": ["./packages/pglite-sync/src/index.ts"],
       "@pgxsinkit/server": ["./packages/server/src/index.ts"],
-      "@pgxsinkit/sync-engine": ["./packages/sync-engine/src/index.ts"],
       "@pgxsinkit/test-utils": ["./packages/test-utils/src/index.ts"],
       "@pgxsinkit/react": ["./packages/react/src/index.ts"]
     }

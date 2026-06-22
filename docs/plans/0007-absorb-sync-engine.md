@@ -28,8 +28,10 @@ Depends on: best sequenced after/with [ADR-0005](../adr/0005-mutation-convergenc
 ## Acceptance
 
 - `@pgxsinkit/sync-engine` no longer exists or publishes; `client` owns the
-  orchestration internally over the vendored adapter; validate + integration green;
-  no doc references a consumer-facing sync-engine package.
+  orchestration internally (`shape-sync.ts`) over the vendored adapter; no
+  `@pgxsinkit/sync-engine` reference remains; validate green. **(done)** Install-doc
+  cleanup (getting-started / packages page) rides with ADR-0008. Integration lanes
+  repoint to the internal module and run on the Podman lane.
 
 ## Note
 

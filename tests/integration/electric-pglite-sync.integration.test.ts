@@ -2,10 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 import { authorsTable, buildDemoSyncConfig, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createElectricExtension, startConfiguredSync } from "@pgxsinkit/sync-engine";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { createElectricExtension, startConfiguredSync } from "../../packages/client/src/shape-sync";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
 import { createFreshTestPGlite } from "../support/pglite";
 

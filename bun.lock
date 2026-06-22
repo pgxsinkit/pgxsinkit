@@ -66,7 +66,6 @@
         "@pgxsinkit/contracts": "workspace:*",
         "@pgxsinkit/react": "workspace:*",
         "@pgxsinkit/schema": "workspace:*",
-        "@pgxsinkit/sync-engine": "workspace:*",
         "react": "19.2.7",
         "react-dom": "19.2.7",
         "uuid": "14.0.0",
@@ -92,7 +91,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@pgxsinkit/contracts": "workspace:*",
-        "@pgxsinkit/sync-engine": "workspace:*",
+        "@pgxsinkit/pglite-sync": "workspace:*",
       },
       "peerDependencies": {
         "@electric-sql/pglite": "0.5.3",
@@ -150,17 +149,6 @@
       "peerDependencies": {
         "drizzle-orm": "1.0.0-rc.2",
         "hono": "^4.12.26",
-      },
-    },
-    "packages/sync-engine": {
-      "name": "@pgxsinkit/sync-engine",
-      "version": "0.0.0",
-      "dependencies": {
-        "@pgxsinkit/contracts": "workspace:*",
-        "@pgxsinkit/pglite-sync": "workspace:*",
-      },
-      "peerDependencies": {
-        "@electric-sql/pglite": "0.5.3",
       },
     },
     "packages/test-utils": {
@@ -502,8 +490,6 @@
     "@pgxsinkit/schema": ["@pgxsinkit/schema@workspace:packages/schema"],
 
     "@pgxsinkit/server": ["@pgxsinkit/server@workspace:packages/server"],
-
-    "@pgxsinkit/sync-engine": ["@pgxsinkit/sync-engine@workspace:packages/sync-engine"],
 
     "@pgxsinkit/test-utils": ["@pgxsinkit/test-utils@workspace:packages/test-utils"],
 

@@ -1,6 +1,6 @@
 # Absorb sync-engine into the client
 
-Status: proposed (2026-06-22)
+Status: accepted (2026-06-22)
 
 `packages/sync-engine` is a single 165-line `index.ts`. Its only product caller is
 `client/src/index.ts:21` (`apps/web/vite.config.ts:13` is a build alias, not a
@@ -40,6 +40,19 @@ tells consumers to install it directly while the packages page calls it transiti
   in the client's internal module and aligns with
   [ADR-0005](0005-mutation-convergence.md)'s convergence driver, without a
   standalone package.
+
+## Implementation status
+
+Done. `packages/sync-engine/src/index.ts` moved to
+`packages/client/src/shape-sync.ts` (an internal module of the client); `client`
+imports it directly and depends on the vendored `@pgxsinkit/pglite-sync` in place of
+the removed wrapper. The `@pgxsinkit/sync-engine` package is deleted — dropped from the
+build/release list (`scripts/build-public-packages.ts`), the tsconfig path map, and the
+`apps/web` dependency + Vite alias (it was never imported in `apps/web/src`). The unit
+test became `tests/unit/shape-sync.test.ts`; the integration harnesses and the
+client-reset mock import the internal module directly. Nothing of the wrapper is
+re-exported from `@pgxsinkit/client`'s public surface. Install-doc updates ride with
+[ADR-0008](0008-docs-prove-interface.md).
 
 References: [ADR-0005](0005-mutation-convergence.md) (where retries/instrumentation
 land); [ADR-0008](0008-docs-prove-interface.md) (docs/install updates);

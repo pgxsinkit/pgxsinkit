@@ -10,7 +10,6 @@ const workspaceAliases = {
   "@pgxsinkit/pglite-sync": fileURLToPath(new URL("../../packages/pglite-sync/src/index.ts", import.meta.url)),
   "@pgxsinkit/react": fileURLToPath(new URL("../../packages/react/src/index.ts", import.meta.url)),
   "@pgxsinkit/schema": fileURLToPath(new URL("../../packages/schema/src/index.ts", import.meta.url)),
-  "@pgxsinkit/sync-engine": fileURLToPath(new URL("../../packages/sync-engine/src/index.ts", import.meta.url)),
 };
 
 export default defineConfig({
