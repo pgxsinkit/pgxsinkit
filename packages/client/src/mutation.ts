@@ -48,7 +48,9 @@ import {
   quoteIdentifier,
 } from "@pgxsinkit/contracts";
 
-export type MutationStatus = "pending" | "sending" | "acked" | "failed";
+import { assertValidMutationTransition, type MutationStatus } from "./mutation-state";
+
+export type { MutationStatus } from "./mutation-state";
 export type MutationKind = "create" | "update" | "delete";
 
 export type MutationBatchItem<TRegistry extends SyncTableRegistry> = {
@@ -154,8 +156,19 @@ export function computeBackoffDelayMs(attemptCount: number) {
   return Math.min(1000 * 2 ** exponent, 30_000);
 }
 
-export function computeNextRetryAtUs(nowUs: string, attemptCount: number) {
-  return (BigInt(nowUs) + BigInt(computeBackoffDelayMs(attemptCount)) * 1000n).toString();
+/**
+ * Retry delay with equal jitter around the {@link computeBackoffDelayMs} ceiling: half
+ * the ceiling plus a random share of the other half. Spreads retries so a fleet of
+ * clients does not stampede the server in lockstep after an outage (ADR-0005 congestion
+ * policy). `random` is injectable for deterministic tests.
+ */
+export function computeRetryDelayMs(attemptCount: number, random: () => number = Math.random) {
+  const ceiling = computeBackoffDelayMs(attemptCount);
+  return Math.round(ceiling / 2 + random() * (ceiling / 2));
+}
+
+export function computeNextRetryAtUs(nowUs: string, attemptCount: number, random: () => number = Math.random) {
+  return (BigInt(nowUs) + BigInt(computeRetryDelayMs(attemptCount, random)) * 1000n).toString();
 }
 
 export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
@@ -505,6 +518,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       }
     },
     retryFailed: async (table) => {
+      assertValidMutationTransition("failed", "pending");
       const contexts = filterContexts(tableContexts, table);
       const nowUs = nowMicroseconds();
 
@@ -524,6 +538,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       }
     },
     recoverSending: async (table) => {
+      assertValidMutationTransition("sending", "pending");
       const contexts = filterContexts(tableContexts, table);
       const nowUs = nowMicroseconds();
 

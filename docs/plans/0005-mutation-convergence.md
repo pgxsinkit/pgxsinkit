@@ -48,6 +48,12 @@ Depends on: [ADR-0006](../adr/0006-local-schema-evolution.md) drop primitive (fo
 
 ## Acceptance
 
-- State machine explicit and tested; congestion policy centralised + bounded.
-- Driver opt-in; both demo apps use it; manual mode preserved.
-- `destroy()` wipes; `stop()` does not; pending-write guard tested.
+- State machine explicit and tested (`mutation-state.ts`,
+  `tests/unit/mutation-state.test.ts`); backoff jittered + bounded, flushes already
+  serialised. **(Phase 1 + the jitter half of Phase 2 done)**
+- Driver opt-in; both demo apps use it; manual mode preserved. **(Phase 3 — deferred
+  to its own change verified on the Podman integration lane; retry cadence must be
+  checked against real `next_retry_at_us` backoff, not unit fakes)**
+- `destroy()` wipes; `stop()` does not; pending-write guard tested. **(Phase 4 —
+  deferred to land with ADR-0006's drop primitive)**
+- Max-attempts cap **(deferred to ADR-0006's quarantine terminal state)**.

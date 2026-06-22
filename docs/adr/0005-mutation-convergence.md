@@ -1,6 +1,6 @@
 # Mutation convergence: mechanism primitives plus an opt-in driver
 
-Status: proposed (2026-06-22)
+Status: accepted (2026-06-22); partially implemented
 
 The product promise is reliable offline operation and eventual convergence. The
 mutation journal (`packages/client/src/mutation.ts`, 1,835 lines) is deep in raw
@@ -66,6 +66,29 @@ split.
   keep full control.
 - Congestion safety is centralised; servers stop being hammered on recovery.
 - `destroy()` finally means destroy; logout and erasure become correct.
+
+## Implementation status
+
+- **Decision 4 (explicit state machine) — done.** `packages/client/src/mutation-state.ts`
+  is the one named definition of the journal transitions
+  (`pending`/`sending`/`acked`/`failed`), with `isValidMutationTransition` /
+  `assertValidMutationTransition`; the runtime sources `MutationStatus` from it and
+  guards the manual `retryFailed`/`recoverSending` transitions. Pinned by
+  `tests/unit/mutation-state.test.ts`. ADR-0006 extends this with the
+  transient/permanent split.
+- **Decision 1 (congestion policy) — partially done.** Backoff now applies equal
+  jitter around the existing capped-exponential ceiling
+  (`computeRetryDelayMs`, injectable RNG), so a fleet does not retry in lockstep
+  after an outage. Flushes are already serialised through the runtime's `flushQueue`
+  (effective concurrency cap of 1). A hard max-attempts cap is folded into ADR-0006's
+  quarantine state (a terminal "give up" needs that state).
+- **Decision 3 (opt-in convergence driver) — deferred.** The driver's retry cadence
+  interacts with the runtime's per-mutation `next_retry_at_us` backoff in ways that
+  must be verified against real sync (the Podman integration lane), not just unit
+  fakes. To be built as its own focused change with that lane, including the demo
+  rewire.
+- **Decision 5 (`destroy()` teardown) — deferred** to land with ADR-0006's
+  `dropReadCache`/full-wipe drop primitive, which it reuses.
 
 References: [ADR-0006](0006-local-schema-evolution.md) (drop primitive, quarantine
 state); `CONTEXT.md` (Mutation journal, Overlay);

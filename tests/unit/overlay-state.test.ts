@@ -10,6 +10,7 @@ import {
   DEFAULT_FLUSH_BATCH_SIZE,
   computeBackoffDelayMs,
   computeNextRetryAtUs,
+  computeRetryDelayMs,
   createMutationRuntime,
   nowMicroseconds,
 } from "../../packages/client/src/mutation";
@@ -399,7 +400,16 @@ describe("overlay state helpers", () => {
     expect(computeBackoffDelayMs(1)).toBe(1000);
     expect(computeBackoffDelayMs(2)).toBe(2000);
     expect(computeBackoffDelayMs(10)).toBe(30000);
-    expect(computeNextRetryAtUs("1000", 2)).toBe("2001000");
+  });
+
+  it("applies equal jitter around the backoff ceiling (ADR-0005 congestion policy)", () => {
+    // Equal jitter: half the ceiling, plus a random share of the other half.
+    expect(computeRetryDelayMs(2, () => 0)).toBe(1000); // floor = ceiling / 2
+    expect(computeRetryDelayMs(2, () => 1)).toBe(2000); // ceiling
+    expect(computeRetryDelayMs(2, () => 0.5)).toBe(1500); // midpoint
+    // next-retry timestamp threads the same jitter (us = nowUs + delayMs * 1000).
+    expect(computeNextRetryAtUs("1000", 2, () => 0)).toBe("1001000");
+    expect(computeNextRetryAtUs("1000", 2, () => 1)).toBe("2001000");
   });
 
   it("queues updates into the overlay and journal", async () => {
