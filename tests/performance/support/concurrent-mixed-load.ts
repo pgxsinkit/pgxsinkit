@@ -509,7 +509,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
     return buildRunResult(config, tableNames, performance.now() - startedAtMs, clientHandles, finalDiagnostics);
   } finally {
-    await Promise.all(clientHandles.map((handle) => handle.client.destroy()));
+    await Promise.all(clientHandles.map((handle) => handle.client.stop()));
     await stopHttpServer(httpServer);
     await server?.stop();
     await serverDb.close();
@@ -1111,7 +1111,7 @@ export async function runConcurrentMixedLoadWorker(
       },
     };
   } finally {
-    await client.destroy();
+    await client.stop();
   }
 }
 

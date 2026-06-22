@@ -88,8 +88,12 @@ split.
   must be verified against real sync (the Podman integration lane), not just unit
   fakes. To be built as its own focused change with that lane, including the demo
   rewire.
-- **Decision 5 (`destroy()` teardown) — deferred** to land with ADR-0006's
-  `dropReadCache`/full-wipe drop primitive, which it reuses.
+- **Decision 5 (`destroy()` teardown) — done.** `destroy()` now wipes the entire local
+  store (synced cache + overlay + journal) via ADR-0006's `buildWipeLocalStoreSql`, distinct
+  from `stop()` (which only halts sync and closes the handle, preserving data). A guard
+  refuses the wipe while mutations are still owed (pending/sending/failed/quarantined) unless
+  `destroy({ force: true })`, so logout/erasure never silently drops owed writes. Proven in
+  `tests/integration/client-contract.integration.test.ts`.
 
 References: [ADR-0006](0006-local-schema-evolution.md) (drop primitive, quarantine
 state); `CONTEXT.md` (Mutation journal, Overlay);

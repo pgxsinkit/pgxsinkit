@@ -1,13 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-const destroyMock = mock(async (): Promise<void> => undefined);
+const stopMock = mock(async (): Promise<void> => undefined);
 const createSyncClientMock = mock(
-  async (
-    _options: unknown,
-  ): Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: typeof destroyMock }> => ({
+  async (_options: unknown): Promise<{ pglite: { name: string }; ready: Promise<void>; stop: typeof stopMock }> => ({
     pglite: { name: "mock-db" },
     ready: Promise.resolve(),
-    destroy: destroyMock,
+    stop: stopMock,
   }),
 );
 
@@ -21,7 +19,7 @@ describe("web pglite loader", () => {
   afterAll(() => mock.restore());
 
   beforeEach(() => {
-    destroyMock.mockClear();
+    stopMock.mockClear();
     createSyncClientMock.mockClear();
   });
 
@@ -51,10 +49,10 @@ describe("web pglite loader", () => {
     expect(first.db).toBe(second.db);
 
     await first.dispose();
-    expect(destroyMock).not.toHaveBeenCalled();
+    expect(stopMock).not.toHaveBeenCalled();
 
     await second.dispose();
-    expect(destroyMock).toHaveBeenCalledTimes(1);
+    expect(stopMock).toHaveBeenCalledTimes(1);
   });
 
   it("skips read sync for the unauthenticated demo identity", async () => {
@@ -77,6 +75,6 @@ describe("web pglite loader", () => {
     expect(await createSyncClientArgs?.getAuthToken?.()).toBeUndefined();
 
     await loaded.dispose();
-    expect(destroyMock).toHaveBeenCalledTimes(1);
+    expect(stopMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -65,7 +65,7 @@ export async function loadPerfClient(
     client,
     db: client.pglite,
     dispose: async () => {
-      await client.destroy();
+      await client.stop();
     },
   };
 }

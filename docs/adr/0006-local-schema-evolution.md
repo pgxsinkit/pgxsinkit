@@ -117,11 +117,17 @@ drain-then-drop while online. Optimistic *attempt* yes; *silent* loss no.
   a quarantined mutation holds later same-entity mutations behind it. Pinned by
   `tests/unit/mutation-quarantine.test.ts` + `tests/unit/mutation-state.test.ts`.
 - **Decisions 1–3 (fingerprint-keyed store, drain-then-drop boot, `dropReadCache`)
-  — deferred to the integration-verified runtime cluster.** They touch the local-DB boot
-  and the drain half must be verified against real sync (the Podman integration lane),
-  not unit fakes; they land with ADR-0005's `destroy()` teardown (which reuses
-  `dropReadCache`). The ADR-0004 fingerprint and the journal stamp they build on are in
-  place.
+  — done.** A local-meta table (`pgxsinkit_local_meta`, `client/src/schema.ts`) records the
+  registry fingerprint the store was provisioned under; `client/src/local-store.ts`
+  (`reconcileLocalStoreVersion`) compares it on boot. On a change with **nothing owed**, it
+  wipes and rebuilds the read cache at the new shape and resets the Electric subscriptions so
+  shapes re-stream; with writes still owed it **defers** (surfaced via `onSchemaChange`,
+  retried on a later boot) so nothing is dropped — the drain happens across sessions as
+  pending writes flush and reconcile. `buildDropReadCacheSql` (read cache only, preserves
+  overlay/journal) and `buildWipeLocalStoreSql` (full teardown) are the drop primitives;
+  `client.dropReadCache()` exposes the former. Pinned by `tests/unit/local-store.test.ts`
+  and proven against real Electric in `tests/integration/client-contract.integration.test.ts`
+  (cross-boot rebuild + re-sync).
 - **Decision 9 (lossless offline upgrade) — deferred** as designed.
 
 References: [ADR-0004](0004-one-registry-interpreter.md) (fingerprint);

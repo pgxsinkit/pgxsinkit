@@ -63,8 +63,8 @@ across renames). Revisit on real demand.
   **(Phase 3 + Phase 4 done — `registry-diff.ts`, `tests/unit/registry-diff.test.ts`,
   `docs/registry-evolution.md`)**
 - Fingerprint-keyed store; drain-then-drop preserves the journal; tests green.
-  **(Phase 1 — deferred to the integration-verified runtime cluster)**
-- Journal stamped; transient vs permanent split; quarantine surfaced. **(Phase 2 —
-  deferred to the runtime cluster; reuses the ADR-0005 state machine + ADR-0004
-  fingerprint already in place)**
-- `dropReadCache` primitive **(deferred — lands with ADR-0005 `destroy()`)**.
+  **(Phase 1 done — `local-store.ts` + `pgxsinkit_local_meta`; unit + cross-boot integration)**
+- Journal stamped; transient vs permanent split; quarantine surfaced. **(Phase 2 done —
+  `registry_version` column + `classifyFailureStatus` + `onQuarantine` + the hard attempt
+  cap; `tests/unit/mutation-quarantine.test.ts`)**
+- `dropReadCache` primitive **(done — `buildDropReadCacheSql` + `client.dropReadCache()`).**

@@ -195,7 +195,9 @@ describe("client facade contract", () => {
           expect(rows).toHaveLength(1);
         });
       } finally {
-        await firstClient.destroy();
+        // stop() halts sync + closes the handle but preserves the local store, so the
+        // second client on the same dataDir still sees the synced data (ADR-0005).
+        await firstClient.stop();
       }
 
       const secondClient = await createSyncClient({
@@ -325,6 +327,103 @@ describe("client facade contract", () => {
       } finally {
         await client.destroy();
       }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("rebuilds the read cache on a registry-version change and re-syncs (ADR-0006)", async () => {
+    const dataDir = await createPersistentDataDir();
+
+    try {
+      await server.drizzle.insert(projectsTable).values({
+        id: "01965156-5884-7a0b-a24e-31b5c9be0006",
+        name: "Upgrade survivor",
+      });
+
+      const firstClient = await createSyncClient({
+        registry: projectsSyncRegistry,
+        electricUrl: env.electricUrl,
+        writeUrl: `http://127.0.0.1:${writeApiPort}`,
+        dataDir,
+      });
+
+      try {
+        await firstClient.ready;
+        await waitFor(async () => {
+          const rows = await firstClient.drizzle.select().from(projectsTable);
+          expect(rows).toHaveLength(1);
+        });
+
+        // Simulate a returning user whose store was provisioned under an older registry
+        // fingerprint, with nothing owed locally (a clean drain).
+        await firstClient.pglite.exec(
+          "UPDATE pgxsinkit_local_meta SET value = 'older-fingerprint' WHERE key = 'registry_fingerprint';",
+        );
+      } finally {
+        await firstClient.stop();
+      }
+
+      const events: string[] = [];
+      const secondClient = await createSyncClient({
+        registry: projectsSyncRegistry,
+        electricUrl: env.electricUrl,
+        writeUrl: `http://127.0.0.1:${writeApiPort}`,
+        dataDir,
+        onSchemaChange: (event) => {
+          events.push(event.status);
+        },
+      });
+
+      try {
+        await secondClient.ready;
+
+        // The fingerprint changed with nothing owed -> read cache rebuilt, then re-synced.
+        expect(events).toEqual(["rebuilt"]);
+        await waitFor(async () => {
+          const rows = await secondClient.drizzle.select().from(projectsTable);
+          expect(rows).toHaveLength(1);
+          expect(rows[0]?.name).toBe("Upgrade survivor");
+        });
+      } finally {
+        await secondClient.destroy({ force: true });
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("destroy() refuses while writes are owed, and force-wipes (ADR-0005)", async () => {
+    const dataDir = await createPersistentDataDir();
+
+    try {
+      const client = await createSyncClient({
+        registry: projectsSyncRegistry,
+        electricUrl: env.electricUrl,
+        writeUrl: `http://127.0.0.1:${writeApiPort}`,
+        dataDir,
+      });
+
+      await client.ready;
+
+      // An un-flushed write is owed to the server; destroy() must refuse to drop it.
+      await client.tables.projects.create({
+        id: "01965156-5884-7a0b-a24e-31b5c9be0008",
+        name: "Owed write",
+      });
+
+      let refusal: Error | null = null;
+      try {
+        await client.destroy();
+      } catch (error) {
+        refusal = error as Error;
+      }
+
+      expect(refusal?.message).toMatch(/still owed/);
+      expect((await client.diagnostics()).mutation.pendingCount).toBe(1);
+
+      // force wipes regardless and closes the handle.
+      await client.destroy({ force: true });
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

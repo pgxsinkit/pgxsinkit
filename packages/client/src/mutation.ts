@@ -148,6 +148,8 @@ interface TableContext {
 }
 
 export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
+  /** The registry fingerprint (ADR-0004) this runtime stamps onto enqueued mutations. */
+  registryVersion: string;
   create: <TKey extends SyncTableName<TRegistry>>(
     table: TKey,
     input: SyncTableCreateInput<TRegistry, TKey>,
@@ -514,6 +516,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   };
 
   return {
+    registryVersion,
     create: async (table, input) => {
       await runInTransaction(async () => {
         await enqueueBatch([

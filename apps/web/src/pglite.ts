@@ -102,5 +102,6 @@ async function releaseSharedDatabase(dataDir: string, entry: SharedDatabaseEntry
   }
 
   const loaded = await entry.promise;
-  await loaded.client.destroy();
+  // Halt sync and close the handle, preserving the local store for the next mount (ADR-0005).
+  await loaded.client.stop();
 }

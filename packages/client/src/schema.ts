@@ -19,6 +19,14 @@ interface ResolvedProjection {
   readModel: string;
 }
 
+/**
+ * Local key/value metadata table. Holds the registry fingerprint the local store was
+ * provisioned under (ADR-0006), so a registry change is detected on boot and the read
+ * cache is rebuilt — rather than relying on a hand-bumped `idb://…-vN` suffix.
+ */
+export const LOCAL_META_TABLE = "pgxsinkit_local_meta";
+export const REGISTRY_FINGERPRINT_KEY = "registry_fingerprint";
+
 type TableColumn = ReturnType<typeof getProjectedColumns<AnyPgTable>>[number]["column"];
 
 export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
@@ -28,6 +36,13 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
   if (localSchema !== "public") {
     statements.push(`CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(localSchema)};`);
   }
+
+  statements.push(
+    `CREATE TABLE IF NOT EXISTS ${qualifyIdentifier(localSchema, LOCAL_META_TABLE)} (\n  ${[
+      "key TEXT PRIMARY KEY",
+      "value TEXT NOT NULL",
+    ].join(",\n  ")}\n);`,
+  );
 
   const enumDefinitions = collectEnumDefinitions(registry, localSchema);
 
@@ -395,4 +410,69 @@ function qualifyIdentifier(schemaName: string, objectName: string) {
 
 function buildJournalSequenceName(journalTable: string) {
   return `${journalTable}_mutation_seq`;
+}
+
+/**
+ * Drop the reconstructible **read cache** — the synced tables and their read-model views
+ * and reconcile triggers/functions — while preserving the authority tables (overlay,
+ * journal, the local-meta table). Re-running {@link generateLocalSchemaSql} then rebuilds
+ * the synced tables at the current shape, and a re-sync refills them (ADR-0006). This is
+ * the named drop primitive a returning-online upgrade uses after a clean drain.
+ */
+export function buildDropReadCacheSql<TRegistry extends SyncTableRegistry>(registry: TRegistry): string {
+  const localSchema = getSyncRegistrySchema(registry);
+  const statements: string[] = [];
+
+  for (const [tableKey, entry] of Object.entries(registry)) {
+    const projection = getClientProjection(entry, tableKey, localSchema);
+    const triggerName = `${projection.syncedTable}_reconcile_on_sync`;
+
+    if (entry.mode !== "readonly") {
+      statements.push(`DROP VIEW IF EXISTS ${projection.readModel};`);
+      statements.push(`DROP TRIGGER IF EXISTS ${triggerName} ON ${projection.syncedTable};`);
+      statements.push(`DROP FUNCTION IF EXISTS ${triggerName}();`);
+    }
+
+    statements.push(`DROP TABLE IF EXISTS ${projection.syncedTable} CASCADE;`);
+  }
+
+  return `${statements.join("\n")}\n`;
+}
+
+/**
+ * Wipe the **entire** local store provisioned from the registry — the read cache plus the
+ * authority tables (overlay, journal, sequences), the enum types, and the local-meta row.
+ * This is the full teardown reused by `destroy()` (ADR-0005 decision 5) and by the
+ * drain-then-drop upgrade once a clean drain has confirmed nothing is owed (ADR-0006).
+ */
+export function buildWipeLocalStoreSql<TRegistry extends SyncTableRegistry>(registry: TRegistry): string {
+  const localSchema = getSyncRegistrySchema(registry);
+  const statements: string[] = [buildDropReadCacheSql(registry).trimEnd()];
+
+  for (const [tableKey, entry] of Object.entries(registry)) {
+    if (entry.mode === "readonly") {
+      continue;
+    }
+
+    const projection = getClientProjection(entry, tableKey, localSchema);
+
+    if (projection.overlayTable) {
+      statements.push(`DROP TABLE IF EXISTS ${projection.overlayTable} CASCADE;`);
+    }
+
+    if (projection.journalTable && entry.clientProjection?.journalTable) {
+      statements.push(`DROP TABLE IF EXISTS ${projection.journalTable} CASCADE;`);
+      statements.push(
+        `DROP SEQUENCE IF EXISTS ${qualifyIdentifier(localSchema, buildJournalSequenceName(entry.clientProjection.journalTable))};`,
+      );
+    }
+  }
+
+  for (const enumDefinition of collectEnumDefinitions(registry, localSchema)) {
+    statements.push(`DROP TYPE IF EXISTS ${qualifyIdentifier(enumDefinition.schemaName, enumDefinition.enumName)};`);
+  }
+
+  statements.push(`DROP TABLE IF EXISTS ${qualifyIdentifier(localSchema, LOCAL_META_TABLE)} CASCADE;`);
+
+  return `${statements.join("\n")}\n`;
 }

@@ -19,11 +19,13 @@ import type {
 } from "@pgxsinkit/contracts";
 import { getSyncRegistrySchema } from "@pgxsinkit/contracts";
 
+import { type LocalStoreVersionEvent, reconcileLocalStoreVersion } from "./local-store";
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
-import { generateLocalSchemaSql } from "./schema";
+import { buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
 import { createElectricExtension, startConfiguredSync } from "./shape-sync";
 
 export { generateLocalSchemaSql };
+export type { LocalStoreVersionEvent };
 
 export type ClientPGlite = PGliteWithLive &
   PGliteInterfaceExtensions<{ electric: ReturnType<typeof createElectricExtension> }>;
@@ -51,6 +53,13 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * The library surfaces them here rather than silently dropping or retry-looping (ADR-0006).
    */
   onQuarantine?: (quarantined: MutationDetail[]) => void | Promise<void>;
+  /**
+   * Invoked on boot when the registry fingerprint differs from the one the local store was
+   * provisioned under (ADR-0006). `rebuilt` = the read cache was dropped and rebuilt at the
+   * new shape; `deferred` = un-flushed/quarantined writes are still owed, so the rebuild is
+   * postponed (and retried on a later boot) rather than dropping owed data.
+   */
+  onSchemaChange?: (event: LocalStoreVersionEvent) => void | Promise<void>;
 }
 
 export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey extends SyncTableName<TRegistry>> {
@@ -72,7 +81,18 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
   status: SyncRuntimeStatus;
   start: () => Promise<void>;
   stop: () => Promise<void>;
-  destroy: () => Promise<void>;
+  /**
+   * Wipe the entire local store (synced cache + overlay + journal) and close the handle
+   * (ADR-0005). Refuses if mutations are still owed to the server unless `force` is set, so
+   * it never silently drops un-flushed writes. Distinct from `stop()`, which only halts sync.
+   */
+  destroy: (options?: { force?: boolean }) => Promise<void>;
+  /**
+   * Drop and rebuild the reconstructible synced read cache, preserving the overlay and
+   * mutation journal (ADR-0006). The next sync refills it. Use to recover from a corrupt or
+   * stale read cache without losing un-flushed writes.
+   */
+  dropReadCache: () => Promise<void>;
   flush: (table?: SyncTableName<TRegistry>) => Promise<void>;
   reconcile: (table?: SyncTableName<TRegistry>) => Promise<void>;
   retryFailed: (table?: SyncTableName<TRegistry>) => Promise<void>;
@@ -133,6 +153,31 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     }
   }
 
+  const mutationRuntime = createMutationRuntime({
+    db: pglite,
+    registry: options.registry,
+    writeUrl: options.writeUrl,
+    ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
+    ...(options.maxMutationAttempts != null ? { maxMutationAttempts: options.maxMutationAttempts } : {}),
+    ...(options.onQuarantine ? { onQuarantine: options.onQuarantine } : {}),
+  });
+
+  // Reclaim any in-flight mutations interrupted by a previous shutdown (ADR-0005), then
+  // reconcile the local store against the current registry fingerprint before sync starts
+  // (ADR-0006). Skipped when the caller supplies their own pglite (they own its schema).
+  await mutationRuntime.recoverSending();
+
+  let versionEvent: LocalStoreVersionEvent | null = null;
+
+  if (!options.pgliteInstance) {
+    versionEvent = await reconcileLocalStoreVersion({
+      db: pglite,
+      registry: options.registry,
+      runtime: mutationRuntime,
+      ...(options.onSchemaChange ? { onSchemaChange: options.onSchemaChange } : {}),
+    });
+  }
+
   const drizzleDb = createDrizzleDatabase(pglite, buildSchema(options.registry));
 
   const syncEnabled = options.syncEnabled ?? true;
@@ -141,7 +186,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   status.isRunning = true;
 
   if (syncEnabled) {
-    await resetSubscriptionsIfRequested(pglite, options.resetSubscriptionKeys);
+    // After a read-cache rebuild the Electric subscription bookkeeping is stale (it would
+    // believe the dropped shapes are still caught up and never backfill), so reset every
+    // shape subscription to force a fresh re-stream (ADR-0006).
+    const resetKeys =
+      versionEvent?.status === "rebuilt"
+        ? [...(options.resetSubscriptionKeys ?? []), ...allShapeSubscriptionKeys(options.registry)]
+        : options.resetSubscriptionKeys;
+    await resetSubscriptionsIfRequested(pglite, resetKeys);
 
     status.phase = "syncing";
     options.onStatusChange?.(status);
@@ -163,17 +215,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     options.onStatusChange?.(status);
     resolveReady();
   }
-
-  const mutationRuntime = createMutationRuntime({
-    db: pglite,
-    registry: options.registry,
-    writeUrl: options.writeUrl,
-    ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
-    ...(options.maxMutationAttempts != null ? { maxMutationAttempts: options.maxMutationAttempts } : {}),
-    ...(options.onQuarantine ? { onQuarantine: options.onQuarantine } : {}),
-  });
-
-  await mutationRuntime.recoverSending();
 
   const mutate: SyncClient<TRegistry>["mutate"] = {
     create: (table, input) => mutationRuntime.create(table, input),
@@ -211,11 +252,30 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       options.onStatusChange?.(status);
       await pglite.close();
     },
-    destroy: async () => {
+    destroy: async (destroyOptions) => {
+      if (!destroyOptions?.force) {
+        const stats = await mutationRuntime.readMutationStats();
+        const owed = stats.pendingCount + stats.sendingCount + stats.failedCount + stats.quarantinedCount;
+
+        if (owed > 0) {
+          throw new Error(
+            `destroy() refused: ${owed} mutation(s) still owed to the server. Flush them first or call destroy({ force: true }).`,
+          );
+        }
+      }
+
       sync?.unsubscribe();
       status.isRunning = false;
       options.onStatusChange?.(status);
+      await pglite.exec(buildWipeLocalStoreSql(options.registry));
       await pglite.close();
+    },
+    dropReadCache: async () => {
+      await pglite.exec(buildDropReadCacheSql(options.registry));
+      await pglite.exec(generateLocalSchemaSql(options.registry));
+      // Reset the Electric subscriptions so the rebuilt synced tables re-stream from scratch
+      // rather than the bookkeeping believing they are already caught up (ADR-0006).
+      await resetSubscriptionsIfRequested(pglite, allShapeSubscriptionKeys(options.registry));
     },
     flush: (table) => mutationRuntime.flush(table),
     reconcile: (table) => mutationRuntime.reconcile(table),
@@ -229,6 +289,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   };
 
   return client;
+}
+
+/** Every Electric shape subscription key declared by the registry (one per synced table). */
+function allShapeSubscriptionKeys<TRegistry extends SyncTableRegistry>(registry: TRegistry): string[] {
+  return Object.values(registry)
+    .map((entry) => entry.shape?.shapeKey)
+    .filter((key): key is string => typeof key === "string" && key.length > 0);
 }
 
 async function resetSubscriptionsIfRequested(pglite: ClientPGlite, keys: string[] | undefined) {

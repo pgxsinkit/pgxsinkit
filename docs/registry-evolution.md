@@ -15,6 +15,25 @@ Drop + resync is right for the **read cache** and wrong for the **journal/overla
 The default upgrade path is therefore _drain-then-drop_: flush + confirm acks, then
 rebuild the read cache only.
 
+## What the client does on boot
+
+The local store is keyed by the registry fingerprint (recorded in a `pgxsinkit_local_meta`
+row), not a hand-bumped `idb://…-vN` suffix. On boot `createSyncClient` compares the stored
+fingerprint to the current one:
+
+- **Unchanged** → nothing to do.
+- **Changed, nothing owed locally** → the read cache is dropped and rebuilt at the new shape,
+  the Electric subscriptions are reset so shapes re-stream, and the new fingerprint is
+  stamped. Surfaced via `onSchemaChange` with `status: "rebuilt"`.
+- **Changed, writes still owed** (un-flushed/quarantined) → the rebuild is **deferred**
+  (`status: "deferred"`) rather than dropping owed writes. Those writes flush and reconcile
+  during normal use; the rebuild completes on a later boot once the journal is clear. This is
+  the drain-then-drop, spread across sessions — never a silent loss.
+
+`client.dropReadCache()` performs the read-cache rebuild on demand (preserving the journal
+and overlay); `client.destroy()` wipes the whole store (refusing while writes are owed unless
+`destroy({ force: true })`), distinct from `client.stop()` which only closes the handle.
+
 ## What the runtime does at send time
 
 The runtime never silently drops an owed write. Every mutation is stamped at enqueue

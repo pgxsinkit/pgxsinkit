@@ -63,8 +63,15 @@ describe("createSyncClient subscription reset", () => {
       startConfiguredSync: startConfiguredSyncMock,
     }));
 
+    await mock.module("../../packages/client/src/local-store", () => ({
+      reconcileLocalStoreVersion: async () => undefined,
+      readStoredRegistryFingerprint: async () => null,
+      writeStoredRegistryFingerprint: async () => undefined,
+    }));
+
     await mock.module("../../packages/client/src/mutation", () => ({
       createMutationRuntime: () => ({
+        registryVersion: "stub-fingerprint",
         recoverSending: recoverSendingMock,
         create: async () => undefined,
         update: async () => undefined,
@@ -85,6 +92,10 @@ describe("createSyncClient subscription reset", () => {
 
     await mock.module("../../packages/client/src/schema", () => ({
       generateLocalSchemaSql: () => "SELECT 1;",
+      buildDropReadCacheSql: () => "SELECT 1;",
+      buildWipeLocalStoreSql: () => "SELECT 1;",
+      LOCAL_META_TABLE: "pgxsinkit_local_meta",
+      REGISTRY_FINGERPRINT_KEY: "registry_fingerprint",
     }));
   });
 

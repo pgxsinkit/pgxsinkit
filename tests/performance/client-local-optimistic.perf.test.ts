@@ -114,7 +114,7 @@ describe("performance: client local optimistic views", () => {
         console.log("[perf] client-local-optimistic report", { reportPath });
         assertPerfBudgets(budgetResults);
       } finally {
-        await client.destroy();
+        await client.stop();
       }
     },
     10 * 60_000,

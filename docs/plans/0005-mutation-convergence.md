@@ -54,6 +54,8 @@ Depends on: [ADR-0006](../adr/0006-local-schema-evolution.md) drop primitive (fo
 - Driver opt-in; both demo apps use it; manual mode preserved. **(Phase 3 — deferred
   to its own change verified on the Podman integration lane; retry cadence must be
   checked against real `next_retry_at_us` backoff, not unit fakes)**
-- `destroy()` wipes; `stop()` does not; pending-write guard tested. **(Phase 4 —
-  deferred to land with ADR-0006's drop primitive)**
-- Max-attempts cap **(deferred to ADR-0006's quarantine terminal state)**.
+- `destroy()` wipes; `stop()` does not; pending-write guard tested. **(Phase 4 done —
+  `destroy({ force? })` wipes via `buildWipeLocalStoreSql` with an owed-writes guard;
+  proven in `client-contract.integration.test.ts`)**
+- Max-attempts cap **(done — `maxMutationAttempts` escalates an exhausted `failed` to the
+  terminal `quarantined` state)**.

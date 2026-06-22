@@ -166,7 +166,7 @@ export function App() {
   useEffect(() => {
     return () => {
       if (client) {
-        void client.destroy();
+        void client.stop();
       }
     };
   }, [client]);
@@ -433,7 +433,7 @@ export function App() {
     let loadedClient: Awaited<ReturnType<typeof loadPerfClient>> | null = null;
 
     if (client) {
-      await client.destroy();
+      await client.stop();
     }
 
     setStatus("booting");
