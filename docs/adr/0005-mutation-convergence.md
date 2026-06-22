@@ -1,6 +1,6 @@
 # Mutation convergence: mechanism primitives plus an opt-in driver
 
-Status: accepted (2026-06-22); partially implemented
+Status: accepted (2026-06-22); implemented
 
 The product promise is reliable offline operation and eventual convergence. The
 mutation journal (`packages/client/src/mutation.ts`, 1,835 lines) is deep in raw

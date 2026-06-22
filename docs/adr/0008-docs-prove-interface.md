@@ -1,6 +1,6 @@
 # Documentation proves the product interface
 
-Status: accepted (2026-06-22); partially implemented
+Status: accepted (2026-06-22); implemented
 
 `getting-started.md` is narrative, not executable for a downstream consumer: step 1
 ("define your registry") has no code, step 3 mentions `createSyncServer` inline with

@@ -1,6 +1,6 @@
 # Local schema evolution and mutation compatibility
 
-Status: accepted (2026-06-22); partially implemented
+Status: accepted (2026-06-22); implemented (decision 9, lossless offline upgrade, deferred by design)
 
 The local PGlite database (`idb://pgxsinkit-overlay-v1`, `client/index.ts:107`) is
 provisioned by `generateLocalSchemaSql` (CREATE-style DDL) from the registry. There
