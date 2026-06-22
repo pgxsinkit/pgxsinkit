@@ -44,6 +44,35 @@ call. Putting the apply logic in the database is the toolkit's central finding,
 not an implementation detail.
 _Avoid_: "the artifact", "the strategy function", "the bulk backend".
 
+## Language — the read path
+
+**Read path**:
+The one way server state reaches the client: the client subscribes to ElectricSQL
+shape streams, buffers each shape's changes ordered by LSN, and applies them to the
+local read cache in LSN order inside transactions. There is exactly one read path —
+Electric shapes in, local synced tables out. The toolkit owns the ingest glue; Electric
+owns the replication protocol.
+_Avoid_: "pglite-sync", "the vendored sync", "the Electric adapter" — the ingest is
+internal to the client, no longer a separate or vendored package.
+
+**Sync applier**:
+The client component that writes buffered shape changes into the local synced tables.
+It picks one apply strategy per table from the registry's column types — bulk `COPY`
+for all-scalar tables, `json_to_recordset` for tables with array/json/jsonb columns,
+and plain batched `INSERT` as the always-correct floor. The read-path counterpart to
+the Mutation applier.
+_Avoid_: "the importer", "the COPY path" (it is one of three), "row transform".
+
+**Consistency group**:
+A set of synced tables that share one shape stream and commit atomically at a shared
+LSN frontier, so the local read cache never shows one table advanced past another for
+the same server transaction (no transient broken joins). Declared per table via
+`consistencyGroup`; the default is a per-table singleton, so grouping is opt-in and a
+group advances only as fast as its slowest shape. Subscription resume and read-cache
+rebuild are group-granular.
+_Avoid_: "sync group", "shard", "batch", and especially "group" alone (it collides
+with an application-domain Group primitive and is a reserved word).
+
 ## Language — the local-first client
 
 **Local schema**:
