@@ -1,3 +1,4 @@
+export * from "./apply-strategy";
 export * from "./common";
 export * from "./config";
 export * from "./fingerprint";

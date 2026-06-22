@@ -17,7 +17,7 @@ import type {
   SyncTableRegistry,
   SyncTableUpdateInput,
 } from "@pgxsinkit/contracts";
-import { getSyncRegistrySchema } from "@pgxsinkit/contracts";
+import { classifyTableApplyStrategy, deriveSyncColumnTypes, getSyncRegistrySchema } from "@pgxsinkit/contracts";
 
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { type LocalStoreVersionEvent, reconcileLocalStoreVersion } from "./local-store";
@@ -414,6 +414,11 @@ function buildSyncTableInput(entry: SyncTableEntry, tableKey: string) {
     primaryKey: entry.primaryKey,
     ...(entry.shape !== undefined ? { shape: entry.shape } : {}),
     clientProjection,
+    // Resolve the read-path apply ladder statically from the registry's column types (ADR-0009
+    // decision 3): the engine selects copy|json|insert and feeds the json path its casts, with no
+    // runtime information_schema round-trip.
+    applyStrategy: classifyTableApplyStrategy(entry),
+    columnTypes: deriveSyncColumnTypes(entry),
   };
 }
 

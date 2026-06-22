@@ -1,7 +1,7 @@
 import type { ChangeMessage, Row } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 
-import { quoteIdentifier } from "@pgxsinkit/contracts";
+import { quoteIdentifier, type SyncColumnType } from "@pgxsinkit/contracts";
 
 import type { MapColumns, InsertChangeMessage } from "./types";
 
@@ -83,6 +83,12 @@ export interface BulkApplyMessagesToTableOptions {
   mapColumns?: MapColumns | undefined;
   primaryKey?: string[] | undefined;
   debug: boolean;
+  /**
+   * Statically-resolved column types (ADR-0009 decision 3). Consumed only by the `json` apply path,
+   * which builds its `json_to_recordset` casts from them instead of querying `information_schema`.
+   * Absent → the `json` path falls back to runtime introspection (the generic/legacy caller path).
+   */
+  columnTypes?: SyncColumnType[] | undefined;
 }
 
 export async function applyInsertsToTable({
@@ -219,6 +225,51 @@ export async function applyInsertsToTable({
   if (debug) console.log(`Inserted ${messages.length} rows using INSERT`);
 }
 
+/** A column's name plus the SQL type to cast it to inside a `json_to_recordset` record definition. */
+interface JsonRecordsetColumn {
+  name: string;
+  castType: string;
+}
+
+/**
+ * Resolves the `json_to_recordset` column casts for the rows being applied. Prefers the
+ * statically-supplied {@link BulkApplyMessagesToTableOptions.columnTypes} (ADR-0009 decision 3 —
+ * we own the types, no DB round-trip); falls back to an `information_schema` probe only when the
+ * caller drove the engine without a registry. Either way it is narrowed to the columns actually
+ * present in the synced row.
+ */
+async function resolveJsonRecordsetColumns(
+  pg: PGliteInterface | Transaction,
+  table: string,
+  schema: string,
+  firstRow: Row<unknown>,
+  columnTypes: SyncColumnType[] | undefined,
+): Promise<JsonRecordsetColumn[]> {
+  const present = (name: string) => Object.prototype.hasOwnProperty.call(firstRow, name);
+
+  if (columnTypes) {
+    return columnTypes
+      .filter((column) => present(column.name))
+      .map((column) => ({ name: column.name, castType: `${column.sqlType}${column.isArray ? "[]" : ""}` }));
+  }
+
+  const rows = (
+    await pg.query<{ column_name: string; udt_name: string; data_type: string }>(
+      `
+        SELECT column_name, udt_name, data_type
+        FROM information_schema.columns
+        WHERE table_name = $1 AND table_schema = $2
+      `,
+      [table, schema],
+    )
+  ).rows.filter((column) => present(column.column_name));
+
+  return rows.map((column) => ({
+    name: column.column_name,
+    castType: `${column.udt_name.replace(/^_/, "")}${column.data_type === "ARRAY" ? "[]" : ""}`,
+  }));
+}
+
 export async function applyMessagesToTableWithJson({
   pg,
   table,
@@ -226,6 +277,7 @@ export async function applyMessagesToTableWithJson({
   messages,
   mapColumns,
   primaryKey,
+  columnTypes,
   debug,
 }: BulkApplyMessagesToTableOptions) {
   if (debug) console.log("applying messages with json_to_recordset");
@@ -237,37 +289,20 @@ export async function applyMessagesToTableWithJson({
   if (!firstRow) {
     return;
   }
-  const columns = (
-    await pg.query<{
-      column_name: string;
-      udt_name: string;
-      data_type: string;
-    }>(
-      `
-        SELECT column_name, udt_name, data_type
-        FROM information_schema.columns
-        WHERE table_name = $1 AND table_schema = $2
-      `,
-      [table, schema],
-    )
-  ).rows.filter((column) => Object.prototype.hasOwnProperty.call(firstRow, column.column_name));
+  const columns = await resolveJsonRecordsetColumns(pg, table, schema, firstRow, columnTypes);
 
   const max = 10_000;
   for (let i = 0; i < data.length; i += max) {
     const batch = data.slice(i, i + max);
     const upsertClause = buildUpsertClause(
-      columns.map((column) => column.column_name),
+      columns.map((column) => column.name),
       primaryKey,
     );
     await pg.query(
       `
         INSERT INTO ${qualifiedTable(schema, table)}
         SELECT x.* from json_to_recordset($1) as x(${columns
-          .map(
-            (column) =>
-              `${quoteIdentifier(column.column_name)} ${column.udt_name.replace(/^_/, "")}` +
-              (column.data_type === "ARRAY" ? `[]` : ""),
-          )
+          .map((column) => `${quoteIdentifier(column.name)} ${column.castType}`)
           .join(", ")})
         ${upsertClause}
       `,

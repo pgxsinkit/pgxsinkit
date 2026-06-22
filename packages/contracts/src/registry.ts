@@ -21,6 +21,7 @@ import { varchar } from "drizzle-orm/pg-core";
 import type { ExtractTablesWithRelations } from "drizzle-orm/relations";
 import { getColumns } from "drizzle-orm/utils";
 
+import { type ApplyStrategy, classifyApplyStrategy, type SyncColumnType } from "./apply-strategy";
 import type {
   ClientProjectionSpec,
   DeferrableConstraintSpec,
@@ -444,6 +445,30 @@ export function getOmittedProjectedColumns<TTable extends AnyPgTable>(entry: Syn
 
 export function getProjectedColumnNames<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {
   return getProjectedColumns(entry).map(({ columnName }) => columnName);
+}
+
+/**
+ * Resolves the {@link SyncColumnType}s of a synced table's client-projected columns from its Drizzle
+ * definition (ADR-0009 decision 3) — the same `getSQLType()`/`dimensions` introspection the local
+ * schema generator uses, so the apply ladder and the generated DDL can never disagree about a
+ * column's type. Drives both {@link classifyTableApplyStrategy} and the engine's `json` apply cast,
+ * removing the runtime `information_schema` round-trip.
+ */
+export function deriveSyncColumnTypes<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>): SyncColumnType[] {
+  return getProjectedColumns(entry).map(({ column, columnName }) => {
+    const typedColumn = column as { getSQLType?: () => string; dimensions?: number };
+    const sqlType = typedColumn.getSQLType?.() ?? "";
+    return {
+      name: columnName,
+      sqlType,
+      isArray: (typedColumn.dimensions ?? 0) > 0,
+    } satisfies SyncColumnType;
+  });
+}
+
+/** The statically-chosen bulk-insert strategy for a synced table (ADR-0009 decision 3). */
+export function classifyTableApplyStrategy<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>): ApplyStrategy {
+  return classifyApplyStrategy(deriveSyncColumnTypes(entry));
 }
 
 export function getOmittedProjectedColumnNames<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { ApplyStrategy, SyncColumnType } from "./apply-strategy";
 import { escapeSqlLiteral } from "./sql-identifier";
 
 export type TableMode = "readonly" | "writeonly" | "readwrite";
@@ -107,6 +108,18 @@ export interface TableSpecInput {
   shape?: ShapeSpec;
   clientProjection?: ClientProjectionSpec;
   governance?: TableGovernanceSpec;
+  /**
+   * The statically-resolved bulk-insert strategy for this table's read-path backfill (ADR-0009
+   * decision 3), derived from its column types by the registry. Optional: when absent, the engine
+   * defaults to `insert` (the always-correct floor).
+   */
+  applyStrategy?: ApplyStrategy;
+  /**
+   * The resolved column types for the `json` apply path (ADR-0009 decision 3), so it never queries
+   * `information_schema` at runtime. Carried from the registry; absent for callers that drive the
+   * engine without one (those fall back to runtime introspection).
+   */
+  columnTypes?: SyncColumnType[];
 }
 
 export interface SyncConfigInput<TTables extends Record<string, TableSpecInput> = Record<string, TableSpecInput>> {

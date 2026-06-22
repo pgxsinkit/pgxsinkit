@@ -4,7 +4,7 @@ import type { ChangeMessage, ShapeStreamOptions } from "@electric-sql/client";
 import { MultiShapeStream } from "@electric-sql/experimental";
 import type { Extension, PGliteInterface } from "@electric-sql/pglite";
 
-import { quoteIdentifier } from "@pgxsinkit/contracts";
+import { type ApplyStrategy, quoteIdentifier } from "@pgxsinkit/contracts";
 
 import { computeRetryDelayMs } from "../mutation";
 import {
@@ -23,6 +23,7 @@ import {
 import {
   DEFAULT_MAX_COMMIT_RETRIES,
   type ElectricSyncOptions,
+  type InitialInsertMethod,
   type InsertChangeMessage,
   type Lsn,
   type SyncShapesToTablesOptions,
@@ -39,6 +40,22 @@ export * from "./types";
  * `last` marks the final change of an LSN. Single choke point for these
  * protocol assumptions.
  */
+/**
+ * Maps the statically-resolved {@link ApplyStrategy} (ADR-0009 decision 3) onto the engine's
+ * initial-backfill apply path. Undefined (no registry-supplied strategy) defaults to `insert`,
+ * the always-correct floor.
+ */
+function applyStrategyToInsertMethod(strategy: ApplyStrategy | undefined): InitialInsertMethod {
+  switch (strategy) {
+    case "copy":
+      return "csv";
+    case "json":
+      return "json";
+    default:
+      return "insert";
+  }
+}
+
 function readReplicationHeaders(headers: ChangeMessage["headers"]): { lsn: bigint; isLastOfLsn: boolean } {
   const rawLsn: unknown = headers["lsn"];
 
@@ -267,6 +284,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
                   messages: initialInserts,
                   mapColumns: shape.mapColumns,
                   primaryKey: shape.primaryKey,
+                  columnTypes: shape.columnTypes,
                   debug,
                 });
 
@@ -293,6 +311,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
                     messages: bulkInserts,
                     mapColumns: shape.mapColumns,
                     primaryKey: shape.primaryKey,
+                    columnTypes: shape.columnTypes,
                     debug,
                   });
                   bulkInserts.length = 0;
@@ -505,11 +524,15 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
           mapColumns: options.mapColumns,
           primaryKey: options.primaryKey,
           onMustRefetch: options.onMustRefetch,
+          columnTypes: options.columnTypes,
         },
       },
       key: options.shapeKey,
       useCopy: options.useCopy,
-      initialInsertMethod: options.initialInsertMethod,
+      // Static type-driven selection (ADR-0009 decision 3): an explicit `initialInsertMethod`/`useCopy`
+      // (the generic/legacy API) still wins; otherwise the registry-resolved `applyStrategy` picks the
+      // backfill path, defaulting to `insert`.
+      initialInsertMethod: options.initialInsertMethod ?? applyStrategyToInsertMethod(options.applyStrategy),
       onInitialSync: options.onInitialSync,
       onError: options.onError,
       onSyncError: options.onSyncError,

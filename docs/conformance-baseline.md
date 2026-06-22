@@ -41,7 +41,14 @@ transforms, swap the top import block for the shim, and update the pinned SHA he
 - **Multi-shape simultaneous sync + cross-table transactions + multi-table must-refetch** →
   decision 2 (registry-declared **consistency groups** / atomic cross-table commit).
 - **COPY FROM (+ special chars) and camelCase `json_to_recordset`** → decision 3 (the static,
-  type-driven apply ladder).
+  type-driven apply ladder — **built, Phase 3**). The classifier (`classifyApplyStrategy` /
+  `classifyTableApplyStrategy` in contracts) picks `copy | json | insert` from registry column types;
+  the `json` path now takes its casts from registry-supplied `columnTypes` (no `information_schema`
+  round-trip) and keeps the introspection only as a fallback for the registry-less generic API the
+  oracle exercises. New proofs: `tests/unit/apply-strategy.test.ts` (classifier tiers, fast) and
+  `tests/unit/apply-ladder.test.ts` (each tier on the pinned PGlite, incl. jsonb + bigint[] via the
+  `columnTypes` json path). The two oracle COPY tests and the camelCase json test stay green on the
+  fallback path, unchanged.
 - **`electric.syncing` flag set during sync** → decision 6 (keep the sync-origin GUC, renamed).
 - **Subscription persist/resume, clears+restarts on refetch, must-refetch** → decision 4/5
   (serialized commit queue + failure surfacing; Electric `must-refetch` stays its own path).

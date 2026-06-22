@@ -1,6 +1,11 @@
 import type { PGlite, PGliteInterfaceExtensions } from "@electric-sql/pglite";
 
-import { type SyncConfigInput, type TableSpecInput } from "@pgxsinkit/contracts";
+import {
+  type ApplyStrategy,
+  type SyncColumnType,
+  type SyncConfigInput,
+  type TableSpecInput,
+} from "@pgxsinkit/contracts";
 
 import { electricSync } from "./sync";
 
@@ -11,6 +16,10 @@ export interface ShapeSyncSpec {
   shapeKey: string;
   primaryKey: string[];
   electricTable?: string;
+  /** Statically-resolved bulk-insert strategy for this table (ADR-0009 decision 3). */
+  applyStrategy?: ApplyStrategy;
+  /** Resolved column types for the `json` apply path (ADR-0009 decision 3); no `information_schema` probe. */
+  columnTypes?: SyncColumnType[];
 }
 
 export interface StartShapeSyncOptions extends ShapeSyncSpec {
@@ -91,6 +100,8 @@ export async function startShapeSync(pg: SyncEnginePGlite, input: StartShapeSync
     ...(shapeHeaders ? { shape: { ...config.shape, headers: shapeHeaders } } : {}),
     ...(input.onInitialSync ? { onInitialSync: input.onInitialSync } : {}),
     ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
+    ...(input.applyStrategy ? { applyStrategy: input.applyStrategy } : {}),
+    ...(input.columnTypes ? { columnTypes: input.columnTypes } : {}),
   });
 }
 
@@ -111,6 +122,8 @@ export async function startConfiguredSync(
         shapeKey: spec.shapeKey,
         primaryKey: spec.primaryKey,
         ...(spec.electricTable !== undefined ? { electricTable: spec.electricTable } : {}),
+        ...(spec.applyStrategy ? { applyStrategy: spec.applyStrategy } : {}),
+        ...(spec.columnTypes ? { columnTypes: spec.columnTypes } : {}),
         ...(input.shapeHeaders ? { headers: input.shapeHeaders } : {}),
         ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
         onInitialSync: () => {
@@ -161,5 +174,7 @@ function buildConfiguredShapeSpec(
     shapeKey: table.shape.shapeKey,
     primaryKey: [...(table.clientProjection?.localPrimaryKey?.columns ?? table.primaryKey.columns)],
     electricTable: table.shape.electricTable ?? table.shape.tableName,
+    ...(table.applyStrategy ? { applyStrategy: table.applyStrategy } : {}),
+    ...(table.columnTypes ? { columnTypes: table.columnTypes } : {}),
   };
 }

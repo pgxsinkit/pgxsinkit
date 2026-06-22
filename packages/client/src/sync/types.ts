@@ -1,6 +1,8 @@
 import type { ChangeMessage, FetchError, Row, ShapeStreamInterface, ShapeStreamOptions } from "@electric-sql/client";
 import type { Transaction } from "@electric-sql/pglite";
 
+import type { ApplyStrategy, SyncColumnType } from "@pgxsinkit/contracts";
+
 export type Lsn = bigint;
 
 export type MapColumnsMap = Record<string, string>;
@@ -19,6 +21,12 @@ export interface ShapeToTableOptions {
   mapColumns?: MapColumns | undefined;
   primaryKey: string[];
   onMustRefetch?: ((tx: Transaction) => Promise<void>) | undefined;
+  /**
+   * Resolved column types for this shape's `json` apply path (ADR-0009 decision 3). When present
+   * the engine builds the `json_to_recordset` casts from them instead of querying
+   * `information_schema`; when absent the `json` path falls back to runtime introspection.
+   */
+  columnTypes?: SyncColumnType[] | undefined;
 }
 
 export interface SyncShapesToTablesOptions {
@@ -55,6 +63,14 @@ export interface SyncShapeToTableOptions {
   shapeKey: string | null;
   useCopy?: boolean | undefined;
   initialInsertMethod?: InitialInsertMethod | undefined;
+  /**
+   * The statically-resolved bulk-insert strategy for this table (ADR-0009 decision 3). When set
+   * (and `initialInsertMethod`/`useCopy` are not), it selects the initial-backfill apply path:
+   * `copy` → CSV `COPY`, `json` → `json_to_recordset`, `insert` → batched `INSERT`.
+   */
+  applyStrategy?: ApplyStrategy | undefined;
+  /** Resolved column types for the `json` apply path; see {@link ShapeToTableOptions.columnTypes}. */
+  columnTypes?: SyncColumnType[] | undefined;
   onInitialSync?: (() => void) | undefined;
   onError?: ((error: FetchError | Error) => void) | undefined;
   /** Commit-level error surfacing (ADR-0009 decision 5); see {@link SyncShapesToTablesOptions.onSyncError}. */

@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
+import { pgTable, text, uuid } from "drizzle-orm/pg-core";
+
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+
+// A real Drizzle table so `buildSyncConfigFromRegistry` can derive column types / the apply strategy
+// (ADR-0009 decision 3) from it; the registry shape is otherwise hand-stubbed for these reset tests.
+const itemsTable = pgTable("items", {
+  id: uuid("id").primaryKey(),
+  title: text("title"),
+});
 
 const order: string[] = [];
 
@@ -116,7 +125,7 @@ describe("createSyncClient subscription reset", () => {
     await createSyncClient({
       registry: {
         items: {
-          table: {},
+          table: itemsTable,
           mode: "readwrite",
           primaryKey: { columns: ["id"] },
           shape: { tableName: "items", shapeKey: "schema.items" },
@@ -157,7 +166,7 @@ describe("createSyncClient subscription reset", () => {
     await createSyncClient({
       registry: {
         items: {
-          table: {},
+          table: itemsTable,
           mode: "readwrite",
           primaryKey: { columns: ["id"] },
           shape: { tableName: "items", shapeKey: "schema.items" },
@@ -196,7 +205,7 @@ describe("createSyncClient subscription reset", () => {
     await createSyncClient({
       registry: {
         items: {
-          table: {},
+          table: itemsTable,
           mode: "readwrite",
           primaryKey: { columns: ["id"] },
           shape: { tableName: "items", shapeKey: "schema.items" },
@@ -233,7 +242,7 @@ describe("createSyncClient subscription reset", () => {
     await createSyncClient({
       registry: {
         items: {
-          table: {},
+          table: itemsTable,
           mode: "readwrite",
           primaryKey: { columns: ["id"] },
           shape: { tableName: "items", shapeKey: "schema.items" },
@@ -264,7 +273,7 @@ describe("createSyncClient subscription reset", () => {
     await createSyncClient({
       registry: {
         items: {
-          table: {},
+          table: itemsTable,
           mode: "readwrite",
           primaryKey: { columns: ["id"] },
           shape: { tableName: "items", shapeKey: "schema.items" },
