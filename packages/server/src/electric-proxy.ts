@@ -26,9 +26,18 @@ export async function proxyElectricShapeRequest(
   claims: JwtClaims | null,
   options: ElectricProxyOptions,
 ): Promise<Response> {
-  const targetUrl = buildProxyTargetUrl(request, claims, options);
+  const decision = decideProxyTarget(request, claims, options);
 
-  const response = await fetch(targetUrl.toString(), {
+  if (decision.kind === "reject") {
+    // Fail closed: never forward, so the upstream Electric credentials in
+    // `electricUrl` are not lent to a request the registry does not govern.
+    return new Response(JSON.stringify({ message: decision.message }), {
+      status: decision.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  const response = await fetch(decision.targetUrl, {
     method: "GET",
     signal: request.signal,
   }).catch((error: unknown) => {
@@ -76,6 +85,33 @@ export async function proxyElectricShapeRequest(
     statusText: response.statusText,
     headers: responseHeaders,
   });
+}
+
+type ProxyTargetDecision = { kind: "forward"; targetUrl: string } | { kind: "reject"; status: number; message: string };
+
+/**
+ * Decide whether a shape request may be forwarded. The proxy serves only
+ * registry-governed shapes (ADR-0003): a request with no `table`, or one naming a
+ * table absent from the registry, is rejected and never reaches Electric. A table
+ * that is in the registry but declares no `rowFilter` still forwards — the gate is
+ * registry membership, not the presence of a filter.
+ */
+function decideProxyTarget(
+  request: Request,
+  claims: JwtClaims | null,
+  options: ElectricProxyOptions,
+): ProxyTargetDecision {
+  const requestedTable = new URL(request.url).searchParams.get("table");
+
+  if (!requestedTable) {
+    return { kind: "reject", status: 400, message: "Shape request must specify a table" };
+  }
+
+  if (!getRegistryEntry(options.registry, requestedTable)) {
+    return { kind: "reject", status: 403, message: `Table is not in the sync registry: ${requestedTable}` };
+  }
+
+  return { kind: "forward", targetUrl: buildProxyTargetUrl(request, claims, options) };
 }
 
 function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options: ElectricProxyOptions): string {

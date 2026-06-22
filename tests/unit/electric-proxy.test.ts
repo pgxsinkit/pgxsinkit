@@ -323,6 +323,64 @@ describe("electric proxy", () => {
     });
   });
 
+  describe("fail closed (registry membership gate)", () => {
+    it("rejects a table absent from the registry with 403 and does not forward", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const request = new Request("http://localhost:3001/v1/electric-proxy?table=unknown_table&offset=-1");
+
+      const response = await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        {
+          registry: demoSyncRegistry,
+          electricUrl: "http://localhost:3000/v1/shape?secret=test-api-token",
+        },
+      );
+
+      expect(response.status).toBe(403);
+      // The upstream Electric credentials must never be lent to an ungoverned table.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a request with no table with 400 and does not forward", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const request = new Request("http://localhost:3001/v1/electric-proxy?offset=-1");
+
+      const response = await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        {
+          registry: demoSyncRegistry,
+          electricUrl: "http://localhost:3000/v1/shape",
+        },
+      );
+
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("still forwards a registered table that declares no rowFilter", async () => {
+      fetchMock.mockResolvedValue(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const request = new Request("http://localhost:3001/v1/electric-proxy?table=secure_items&offset=-1");
+
+      const response = await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        { registry: secureItemsRegistry, electricUrl: "http://localhost:3000/v1/shape" },
+      );
+
+      expect(response.status).toBe(200);
+      // Registry membership is the gate, not the presence of a filter.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("error handling", () => {
     it("returns 499 when upstream fetch is aborted (client disconnect)", async () => {
       const abortError = new Error("The connection was closed.") as Error & { code: number; name: string };
