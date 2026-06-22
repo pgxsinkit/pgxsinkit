@@ -4,7 +4,12 @@ import { createInsertSchema } from "drizzle-orm/zod";
 import { useEffect, useMemo, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 
-import type { MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
+import {
+  createBrowserConvergenceTrigger,
+  createConvergenceDriver,
+  type MutationDetail,
+  type MutationDiagnostics,
+} from "@pgxsinkit/client";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 import {
   authorsTable,
@@ -255,34 +260,37 @@ function TodoApp({
   useEffect(() => {
     let isDisposed = false;
 
-    async function refreshMutationState() {
-      try {
-        await client.flush();
+    async function refreshDisplay() {
+      if (isDisposed) {
+        return;
+      }
 
-        if (!isDisposed) {
-          const [{ mutation }, mutationJournal] = await Promise.all([
-            client.diagnostics(),
-            client.readMutationDetails(),
-          ]);
+      const [{ mutation }, mutationJournal] = await Promise.all([client.diagnostics(), client.readMutationDetails()]);
 
-          setMutationStats(mutation);
-          setJournalRows(sortJournalRows(mutationJournal));
-        }
-      } catch (reason) {
-        if (!isDisposed) {
-          setError(reason instanceof Error ? reason.message : "Failed to process local writes");
-        }
+      if (!isDisposed) {
+        setMutationStats(mutation);
+        setJournalRows(sortJournalRows(mutationJournal));
       }
     }
 
-    void refreshMutationState();
-    const timer = window.setInterval(() => {
-      void refreshMutationState();
-    }, 1500);
+    // The opt-in convergence driver (ADR-0005) owns the flush/reconcile/retry loop on the
+    // browser schedule; the component just refreshes its diagnostics view after each pass.
+    const driver = createConvergenceDriver({
+      client,
+      trigger: createBrowserConvergenceTrigger(),
+      onPass: (error) => {
+        if (error && !isDisposed) {
+          setError(error instanceof Error ? error.message : "Failed to process local writes");
+        }
+        void refreshDisplay();
+      },
+    });
+
+    driver.start();
 
     return () => {
       isDisposed = true;
-      window.clearInterval(timer);
+      driver.stop();
     };
   }, [client]);
 

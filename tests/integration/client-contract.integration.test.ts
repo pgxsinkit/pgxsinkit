@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createSyncClient } from "@pgxsinkit/client";
+import { createIntervalConvergenceTrigger, createSyncClient } from "@pgxsinkit/client";
 import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
@@ -387,6 +387,44 @@ describe("client facade contract", () => {
         });
       } finally {
         await secondClient.destroy({ force: true });
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("auto-converges a write via the opt-in driver without a manual flush (ADR-0005)", async () => {
+    const dataDir = await createPersistentDataDir();
+
+    try {
+      const client = await createSyncClient({
+        registry: projectsSyncRegistry,
+        electricUrl: env.electricUrl,
+        writeUrl: `http://127.0.0.1:${writeApiPort}`,
+        dataDir,
+        // An interval trigger drives convergence deterministically (no DOM events needed).
+        autoSync: createIntervalConvergenceTrigger(200),
+      });
+
+      try {
+        await client.ready;
+
+        await client.tables.projects.create({
+          id: "01965156-5884-7a0b-a24e-31b5c9be0009",
+          name: "Auto converged",
+        });
+
+        // No manual flush(): the driver flushes + reconciles on its own schedule.
+        await waitFor(async () => {
+          const remoteRows = await server.drizzle.select().from(projectsTable);
+          expect(remoteRows).toHaveLength(1);
+          expect(remoteRows[0]?.name).toBe("Auto converged");
+
+          const diagnostics = await client.diagnostics();
+          expect(diagnostics.mutation.pendingCount).toBe(0);
+        });
+      } finally {
+        await client.destroy({ force: true });
       }
     } finally {
       await rm(dataDir, { recursive: true, force: true });

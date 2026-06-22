@@ -19,12 +19,22 @@ import type {
 } from "@pgxsinkit/contracts";
 import { getSyncRegistrySchema } from "@pgxsinkit/contracts";
 
+import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { type LocalStoreVersionEvent, reconcileLocalStoreVersion } from "./local-store";
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
 import { buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
 import { createElectricExtension, startConfiguredSync } from "./shape-sync";
 
 export { generateLocalSchemaSql };
+export {
+  type ConvergenceClient,
+  type ConvergenceDriver,
+  type ConvergenceDriverOptions,
+  type ConvergenceTrigger,
+  createBrowserConvergenceTrigger,
+  createConvergenceDriver,
+  createIntervalConvergenceTrigger,
+} from "./convergence";
 export type { LocalStoreVersionEvent };
 
 export type ClientPGlite = PGliteWithLive &
@@ -60,6 +70,15 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * postponed (and retried on a later boot) rather than dropping owed data.
    */
   onSchemaChange?: (event: LocalStoreVersionEvent) => void | Promise<void>;
+  /**
+   * Opt-in convergence driver (ADR-0005). Supply a {@link ConvergenceTrigger} (e.g.
+   * `createBrowserConvergenceTrigger()`) and the client drives `flush`/`reconcile`/`retryFailed`
+   * on the trigger's schedule, started once sync is ready and stopped on `stop()`/`destroy()`.
+   * Omit it for fully-manual convergence (the mechanism primitives stay public either way).
+   */
+  autoSync?: ConvergenceTrigger;
+  /** Invoked after each automatic convergence pass with its error, or `null` on success (only when `autoSync` is set). */
+  onConvergencePass?: (error: unknown) => void;
 }
 
 export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey extends SyncTableName<TRegistry>> {
@@ -182,6 +201,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
 
   const syncEnabled = options.syncEnabled ?? true;
   let sync: Awaited<ReturnType<typeof startConfiguredSync>> | null = null;
+  let convergenceDriver: ConvergenceDriver | null = null;
 
   status.isRunning = true;
 
@@ -216,6 +236,22 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     resolveReady();
   }
 
+  if (options.autoSync) {
+    convergenceDriver = createConvergenceDriver({
+      client: {
+        flush: () => mutationRuntime.flush(),
+        reconcile: () => mutationRuntime.reconcile(),
+        retryFailed: () => mutationRuntime.retryFailed(),
+      },
+      trigger: options.autoSync,
+      ...(options.onConvergencePass ? { onPass: options.onConvergencePass } : {}),
+    });
+
+    // Start driving convergence once the initial sync is ready, so a pass never races the
+    // first shape load. stop()/destroy() halt it.
+    void ready.then(() => convergenceDriver?.start());
+  }
+
   const mutate: SyncClient<TRegistry>["mutate"] = {
     create: (table, input) => mutationRuntime.create(table, input),
     update: (table, entityKey, patch) => mutationRuntime.update(table, entityKey, patch),
@@ -247,6 +283,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       await ready;
     },
     stop: async () => {
+      convergenceDriver?.stop();
       sync?.unsubscribe();
       status.isRunning = false;
       options.onStatusChange?.(status);
@@ -264,6 +301,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         }
       }
 
+      convergenceDriver?.stop();
       sync?.unsubscribe();
       status.isRunning = false;
       options.onStatusChange?.(status);

@@ -51,9 +51,10 @@ Depends on: [ADR-0006](../adr/0006-local-schema-evolution.md) drop primitive (fo
 - State machine explicit and tested (`mutation-state.ts`,
   `tests/unit/mutation-state.test.ts`); backoff jittered + bounded, flushes already
   serialised. **(Phase 1 + the jitter half of Phase 2 done)**
-- Driver opt-in; both demo apps use it; manual mode preserved. **(Phase 3 — deferred
-  to its own change verified on the Podman integration lane; retry cadence must be
-  checked against real `next_retry_at_us` backoff, not unit fakes)**
+- Driver opt-in; manual mode preserved. **(Phase 3 done — `convergence.ts`
+  (`createConvergenceDriver` + browser/interval triggers) wired via `createSyncClient`'s
+  `autoSync`; `apps/web` adopts it; `apps/perf-lab` drives manually by design. Unit + an
+  auto-converge integration case against real Electric.)**
 - `destroy()` wipes; `stop()` does not; pending-write guard tested. **(Phase 4 done —
   `destroy({ force? })` wipes via `buildWipeLocalStoreSql` with an owed-writes guard;
   proven in `client-contract.integration.test.ts`)**

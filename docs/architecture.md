@@ -66,6 +66,7 @@ The `operations_log` table is a Drizzle-managed internal server table included i
 
 - The local store is keyed by the registry fingerprint (recorded in `pgxsinkit_local_meta`), not a manual `idb://…-vN` suffix. On boot the client reconciles a fingerprint change with a drain-then-drop rebuild of the read cache, deferring the rebuild while writes are still owed so nothing is dropped (see [adr/0006](adr/0006-local-schema-evolution.md)).
 - `stop()` halts sync and closes the handle, **preserving** the local store. `destroy()` is a true teardown that **wipes** the store (synced cache + overlay + journal), refusing while writes are owed unless `destroy({ force: true })`. `dropReadCache()` rebuilds only the reconstructible synced cache, preserving the journal and overlay.
+- Convergence is manual by default (`flush`/`reconcile`/`retryFailed` stay public). Supplying `autoSync` (a `ConvergenceTrigger`) opts into the driver, which owns the loop on the app's schedule while the library owns the congestion policy (see [adr/0005](adr/0005-mutation-convergence.md)). `createBrowserConvergenceTrigger` and `createIntervalConvergenceTrigger` are the bundled adapters.
 
 ## Local schema prerequisite hook
 

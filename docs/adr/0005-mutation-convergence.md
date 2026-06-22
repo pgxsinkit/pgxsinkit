@@ -83,11 +83,18 @@ split.
   (`maxMutationAttempts`, default `DEFAULT_MAX_MUTATION_ATTEMPTS` = 10) escalates an
   exhausted `failed` mutation to the terminal `quarantined` state (ADR-0006), so a
   permanently-unreachable server never produces an unbounded retry loop.
-- **Decision 3 (opt-in convergence driver) — deferred.** The driver's retry cadence
-  interacts with the runtime's per-mutation `next_retry_at_us` backoff in ways that
-  must be verified against real sync (the Podman integration lane), not just unit
-  fakes. To be built as its own focused change with that lane, including the demo
-  rewire.
+- **Decision 3 (opt-in convergence driver) — done.** `client/src/convergence.ts` adds
+  `createConvergenceDriver` (a coalescing `retryFailed`→`flush`→`reconcile` loop gated by a
+  `ConvergenceTrigger`) and two real adapters proving the seam: `createBrowserConvergenceTrigger`
+  (`online`/`visibilitychange` + a fallback interval, gated on online/foreground) and
+  `createIntervalConvergenceTrigger` (fixed cadence — the base for a React Native
+  `AppState`/`NetInfo` adapter). `createSyncClient({ autoSync })` drives it (started on ready,
+  stopped on `stop()`/`destroy()`); omitting `autoSync` keeps today's fully-manual behaviour.
+  The retry cadence is the runtime's per-mutation `next_retry_at_us` backoff — the driver only
+  decides *when* to attempt, so the two never fight. `apps/web` now uses the driver in place of
+  its hand-rolled `setInterval` flush loop (`apps/perf-lab` drives manually by design — it
+  measures explicit flush/reconcile sweeps). Pinned by `tests/unit/convergence.test.ts` and the
+  auto-converge case in `tests/integration/client-contract.integration.test.ts`.
 - **Decision 5 (`destroy()` teardown) — done.** `destroy()` now wipes the entire local
   store (synced cache + overlay + journal) via ADR-0006's `buildWipeLocalStoreSql`, distinct
   from `stop()` (which only halts sync and closes the handle, preserving data). A guard
