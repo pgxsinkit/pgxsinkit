@@ -17,7 +17,8 @@
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
@@ -28,6 +29,7 @@ function parseArgs(argv: string[]) {
   let projectDir = process.cwd();
   let migrationName = "sync_artifact";
   let drizzleConfig = "";
+  let exportName: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -39,25 +41,61 @@ function parseArgs(argv: string[]) {
       migrationName = argv[++i]!;
     } else if (arg === "--config" && argv[i + 1]) {
       drizzleConfig = argv[++i]!;
+    } else if (arg === "--export" && argv[i + 1]) {
+      exportName = argv[++i]!;
     }
   }
 
   if (!registryPath) {
     console.error(
-      "Usage: pgxsinkit-generate --registry <path> [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts]",
+      "Usage: pgxsinkit-generate --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts]",
     );
     process.exit(1);
   }
 
-  return { registryPath, projectDir, migrationName, drizzleConfig };
+  return { registryPath, projectDir, migrationName, drizzleConfig, exportName };
 }
 
-async function importRegistry(registryPath: string, projectDir: string): Promise<SyncTableRegistry> {
-  // Resolve relative to the project directory (which is cwd when running from project root)
-  const absProjectDir = join(process.cwd(), projectDir);
-  const resolved = registryPath.startsWith("/") ? registryPath : join(absProjectDir, registryPath);
-  const mod = await import(resolved.startsWith("file://") ? resolved : `file://${resolved}`);
-  return mod.transcrobesSyncRegistry ?? mod.demoSyncRegistry ?? mod.default;
+/** Registry source paths are relative to the invocation directory, not the migration output directory. */
+export function resolveRegistryModulePath(registryPath: string, cwd = process.cwd()): string {
+  return isAbsolute(registryPath) ? registryPath : resolve(cwd, registryPath);
+}
+
+function isSyncTableRegistry(value: unknown): value is SyncTableRegistry {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Select a registry from an imported module, with `--export` available for arbitrary names. */
+export function selectRegistryExport(moduleExports: Record<string, unknown>, exportName?: string): SyncTableRegistry {
+  const availableExports = Object.keys(moduleExports).sort();
+
+  if (exportName) {
+    const selected = moduleExports[exportName];
+    if (isSyncTableRegistry(selected)) {
+      return selected;
+    }
+
+    throw new Error(
+      `Registry export '${exportName}' was not found or is not an object. Available exports: ${availableExports.join(", ") || "(none)"}`,
+    );
+  }
+
+  for (const conventionalName of ["registry", "default", "transcrobesSyncRegistry", "demoSyncRegistry"]) {
+    const selected = moduleExports[conventionalName];
+    if (isSyncTableRegistry(selected)) {
+      return selected;
+    }
+  }
+
+  throw new Error(
+    `Could not find a registry export. Export it as 'registry' or default, or pass --export <name>. Available exports: ${availableExports.join(", ") || "(none)"}`,
+  );
+}
+
+async function importRegistry(registryPath: string, exportName?: string): Promise<SyncTableRegistry> {
+  const resolved = resolveRegistryModulePath(registryPath);
+  const moduleExports = (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
+  return selectRegistryExport(moduleExports, exportName);
 }
 
 function runDrizzleGenerate(projectDir: string, name: string, drizzleConfig?: string): void {
@@ -107,10 +145,10 @@ function findNewMigrationFile(drizzleDir: string): string | null {
 }
 
 async function main() {
-  const { registryPath, projectDir, migrationName, drizzleConfig } = parseArgs(process.argv.slice(2));
+  const { registryPath, projectDir, migrationName, drizzleConfig, exportName } = parseArgs(process.argv.slice(2));
 
   console.log(`Importing registry from ${registryPath}...`);
-  const registry = await importRegistry(registryPath, projectDir);
+  const registry = await importRegistry(registryPath, exportName);
 
   console.log(`Generating DDL for ${Object.keys(registry).length} table(s)...`);
   const ddl = buildPlpgsqlBatchFunctionDdl(registry);
@@ -135,7 +173,9 @@ async function main() {
   console.log(`Wrote sync function to ${drizzleDir}/.../migration.sql`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

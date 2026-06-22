@@ -73,6 +73,7 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    ```bash
    bun run pgxsinkit-generate \
      --registry ./sync-registry.ts \
+     --export registry \
      --project-dir ./db \
      --name sync_artifact
    ```
