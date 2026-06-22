@@ -1,6 +1,6 @@
 # Local schema evolution and mutation compatibility
 
-Status: proposed (2026-06-22)
+Status: accepted (2026-06-22); partially implemented
 
 The local PGlite database (`idb://pgxsinkit-overlay-v1`, `client/index.ts:107`) is
 provisioned by `generateLocalSchemaSql` (CREATE-style DDL) from the registry. There
@@ -94,6 +94,26 @@ drain-then-drop while online. Optimistic *attempt* yes; *silent* loss no.
   (diff gate / quarantine), never silent.
 - pgxsinkit gains a registry-diff/check tool and a fingerprint-stamped journal
   without owning anyone's pipeline.
+
+## Implementation status
+
+- **Decisions 5, 6, 7 (authoring-time gate + discipline + library/consumer boundary)
+  — done.** `packages/contracts/src/registry-diff.ts` classifies a shape change
+  (`compatible | risky | breaking`) over the ADR-0004 canonical shape, with
+  `buildRegistryLock`, `diffRegistryAgainstLock`, `runRegistryCheck` (consumer wires
+  the exit code), and `summarizeRegistryDiff`. The same-name type-change case — the
+  silent repurposing the runtime cannot catch — is classified `breaking`. Pinned by
+  `tests/unit/registry-diff.test.ts`. The expand/contract discipline and the
+  commit-the-lock enforcement model are documented in
+  [docs/registry-evolution.md](../registry-evolution.md).
+- **Decisions 1–4 (drain-then-drop boot, fingerprint-keyed store, journal
+  `registry_version` stamp, transient/permanent quarantine split, `dropReadCache`)
+  — deferred.** These are the runtime cluster: they touch the local-DB boot and the
+  flush path, and the drain half must be verified against real sync (the Podman
+  integration lane), not unit fakes. They land together with ADR-0005's deferred
+  convergence driver and `destroy()` teardown (which reuses `dropReadCache`). The
+  ADR-0004 fingerprint they build on is already in place.
+- **Decision 9 (lossless offline upgrade) — deferred** as designed.
 
 References: [ADR-0004](0004-one-registry-interpreter.md) (fingerprint);
 [ADR-0005](0005-mutation-convergence.md) (drop primitive, quarantine surfacing);

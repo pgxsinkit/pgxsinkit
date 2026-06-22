@@ -13,7 +13,7 @@ import type { SyncTableEntry, SyncTableRegistry } from "./registry";
  * server-compatibility participates.
  */
 
-interface CanonicalColumn {
+export interface CanonicalColumn {
   name: string;
   type: string;
   notNull: boolean;
@@ -21,7 +21,7 @@ interface CanonicalColumn {
   primary: boolean;
 }
 
-interface CanonicalTable {
+export interface CanonicalTable {
   key: string;
   mode: string;
   primaryKey: string[];

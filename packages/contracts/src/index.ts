@@ -2,6 +2,7 @@ export * from "./common";
 export * from "./config";
 export * from "./fingerprint";
 export * from "./registry";
+export * from "./registry-diff";
 export * from "./mutation";
 export * from "./runtime";
 export * from "./sql-identifier";

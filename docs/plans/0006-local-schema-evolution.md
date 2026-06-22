@@ -58,7 +58,13 @@ across renames). Revisit on real demand.
 
 ## Acceptance
 
+- `compareRegistries` + `runRegistryCheck` + `registry.lock` shipped with tests; the
+  silent-repurposing case is caught at authoring time; expand/contract documented.
+  **(Phase 3 + Phase 4 done — `registry-diff.ts`, `tests/unit/registry-diff.test.ts`,
+  `docs/registry-evolution.md`)**
 - Fingerprint-keyed store; drain-then-drop preserves the journal; tests green.
-- Journal stamped; transient vs permanent split; quarantine surfaced.
-- `compareRegistries` + `registry-check` + `registry.lock` shipped with tests; the
-  silent-repurposing case is caught at authoring time.
+  **(Phase 1 — deferred to the integration-verified runtime cluster)**
+- Journal stamped; transient vs permanent split; quarantine surfaced. **(Phase 2 —
+  deferred to the runtime cluster; reuses the ADR-0005 state machine + ADR-0004
+  fingerprint already in place)**
+- `dropReadCache` primitive **(deferred — lands with ADR-0005 `destroy()`)**.
