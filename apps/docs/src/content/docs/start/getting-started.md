@@ -30,7 +30,7 @@ This page gets you from zero to a working read + write path. For what each packa
 ## Install
 
 ```bash
-bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts @pgxsinkit/sync-engine
+bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 # React bindings (optional)
 bun add @pgxsinkit/react
 ```

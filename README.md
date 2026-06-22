@@ -57,7 +57,6 @@ policy depends on the column).
 - `apps/write-api`: Bun + Hono write API.
 - `packages/contracts`: shared validation schemas and DTOs.
 - `packages/pglite-sync`: vendored upstream sync implementation.
-- `packages/sync-engine`: wrapper around vendored sync package.
 - `packages/test-utils`: shared test helpers.
 - `infra/compose`: compose files for PostgreSQL and ElectricSQL.
 - `infra/drizzle`: drizzle migrations for PostgreSQL.
@@ -77,7 +76,7 @@ policy depends on the column).
 
 ## Releasing
 
-See [RELEASING.md](./RELEASING.md) for publishing the `@pgxsinkit/*` packages to npm and GitHub Packages (bump → tag → publish, one tag at a time).
+See [RELEASING.md](./RELEASING.md) for publishing the `@pgxsinkit/*` packages to npm and GitHub Packages. Push a semver **tag**; CI derives the version from the tag and publishes all packages at that one version — there is no version bump (see [adr/0001](docs/adr/0001-unified-ts-release-versioning-tooling-standard.md)).
 
 ## Provisioning workflow
 

@@ -4,7 +4,7 @@
 > [docs/adr/0001](docs/adr/0001-unified-ts-release-versioning-tooling-standard.md).
 
 pgxsinkit publishes its public packages (`@pgxsinkit/client`, `contracts`, `pglite-sync`, `react`,
-`server`, `sync-engine`) to **two** registries:
+`server`) to **two** registries:
 
 | Registry                                   | Role                                                                                                      | How it's published                                                              |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |

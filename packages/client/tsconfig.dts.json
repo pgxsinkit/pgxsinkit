@@ -12,7 +12,7 @@
       "drizzle-orm": ["../../node_modules/drizzle-orm"],
       "drizzle-orm/*": ["../../node_modules/drizzle-orm/*"],
       "@pgxsinkit/contracts": ["../contracts/dist/index.d.ts"],
-      "@pgxsinkit/sync-engine": ["../sync-engine/dist/index.d.ts"]
+      "@pgxsinkit/pglite-sync": ["../pglite-sync/dist/index.d.ts"]
     }
   },
   "include": ["src"]

@@ -1,6 +1,6 @@
 # Documentation proves the product interface
 
-Status: proposed (2026-06-22)
+Status: accepted (2026-06-22); partially implemented
 
 `getting-started.md` is narrative, not executable for a downstream consumer: step 1
 ("define your registry") has no code, step 3 mentions `createSyncServer` inline with
@@ -54,6 +54,22 @@ all of this drifts invisibly.
 - Distribution correctness (`exports`/`types`/`target`) gains an executable proof.
 - Maintenance cost is one small fixture plus a docs-build CI step — acceptable
   before 1.0; the alternative is shipping a broken install path.
+
+## Implementation status
+
+- **Decision 3 (standing contradictions) — done.** The README release wording now
+  matches [ADR-0001](0001-unified-ts-release-versioning-tooling-standard.md)
+  (tag-derived, no bump); `docs/architecture.md` says "three boundaries"; the
+  getting-started install list and the docs packages/reference pages drop
+  `@pgxsinkit/sync-engine` (removed by [ADR-0007](0007-absorb-sync-engine.md)); and the
+  five `files`-declared package READMEs now exist (`contracts`, `client`, `server`,
+  `react` gained minimal stubs; `pglite-sync` already had one).
+- **Decisions 1, 2, 4 (packed downstream fixture, the docs-build / fixture-smoke gate,
+  and the `target: "bun"` investigation) — deferred.** They require packing and
+  installing the built artifacts and a CI/docs-build step to verify; they land with the
+  same build/integration work as the deferred runtime cluster. Generating package
+  READMEs at packaging time (rather than the committed stubs) is the richer option to
+  revisit then.
 
 References: [ADR-0001](0001-unified-ts-release-versioning-tooling-standard.md)
 (release model); [ADR-0006](0006-local-schema-evolution.md) (registry-diff check);

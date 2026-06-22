@@ -49,6 +49,9 @@ check in the check surface).
 
 ## Acceptance
 
-- Standing contradictions fixed; getting-started reflects reality.
+- Standing contradictions fixed; getting-started reflects reality; the five package
+  READMEs exist. **(Phase 1 done)**
 - A packed-fixture smoke test proves the published install path; CI builds the docs.
-- `target` decision made on fixture evidence.
+  **(Phases 2–3 — deferred; need packing the built artifacts + a CI/docs-build step)**
+- `target` decision made on fixture evidence. **(Phase 4 — deferred; depends on the
+  fixture)**

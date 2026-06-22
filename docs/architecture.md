@@ -1,6 +1,6 @@
 # Architecture
 
-The repository is split into four boundaries:
+The repository is split into three boundaries:
 
 ## 1. Contracts
 
@@ -8,9 +8,9 @@ The repository is split into four boundaries:
 
 ## 2. Sync adapter
 
-`packages/pglite-sync` vendors the upstream `@electric-sql/pglite-sync` implementation.
+`packages/pglite-sync` vendors the upstream `@electric-sql/pglite-sync` implementation. This keeps upstream behavior visible and gives the repo a stable place to apply version-specific patches.
 
-`packages/sync-engine` is a narrow wrapper around that vendored package. This keeps upstream behavior visible while giving the repo a stable place to layer retries, instrumentation, and version-specific patches later.
+`@pgxsinkit/client` wraps that vendored adapter internally (`packages/client/src/shape-sync.ts`) — the place to layer retries and instrumentation. There is no separate sync-engine package (see [adr/0007](adr/0007-absorb-sync-engine.md)).
 
 ## 3. Verification harness
 
