@@ -53,6 +53,20 @@ const defaultedColumnRegistry = defineSyncRegistry({
   }),
 });
 
+// ADR-0012: a writable table whose PK drizzle property (`groupId`) differs from its column
+// (`group_id`). The client must persist the canonical column-keyed identity.
+const renamedPkRegistry = defineSyncRegistry({
+  renamedPk: defineSyncTable({
+    tableName: "renamed_pk_items",
+    makeColumns: () => ({
+      groupId: uuid("group_id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+    }),
+    mode: "readwrite",
+    primaryKey: ["group_id"],
+  }),
+});
+
 async function createOverlayTestContext() {
   const db = await createFreshTestPGlite();
   await db.exec(overlaySchemaSql);
@@ -1429,6 +1443,36 @@ describe("overlay state helpers", () => {
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.lastHttpStatus).toBe(409);
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("canonical entity identity — property≠column PK (ADR-0012)", () => {
+  it("persists the column-keyed identity in the journal for create and update", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(generateLocalSchemaSql(renamedPkRegistry));
+    const runtime = createMutationRuntime({ db, registry: renamedPkRegistry, writeUrl });
+
+    const groupId = "30000000-0000-4000-8000-00000000000a";
+    await runtime.create("renamedPk", { groupId, label: "first" });
+    await runtime.update("renamedPk", { groupId }, { label: "second" });
+
+    // The journal's real PK column is populated, and entity_key_json is the canonical
+    // column-keyed identity ({ group_id }), never the drizzle property ({ groupId }).
+    const journal = await db.query<{ groupId: string; entityKeyJson: string }>(
+      `SELECT group_id AS "groupId", entity_key_json AS "entityKeyJson"
+         FROM renamed_pk_items_mutations ORDER BY mutation_seq`,
+    );
+    expect(journal.rows).toHaveLength(2);
+    for (const row of journal.rows) {
+      expect(row.groupId).toBe(groupId);
+      expect(JSON.parse(row.entityKeyJson)).toEqual({ group_id: groupId });
+    }
+
+    // readMutationDetails surfaces the same canonical identity past the boundary.
+    const details = await runtime.readMutationDetails("renamedPk");
+    for (const detail of details) {
+      expect(detail.entityKey).toEqual({ group_id: groupId });
     }
   });
 });

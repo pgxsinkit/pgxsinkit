@@ -993,15 +993,19 @@ function buildEntityKeyFromRecord(context: TableContext, record: unknown) {
 }
 
 function normalizeEntityKey(context: TableContext, input: Record<string, string>) {
+  // The public API accepts the identity by drizzle property name (ergonomics); past this
+  // boundary the canonical Entity identity is column-keyed (ADR-0012), matching the
+  // journal/overlay PK columns, entity_key_json, and the applier's `v_entity_key->>'<column>'`.
+  // pkPropertyKeys[i] ↔ pkColumnNames[i] by construction (buildTableContext), so we map once here.
   return Object.fromEntries(
-    context.pkPropertyKeys.map((propertyKey) => {
+    context.pkPropertyKeys.map((propertyKey, index) => {
       const value = input[propertyKey];
 
       if (value === undefined) {
         throw new Error(`Missing entity key property ${propertyKey} for table ${context.key}`);
       }
 
-      return [propertyKey, String(value)];
+      return [context.pkColumnNames[index]!, String(value)];
     }),
   );
 }
@@ -1146,7 +1150,7 @@ async function insertMutationsBulk(
     const start = params.length;
     const values = [
       row.mutationId,
-      ...context.pkPropertyKeys.map((propertyKey) => row.entityKey[propertyKey]),
+      ...context.pkColumnNames.map((columnName) => row.entityKey[columnName]),
       row.entityKeyJson,
       row.mutationKind,
       "pending",
@@ -1238,10 +1242,7 @@ function buildBatchEntityInputCte(context: TableContext, entities: ReadonlyArray
   const params: unknown[] = [];
   const tuples = entities.map((entity) => {
     const start = params.length;
-    const values = [
-      entity.entityKeyJson,
-      ...context.pkPropertyKeys.map((propertyKey) => entity.entityKey[propertyKey]),
-    ];
+    const values = [entity.entityKeyJson, ...context.pkColumnNames.map((columnName) => entity.entityKey[columnName])];
 
     params.push(...values);
 

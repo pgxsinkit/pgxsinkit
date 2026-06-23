@@ -6,6 +6,7 @@ import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createFreshTestPGlite } from "../support/pglite";
 
 const projectedPlpgsqlRegistry = defineSyncRegistry({
   projectedItems: defineSyncTable({
@@ -69,5 +70,122 @@ describe("plpgsql batch function generator", () => {
     expect(ddl).toContain("set_config('role', COALESCE(NULLIF(_previous_role, ''), 'none'), true)");
     expect(ddl).toContain("set_config('request.jwt.claims', COALESCE(_previous_claims, ''), true)");
     expect(ddl).toContain("set_config('request.jwt.claim.sub', COALESCE(_previous_claim_sub, ''), true)");
+  });
+});
+
+// ADR-0012: the applier matches update/delete over the FULL server primary-key tuple, by column
+// name with per-column casts — not `primaryKey.columns[0]`.
+const compositeThingsRegistry = defineSyncRegistry({
+  compositeThings: defineSyncTable({
+    tableName: "composite_things",
+    makeColumns: () => ({
+      tenantId: uuid("tenant_id").notNull(),
+      id: uuid("id").notNull(),
+      label: varchar("label", { length: 120 }).notNull(),
+    }),
+    mode: "readwrite",
+    primaryKey: ["tenant_id", "id"],
+  }),
+});
+
+// ADR-0012: a PK whose drizzle property name (`groupId`) differs from its column name (`group_id`)
+// must resolve by the COLUMN name everywhere the canonical identity is read.
+const renamedPkRegistry = defineSyncRegistry({
+  renamedPk: defineSyncTable({
+    tableName: "renamed_pk_items",
+    makeColumns: () => ({
+      groupId: uuid("group_id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+    }),
+    mode: "readwrite",
+    primaryKey: ["group_id"],
+  }),
+});
+
+function compositeBatch(
+  kind: "create" | "update" | "delete",
+  entityKey: Record<string, string>,
+  payload: Record<string, string>,
+) {
+  return {
+    mutations: [
+      {
+        tableName: "composite_things",
+        kind,
+        entityKey,
+        payload,
+        mutationId: "00000000-0000-4000-8000-000000000001",
+        mutationSeq: 1,
+        clientTimestampUs: "1000",
+      },
+    ],
+  };
+}
+
+async function applyBatch(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, batch: unknown) {
+  await db.query(`SELECT pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb)`, [
+    JSON.stringify(batch),
+  ]);
+}
+
+describe("canonical entity identity — composite + renamed PK (ADR-0012)", () => {
+  it("matches update and delete over the full server primary-key tuple", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry);
+
+    // update WHERE — inside the format() template, so its single quotes are doubled.
+    expect(ddl).toContain(`"tenant_id" = ($2->>''tenant_id'')::uuid AND "id" = ($2->>''id'')::uuid`);
+    // delete WHERE — direct PL/pgSQL.
+    expect(ddl).toContain(`"tenant_id" = (v_entity_key->>'tenant_id')::uuid AND "id" = (v_entity_key->>'id')::uuid`);
+  });
+
+  it("resolves a property≠column primary key by its column name, never the drizzle property", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(renamedPkRegistry);
+
+    expect(ddl).toContain(`"group_id" = ($2->>''group_id'')::uuid`);
+    expect(ddl).toContain(`"group_id" = (v_entity_key->>'group_id')::uuid`);
+    expect(ddl).not.toContain("groupId");
+  });
+
+  it("applies update/delete to exactly the addressed row of a composite-PK table", async () => {
+    const db = await createFreshTestPGlite();
+
+    try {
+      await db.exec(`CREATE TABLE composite_things (
+        tenant_id uuid NOT NULL,
+        id uuid NOT NULL,
+        label varchar(120) NOT NULL,
+        PRIMARY KEY (tenant_id, id)
+      )`);
+      await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry));
+
+      const tenant = "10000000-0000-4000-8000-000000000001";
+      const idA = "20000000-0000-4000-8000-00000000000a";
+      const idB = "20000000-0000-4000-8000-00000000000b";
+
+      // Two rows share tenant_id and differ only on id — the exact case where a `columns[0]`-only
+      // WHERE would match (and clobber) BOTH.
+      await db.query(`INSERT INTO composite_things (tenant_id, id, label) VALUES ($1, $2, 'A'), ($1, $3, 'B')`, [
+        tenant,
+        idA,
+        idB,
+      ]);
+
+      await applyBatch(db, compositeBatch("update", { tenant_id: tenant, id: idA }, { label: "A2" }));
+
+      const afterUpdate = await db.query<{ id: string; label: string }>(
+        `SELECT id, label FROM composite_things ORDER BY label`,
+      );
+      expect(afterUpdate.rows).toEqual([
+        { id: idA, label: "A2" },
+        { id: idB, label: "B" },
+      ]);
+
+      await applyBatch(db, compositeBatch("delete", { tenant_id: tenant, id: idA }, { tenant_id: tenant, id: idA }));
+
+      const afterDelete = await db.query<{ id: string }>(`SELECT id FROM composite_things`);
+      expect(afterDelete.rows).toEqual([{ id: idB }]);
+    } finally {
+      await db.close();
+    }
   });
 });

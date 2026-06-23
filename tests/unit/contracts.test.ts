@@ -72,6 +72,24 @@ describe("sync config contracts", () => {
     ).toThrow(/must not omit primary-key columns/);
   });
 
+  it("rejects omitting a primary-key column from a writable composite-PK table (ADR-0012)", () => {
+    // The writable projection must carry the full server PK identity, or the overlay↔synced join
+    // and the applier's per-column WHERE break. Omitting either composite-PK column is rejected.
+    expect(() =>
+      defineSyncTable({
+        tableName: "composite_pk_items",
+        makeColumns: () => ({
+          tenantId: uuid("tenant_id").notNull(),
+          id: uuid("id").notNull(),
+          title: varchar("title", { length: 120 }).notNull(),
+        }),
+        mode: "readwrite",
+        primaryKey: ["tenant_id", "id"],
+        clientProjection: { omitColumns: ["tenantId"] },
+      }),
+    ).toThrow(/must not omit primary-key columns/);
+  });
+
   it("rejects omitting required unmanaged create columns from writable tables", () => {
     expect(() =>
       defineSyncTable({

@@ -64,9 +64,14 @@ function buildTableBranch(entry: SyncTableEntry): string {
   const qualifiedTableName = qualifyIdent(schema, tableName);
   const columns = getColumns(entry.table as AnyPgTable);
   const projectedColumns = getProjectedColumns(entry);
-  const primaryKeyColumn = entry.primaryKey.columns[0]!;
-  const primaryKeyColumnObject = Object.values(columns).find((column) => column.name === primaryKeyColumn);
-  const primaryKeyType = primaryKeyColumnObject?.getSQLType() ?? "text";
+  // The canonical Entity identity is the full server primary-key tuple, by column name with
+  // typed values (ADR-0012): the applier matches update/delete over EVERY pk column. Keying on
+  // only the first column (the old `columns[0]`) matched too many rows on a composite-PK table.
+  const primaryKeyColumns = entry.primaryKey.columns.map((columnName) => {
+    const columnObject = Object.values(columns).find((column) => column.name === columnName);
+    return { name: columnName, type: columnObject?.getSQLType() ?? "text" };
+  });
+  const primaryKeyColumnNames = new Set(primaryKeyColumns.map((pk) => pk.name));
 
   const createManagedFields = getManagedFieldsForOperation(entry, "create");
   const updateManagedFields = getManagedFieldsForOperation(entry, "update");
@@ -81,7 +86,7 @@ function buildTableBranch(entry: SyncTableEntry): string {
 
   const nonPrimaryKeyColumnPairs = projectedColumns
     .map(({ column }) => column)
-    .filter((column) => column.name !== primaryKeyColumn && !updateManagedFieldNames.has(column.name))
+    .filter((column) => !primaryKeyColumnNames.has(column.name) && !updateManagedFieldNames.has(column.name))
     .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(column.getSQLType())}')`)
     .join(",\n            ");
 
@@ -93,12 +98,19 @@ function buildTableBranch(entry: SyncTableEntry): string {
     .map((field) => `${quoteIdent(field.columnName)} = ${buildManagedFieldExpression(field.strategy)}`)
     .join(", ");
 
+  // WHERE over the full pk tuple. v_entity_key (EXECUTE arg $2) is column-keyed (ADR-0012), so
+  // each pk column reads `$2->>'<columnName>'` with its own registry-derived cast. The pk names
+  // and types are static, so the predicate is inlined (its single quotes are doubled by the
+  // template's `.replace` below); only the per-column value extraction is runtime.
+  const updateWhereClause = primaryKeyColumns
+    .map((pk) => `${quoteIdent(pk.name)} = ($2->>'${toSqlLiteral(pk.name)}')::${pk.type}`)
+    .join(" AND ");
+  const deleteWhereClause = primaryKeyColumns
+    .map((pk) => `${quoteIdent(pk.name)} = (v_entity_key->>'${toSqlLiteral(pk.name)}')::${pk.type}`)
+    .join(" AND ");
+
   const createSqlTemplate = `INSERT INTO ${qualifiedTableName} (%s) VALUES (%s)`.replace(/'/g, "''");
-  const updateSqlTemplate =
-    `UPDATE ${qualifiedTableName} SET %s WHERE ${quoteIdent(primaryKeyColumn)} = ($2->>%L)::${primaryKeyType}`.replace(
-      /'/g,
-      "''",
-    );
+  const updateSqlTemplate = `UPDATE ${qualifiedTableName} SET %s WHERE ${updateWhereClause}`.replace(/'/g, "''");
 
   const createBranch = `
         SELECT format(
@@ -120,8 +132,7 @@ function buildTableBranch(entry: SyncTableEntry): string {
   const updateBranch = `
         SELECT format(
           '${updateSqlTemplate}',
-          concat_ws(', ', nullif(string_agg(format('%I = ($1->>%L)::%s', col_name, col_name, col_type), ', '), ''), ${toSqlTextOrNull(updateManagedAssignmentsSql)}),
-          '${toSqlLiteral(primaryKeyColumn)}'
+          concat_ws(', ', nullif(string_agg(format('%I = ($1->>%L)::%s', col_name, col_name, col_type), ', '), ''), ${toSqlTextOrNull(updateManagedAssignmentsSql)})
         )
         INTO dml_sql
         FROM (VALUES
@@ -136,7 +147,7 @@ function buildTableBranch(entry: SyncTableEntry): string {
 
   const deleteBranch = `
       DELETE FROM ${qualifiedTableName}
-        WHERE ${quoteIdent(primaryKeyColumn)} = (v_entity_key->>'${toSqlLiteral(primaryKeyColumn)}')::${primaryKeyType};
+        WHERE ${deleteWhereClause};
       `.trim();
 
   return `
