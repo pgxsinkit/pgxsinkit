@@ -120,6 +120,11 @@ export interface TableSpecInput {
    * engine without one (those fall back to runtime introspection).
    */
   columnTypes?: SyncColumnType[];
+  /**
+   * Consistency group (ADR-0009 decision 2): tables sharing a group sync on one `MultiShapeStream`
+   * and commit atomically at a shared LSN frontier. Absent → the table is its own singleton group.
+   */
+  consistencyGroup?: string;
 }
 
 export interface SyncConfigInput<TTables extends Record<string, TableSpecInput> = Record<string, TableSpecInput>> {

@@ -699,7 +699,7 @@ describe("pglite-sync", () => {
       DECLARE
         is_syncing BOOLEAN;
       BEGIN
-        is_syncing := COALESCE(current_setting('electric.syncing', true)::boolean, false);
+        is_syncing := COALESCE(current_setting('pgxsinkit.syncing', true)::boolean, false);
         IF is_syncing THEN
           NEW.is_syncing := TRUE;
         ELSE
@@ -715,7 +715,7 @@ describe("pglite-sync", () => {
     `);
 
     // Check the flag is not set outside of a sync
-    const result0 = await pg.sql`SELECT current_setting('electric.syncing', true)`;
+    const result0 = await pg.sql`SELECT current_setting('pgxsinkit.syncing', true)`;
     expect(result0.rows[0]).toEqual({ current_setting: null }); // not set yet as syncShapeToTable hasn't been called
 
     const shape = await pg.electric.syncShapeToTable({
@@ -748,7 +748,7 @@ describe("pglite-sync", () => {
     });
 
     // Check the flag is not set outside of a sync
-    const result2 = await pg.sql`SELECT current_setting('electric.syncing', true)`;
+    const result2 = await pg.sql`SELECT current_setting('pgxsinkit.syncing', true)`;
     expect(result2.rows[0]).toEqual({ current_setting: "false" });
 
     shape.unsubscribe();
@@ -787,7 +787,7 @@ describe("pglite-sync", () => {
       },
       table: "todo",
       primaryKey: ["id"],
-      initialInsertMethod: "csv",
+      initialInsertMethod: "copy",
       shapeKey: null,
     });
 
@@ -884,7 +884,7 @@ describe("pglite-sync", () => {
       },
       table: "todo",
       primaryKey: ["id"],
-      initialInsertMethod: "csv",
+      initialInsertMethod: "copy",
       shapeKey: null,
     });
 

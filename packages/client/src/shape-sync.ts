@@ -20,6 +20,11 @@ export interface ShapeSyncSpec {
   applyStrategy?: ApplyStrategy;
   /** Resolved column types for the `json` apply path (ADR-0009 decision 3); no `information_schema` probe. */
   columnTypes?: SyncColumnType[];
+  /**
+   * Consistency group (ADR-0009 decision 2). Specs sharing a group sync on one `MultiShapeStream`
+   * and commit atomically. Absent → the table is its own singleton group keyed by its `shapeKey`.
+   */
+  consistencyGroup?: string;
 }
 
 export interface StartShapeSyncOptions extends ShapeSyncSpec {
@@ -110,46 +115,111 @@ export async function startConfiguredSync(
   input: StartConfiguredSyncOptions,
 ): Promise<StartConfiguredSyncResult> {
   const specs = buildConfiguredShapeSpecs(input.syncConfig);
-  let pendingInitialSyncs = specs.length;
+
+  // Bucket specs into consistency groups (ADR-0009 decision 2). Each group is one MultiShapeStream
+  // committed atomically; an ungrouped table is its own singleton group keyed by its shapeKey.
+  const groups = new Map<string, ConfiguredShapeSyncSpec[]>();
+  for (const spec of specs) {
+    const groupKey = groupSubscriptionKey(spec);
+    const bucket = groups.get(groupKey);
+    if (bucket) {
+      bucket.push(spec);
+    } else {
+      groups.set(groupKey, [spec]);
+    }
+  }
+
+  let pendingInitialSyncs = groups.size;
   let initialSyncSignalled = pendingInitialSyncs === 0;
 
-  const entries = await Promise.all(
-    specs.map(async (spec) => {
-      const result = await startShapeSync(pg, {
-        electricUrl: spec.electricUrl,
-        tableName: spec.tableName,
-        ...(spec.schema !== undefined ? { schema: spec.schema } : {}),
-        shapeKey: spec.shapeKey,
-        primaryKey: spec.primaryKey,
-        ...(spec.electricTable !== undefined ? { electricTable: spec.electricTable } : {}),
-        ...(spec.applyStrategy ? { applyStrategy: spec.applyStrategy } : {}),
-        ...(spec.columnTypes ? { columnTypes: spec.columnTypes } : {}),
+  const groupResults = await Promise.all(
+    [...groups.entries()].map(async ([groupKey, groupSpecs]) => {
+      const result = await startGroupSync(pg, {
+        groupKey,
+        specs: groupSpecs,
         ...(input.shapeHeaders ? { headers: input.shapeHeaders } : {}),
         ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
-        onInitialSync: () => {
+        onGroupInitialSync: () => {
+          // The group is up-to-date as a unit; signal each member table, then advance the global
+          // initial-sync gate once every group is caught up.
+          for (const spec of groupSpecs) {
+            input.onTableInitialSync?.(spec.key);
+          }
           pendingInitialSyncs -= 1;
-          input.onTableInitialSync?.(spec.key);
-
           if (!initialSyncSignalled && pendingInitialSyncs === 0) {
             initialSyncSignalled = true;
             input.onInitialSync?.();
           }
         },
       });
-
-      return [spec.key, result] as const;
+      return { groupSpecs, result };
     }),
   );
 
-  const tables = Object.fromEntries(entries);
+  // Each member table exposes a per-table view backed by its group's single stream: the table is
+  // up-to-date exactly when its group is, and unsubscribing it tears down the whole group.
+  const tables: Record<string, ShapeSyncResult> = {};
+  for (const { groupSpecs, result } of groupResults) {
+    for (const spec of groupSpecs) {
+      tables[spec.key] = {
+        unsubscribe: result.unsubscribe,
+        get isUpToDate() {
+          return result.isUpToDate;
+        },
+      };
+    }
+  }
+
   return {
     unsubscribe: () => {
-      for (const table of Object.values(tables)) {
-        table.unsubscribe();
+      // Unsubscribe per group (not per table) so a multi-table group's stream is torn down once.
+      for (const { result } of groupResults) {
+        result.unsubscribe();
       }
     },
     tables,
   };
+}
+
+interface StartGroupSyncOptions {
+  groupKey: string;
+  specs: ConfiguredShapeSyncSpec[];
+  headers?: Record<string, string>;
+  onGroupInitialSync?: () => void;
+  onSyncError?: (error: Error) => void;
+}
+
+/**
+ * Sync one consistency group on a single `MultiShapeStream` (ADR-0009 decision 2). All member
+ * shapes share the group's subscription key and commit atomically at a shared LSN frontier; each
+ * shape keeps its own apply strategy and column types (resolved per-shape inside the engine).
+ */
+export async function startGroupSync(pg: SyncEnginePGlite, input: StartGroupSyncOptions) {
+  const shapeHeaders = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
+
+  const shapes = Object.fromEntries(
+    input.specs.map((spec) => [
+      spec.key,
+      {
+        shape: {
+          url: buildShapeUrl(spec.electricUrl, spec.electricTable ?? spec.tableName),
+          ...(shapeHeaders ? { headers: shapeHeaders } : {}),
+        },
+        table: spec.tableName,
+        ...(spec.schema !== undefined ? { schema: spec.schema } : {}),
+        primaryKey: [...spec.primaryKey],
+        ...(spec.applyStrategy ? { applyStrategy: spec.applyStrategy } : {}),
+        ...(spec.columnTypes ? { columnTypes: spec.columnTypes } : {}),
+      },
+    ]),
+  );
+
+  return getElectricNamespace(pg).syncShapesToTables({
+    key: input.groupKey,
+    shapes,
+    ...(input.onGroupInitialSync ? { onInitialSync: input.onGroupInitialSync } : {}),
+    ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
+  });
 }
 
 function getElectricNamespace(pg: SyncEnginePGlite) {
@@ -176,5 +246,15 @@ function buildConfiguredShapeSpec(
     electricTable: table.shape.electricTable ?? table.shape.tableName,
     ...(table.applyStrategy ? { applyStrategy: table.applyStrategy } : {}),
     ...(table.columnTypes ? { columnTypes: table.columnTypes } : {}),
+    ...(table.consistencyGroup ? { consistencyGroup: table.consistencyGroup } : {}),
   };
+}
+
+/**
+ * The subscription key for a spec's consistency group (ADR-0009 decision 2): the explicit
+ * `consistencyGroup` when set, else the table's own `shapeKey` (a singleton group). One persisted
+ * subscription-state row exists per group key, so subscription reset enumerates these.
+ */
+export function groupSubscriptionKey(spec: Pick<ConfiguredShapeSyncSpec, "consistencyGroup" | "shapeKey">): string {
+  return spec.consistencyGroup ?? spec.shapeKey;
 }

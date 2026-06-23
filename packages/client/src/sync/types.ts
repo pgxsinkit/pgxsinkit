@@ -3,13 +3,15 @@ import type { Transaction } from "@electric-sql/pglite";
 
 import type { ApplyStrategy, SyncColumnType } from "@pgxsinkit/contracts";
 
+export type { ApplyStrategy };
+
 export type Lsn = bigint;
 
 export type MapColumnsMap = Record<string, string>;
 export type MapColumnsFn = (message: ChangeMessage<Row<unknown>>) => Row<unknown>;
 export type MapColumns = MapColumnsMap | MapColumnsFn;
 export type SubscriptionKey = string;
-export type InitialInsertMethod = "insert" | "csv" | "json" | "useCopy";
+export type InitialInsertMethod = "insert" | "copy" | "json";
 
 /** Default hard cap on commit-transaction attempts before the engine goes degraded (ADR-0009). */
 export const DEFAULT_MAX_COMMIT_RETRIES = 5;
@@ -27,12 +29,19 @@ export interface ShapeToTableOptions {
    * `information_schema`; when absent the `json` path falls back to runtime introspection.
    */
   columnTypes?: SyncColumnType[] | undefined;
+  /**
+   * Per-shape initial-backfill apply strategy (ADR-0009 decisions 2 + 3). In a consistency group
+   * each shape resolves its own apply path and its own `useInsert` transition, so one shape's
+   * backfill never forces the rest onto plain `INSERT`. `initialInsertMethod` (explicit) wins;
+   * otherwise `applyStrategy` is mapped; otherwise the group-level default applies.
+   */
+  applyStrategy?: ApplyStrategy | undefined;
+  initialInsertMethod?: InitialInsertMethod | undefined;
 }
 
 export interface SyncShapesToTablesOptions {
   key: string | null;
   shapes: Record<string, ShapeToTableOptions>;
-  useCopy?: boolean | undefined;
   initialInsertMethod?: InitialInsertMethod | undefined;
   onInitialSync?: (() => void) | undefined;
   /** Stream-level (network / fetch) error from Electric, forwarded to `MultiShapeStream.subscribe`. */
@@ -61,12 +70,11 @@ export interface SyncShapeToTableOptions {
   mapColumns?: MapColumns | undefined;
   primaryKey: string[];
   shapeKey: string | null;
-  useCopy?: boolean | undefined;
   initialInsertMethod?: InitialInsertMethod | undefined;
   /**
    * The statically-resolved bulk-insert strategy for this table (ADR-0009 decision 3). When set
-   * (and `initialInsertMethod`/`useCopy` are not), it selects the initial-backfill apply path:
-   * `copy` → CSV `COPY`, `json` → `json_to_recordset`, `insert` → batched `INSERT`.
+   * (and `initialInsertMethod` is not), it selects the initial-backfill apply path:
+   * `copy` → `COPY` (TEXT format), `json` → `json_to_recordset`, `insert` → batched `INSERT`.
    */
   applyStrategy?: ApplyStrategy | undefined;
   /** Resolved column types for the `json` apply path; see {@link ShapeToTableOptions.columnTypes}. */

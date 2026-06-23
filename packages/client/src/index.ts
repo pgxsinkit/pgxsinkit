@@ -217,7 +217,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // shape subscription to force a fresh re-stream (ADR-0006).
     const resetKeys =
       versionEvent?.status === "rebuilt"
-        ? [...(options.resetSubscriptionKeys ?? []), ...allShapeSubscriptionKeys(options.registry)]
+        ? [...(options.resetSubscriptionKeys ?? []), ...allGroupSubscriptionKeys(options.registry)]
         : options.resetSubscriptionKeys;
     await resetSubscriptionsIfRequested(pglite, resetKeys);
 
@@ -330,7 +330,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       await pglite.exec(generateLocalSchemaSql(options.registry));
       // Reset the Electric subscriptions so the rebuilt synced tables re-stream from scratch
       // rather than the bookkeeping believing they are already caught up (ADR-0006).
-      await resetSubscriptionsIfRequested(pglite, allShapeSubscriptionKeys(options.registry));
+      await resetSubscriptionsIfRequested(pglite, allGroupSubscriptionKeys(options.registry));
     },
     flush: (table) => mutationRuntime.flush(table),
     reconcile: (table) => mutationRuntime.reconcile(table),
@@ -346,11 +346,17 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   return client;
 }
 
-/** Every Electric shape subscription key declared by the registry (one per synced table). */
-function allShapeSubscriptionKeys<TRegistry extends SyncTableRegistry>(registry: TRegistry): string[] {
-  return Object.values(registry)
-    .map((entry) => entry.shape?.shapeKey)
-    .filter((key): key is string => typeof key === "string" && key.length > 0);
+/**
+ * Every persisted subscription key declared by the registry — one per consistency group (ADR-0009
+ * decision 2), not per table. Grouped tables share a subscription-state row keyed by their group;
+ * ungrouped tables are singleton groups keyed by their own `shapeKey`. Deduped, since several tables
+ * collapse onto one group key.
+ */
+function allGroupSubscriptionKeys<TRegistry extends SyncTableRegistry>(registry: TRegistry): string[] {
+  const keys = Object.values(registry)
+    .filter((entry) => typeof entry.shape?.shapeKey === "string" && entry.shape.shapeKey.length > 0)
+    .map((entry) => entry.consistencyGroup ?? entry.shape!.shapeKey);
+  return [...new Set(keys)];
 }
 
 async function resetSubscriptionsIfRequested(pglite: ClientPGlite, keys: string[] | undefined) {
@@ -419,6 +425,9 @@ function buildSyncTableInput(entry: SyncTableEntry, tableKey: string) {
     // runtime information_schema round-trip.
     applyStrategy: classifyTableApplyStrategy(entry),
     columnTypes: deriveSyncColumnTypes(entry),
+    // Carry the consistency group (ADR-0009 decision 2) so the sync starter buckets grouped tables
+    // onto one MultiShapeStream; absent → singleton group.
+    ...(entry.consistencyGroup ? { consistencyGroup: entry.consistencyGroup } : {}),
   };
 }
 

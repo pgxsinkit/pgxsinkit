@@ -199,7 +199,7 @@ describe("sync-e2e", () => {
       DECLARE
         is_syncing BOOLEAN;
       BEGIN
-        is_syncing := COALESCE(current_setting('electric.syncing', true)::boolean, false);
+        is_syncing := COALESCE(current_setting('pgxsinkit.syncing', true)::boolean, false);
         IF is_syncing THEN
           NEW.is_syncing := TRUE;
         ELSE
@@ -339,7 +339,7 @@ describe("sync-e2e", () => {
       DECLARE
         is_syncing BOOLEAN;
       BEGIN
-        is_syncing := COALESCE(current_setting('electric.syncing', true)::boolean, false);
+        is_syncing := COALESCE(current_setting('pgxsinkit.syncing', true)::boolean, false);
         IF is_syncing THEN
           NEW.is_syncing := TRUE;
         ELSE
@@ -674,7 +674,7 @@ describe("sync-e2e", () => {
 
   it("sets the syncing flag to true when syncing begins", async () => {
     // Check the flag is not set outside of a sync
-    const result0 = await pg.sql`SELECT current_setting('electric.syncing', true)`;
+    const result0 = await pg.sql`SELECT current_setting('pgxsinkit.syncing', true)`;
     expect(result0.rows[0]).toEqual({ current_setting: null }); // not set yet as syncShapeToTable hasn't been called
 
     const shape = await pg.electric.syncShapeToTable({
@@ -709,7 +709,7 @@ describe("sync-e2e", () => {
     });
 
     // Check the flag is not set outside of a sync
-    const result2 = await pg.sql`SELECT current_setting('electric.syncing', true)`;
+    const result2 = await pg.sql`SELECT current_setting('pgxsinkit.syncing', true)`;
     expect(result2.rows[0]).toEqual({ current_setting: "false" });
 
     // Clean up
@@ -798,7 +798,7 @@ describe("sync-e2e", () => {
       },
       table: "todo",
       primaryKey: ["id"],
-      initialInsertMethod: "csv",
+      initialInsertMethod: "copy",
       shapeKey: null,
     });
 
@@ -864,7 +864,7 @@ newline', false);
       },
       table: "todo",
       primaryKey: ["id"],
-      initialInsertMethod: "csv",
+      initialInsertMethod: "copy",
       shapeKey: null,
     });
 
@@ -1802,7 +1802,7 @@ newline', false);
       },
       table: "large_table",
       primaryKey: ["id"],
-      initialInsertMethod: "csv",
+      initialInsertMethod: "copy",
       shapeKey: null,
     });
 
@@ -1894,7 +1894,7 @@ newline', false);
       },
       table: "large_ops_table",
       primaryKey: ["id"],
-      initialInsertMethod: "csv",
+      initialInsertMethod: "copy",
       shapeKey: null,
     });
 
@@ -2428,10 +2428,9 @@ newline', false);
     await pg.electric.deleteSubscription("data_types_test");
   };
 
-  // FIXME: fails...
-  // it('syncs data with various column types initial COPY', async () => {
-  //   await types_syncer('csv')
-  // }, 60000)
+  it("syncs data with various column types initial COPY", async () => {
+    await types_syncer("copy");
+  }, 60000);
 
   it("syncs data with various column types initial json_to_recordset", async () => {
     await types_syncer("json");
@@ -2441,11 +2440,7 @@ newline', false);
     await types_syncer("insert");
   }, 60000);
 
-  const many_syncer = async (
-    method: InitialInsertMethod | "useCopy",
-    numTodos: number = 150000,
-    rowSize: number = 100,
-  ) => {
+  const many_syncer = async (method: InitialInsertMethod, numTodos: number = 150000, rowSize: number = 100) => {
     // Batch the inserts to Postgres
     const batchSize = 1000;
     const batches = Math.ceil(numTodos / batchSize);
@@ -2473,17 +2468,7 @@ newline', false);
       await pgClient.query(query, params);
     }
 
-    // We want to test the deprecated useCopy option, but also the new initialInsertMethod option
-    let useCopy: boolean | undefined = undefined;
-    let initialInsertMethod: InitialInsertMethod | undefined = undefined;
-    if (method === "useCopy") {
-      useCopy = true;
-      initialInsertMethod = undefined;
-    } else {
-      initialInsertMethod = method;
-    }
-
-    // Set up sync with COPY enabled for efficiency
+    // Set up sync with the requested initial-backfill method
     const shape = await pg.electric.syncShapeToTable({
       shape: {
         url: ELECTRIC_URL,
@@ -2492,8 +2477,7 @@ newline', false);
       },
       table: "todo",
       primaryKey: ["id"],
-      useCopy,
-      initialInsertMethod,
+      initialInsertMethod: method,
       shapeKey: "large_todo_sync_test",
     });
 
@@ -2564,17 +2548,11 @@ newline', false);
 
           if (numTodos <= 150_000) {
             it(`with COPY`, async () => {
-              await many_syncer("csv", numTodos, rowSize);
+              await many_syncer("copy", numTodos, rowSize);
             }, 60000);
 
             it(`with json_to_recordset`, async () => {
               await many_syncer("json", numTodos, rowSize);
-            }, 60000);
-          }
-
-          if (numTodos <= 20_000) {
-            it(`with the deprecated useCopy option`, async () => {
-              await many_syncer("useCopy", numTodos);
             }, 60000);
           }
         });

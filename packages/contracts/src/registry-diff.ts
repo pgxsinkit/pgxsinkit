@@ -96,6 +96,15 @@ function diffTable(table: string, previous: CanonicalTable, next: CanonicalTable
   }
   diffProjection(table, previous.projection, next.projection, changes);
   diffShape(table, previous.shape, next.shape, changes);
+  if ((previous.consistencyGroup ?? null) !== (next.consistencyGroup ?? null)) {
+    // A group move re-keys the table's subscription-state row (ADR-0009 decision 2): the local cache
+    // columns survive, but the subscription must reset so the table re-streams under its new group.
+    changes.push({
+      severity: "risky",
+      table,
+      detail: `consistency group changed: ${previous.consistencyGroup ?? "(singleton)"} -> ${next.consistencyGroup ?? "(singleton)"} (re-sync required)`,
+    });
+  }
   if (JSON.stringify(previous.managedFields) !== JSON.stringify(next.managedFields)) {
     // Managed-field governance changes how writes are constructed/owned; a returning client
     // with owed writes authored under the old governance needs a conscious re-sync.

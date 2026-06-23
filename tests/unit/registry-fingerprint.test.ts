@@ -40,6 +40,26 @@ describe("registry fingerprint (ADR-0004)", () => {
     expect(fingerprintRegistry(ba)).toBe(fingerprintRegistry(ab));
   });
 
+  it("changes when a table's consistency group changes (ADR-0009 decision 2)", () => {
+    const ungrouped = defineSyncRegistry({ items: items() });
+    const grouped = defineSyncRegistry({
+      items: defineSyncTable({
+        tableName: "items",
+        makeColumns: () => ({
+          id: uuid("id").primaryKey(),
+          title: varchar("title", { length: 120 }).notNull(),
+        }),
+        clientProjection: { omitColumns: [] },
+        consistencyGroup: "forum",
+      }),
+    });
+
+    expect(fingerprintRegistry(grouped)).not.toBe(fingerprintRegistry(ungrouped));
+    // The canonical form carries the group so the diff gate can see the move.
+    expect(canonicalizeRegistry(grouped)[0]?.consistencyGroup).toBe("forum");
+    expect(canonicalizeRegistry(ungrouped)[0]?.consistencyGroup).toBeNull();
+  });
+
   it("changes when a column is added", () => {
     const base = defineSyncRegistry({ items: items() });
     const widened = defineSyncRegistry({

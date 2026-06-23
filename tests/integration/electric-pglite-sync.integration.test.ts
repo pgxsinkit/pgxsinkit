@@ -44,6 +44,19 @@ async function startTestSync(localPg: Awaited<ReturnType<typeof createLocalTodoS
   };
 }
 
+// Bind both demo tables into one consistency group (ADR-0009 decision 2) so they sync on a single
+// MultiShapeStream and commit atomically — the cross-shape path the standalone-per-table wiring
+// never exercised.
+function groupedDemoSyncConfig() {
+  const config = buildDemoSyncConfig(env.electricUrl);
+  return {
+    ...config,
+    tables: Object.fromEntries(
+      Object.entries(config.tables).map(([key, table]) => [key, { ...table, consistencyGroup: "demo" }]),
+    ),
+  };
+}
+
 describe("electric -> pglite sync integration", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
   const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
@@ -209,6 +222,79 @@ describe("electric -> pglite sync integration", () => {
         expect(result.rows[0]?.title).toBe("Visible after API write");
         expect(result.rows[0]?.authorId).toBe("01963227-d4c7-72db-b858-f89f6af8f921");
       });
+    } finally {
+      sync.unsubscribe();
+      await localPg.close();
+    }
+  }, 30_000);
+
+  it("syncs a consistency group on one stream with a single shared subscription row (ADR-0009 decision 2)", async () => {
+    // Parent author + child todo seeded together; a group commits both atomically at a shared LSN.
+    await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          {
+            tableName: "authors",
+            entityKey: { id: "0196322a-0000-7000-8000-00000000a001" },
+            mutationId: "8d0a1d2e-0000-4000-8000-00000000a001",
+            mutationSeq: 1,
+            kind: "create",
+            payload: { id: "0196322a-0000-7000-8000-00000000a001", name: "Group Parent" },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+          {
+            tableName: "todos",
+            entityKey: { id: "0196322a-0000-7000-8000-00000000b001" },
+            mutationId: "8d0a1d2e-0000-4000-8000-00000000b001",
+            mutationSeq: 2,
+            kind: "create",
+            payload: {
+              id: "0196322a-0000-7000-8000-00000000b001",
+              title: "Grouped child",
+              description: null,
+              author_id: "0196322a-0000-7000-8000-00000000a001",
+              status: "todo",
+              priority: "medium",
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
+      }),
+    });
+
+    const localPg = await createLocalTodoStore();
+    let markInitialSyncDone: (() => void) | null = null;
+    const initialSyncDone = new Promise<void>((resolve) => {
+      markInitialSyncDone = resolve;
+    });
+    const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
+      syncConfig: groupedDemoSyncConfig(),
+      onInitialSync: () => {
+        markInitialSyncDone?.();
+        markInitialSyncDone = null;
+      },
+    });
+
+    try {
+      await initialSyncDone;
+
+      await waitFor(async () => {
+        const authorResult = await localPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors;");
+        const todoResult = await localPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos;");
+        expect(authorResult.rows[0]?.count).toBe(1);
+        expect(todoResult.rows[0]?.count).toBe(1);
+      });
+
+      // The whole group persists ONE subscription-state row, keyed by the group, whose per-shape
+      // metadata covers both member tables — i.e. it is a single MultiShapeStream, not two streams.
+      const subs = await localPg.query<{ key: string; shape_metadata: Record<string, unknown> }>(
+        "SELECT key, shape_metadata FROM pgxsinkit.subscriptions_metadata ORDER BY key;",
+      );
+      expect(subs.rows).toHaveLength(1);
+      expect(subs.rows[0]?.key).toBe("demo");
+      expect(Object.keys(subs.rows[0]?.shape_metadata ?? {}).sort()).toEqual(["authors", "todos"]);
     } finally {
       sync.unsubscribe();
       await localPg.close();

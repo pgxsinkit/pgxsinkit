@@ -105,6 +105,14 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
   clientProjection?: ClientProjectionSpecForTable<TTable>;
   serverProjection?: ServerProjectionSpec;
   governance?: TableGovernanceSpecForTable<TTable>;
+  /**
+   * Consistency group (ADR-0009 decision 2). Tables sharing a `consistencyGroup` are synced on one
+   * `MultiShapeStream` and committed atomically at a shared LSN frontier, so a local reader never
+   * sees one grouped table advanced past another for the same server transaction. Omitted → the
+   * table is its own singleton group (independent frontier, today's behaviour). The latency cost (a
+   * group advances only as fast as its slowest shape) is contained to the tables that opt in.
+   */
+  consistencyGroup?: string;
 }
 
 /** Column property key names from a `makeColumns` factory function. */
@@ -199,6 +207,12 @@ export type SyncTableInput<
   /** Server-side response-path projection (e.g. `rowTransform`). Server authority, not client shape. */
   serverProjection?: ServerProjectionSpec;
   governance?: SyncTableInputGovernance<TColumns>;
+  /**
+   * Bind this table into a consistency group (ADR-0009 decision 2): grouped tables sync on one
+   * `MultiShapeStream` and commit atomically. Omit for the default singleton group. See
+   * {@link SyncTableEntry.consistencyGroup}.
+   */
+  consistencyGroup?: string;
 };
 
 export type SyncTableRegistry = Record<string, SyncTableEntry>;

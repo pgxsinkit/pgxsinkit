@@ -173,6 +173,27 @@ describe("registry diff gate (ADR-0006)", () => {
     expect(diff.changes.some((change) => /row filter changed/.test(change.detail))).toBe(true);
   });
 
+  it("classifies a consistency-group change as risky (ADR-0009 decision 2)", () => {
+    const mk = (consistencyGroup?: string) =>
+      defineSyncRegistry({
+        items: defineSyncTable({
+          tableName: "items",
+          makeColumns: () => ({ id: uuid("id").primaryKey() }),
+          clientProjection: { omitColumns: [] },
+          ...(consistencyGroup ? { consistencyGroup } : {}),
+        }),
+      });
+
+    // Singleton -> named group, and named -> different named, are both risky re-syncs.
+    const intoGroup = compareRegistries(mk(), mk("forum"));
+    expect(intoGroup.severity).toBe("risky");
+    expect(intoGroup.changes.some((change) => /consistency group changed/.test(change.detail))).toBe(true);
+
+    expect(compareRegistries(mk("forum"), mk("roster")).severity).toBe("risky");
+    // No change in group membership is not flagged.
+    expect(compareRegistries(mk("forum"), mk("forum")).changes).toEqual([]);
+  });
+
   it("round-trips a lock and gates a breaking change", () => {
     const lock = buildRegistryLock(base());
     expect(runRegistryCheck({ registry: base(), lock }).ok).toBe(true);

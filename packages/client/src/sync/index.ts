@@ -42,17 +42,17 @@ export * from "./types";
  */
 /**
  * Maps the statically-resolved {@link ApplyStrategy} (ADR-0009 decision 3) onto the engine's
- * initial-backfill apply path. Undefined (no registry-supplied strategy) defaults to `insert`,
- * the always-correct floor.
+ * initial-backfill apply path. Undefined (no registry-supplied strategy) defaults to `copy`:
+ * the COPY TEXT serializer round-trips every built-in type, so it is the safe no-brainer bootstrap.
  */
 function applyStrategyToInsertMethod(strategy: ApplyStrategy | undefined): InitialInsertMethod {
   switch (strategy) {
-    case "copy":
-      return "csv";
     case "json":
       return "json";
-    default:
+    case "insert":
       return "insert";
+    default:
+      return "copy";
   }
 }
 
@@ -67,7 +67,10 @@ function readReplicationHeaders(headers: ChangeMessage["headers"]): { lsn: bigin
 
 async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) {
   const debug = options?.debug ?? false;
-  const metadataSchema = options?.metadataSchema ?? "electric";
+  // pgxsinkit-owned metadata namespace (ADR-0009 decision 6): this is our local bookkeeping (the
+  // subscription-state table) and the sync-origin GUC (`<schema>.syncing`), not Electric's — so it
+  // lives under our own schema, renamed from the upstream `electric` default.
+  const metadataSchema = options?.metadataSchema ?? "pgxsinkit";
   const streams: Array<{
     stream: MultiShapeStream<Record<string, Row<unknown>>>;
     aborter: AbortController;
@@ -96,8 +99,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
   const syncShapesToTables = async ({
     key,
     shapes,
-    useCopy = false,
-    initialInsertMethod = "insert",
+    initialInsertMethod = "copy",
     onInitialSync,
     onError,
     onSyncError,
@@ -130,14 +132,26 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
 
     const isNewSubscription = subState === null;
 
-    if (useCopy && initialInsertMethod === "insert") {
-      initialInsertMethod = "csv";
-      console.warn(
-        "The useCopy option is deprecated and will be removed in a future version. Use initialInsertMethod instead.",
-      );
-    }
+    // Each shape resolves its own apply method (ADR-0009 decisions 2 + 3): an explicit per-shape
+    // `initialInsertMethod` wins, else the per-shape `applyStrategy`, else the group-level default.
+    // So a consistency group with mixed column profiles applies each table on its correct path.
+    const shapeInsertMethod = new Map<string, InitialInsertMethod>(
+      Object.entries(shapes).map(([shapeName, shapeOptions]) => [
+        shapeName,
+        shapeOptions.initialInsertMethod ??
+          (shapeOptions.applyStrategy ? applyStrategyToInsertMethod(shapeOptions.applyStrategy) : initialInsertMethod),
+      ]),
+    );
 
-    let useInsert = !isNewSubscription || initialInsertMethod === "insert";
+    // `useInsert` is per-shape, not shared: in a multi-shape group, one shape finishing its bulk
+    // backfill must not flip every other shape onto plain `INSERT`. A shape uses its bulk path only
+    // on a fresh subscription with a non-`insert` method; a resume starts already in insert mode.
+    const useInsert = new Map<string, boolean>(
+      Object.keys(shapes).map((shapeName) => [
+        shapeName,
+        !isNewSubscription || shapeInsertMethod.get(shapeName) === "insert",
+      ]),
+    );
     let onInitialSyncCalled = false;
 
     const maybeSignalInitialSync = () => {
@@ -203,8 +217,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
 
     const insertMethods = {
       json: applyMessagesToTableWithJson,
-      csv: applyMessagesToTableWithCopy,
-      useCopy: applyMessagesToTableWithCopy,
+      copy: applyMessagesToTableWithCopy,
       insert: applyInsertsToTable,
     } as const;
 
@@ -245,6 +258,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
 
           for (const [shapeName, initialMessages] of messagesToCommit.entries()) {
             const shape = getShapeOptions(shapes, shapeName);
+            const shapeMethod = shapeInsertMethod.get(shapeName)!;
             let messages = initialMessages;
 
             if (shapesToTruncate.has(shapeName)) {
@@ -259,7 +273,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               }
             }
 
-            if (!useInsert) {
+            if (!useInsert.get(shapeName)) {
               const initialInserts: InsertChangeMessage[] = [];
               const remainingMessages: ChangeMessage<Row<unknown>>[] = [];
               let foundNonInsert = false;
@@ -271,13 +285,13 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
                   remainingMessages.push(message);
                 }
               }
-              if (initialInserts.length > 0 && initialInsertMethod === "csv") {
+              if (initialInserts.length > 0 && shapeMethod === "copy") {
                 remainingMessages.unshift(initialInserts.pop()!);
               }
               messages = remainingMessages;
 
               if (initialInserts.length > 0) {
-                await insertMethods[initialInsertMethod]({
+                await insertMethods[shapeMethod]({
                   pg: tx,
                   table: shape.table,
                   schema: shape.schema,
@@ -288,7 +302,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
                   debug,
                 });
 
-                useInsert = true;
+                useInsert.set(shapeName, true);
               }
             }
 
@@ -353,6 +367,14 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               debug,
             });
           }
+
+          // If we unsubscribed while this commit was in flight, discard it rather than persist
+          // work during teardown. PGlite's `transaction()` skips its COMMIT once `tx.rollback()`
+          // has closed the tx, so this rolls back both the applied rows and the subscription-state
+          // advance; the (un-advanced) persisted offset means a later resume re-streams this batch.
+          if (unsubscribed) {
+            await tx.rollback();
+          }
         });
 
       for (let attempt = 1; ; attempt++) {
@@ -361,6 +383,11 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
         }
         try {
           await runCommit();
+          if (unsubscribed) {
+            // The commit rolled itself back on unsubscribe (see runCommit); do not advance the
+            // committed frontier or clear truncate flags for work that was discarded.
+            return false;
+          }
           committedLsn = targetLsn;
           for (const shapeName of shapesToTruncate) {
             truncateNeeded.delete(shapeName);
@@ -528,10 +555,9 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
         },
       },
       key: options.shapeKey,
-      useCopy: options.useCopy,
-      // Static type-driven selection (ADR-0009 decision 3): an explicit `initialInsertMethod`/`useCopy`
-      // (the generic/legacy API) still wins; otherwise the registry-resolved `applyStrategy` picks the
-      // backfill path, defaulting to `insert`.
+      // Static type-driven selection (ADR-0009 decision 3): an explicit `initialInsertMethod`
+      // (the generic API) still wins; otherwise the registry-resolved `applyStrategy` picks the
+      // backfill path, defaulting to `copy`.
       initialInsertMethod: options.initialInsertMethod ?? applyStrategyToInsertMethod(options.applyStrategy),
       onInitialSync: options.onInitialSync,
       onError: options.onError,
@@ -590,7 +616,7 @@ export type PGliteWithSync = PGliteInterface & {
 
 export function electricSync(options?: ElectricSyncOptions) {
   return {
-    name: "ElectricSQL Sync",
+    name: "Postgres Sync",
     setup: async (pg: PGliteInterface) => {
       const { namespaceObj, close } = await createPlugin(pg, options);
       return {

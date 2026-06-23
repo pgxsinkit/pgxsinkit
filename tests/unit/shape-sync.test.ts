@@ -2,7 +2,12 @@ import { describe, expect, it } from "bun:test";
 
 import { buildDemoSyncConfig } from "@pgxsinkit/schema";
 
-import { buildConfiguredShapeSpecs, buildShapeConfig, buildShapeUrl } from "../../packages/client/src/shape-sync";
+import {
+  buildConfiguredShapeSpecs,
+  buildShapeConfig,
+  buildShapeUrl,
+  startConfiguredSync,
+} from "../../packages/client/src/shape-sync";
 
 describe("shape sync", () => {
   it("builds a shape URL with the table parameter", () => {
@@ -73,5 +78,63 @@ describe("shape sync", () => {
     expect(specs.map((spec) => spec.key)).toEqual(["authors", "todos"]);
     expect(specs[0]?.tableName).toBe("authors");
     expect(specs[1]?.tableName).toBe("todos");
+  });
+
+  it("buckets tables sharing a consistency group onto one MultiShapeStream (ADR-0009 decision 2)", async () => {
+    const calls: Array<{ key: string | null; shapeNames: string[] }> = [];
+    const namespace = {
+      initMetadataTables: async () => {},
+      syncShapesToTables: async (opts: {
+        key: string | null;
+        shapes: Record<string, unknown>;
+        onInitialSync?: () => void;
+      }) => {
+        calls.push({ key: opts.key, shapeNames: Object.keys(opts.shapes).sort() });
+        opts.onInitialSync?.();
+        return { unsubscribe: () => {}, isUpToDate: true, streams: {} };
+      },
+    };
+    const pg = { electric: namespace } as unknown as Parameters<typeof startConfiguredSync>[0];
+
+    const tableSyncs: string[] = [];
+    let initialSyncCount = 0;
+    const result = await startConfiguredSync(pg, {
+      onTableInitialSync: (key) => tableSyncs.push(key),
+      onInitialSync: () => (initialSyncCount += 1),
+      syncConfig: {
+        electricUrl: "http://localhost:3000/v1/shape",
+        localSchema: "app_local",
+        tables: {
+          discussion: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "discussion", shapeKey: "discussion-shape" },
+            consistencyGroup: "forum",
+          },
+          post: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "post", shapeKey: "post-shape" },
+            consistencyGroup: "forum",
+          },
+          profile: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "profile", shapeKey: "profile-shape" },
+          },
+        },
+      },
+    });
+
+    // The forum group (discussion + post) syncs on one stream keyed by the group; profile is its
+    // own singleton keyed by its shapeKey.
+    expect(calls).toHaveLength(2);
+    expect(calls.find((call) => call.key === "forum")?.shapeNames).toEqual(["discussion", "post"]);
+    expect(calls.find((call) => call.key === "profile-shape")?.shapeNames).toEqual(["profile"]);
+
+    // Every member table is exposed and the per-table / global initial-sync callbacks all fire.
+    expect(Object.keys(result.tables).sort()).toEqual(["discussion", "post", "profile"]);
+    expect(tableSyncs.sort()).toEqual(["discussion", "post", "profile"]);
+    expect(initialSyncCount).toBe(1);
   });
 });

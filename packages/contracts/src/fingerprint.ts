@@ -44,6 +44,13 @@ export interface CanonicalTable {
     rowFilter: CanonicalRowFilter | null;
   } | null;
   managedFields: Array<{ field: string; strategy: string; applyOn: string[] }>;
+  /**
+   * Consistency group (ADR-0009 decision 2). Part of the fingerprint because it decides which
+   * subscription-state row a table persists under: moving a table between groups must shift the
+   * fingerprint (forcing a cache rebuild + subscription reset) and surface in the diff gate. `null`
+   * = the default singleton group.
+   */
+  consistencyGroup: string | null;
 }
 
 /**
@@ -149,6 +156,7 @@ function canonicalizeTable(key: string, entry: SyncTableEntry): CanonicalTable {
     projection,
     shape,
     managedFields: canonicalizeManagedFields(entry),
+    consistencyGroup: entry.consistencyGroup ?? null,
   };
 }
 

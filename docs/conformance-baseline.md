@@ -55,7 +55,8 @@ transforms, swap the top import block for the shim, and update the pinned SHA he
   real-PGlite `COPY FROM` round-trips for scalars/arrays/multi-dim/json/jsonb/`jsonb[]`/timestamps/
   bytea). json/jsonb disambiguation comes from the registry `columnTypes` (information_schema only as
   the generic-caller fallback), like the json path.
-- **`electric.syncing` flag set during sync** → decision 6 (keep the sync-origin GUC, renamed).
+- **`pgxsinkit.syncing` flag set during sync** → decision 6 (the sync-origin GUC, renamed from the
+  upstream `electric.syncing` to our own metadata namespace; the oracle now asserts the new name).
 - **Subscription persist/resume, clears+restarts on refetch, must-refetch** → decision 4/5
   (serialized commit queue + failure surfacing; Electric `must-refetch` stays its own path).
 - **Insert/update/delete, in-transaction apply, empty-update, case sensitivity** → the apply
@@ -105,3 +106,46 @@ end-to-end on the Podman integration lane — contract, implementation (write ro
 fan-out, electric↔pglite), and the e2e conformance suite (35 tests) — confirming the engine's
 truncate-before-restream / offset-resume invariants keep inserts genuinely conflict-free in real
 operation, so the upsert was never load-bearing.
+
+## Clean break from the vendored API (no consumer back-compat)
+
+Having internalised the engine, we stopped tracking the vendored public surface and adjudicated the
+remaining ours-vs-upstream differences individually:
+
+1. **`useCopy` removed entirely; `'csv'` initial-insert method renamed to `'copy'`.** The deprecated
+   `useCopy?: boolean` option and its runtime `console.warn` shim are gone from both option
+   interfaces and the engine; `InitialInsertMethod` is now `'insert' | 'copy' | 'json'`. The single
+   selection axis is `initialInsertMethod` (explicit caller value wins) falling back to the
+   registry-resolved `applyStrategy`. No deprecation window — there are no external consumers to keep
+   compatible.
+2. **`copy` is now the default initial-backfill method.** With the COPY **TEXT** serializer
+   round-tripping every built-in type (proven by `copy.test.ts` + the re-enabled real-Electric
+   `data_types_table` COPY case), COPY is the safe no-brainer bootstrap. `applyStrategyToInsertMethod`
+   and `syncShapesToTables` both default to `copy`; `insert`/`json` are selected only when explicitly
+   requested or resolved from column types.
+3. **Re-aligned _with_ upstream where ours had drifted, by choice:**
+   - **Extension name** restored to `"Postgres Sync"` (ours lagged on the old `"ElectricSQL Sync"`).
+   - **Rollback on unsubscribe-mid-commit** restored. If the engine unsubscribes while a commit
+     transaction is in flight, it now `tx.rollback()`s rather than persisting work during teardown
+     (PGlite's `transaction()` skips its COMMIT once the tx is closed). The retry loop then declines
+     to advance the committed frontier. We err toward _less_ persisted local data: the un-advanced
+     offset means a later resume simply re-streams that batch.
+
+## Consistency groups + the pgxsinkit metadata namespace (ADR-0009 decisions 2 + 6)
+
+The two remaining ADR-0009 decisions landed together:
+
+- **Consistency groups (decision 2).** A `consistencyGroup` on a synced table binds it with its
+  peers onto one `MultiShapeStream` committed atomically at a shared LSN frontier, so a local reader
+  never sees one grouped table advanced past another for the same server transaction. Ungrouped
+  tables default to a singleton group (today's independent frontier). The apply engine now resolves
+  each shape's strategy and its `useInsert` transition **per shape**, so one member finishing its
+  bulk backfill no longer forces the rest onto plain `INSERT` — the latent bug in the multi-shape
+  path that, per the ADR, had never actually run. Group membership is part of the registry
+  fingerprint and a `risky` registry-diff change (a move re-keys the subscription); subscription
+  reset is group-granular. Proven end-to-end: a grouped pair syncs on one stream persisting a single
+  `subscriptions_metadata` row covering both shapes.
+- **Metadata namespace (decision 6).** The local bookkeeping schema and the sync-origin GUC are
+  renamed from the upstream `electric` default to `pgxsinkit` — `pgxsinkit.subscriptions_metadata`
+  and `SET LOCAL pgxsinkit.syncing = true`. This is our local state, not Electric's. No durable
+  local DBs exist pre-launch, so the rebuild path handles the one-time schema change.
