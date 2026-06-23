@@ -73,6 +73,12 @@ integration lane.
 - **Reserve** the `conflict_state`/`base_server_version` hook on the journal (same pattern as
   the existing `registry_version` stamp) **without** implementing the policy — that is
   [ADR-0015](../adr/0015-stale-write-conflict-policy.md).
+- **Build note:** `conflict_state` reuses the existing `conflict_reason` journal column (surfaced by
+  the view). `base_server_version` is **reserved as a nullable journal column but left unstamped** —
+  what counts as the "base" the write was authored against (the synced Server version only, or the
+  read-model value _including_ a prior optimistic write) is the crux of the conflict policy, so the
+  stamping semantics belong to [ADR-0015](../adr/0015-stale-write-conflict-policy.md), not here. The
+  ADR-0011 proofs do not depend on it.
 
 ## Phase 5 — Proofs
 

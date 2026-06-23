@@ -2,6 +2,7 @@ import { getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import {
   buildOverlayResolutionBarrier,
+  buildSyncStateView,
   getLocalSyncPrimaryKeyColumns,
   getSyncRegistrySchema,
   getProjectedColumns,
@@ -18,6 +19,8 @@ interface ResolvedProjection {
   overlayTable?: string;
   journalTable?: string;
   readModel: string;
+  /** The per-table `<table>_sync_state` convergence view (writable tables only — ADR-0011). */
+  syncState: string;
 }
 
 /**
@@ -110,6 +113,10 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
         // The registry fingerprint (ADR-0004) this mutation was authored under, so a
         // version-boundary crossing is known before sending (ADR-0006 decision 4).
         "registry_version TEXT",
+        // ADR-0011 reserved hook: the Server version the entity was observed at when this mutation
+        // was authored. The slot lives on the journal (per-mutation, like registry_version above);
+        // the stale-write conflict policy (ADR-0015) decides its exact semantics and stamps it.
+        "base_server_version BIGINT",
         "payload_json TEXT NOT NULL",
         "attempt_count INTEGER NOT NULL DEFAULT 0",
         "last_error TEXT",
@@ -193,6 +200,17 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
         projection,
         columns.map((column) => column.name),
       )};`,
+    );
+
+    // ADR-0011: the per-table convergence view — a derived projection over synced + overlay +
+    // journal, distinct from the (lean) read model, whose acked-unobserved status derives from the
+    // same barrier predicate the reconcile trigger above uses (decision 4, anti-drift).
+    statements.push(
+      `CREATE OR REPLACE VIEW ${projection.syncState} AS\n${buildSyncStateView(entry, {
+        syncedTable: projection.syncedTable,
+        overlayTable: projection.overlayTable,
+        journalTable: projection.journalTable,
+      })};`,
     );
   }
 
@@ -399,6 +417,7 @@ function getClientProjection(entry: SyncTableEntry, tableKey: string, localSchem
     ...(projection.overlayTable ? { overlayTable: qualifyIdentifier(localSchema, projection.overlayTable) } : {}),
     ...(projection.journalTable ? { journalTable: qualifyIdentifier(localSchema, projection.journalTable) } : {}),
     readModel: qualifyIdentifier(localSchema, readModelName),
+    syncState: qualifyIdentifier(localSchema, `${syncedTableName}_sync_state`),
   };
 }
 
@@ -441,6 +460,7 @@ export function buildDropReadCacheSql<TRegistry extends SyncTableRegistry>(regis
     const triggerName = `${projection.syncedTable}_reconcile_on_sync`;
 
     if (entry.mode !== "readonly") {
+      statements.push(`DROP VIEW IF EXISTS ${projection.syncState};`);
       statements.push(`DROP VIEW IF EXISTS ${projection.readModel};`);
       statements.push(`DROP TRIGGER IF EXISTS ${triggerName} ON ${projection.syncedTable};`);
       statements.push(`DROP FUNCTION IF EXISTS ${triggerName}();`);
