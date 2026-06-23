@@ -79,6 +79,10 @@ describe("COPY TEXT serializer", () => {
     it("renders Uint8Array as bytea hex", () => {
       expect(serializeCopyValue(new Uint8Array([0xde, 0xad, 0xbe, 0xef]))).toBe("\\\\xdeadbeef");
     });
+
+    it("renders a Date as an ISO 8601 string", () => {
+      expect(serializeCopyValue(new Date("2021-01-01T12:34:56.789Z"))).toBe("2021-01-01T12:34:56.789Z");
+    });
   });
 
   describe("generateCopyData", () => {
@@ -244,6 +248,111 @@ describe("COPY TEXT serializer", () => {
         { id: 1, b: new Uint8Array([0xde, 0xad, 0xbe, 0xef]) },
         { id: 2, b: new Uint8Array([0x01, 0x02, 0x03]) },
       ]);
+    });
+  });
+
+  // The cleanest safety proof for "COPY can bootstrap any table": serialize a value through COPY and
+  // compare the stored result (as text) against the same value written by an ordinary parameterized
+  // INSERT — the app's canonical write path. Locale-independent (both rows share the session), and it
+  // covers both the exotic SQL types Electric delivers as strings and the non-string JS runtime types
+  // (Date, special floats) the serializer must handle.
+  describe("COPY matches a parameterized INSERT (every type is bootstrap-safe)", () => {
+    async function copyVsInsert(
+      columnType: string,
+      paramValue: unknown,
+      copyValue: unknown = paramValue,
+      setup?: string,
+    ): Promise<{ inserted: string | null; copied: string | null }> {
+      const pg = await createFreshTestPGlite();
+      if (setup) await pg.exec(setup);
+      await pg.exec(`CREATE TABLE t (id int, v ${columnType});`);
+
+      // Ground truth: the canonical app write path.
+      await pg.query(`INSERT INTO t (id, v) VALUES (1, $1)`, [paramValue]);
+
+      // Candidate: the same logical value serialized through COPY.
+      const columnTypes = Object.fromEntries(
+        (
+          await pg.query<{ column_name: string; udt_name: string }>(
+            `SELECT column_name, udt_name FROM information_schema.columns WHERE table_name = 't'`,
+          )
+        ).rows.map((c) => [c.column_name, c.udt_name]),
+      );
+      const copyData = generateCopyData([{ id: 2, v: copyValue }], ["id", "v"], columnTypes);
+      await pg.query(`COPY t (id, v) FROM '/dev/blob' WITH (FORMAT text)`, [], {
+        blob: new Blob([copyData], { type: "text/plain" }),
+      });
+
+      const rows = (await pg.query<{ id: number; v: string | null }>(`SELECT id, v::text AS v FROM t ORDER BY id`))
+        .rows;
+      await pg.close();
+      return { inserted: rows[0]?.v ?? null, copied: rows[1]?.v ?? null };
+    }
+
+    it("timestamptz delivered as a Date matches the canonical value", async () => {
+      const { inserted, copied } = await copyVsInsert(
+        "timestamptz",
+        "2021-01-01 12:34:56.789+00",
+        new Date("2021-01-01T12:34:56.789Z"),
+      );
+      expect(copied).toBe(inserted);
+    });
+
+    it("timestamp (without tz) delivered as a Date matches the canonical value", async () => {
+      const { inserted, copied } = await copyVsInsert(
+        "timestamp",
+        "2021-01-01 12:34:56.789",
+        new Date("2021-01-01T12:34:56.789Z"),
+      );
+      expect(copied).toBe(inserted);
+    });
+
+    it("date delivered as a Date matches the canonical value", async () => {
+      const { inserted, copied } = await copyVsInsert("date", "2021-06-15", new Date("2021-06-15T00:00:00Z"));
+      expect(copied).toBe(inserted);
+    });
+
+    // Exotic SQL types Electric delivers as their text representation: serialization is passthrough +
+    // COPY-escaping, so the proof is that the stored value is identical to a parameterized insert.
+    const stringDelivered: ReadonlyArray<readonly [string, string]> = [
+      ["timestamptz", "2021-01-01 12:34:56.789+00"],
+      ["timestamp", "2021-01-01 12:34:56.789"],
+      ["date", "2021-06-15"],
+      ["time", "12:34:56"],
+      ["interval", "1 day 02:03:04"],
+      ["numeric", "-123.456000"],
+      ["numeric", "123456789012345678901234567890.123456789"],
+      ["uuid", "00000000-0000-0000-0000-000000000001"],
+      ["inet", "192.168.0.1"],
+    ];
+    for (const [columnType, value] of stringDelivered) {
+      it(`string-delivered ${columnType} '${value}' round-trips through COPY`, async () => {
+        const { inserted, copied } = await copyVsInsert(columnType, value);
+        expect(copied).toBe(inserted);
+      });
+    }
+
+    const floatSpecials: ReadonlyArray<readonly [string, number]> = [
+      ["NaN", NaN],
+      ["Infinity", Infinity],
+      ["-Infinity", -Infinity],
+    ];
+    for (const [text, value] of floatSpecials) {
+      it(`float8 special value ${text} round-trips through COPY`, async () => {
+        const { inserted, copied } = await copyVsInsert("float8", text, value);
+        expect(copied).toBe(inserted);
+      });
+    }
+
+    it("enum label round-trips through COPY", async () => {
+      const { inserted, copied } = await copyVsInsert(
+        "mood",
+        "happy",
+        "happy",
+        `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');`,
+      );
+      expect(copied).toBe(inserted);
+      expect(copied).toBe("happy");
     });
   });
 });
