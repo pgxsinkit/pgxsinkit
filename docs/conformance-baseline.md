@@ -71,3 +71,31 @@ Porting the unit suite immediately caught a real divergence: the vendored
 `null`. Fixed in the apply module (now `packages/client/src/sync/apply.ts`) — an ADR-0004-class
 unquoted-identifier bug the vendored engine had carried; Phase 1 then routed all of apply's
 identifier quoting through the shared `quoteIdentifier` resolver.
+
+## Upstream divergences removed (apply is operation-faithful)
+
+Diffing our vendored apply path against upstream (`@electric-sql/pglite-sync@0.5.4`, the npm publish
+of the pinned commit) surfaced **two band-aids that were injected into the vendored copy and are not
+in upstream** — both papering over the same thing (an `insert` landing on an existing row) instead of
+treating it as the protocol violation it is. Now that we own the engine, apply does exactly what
+Electric sends:
+
+1. **The COPY primary-key guard.** `applyMessagesToTableWithCopy` early-returned to
+   `applyInsertsToTable` whenever a `primaryKey` was present — and every shape has one — so the COPY
+   path was unreachable dead code. Upstream's COPY function does not even take `primaryKey`. Removed;
+   COPY now runs (an Electric `insert` is a new row, so it cannot legitimately collide).
+2. **The data-path `ON CONFLICT`.** The three data INSERTs carried
+   `ON CONFLICT (pk) DO UPDATE/NOTHING` (a local `buildUpsertClause`), silently upserting a replayed
+   insert. Upstream's three data INSERTs are plain; its only `ON CONFLICT` is the
+   `subscriptions_metadata` bookkeeping upsert (kept). An `insert` means a new row (post-truncate or
+   first send); a genuine primary-key collision is a truncate/protocol violation that must surface
+   (→ the commit queue's `degraded` + `onSyncError`), never be swallowed. Removed `buildUpsertClause`
+   and all three usages.
+
+The two **`*pglite-sync-apply.test.ts`** cases that asserted upsert-on-replay were migrated (per the
+contract above) to assert a replayed key now **fails** instead of overwriting; `apply-ladder.test.ts`
+likewise. The upstream oracle stays green (it never assumed upsert). The whole change was proven
+end-to-end on the Podman integration lane — contract, implementation (write round-trip, membership
+fan-out, electric↔pglite), and the e2e conformance suite (35 tests) — confirming the engine's
+truncate-before-restream / offset-resume invariants keep inserts genuinely conflict-free in real
+operation, so the upsert was never load-bearing.

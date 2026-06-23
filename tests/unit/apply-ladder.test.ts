@@ -78,22 +78,26 @@ describe("apply ladder", () => {
       { id: "r2", big: "200", nums: "{4,5}", doc: { b: 2 } },
     ]);
 
-    // Replay upserts on the primary key rather than duplicating.
-    await applyMessagesToTableWithJson({
-      pg,
-      table: "rich",
-      messages: [insert("r1", { id: "r1", big: 999, nums: [9], doc: { a: 9 } })],
-      primaryKey: ["id"],
-      columnTypes,
-      debug: false,
-    });
+    // Operation-faithful: replaying an existing key fails instead of silently upserting.
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(
+      applyMessagesToTableWithJson({
+        pg,
+        table: "rich",
+        messages: [insert("r1", { id: "r1", big: 999, nums: [9], doc: { a: 9 } })],
+        primaryKey: ["id"],
+        columnTypes,
+        debug: false,
+      }),
+    ).rejects.toThrow();
 
     const replayed = await pg.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM public.rich`);
     expect(replayed.rows[0]!.count).toBe(2);
     const r1 = await pg.query<{ big: string; nums: string }>(
       `SELECT big::text AS big, nums::text AS nums FROM public.rich WHERE id = 'r1'`,
     );
-    expect(r1.rows[0]).toEqual({ big: "999", nums: "{9}" });
+    // Original row untouched.
+    expect(r1.rows[0]).toEqual({ big: "100", nums: "{1,2,3}" });
   });
 
   it("json tier still works via the information_schema fallback when no column types are supplied", async () => {
@@ -119,9 +123,12 @@ describe("apply ladder", () => {
     expect(result.rows).toEqual([{ id: "c1", firstName: "Alice", tags: "{x,y}" }]);
   });
 
-  it("copy tier applies a primary-key-less scalar table, escaping special characters", async () => {
+  it("copy tier runs COPY even for a table with a primary key (no PK guard), escaping special chars", async () => {
+    // COPY needs no ON CONFLICT: an Electric `insert` is a new row (post-truncate or first send), so
+    // it cannot legitimately collide. A primary key must NOT divert away from COPY.
     await pg.exec(`
       CREATE TABLE public.copy_target (
+        id text PRIMARY KEY,
         task text NOT NULL,
         done boolean NOT NULL
       );
@@ -131,24 +138,23 @@ describe("apply ladder", () => {
       pg,
       table: "copy_target",
       messages: [
-        insert("t1", { task: "task with, comma", done: false }),
-        insert("t2", { task: 'task with "quotes"', done: true }),
+        insert("c1", { id: "c1", task: "task with, comma", done: false }),
+        insert("c2", { id: "c2", task: 'task with "quotes"', done: true }),
       ],
-      primaryKey: [],
+      primaryKey: ["id"],
       debug: false,
     });
 
-    const result = await pg.query<{ task: string; done: boolean }>(
-      `SELECT task, done FROM public.copy_target ORDER BY task`,
+    const result = await pg.query<{ id: string; task: string; done: boolean }>(
+      `SELECT id, task, done FROM public.copy_target ORDER BY id`,
     );
-    // Ordered by task: '"' (0x22) sorts before ',' (0x2C).
     expect(result.rows).toEqual([
-      { task: 'task with "quotes"', done: true },
-      { task: "task with, comma", done: false },
+      { id: "c1", task: "task with, comma", done: false },
+      { id: "c2", task: 'task with "quotes"', done: true },
     ]);
   });
 
-  it("insert tier upserts scalar rows on the primary key", async () => {
+  it("insert tier applies scalar rows; a replayed primary key fails instead of upserting", async () => {
     await pg.exec(`
       CREATE TABLE public.scalars (
         id text PRIMARY KEY,
@@ -164,17 +170,20 @@ describe("apply ladder", () => {
       primaryKey: ["id"],
       debug: false,
     });
-    await applyInsertsToTable({
-      pg,
-      table: "scalars",
-      messages: [insert("s1", { id: "s1", name: "second", count: 2 })],
-      primaryKey: ["id"],
-      debug: false,
-    });
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(
+      applyInsertsToTable({
+        pg,
+        table: "scalars",
+        messages: [insert("s1", { id: "s1", name: "second", count: 2 })],
+        primaryKey: ["id"],
+        debug: false,
+      }),
+    ).rejects.toThrow();
 
     const result = await pg.query<{ id: string; name: string; count: number }>(
       `SELECT id, name, count FROM public.scalars`,
     );
-    expect(result.rows).toEqual([{ id: "s1", name: "second", count: 2 }]);
+    expect(result.rows).toEqual([{ id: "s1", name: "first", count: 1 }]);
   });
 });

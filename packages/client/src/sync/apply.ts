@@ -35,14 +35,14 @@ export async function applyMessageToTable({
     case "insert": {
       if (debug) console.log("inserting", data);
       const columns = Object.keys(data);
-      const upsertClause = buildUpsertClause(columns, primaryKey);
+      // Apply exactly what Electric sent: an `insert` is a new row (post-truncate or first send), so
+      // it is a plain INSERT. A genuine primary-key collision must surface, never be silently upserted.
       return await pg.query(
         `
             INSERT INTO ${qualifiedTable(schema, table)}
             (${columns.map((column) => quoteIdentifier(column)).join(", ")})
             VALUES
             (${columns.map((_v, i) => "$" + (i + 1)).join(", ")})
-            ${upsertClause}
           `,
         columns.map((column) => data[column]),
       );
@@ -97,7 +97,6 @@ export async function applyInsertsToTable({
   schema = "public",
   messages,
   mapColumns,
-  primaryKey,
   debug,
 }: BulkApplyMessagesToTableOptions) {
   const data: Row<unknown>[] = messages.map((message) =>
@@ -177,13 +176,11 @@ export async function applyInsertsToTable({
   const maxBytes = 50 * 1024 * 1024;
 
   const executeBatch = async (batch: Row<unknown>[]) => {
-    const upsertClause = buildUpsertClause(columns, primaryKey);
     const sql = `
       INSERT INTO ${qualifiedTable(schema, table)}
       (${columns.map((column) => quoteIdentifier(column)).join(", ")})
       VALUES
       ${batch.map((_, j) => `(${columns.map((_v, k) => "$" + (j * columns.length + k + 1)).join(", ")})`).join(", ")}
-      ${upsertClause}
     `;
     const values = batch.flatMap((message) => columns.map((column) => message[column]));
     await pg.query(sql, values);
@@ -276,7 +273,6 @@ export async function applyMessagesToTableWithJson({
   schema = "public",
   messages,
   mapColumns,
-  primaryKey,
   columnTypes,
   debug,
 }: BulkApplyMessagesToTableOptions) {
@@ -294,17 +290,12 @@ export async function applyMessagesToTableWithJson({
   const max = 10_000;
   for (let i = 0; i < data.length; i += max) {
     const batch = data.slice(i, i + max);
-    const upsertClause = buildUpsertClause(
-      columns.map((column) => column.name),
-      primaryKey,
-    );
     await pg.query(
       `
         INSERT INTO ${qualifiedTable(schema, table)}
         SELECT x.* from json_to_recordset($1) as x(${columns
           .map((column) => `${quoteIdentifier(column.name)} ${column.castType}`)
           .join(", ")})
-        ${upsertClause}
       `,
       [batch],
     );
@@ -321,23 +312,9 @@ export async function applyMessagesToTableWithCopy({
   schema = "public",
   messages,
   mapColumns,
-  primaryKey,
   debug,
 }: BulkApplyMessagesToTableOptions) {
   if (debug) console.log("applying messages with COPY");
-
-  if (primaryKey && primaryKey.length > 0) {
-    await applyInsertsToTable({
-      pg,
-      table,
-      schema,
-      messages,
-      mapColumns,
-      primaryKey,
-      debug,
-    });
-    return;
-  }
 
   const data: Row<unknown>[] = messages.map((message) =>
     mapColumns ? doMapColumns(mapColumns, message) : message.value,
@@ -399,21 +376,4 @@ function doMapColumns(mapColumns: MapColumns, message: ChangeMessage<Row<unknown
     mappedColumns[key] = message.value[value];
   }
   return mappedColumns;
-}
-
-function buildUpsertClause(columns: string[], primaryKey: string[] | undefined): string {
-  if (!primaryKey || primaryKey.length === 0) {
-    return "";
-  }
-
-  const nonPrimaryKeyColumns = columns.filter((column) => !primaryKey.includes(column));
-  const conflictTarget = primaryKey.map((column) => quoteIdentifier(column)).join(", ");
-
-  if (nonPrimaryKeyColumns.length === 0) {
-    return `ON CONFLICT (${conflictTarget}) DO NOTHING`;
-  }
-
-  return `ON CONFLICT (${conflictTarget}) DO UPDATE SET ${nonPrimaryKeyColumns
-    .map((column) => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`)
-    .join(", ")}`;
 }
