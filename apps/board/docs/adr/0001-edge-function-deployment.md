@@ -3,7 +3,7 @@
 The board demo runs pgxsinkit's two server roles as **separate Supabase Edge
 Functions on Deno** — `board-write` (the mutation ingress) and `board-sync` (the
 Electric shape proxy) — using `postgres.js` + Hono, rather than as a Bun/Hono
-container. The demo's job includes proving the most common *real* deployment
+container. The demo's job includes proving the most common _real_ deployment
 target for a Supabase-hosted consumer, and `@pgxsinkit/server` is already a
 runtime-neutral `fetch` handler (Hono + web-standard `Request`/`Response`, DB
 client injected), so each function is a ~15-line adapter that imports the

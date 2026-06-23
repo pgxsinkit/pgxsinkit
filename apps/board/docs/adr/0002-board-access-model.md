@@ -4,7 +4,7 @@ A Member reads and writes Issues and Messages only within Teams they belong to
 (membership-subquery row-filter on the read path; membership RLS on the write
 path). Within a Team, any Member may freely change an Issue's Status and reassign
 it to any teammate. The sole elevation is the global **Admin** role: an Admin
-alone reads across all Teams and may move an Issue to a *different* Team /
+alone reads across all Teams and may move an Issue to a _different_ Team /
 reassign across Team boundaries. In-Team reassignment is deliberately **not**
 Admin-gated.
 
