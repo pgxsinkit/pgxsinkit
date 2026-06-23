@@ -42,7 +42,11 @@ describe("plpgsql batch function generator", () => {
       "auth.uid(), auth.uid(), CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)",
     );
     expect(ddl).toContain('"modified_by" = auth.uid()');
-    expect(ddl).toContain('"updated_at_us" = CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)');
+    // ADR-0010: the Server version's on-update stamp is floored at the prior value + 1 (strictly
+    // monotonic), not a bare clock read — so an inverted wall clock can never lower it.
+    expect(ddl).toContain(
+      '"updated_at_us" = GREATEST(CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT), "updated_at_us" + 1)',
+    );
     expect(ddl).not.toContain("($1->>'owner_id')::uuid");
     expect(ddl).not.toContain("($1->>'modified_by')::uuid");
     expect(ddl).not.toContain("($1->>'created_at_us')::bigint");
@@ -82,9 +86,13 @@ const compositeThingsRegistry = defineSyncRegistry({
       tenantId: uuid("tenant_id").notNull(),
       id: uuid("id").notNull(),
       label: varchar("label", { length: 120 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
     primaryKey: ["tenant_id", "id"],
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
   }),
 });
 
@@ -96,9 +104,13 @@ const renamedPkRegistry = defineSyncRegistry({
     makeColumns: () => ({
       groupId: uuid("group_id").primaryKey(),
       label: varchar("label", { length: 120 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
     primaryKey: ["group_id"],
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
   }),
 });
 
@@ -154,6 +166,7 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
         tenant_id uuid NOT NULL,
         id uuid NOT NULL,
         label varchar(120) NOT NULL,
+        updated_at_us bigint NOT NULL DEFAULT 0,
         PRIMARY KEY (tenant_id, id)
       )`);
       await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry));
@@ -184,6 +197,43 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
 
       const afterDelete = await db.query<{ id: string }>(`SELECT id FROM composite_things`);
       expect(afterDelete.rows).toEqual([{ id: idB }]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("keeps the Server version strictly monotonic even when the wall clock is behind (GREATEST)", async () => {
+    const db = await createFreshTestPGlite();
+
+    try {
+      await db.exec(`CREATE TABLE composite_things (
+        tenant_id uuid NOT NULL,
+        id uuid NOT NULL,
+        label varchar(120) NOT NULL,
+        updated_at_us bigint NOT NULL DEFAULT 0,
+        PRIMARY KEY (tenant_id, id)
+      )`);
+      await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry));
+
+      const tenant = "10000000-0000-4000-8000-000000000002";
+      const id = "20000000-0000-4000-8000-00000000000c";
+
+      // Seed the row's Server version far ahead of the wall clock — the exact inverted-clock case
+      // where a bare `clock_timestamp()` stamp would step the version BACKWARDS.
+      const future = "9999999999999999";
+      await db.query(
+        `INSERT INTO composite_things (tenant_id, id, label, updated_at_us) VALUES ($1, $2, 'A', $3::bigint)`,
+        [tenant, id, future],
+      );
+
+      await applyBatch(db, compositeBatch("update", { tenant_id: tenant, id }, { label: "A2" }));
+
+      // clock_us << 9999999999999999, so GREATEST picks current + 1 — strictly greater, never lower.
+      const row = await db.query<{ updatedAtUs: string }>(
+        `SELECT updated_at_us::text AS "updatedAtUs" FROM composite_things WHERE id = $1`,
+        [id],
+      );
+      expect(row.rows[0]?.updatedAtUs).toBe("10000000000000000");
     } finally {
       await db.close();
     }

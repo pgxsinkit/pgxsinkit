@@ -43,6 +43,7 @@ import type {
 } from "@pgxsinkit/contracts";
 import {
   batchMutationErrorSchema,
+  buildOverlayResolutionBarrier,
   escapeSqlLiteral as escapeSqlString,
   fingerprintRegistry,
   getProjectedColumns as getProjectedTableColumns,
@@ -1788,15 +1789,27 @@ async function reconcileTable(db: MutationDb, context: TableContext) {
   await db.exec("BEGIN");
 
   try {
-    // Clear acknowledged non-delete mutations + matching overlays
+    // Clear acknowledged non-delete mutations + matching overlays. ADR-0010: gated by the
+    // Convergence barrier (same predicate as the trigger) — the acked write clears only once the
+    // synced echo's Server version has reached its acked version. Joining the synced table makes
+    // the comparison possible (and means an un-synced acked write is held until its echo lands).
     await db.query(
       "WITH cleared_journal AS (" +
         "DELETE FROM " +
         context.journalTable +
         " AS journal " +
+        "USING " +
+        context.syncedTable +
+        " AS synced " +
         "WHERE journal.status = 'acked' " +
         "AND journal.server_updated_at_us IS NOT NULL " +
         "AND journal.mutation_kind <> 'delete' " +
+        "AND " +
+        buildColumnEquality(context.pkColumnNames, "journal", "synced") +
+        " " +
+        "AND " +
+        buildOverlayResolutionBarrier(context.entry, { journalAlias: "journal", syncedAlias: "synced" }) +
+        " " +
         "RETURNING journal.entity_key_json, " +
         context.pkColumnNames.map((cn) => "journal." + cn).join(", ") +
         ") " +

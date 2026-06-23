@@ -16,6 +16,7 @@ import type {
 import {
   batchMutationRequestSchema,
   getOmittedProjectedColumns as getOmittedProjectionColumns,
+  resolveServerVersionColumnName,
 } from "@pgxsinkit/contracts";
 
 import type { OperationsLogConfig } from "../operations-log/types";
@@ -514,16 +515,10 @@ function toSchemaPayload(entry: SyncTableEntry, payload: unknown): unknown {
 }
 
 function resolveServerUpdatedAtColumnName(entry: SyncTableEntry): string {
-  // Derive from governance.managedFields, matching client-side resolution.
-  const managedField = (entry.governance?.managedFields ?? []).find(
-    (f) => f.strategy === "nowMicroseconds" && f.applyOn.includes("update"),
-  );
-  if (managedField) {
-    const columns = getColumns(entry.table as AnyPgTable);
-    const col = Object.values(columns).find((c) => c.name === managedField.column);
-    if (col) return col.name;
-  }
-  return "updated_at_us";
+  // The single source for the Server version column (ADR-0010 / ADR-0004): resolves the
+  // managed field's property key to its column name. Falls back to the conventional name for
+  // resilience, though registry validation now guarantees a writable table declares one.
+  return resolveServerVersionColumnName(entry) ?? "updated_at_us";
 }
 
 async function readServerUpdatedAtUs(

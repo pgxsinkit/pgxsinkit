@@ -30,6 +30,9 @@ const routeOptionalBatchRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
   }),
 });
 
@@ -50,6 +53,9 @@ const defaultedColumnRegistry = defineSyncRegistry({
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
   }),
 });
 
@@ -61,9 +67,13 @@ const renamedPkRegistry = defineSyncRegistry({
     makeColumns: () => ({
       groupId: uuid("group_id").primaryKey(),
       label: varchar("label", { length: 120 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
     primaryKey: ["group_id"],
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
   }),
 });
 
@@ -132,7 +142,6 @@ describe("overlay state helpers", () => {
         id: "01963227-d4c7-72db-b858-f89f6af8f901",
         title: "Queued without per-table routes",
         createdAtUs: 100n,
-        updatedAtUs: 100n,
       }),
     ).resolves.toBeUndefined();
 
@@ -155,7 +164,6 @@ describe("overlay state helpers", () => {
       id: "01963227-d4c7-72db-b858-f89f6af8fa01",
       title: "Defaults filled locally",
       createdAtUs: 100n,
-      updatedAtUs: 100n,
     });
 
     const overlayRows = await db.query<{ researchExcluded: boolean; channel: string; overlayKind: string }>(
@@ -192,7 +200,6 @@ describe("overlay state helpers", () => {
       researchExcluded: true,
       channel: "explicit-channel",
       createdAtUs: 100n,
-      updatedAtUs: 100n,
     });
 
     const overlayRows = await db.query<{ researchExcluded: boolean; channel: string }>(
@@ -354,6 +361,48 @@ describe("overlay state helpers", () => {
 
     const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay");
     expect(overlayRows.rows[0]?.count).toBe(0);
+  });
+
+  it("holds the optimistic overlay until the synced echo reaches the acked Server version (ADR-0010 barrier)", async () => {
+    const { db, runtime } = await createOverlayTestContext();
+
+    const id = "01963227-d4c7-72db-b858-f89f6af8f9b0";
+    await runtime.create("todos", {
+      id,
+      title: "Barrier test",
+      description: null,
+      authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+      status: "todo",
+      priority: "medium",
+    });
+
+    // Ack at Server version 500.
+    await db.query(
+      `UPDATE todos_mutations SET status = 'acked', server_updated_at_us = 500 WHERE id = $1 AND mutation_seq = 1`,
+      [id],
+    );
+
+    // A STALE echo (older Server version 400 < 500) must NOT clear the optimistic write — the
+    // overlay and the acked journal entry both survive (the regression the barrier exists to catch).
+    await db.query(
+      `INSERT INTO todos (id, title, description, author_id, status, priority, created_at_us, updated_at_us) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)`,
+      [id, "Stale server row", null, "01963227-d4c7-72db-b858-f89f6af8f920", "todo", "medium", "100", "400"],
+    );
+
+    expect((await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay")).rows[0]?.count).toBe(
+      1,
+    );
+    expect((await runtime.readMutationStats("todos")).ackedCount).toBe(1);
+
+    // The real echo (Server version 600 >= 500) crosses the barrier and clears overlay + journal.
+    await db.query(`UPDATE todos SET updated_at_us = 600 WHERE id = $1`, [id]);
+
+    expect((await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay")).rows[0]?.count).toBe(
+      0,
+    );
+    expect((await runtime.readMutationStats("todos")).ackedCount).toBe(0);
+
+    await db.close();
   });
 
   it("reconciles multiple acknowledged overlays in one pass", async () => {
@@ -1299,7 +1348,10 @@ describe("overlay state helpers", () => {
       expect(fetchMock).toHaveBeenCalledTimes(3);
       expect(mutationStats.pendingCount).toBe(0);
       expect(mutationStats.failedCount).toBe(0);
-      expect(mutationStats.ackedCount).toBe(0);
+      // ADR-0010: acked optimistic creates are HELD (not cleared) until the synced echo reaches
+      // their acked Server version. No echo is simulated here, so every drained mutation remains
+      // acked-but-unobserved — the barrier is exactly what stops a premature clear.
+      expect(mutationStats.ackedCount).toBe(mutationCount);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1434,10 +1486,11 @@ describe("overlay state helpers", () => {
       const mutations = await runtime.readMutationDetails("authors");
       const mutationById = new Map(mutations.map((mutation) => [mutation.entityKey["id"], mutation]));
 
-      // After flush + reconcile, the acked entry is cleared. The 409 conflict is a
-      // structural rejection the server will never accept, so it is quarantined (terminal,
-      // ADR-0006) rather than retry-looped — but its conflict metadata is retained.
-      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f970")).toBeUndefined();
+      // ADR-0010: the acked create is HELD (status 'acked') until its synced echo arrives — none is
+      // simulated here, so it is not cleared. The 409 conflict is a structural rejection the server
+      // will never accept, so it is quarantined (terminal, ADR-0006) rather than retry-looped — but
+      // its conflict metadata is retained. The point: the two statuses apply without row-by-row drift.
+      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f970")?.status).toBe("acked");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.status).toBe("quarantined");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.conflictReason).toBe("duplicate name");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.lastHttpStatus).toBe(409);

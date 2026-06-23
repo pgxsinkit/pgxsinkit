@@ -27,6 +27,10 @@ const projectsSyncEntry = defineSyncTable({
   tableName: "projects",
   makeColumns: makeProjectsColumns,
   mode: "readwrite",
+  governance: {
+    // ADR-0010: updated_at_us is the Server version — server-stamped, strictly monotonic.
+    managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+  },
 });
 
 export const projectsTable = projectsSyncEntry.table;
@@ -56,8 +60,12 @@ const fkParentsSyncEntry = defineSyncTable({
   makeColumns: () => ({
     id: uuid("id").primaryKey(),
     name: varchar("name", { length: 120 }).notNull(),
+    updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
   mode: "readwrite",
+  governance: {
+    managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+  },
 });
 
 export const fkParentsTable = fkParentsSyncEntry.table;
@@ -70,9 +78,11 @@ const fkChildrenSyncEntry = defineSyncTable({
     parentId: uuid("parent_id")
       .notNull()
       .references(() => fkParentsTable.id, { name: "fk_children_parent_fk" }),
+    updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
   mode: "readwrite",
   governance: {
+    managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
     deferrableConstraints: [
       {
         constraintName: "fk_children_parent_fk",
@@ -96,6 +106,7 @@ const rlsTodosSyncEntry = defineSyncTable({
     id: uuid("id").primaryKey(),
     title: varchar("title", { length: 120 }).notNull(),
     ownerId: uuid("owner_id").default(sql`auth.uid()`),
+    updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
   }),
   policies: buildSupabaseOwnerOrAdminNativePolicies({
     tableName: "rls_todos",
@@ -103,6 +114,9 @@ const rlsTodosSyncEntry = defineSyncTable({
     ownerSqlColumn: "owner_id",
   }),
   mode: "readwrite",
+  governance: {
+    managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+  },
 });
 
 export const rlsTodosTable = rlsTodosSyncEntry.table;

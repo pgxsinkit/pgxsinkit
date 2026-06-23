@@ -20,7 +20,11 @@ const makeProjectedContractsColumns = () => ({
   modifiedBy: uuid("modified_by"),
   title: varchar("title", { length: 120 }).notNull(),
   createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull(),
+  updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
 });
+
+// ADR-0010: every writable table must declare a Server version (a nowMicroseconds-on-update
+// managed field). Inlined per fixture because `column` is typed to each table's own keys.
 
 describe("sync config contracts", () => {
   it("attaches registry-level schema metadata without changing table enumeration", () => {
@@ -68,6 +72,9 @@ describe("sync config contracts", () => {
         makeColumns: makeProjectedContractsColumns,
         mode: "readwrite",
         clientProjection: { omitColumns: ["id"] },
+        governance: {
+          managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+        },
       }),
     ).toThrow(/must not omit primary-key columns/);
   });
@@ -82,10 +89,14 @@ describe("sync config contracts", () => {
           tenantId: uuid("tenant_id").notNull(),
           id: uuid("id").notNull(),
           title: varchar("title", { length: 120 }).notNull(),
+          updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
         }),
         mode: "readwrite",
         primaryKey: ["tenant_id", "id"],
         clientProjection: { omitColumns: ["tenantId"] },
+        governance: {
+          managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+        },
       }),
     ).toThrow(/must not omit primary-key columns/);
   });
@@ -97,6 +108,9 @@ describe("sync config contracts", () => {
         makeColumns: makeProjectedContractsColumns,
         mode: "readwrite",
         clientProjection: { omitColumns: ["title"] },
+        governance: {
+          managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+        },
       }),
     ).toThrow(/must only omit create-safe columns/);
   });
@@ -111,6 +125,7 @@ describe("sync config contracts", () => {
         managedFields: [
           { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
           { column: "modifiedBy", applyOn: ["create", "update"], strategy: "authUid" },
+          { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
         ],
       },
     });
@@ -122,6 +137,26 @@ describe("sync config contracts", () => {
     expect(localColumns.id).toBeDefined();
     expect(localColumns.title).toBeDefined();
     expect(localColumns.createdAtUs).toBeDefined();
+  });
+
+  it("rejects a writable table without a Server version, but allows a readonly one (ADR-0010)", () => {
+    const makeVersionlessColumns = () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+    });
+
+    expect(() =>
+      defineSyncTable({ tableName: "no_server_version_items", makeColumns: makeVersionlessColumns, mode: "readwrite" }),
+    ).toThrow(/must declare a Server version/);
+
+    // A readonly table is a pure read cache — no optimistic convergence, so no Server version needed.
+    expect(() =>
+      defineSyncTable({
+        tableName: "no_server_version_readonly",
+        makeColumns: makeVersionlessColumns,
+        mode: "readonly",
+      }),
+    ).not.toThrow();
   });
 
   it("parses generic mutation envelopes and acks", () => {

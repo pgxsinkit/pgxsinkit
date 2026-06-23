@@ -6,6 +6,7 @@ import {
   escapeSqlLiteral as toSqlLiteral,
   getProjectedColumns,
   quoteIdentifier as quoteIdent,
+  resolveServerVersionColumnName,
   type BatchMutationRequest,
   type RegistryRelations,
   type SyncTableEntry,
@@ -94,8 +95,19 @@ function buildTableBranch(entry: SyncTableEntry): string {
   const createManagedValuesSql = createManagedFields
     .map((field) => buildManagedFieldExpression(field.strategy))
     .join(", ");
+  // ADR-0010: the Server version (the nowMicroseconds-on-update managed field) must be strictly
+  // monotonic per row, so its on-update stamp is floored at the previous value + 1 — it can never
+  // repeat or step backwards under wall-clock (NTP) skew, which would let a stale echo clear an
+  // optimistic write early. The bare column on the RHS of an UPDATE SET is the pre-update value.
+  const serverVersionColumn = resolveServerVersionColumnName(entry);
   const updateManagedAssignmentsSql = updateManagedFields
-    .map((field) => `${quoteIdent(field.columnName)} = ${buildManagedFieldExpression(field.strategy)}`)
+    .map((field) => {
+      const expression =
+        field.strategy === "nowMicroseconds" && field.columnName === serverVersionColumn
+          ? `GREATEST(${buildManagedFieldExpression("nowMicroseconds")}, ${quoteIdent(field.columnName)} + 1)`
+          : buildManagedFieldExpression(field.strategy);
+      return `${quoteIdent(field.columnName)} = ${expression}`;
+    })
     .join(", ");
 
   // WHERE over the full pk tuple. v_entity_key (EXECUTE arg $2) is column-keyed (ADR-0012), so

@@ -35,6 +35,7 @@ import type {
   TableGovernanceSpec as TableGovernanceSpecBase,
   TableMode,
 } from "./config";
+import { quoteIdentifier } from "./sql-identifier";
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
 
@@ -493,6 +494,59 @@ export function getLocalSyncedTablePrimaryKeyColumns<TTable extends AnyPgTable>(
   return [...(entry.clientProjection?.localPrimaryKey?.columns ?? entry.primaryKey.columns)];
 }
 
+/**
+ * The Server version column (ADR-0010): the `nowMicroseconds`-on-update managed field a writable
+ * table stamps on every write (conventionally `updated_at_us`), made strictly monotonic by the
+ * applier. Returns its **column name**, resolving the managed field's drizzle property key. Returns
+ * `undefined` when none is declared — registry validation rejects that for writable tables, so the
+ * convergence barrier never has to degrade.
+ */
+export function resolveServerVersionColumnName<TTable extends AnyPgTable>(
+  entry: SyncTableEntry<TTable>,
+): string | undefined {
+  const field = (entry.governance?.managedFields ?? []).find(
+    (managed) => managed.strategy === "nowMicroseconds" && managed.applyOn.includes("update"),
+  );
+
+  if (!field) {
+    return undefined;
+  }
+
+  const columns = getColumns(entry.table);
+  // `field.column` is the drizzle property key; resolve it to the underlying column name.
+  const byProperty = (columns as Record<string, { name: string } | undefined>)[field.column as string];
+  if (byProperty) {
+    return byProperty.name;
+  }
+
+  // Defensive: a managed field declared by column name rather than property key.
+  return Object.values(columns).find((column) => column.name === field.column)?.name;
+}
+
+/**
+ * The Convergence barrier predicate (ADR-0010): an acked create/update is resolved only once the
+ * synced echo's Server version has reached the write's acked version. Emitted identically by the
+ * reconcile trigger (schema.ts) and `reconcileTable` (mutation.ts) — one rule, no drift (ADR-0004).
+ * `syncedAlias` is the synced-side reference (a table alias, or `NEW` inside the trigger);
+ * `journalAlias` qualifies the journal's `server_updated_at_us` (omit it where the journal is the
+ * unaliased target of the `DELETE`).
+ */
+export function buildOverlayResolutionBarrier<TTable extends AnyPgTable>(
+  entry: SyncTableEntry<TTable>,
+  options: { syncedAlias: string; journalAlias?: string },
+): string {
+  const serverVersionColumn = resolveServerVersionColumnName(entry);
+
+  if (!serverVersionColumn) {
+    throw new Error(
+      `writable table ${getTableConfig(entry.table).name} has no Server version; cannot build the convergence barrier (ADR-0010)`,
+    );
+  }
+
+  const journalRef = options.journalAlias ? `${options.journalAlias}.server_updated_at_us` : "server_updated_at_us";
+  return `${journalRef} <= ${options.syncedAlias}.${quoteIdentifier(serverVersionColumn)}`;
+}
+
 export function attachSyncRegistrySchema<TRegistry extends SyncTableRegistry>(registry: TRegistry, schema?: string) {
   const normalizedSchema = normalizeSchemaName(schema);
 
@@ -559,6 +613,17 @@ function getRegistryEntries<TRegistry extends SyncTableRegistry>(registry: TRegi
 
 function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
   const tableName = getTableConfig(entry.table).name;
+
+  // ADR-0010: a writable synced table must declare a Server version — a nowMicroseconds-on-update
+  // managed field (conventionally updated_at_us) the applier stamps and keeps strictly monotonic.
+  // Optimistic convergence is unsound without a per-row version (the barrier would degenerate to a
+  // flicker-prone key-match), so this is a hard requirement, not a silent degraded fallback.
+  if (entry.mode !== "readonly" && resolveServerVersionColumnName(entry) === undefined) {
+    throw new Error(
+      `writable table ${tableName} must declare a Server version: a managed field with strategy ` +
+        `"nowMicroseconds" and applyOn including "update" (conventionally updated_at_us) — ADR-0010`,
+    );
+  }
 
   const columns = Object.entries(getColumns(entry.table)).map(([propertyKey, column]) => ({
     propertyKey,

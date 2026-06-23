@@ -60,8 +60,12 @@ const fallbackReadModelRegistry = defineSyncRegistry({
     makeColumns: () => ({
       id: uuid("id").primaryKey(),
       title: varchar("title", { length: 120 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
     }),
     mode: "readwrite",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
   }),
 });
 
@@ -155,12 +159,14 @@ describe("client local schema generation", () => {
     expect(sql).not.toContain("owner_id uuid NOT NULL PRIMARY KEY");
   });
 
-  it("uses a valid read-model fallback when updated_at_us is absent", () => {
+  it("derives the read-model local timestamp from the Server version column", () => {
+    // ADR-0010 guarantees a writable table carries updated_at_us, so the read model's synced
+    // branch always sources local_updated_at_us from t.updated_at_us — the prior CAST(0) fallback
+    // is unreachable for a conventionally-named Server version.
     const sql = generateLocalSchemaSql(fallbackReadModelRegistry);
 
-    expect(sql).toContain("CAST(0 AS BIGINT) AS local_updated_at_us");
-    expect(sql).not.toContain("CAST(0 AS BIGINT) AS local_updated_at_us AS local_updated_at_us");
-    expect(sql).not.toContain("t.CAST(0 AS BIGINT)");
+    expect(sql).toContain("t.updated_at_us AS local_updated_at_us");
+    expect(sql).not.toContain("CAST(0 AS BIGINT) AS local_updated_at_us");
   });
 
   it("creates and qualifies enum types for non-public local schemas", () => {

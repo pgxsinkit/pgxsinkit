@@ -1,6 +1,7 @@
 import { getViewConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import {
+  buildOverlayResolutionBarrier,
   getLocalSyncPrimaryKeyColumns,
   getSyncRegistrySchema,
   getProjectedColumns,
@@ -152,11 +153,23 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
       .map((col) => `"overlay"."${col.name}" = COALESCE(NEW."${col.name}", OLD."${col.name}")`)
       .join(" AND ");
 
+    // ADR-0010: an acked create/update clears only once the synced echo's Server version reaches
+    // the write's acked version — never on a bare key-match, which a stale or reordered echo could
+    // satisfy and flip the read model to neither the optimistic nor the converged value. A delete
+    // stays resolved by synced-row absence (NEW is NULL on the synced DELETE; the barrier reads
+    // NULL there, so it never clears a create/update on a delete echo). One predicate, shared with
+    // reconcileTable (mutation.ts), so the two sites cannot drift.
+    const resolutionBarrier = buildOverlayResolutionBarrier(entry, { syncedAlias: "NEW" });
+
     statements.push(
       `CREATE OR REPLACE FUNCTION ${triggerFnName}() RETURNS TRIGGER AS $$\n` +
         `BEGIN\n` +
         `  DELETE FROM ${projection.journalTable}\n` +
-        `  WHERE status = 'acked' AND (${pkMatchSql(projection.journalTable)});\n` +
+        `  WHERE status = 'acked' AND (${pkMatchSql(projection.journalTable)})\n` +
+        `    AND (\n` +
+        `      (TG_OP <> 'DELETE' AND mutation_kind <> 'delete' AND ${resolutionBarrier})\n` +
+        `      OR (TG_OP = 'DELETE' AND mutation_kind = 'delete')\n` +
+        `    );\n` +
         `  DELETE FROM ${projection.overlayTable} AS "overlay"\n` +
         `  WHERE (${pkOverlayMatchSql})\n` +
         `    AND NOT EXISTS (\n` +
