@@ -321,6 +321,118 @@ describe("write api implementation integration", () => {
     const afterCount = await readOperationsLogRowCount(server);
     expect(afterCount).toBe(beforeCount);
   });
+
+  it("applies a multi-row, multi-(table,kind,column-set) batch set-based (ADR-0014 Phase 4)", async () => {
+    const a1 = "0196322c-0000-7000-8000-0000000000a1";
+    const a2 = "0196322c-0000-7000-8000-0000000000a2";
+    const a3 = "0196322c-0000-7000-8000-0000000000a3";
+    const t1 = "0196322c-0000-7000-8000-0000000000b1";
+    const t2 = "0196322c-0000-7000-8000-0000000000b2";
+
+    // Batch 1: three authors (one set-based INSERT of 3 rows) + two todos (a second set-based INSERT),
+    // across two (table, kind) groups, ordered authors-before-todos by min(mutationSeq) for the FK.
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a1 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c1",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: a1, name: "Author One" },
+      }),
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a2 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c2",
+        mutationSeq: 2,
+        kind: "create",
+        payload: { id: a2, name: "Author Two" },
+      }),
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a3 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c3",
+        mutationSeq: 3,
+        kind: "create",
+        payload: { id: a3, name: "Author Three" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t1 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c4",
+        mutationSeq: 4,
+        kind: "create",
+        payload: { id: t1, title: "T1", description: null, author_id: a1, status: "todo", priority: "low" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t2 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c5",
+        mutationSeq: 5,
+        kind: "create",
+        payload: { id: t2, title: "T2", description: null, author_id: a2, status: "todo", priority: "low" },
+      }),
+    ]);
+
+    await expectResponseStatus(createResponse, 200);
+    const createBody = (await createResponse.json()) as {
+      acks: Array<{ status: string; serverUpdatedAtUs?: string }>;
+    };
+    expect(createBody.acks).toHaveLength(5);
+    expect(createBody.acks.every((ack) => ack.status === "acked")).toBe(true);
+    expect(createBody.acks.every((ack) => /^[0-9]+$/.test(ack.serverUpdatedAtUs ?? ""))).toBe(true);
+
+    expect(await server.drizzle.select().from(authorsTable)).toHaveLength(3);
+    const todosAfterCreate = await server.drizzle.select().from(todosTable);
+    expect(todosAfterCreate).toHaveLength(2);
+    for (const todo of todosAfterCreate) {
+      // Managed fields stamped by the set-based INSERT, not read from payload.
+      expect(todo.createdAtUs).toBeTypeOf("bigint");
+      expect(todo.updatedAtUs).toBeTypeOf("bigint");
+    }
+
+    // Batch 2: two partial updates with DIFFERENT column-sets ({status} vs {priority, title}) — two
+    // UPDATE groups — plus a delete. All set-based; each row's untouched columns must survive.
+    const updateResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t1 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c6",
+        mutationSeq: 6,
+        kind: "update",
+        payload: { status: "done" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t2 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c7",
+        mutationSeq: 7,
+        kind: "update",
+        payload: { title: "T2-renamed", priority: "high" },
+      }),
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a3 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c8",
+        mutationSeq: 8,
+        kind: "delete",
+        payload: { id: a3 },
+      }),
+    ]);
+
+    await expectResponseStatus(updateResponse, 200);
+
+    const t1Row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, t1)))[0];
+    const t2Row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, t2)))[0];
+    expect(t1Row?.status).toBe("done");
+    expect(t1Row?.title).toBe("T1"); // untouched by the {status} group
+    expect(t2Row?.title).toBe("T2-renamed");
+    expect(t2Row?.priority).toBe("high");
+    expect(t2Row?.status).toBe("todo"); // untouched by the {priority, title} group
+
+    const remainingAuthors = await server.drizzle.select().from(authorsTable);
+    expect(remainingAuthors.map((author) => author.id).sort()).toEqual([a1, a2].sort()); // a3 deleted
+  });
 });
 
 describe("write api deferred FK behavior", () => {

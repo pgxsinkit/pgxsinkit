@@ -300,4 +300,94 @@ describe("electric -> pglite sync integration", () => {
       await localPg.close();
     }
   }, 30_000);
+
+  it("converges a steady-state stream of same-PK updates through the fold + bulk apply (ADR-0014)", async () => {
+    const authorId = "0196322b-0000-7000-8000-0000000000a1";
+    const todoId = "0196322b-0000-7000-8000-0000000000b1";
+
+    // Seed the parent author and the todo whose primary key we will churn.
+    await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          {
+            tableName: "authors",
+            entityKey: { id: authorId },
+            mutationId: "0196322b-0000-4000-8000-0000000000a1",
+            mutationSeq: 1,
+            kind: "create",
+            payload: { id: authorId, name: "Churn Author" },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+          {
+            tableName: "todos",
+            entityKey: { id: todoId },
+            mutationId: "0196322b-0000-4000-8000-0000000000b1",
+            mutationSeq: 2,
+            kind: "create",
+            payload: {
+              id: todoId,
+              title: "v0",
+              description: null,
+              author_id: authorId,
+              status: "todo",
+              priority: "low",
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
+      }),
+    });
+
+    const localPg = await createLocalTodoStore();
+    const { sync, initialSyncDone } = await startTestSync(localPg);
+
+    try {
+      await initialSyncDone;
+
+      // Steady-state churn: many updates to the SAME primary key, each its own batch (faithful to the
+      // client's per-entity serialization). They stream down and the read apply must converge to the
+      // last value — the fold collapses any that land in one drained window to a single UPDATE.
+      const updates = 8;
+      for (let i = 1; i <= updates; i++) {
+        await server.request("/api/mutations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mutations: [
+              {
+                tableName: "todos",
+                entityKey: { id: todoId },
+                mutationId: `0196322b-0000-4000-8000-0000000000${(0xc0 + i).toString(16)}`,
+                mutationSeq: i + 2,
+                kind: "update",
+                payload: { title: `v${i}`, priority: i % 2 === 0 ? "high" : "low" },
+                clientTimestampUs: String(Date.now() * 1000),
+              },
+            ],
+          }),
+        });
+      }
+
+      await waitFor(async () => {
+        const result = await localPg.query<{ title: string; priority: string }>(
+          "SELECT title, priority FROM todos WHERE id = $1;",
+          [todoId],
+        );
+        expect(result.rows[0]?.title).toBe(`v${updates}`); // converged to the last write
+        expect(result.rows[0]?.priority).toBe("high"); // v8 is even → high
+
+        // Exactly one row for the PK — the bulk INSERT/UPDATE path never duplicated it.
+        const countResult = await localPg.query<{ count: number }>(
+          "SELECT COUNT(*)::int AS count FROM todos WHERE id = $1;",
+          [todoId],
+        );
+        expect(countResult.rows[0]?.count).toBe(1);
+      });
+    } finally {
+      sync.unsubscribe();
+      await localPg.close();
+    }
+  }, 30_000);
 });
