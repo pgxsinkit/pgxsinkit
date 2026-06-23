@@ -13,6 +13,7 @@ import {
   applyMessagesToTableWithCopy,
   applyMessagesToTableWithJson,
 } from "./apply";
+import { ShapeInbox } from "./shape-inbox";
 import {
   deleteSubscriptionState,
   getSubscriptionState,
@@ -161,11 +162,9 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       }
     };
 
-    const changes = new Map<string, Map<Lsn, ChangeMessage<Row<unknown>>[]>>(
-      Object.keys(shapes).map((key) => [key, new Map()]),
-    );
-
-    const completeLsns = new Map<string, Lsn>(Object.keys(shapes).map((key) => [key, BigInt(-1)]));
+    // The Shape inbox (ADR-0014 / ISS-06): the pure, in-memory buffer + complete-LSN frontier for
+    // this group's shapes. The engine keeps the commit queue, the apply, and the truncate set.
+    const inbox = new ShapeInbox(Object.keys(shapes));
 
     const truncateNeeded = new Set<string>();
     // The committed frontier is a *running* variable, advanced after each successful commit — not
@@ -228,21 +227,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
     // messages and the truncate snapshot are held across retries so a transient failure loses
     // nothing; the read cache never advances past an unapplied commit.
     const commitUpToLsn = async (targetLsn: Lsn): Promise<boolean> => {
-      const messagesToCommit = new Map<string, ChangeMessage<Row<unknown>>[]>(
-        Object.keys(shapes).map((shapeName) => [shapeName, []]),
-      );
-
-      for (const [shapeName, shapeChanges] of changes.entries()) {
-        const messagesForShape = messagesToCommit.get(shapeName)!;
-        for (const lsn of shapeChanges.keys()) {
-          if (lsn <= targetLsn) {
-            for (const message of shapeChanges.get(lsn)!) {
-              messagesForShape.push(message);
-            }
-            shapeChanges.delete(lsn);
-          }
-        }
-      }
+      const messagesToCommit = inbox.drainUpTo(targetLsn);
 
       // Snapshot the truncate set so a retried transaction still truncates; the per-shape flag is
       // cleared only once the commit has succeeded.
@@ -409,8 +394,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       }
     };
 
-    const lowestCompleteLsn = (): Lsn =>
-      Array.from(completeLsns.values()).reduce((minimum, entry) => (entry < minimum ? entry : minimum));
+    const lowestCompleteLsn = (): Lsn => inbox.lowestCompleteLsn();
 
     // Drain buffered changes up to the current complete frontier, one commit at a time, looping
     // while fresh messages keep arriving (so commits coalesce). Returns early on `degraded` — a held
@@ -460,21 +444,9 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       }
 
       messages.forEach((message) => {
-        const lastCommittedLsnForShape = completeLsns.get(message.shape) ?? BigInt(-1);
-
         if (isChangeMessage(message)) {
-          const shapeChanges = changes.get(message.shape)!;
           const { lsn, isLastOfLsn } = readReplicationHeaders(message.headers);
-          if (lsn <= lastCommittedLsnForShape) {
-            return;
-          }
-          if (!shapeChanges.has(lsn)) {
-            shapeChanges.set(lsn, []);
-          }
-          shapeChanges.get(lsn)!.push(message);
-          if (isLastOfLsn) {
-            completeLsns.set(message.shape, lsn);
-          }
+          inbox.ingestChange(message.shape, message, lsn, isLastOfLsn);
         } else if (isControlMessage(message)) {
           switch (message.headers.control) {
             case "up-to-date": {
@@ -484,20 +456,14 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               if (typeof message.headers.global_last_seen_lsn !== "string") {
                 throw new Error("global_last_seen_lsn is not a string");
               }
-              const globalLastSeenLsn = BigInt(message.headers.global_last_seen_lsn);
-              if (globalLastSeenLsn <= lastCommittedLsnForShape) {
-                return;
-              }
-              completeLsns.set(message.shape, globalLastSeenLsn);
+              inbox.ingestUpToDate(message.shape, BigInt(message.headers.global_last_seen_lsn));
               break;
             }
             case "must-refetch": {
               if (debug) {
                 console.log("received must-refetch", message);
               }
-              const shapeChanges = changes.get(message.shape)!;
-              shapeChanges.clear();
-              completeLsns.set(message.shape, BigInt(-1));
+              inbox.resetShape(message.shape);
               truncateNeeded.add(message.shape);
               break;
             }
