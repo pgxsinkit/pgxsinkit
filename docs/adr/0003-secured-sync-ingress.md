@@ -103,6 +103,19 @@ the registry row filter is the sole authority), and allowlisting now matches the
 declared Electric target with no schema stripping. Pinned by the precedence-bypass and
 schema-qualified-rejection cases in `tests/unit/electric-proxy.test.ts`.
 
+**Post-review hardening (2026-06-23).** A later pass found the proxy still forwarded every client
+query param except `where` (`buildProxyTargetUrl`), so a client could set `columns`, `replica`, or
+arbitrary params on the upstream Electric request. The proxy now **derives every shape-defining
+param from the registry** (table, columns, where, replica) and forwards **only** Electric protocol
+resume/control params (`ELECTRIC_PROTOCOL_QUERY_PARAMS` from `@electric-sql/client`) from the
+client. `columns` is set from the registry projection so omitted columns never leave the server (the
+prior JSON-stripping becomes belt-and-braces); a table whose `rowTransform` reads an omitted column
+fetches it and omits it post-hoc, so registry-derived `columns` = projected ∪ transform-inputs. The
+registry entry, keyed by its exact Electric target, is itself the shape capability — no opaque
+shape-id layer is introduced (it would add no authorization the exact-table allowlist does not
+already give). Pinned by a forwarded-param-rejection case in `tests/unit/electric-proxy.test.ts`.
+(worklog ISS-08)
+
 References: [ADR-0002](0002-single-in-database-write-path.md) (single write path);
 `CONTEXT.md` (Parity boundary, Read model);
 [docs/plans/0003-secured-sync-ingress.md](../plans/0003-secured-sync-ingress.md).
