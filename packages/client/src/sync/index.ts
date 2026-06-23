@@ -8,12 +8,14 @@ import { type ApplyStrategy, quoteIdentifier } from "@pgxsinkit/contracts";
 
 import { computeRetryDelayMs } from "../mutation";
 import {
+  applyBulkDeletesToTable,
+  applyBulkUpdatesToTable,
   applyInsertsToTable,
-  applyMessageToTable,
   applyMessagesToTableWithCopy,
   applyMessagesToTableWithJson,
+  doMapColumns,
 } from "./apply";
-import { ShapeInbox } from "./shape-inbox";
+import { foldChangeBatch, ShapeInbox } from "./shape-inbox";
 import {
   deleteSubscriptionState,
   getSubscriptionState,
@@ -291,42 +293,60 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               }
             }
 
-            const bulkInserts: InsertChangeMessage[] = [];
-            let change: ChangeMessage<Row<unknown>> | null = null;
-            const messagesLength = messages.length;
-            for (const [index, changeMessage] of messages.entries()) {
-              if (changeMessage.headers.operation === "insert") {
-                bulkInserts.push(changeMessage as InsertChangeMessage);
-              } else {
-                change = changeMessage;
-              }
+            // ADR-0014 Phase 3: fold this shape's drained batch to one net op per PK, then apply
+            // three bulk statements in the order DELETE → INSERT → UPDATE. A re-created PK's delete
+            // must precede its insert; every other PK lands in exactly one statement, so the rest of
+            // the order is irrelevant within the (atomic) commit. The fold collapses same-PK runs, so
+            // no bulk statement ever holds two rows for one PK — closing the `UPDATE … FROM` /
+            // `json_to_recordset` join hazard (which would use one arbitrary matching row) by
+            // construction. This replaces the previous one-SQL-statement-per-row steady-state loop.
+            if (messages.length > 0) {
+              const mapColumns = shape.mapColumns;
+              // A column-renaming map commutes with the per-PK value merge, so it can map after the
+              // fold. A mapColumns *function* may not, so pre-map each message before folding and let
+              // the bulk appliers apply the already-mapped values verbatim.
+              const foldInput =
+                typeof mapColumns === "function"
+                  ? messages.map((message) => ({ ...message, value: doMapColumns(mapColumns, message) }))
+                  : messages;
+              const bulkMapColumns = typeof mapColumns === "function" ? undefined : mapColumns;
+              const folded = foldChangeBatch(foldInput);
 
-              if (change || index === messagesLength - 1) {
-                if (bulkInserts.length > 0) {
-                  await applyInsertsToTable({
-                    pg: tx,
-                    table: shape.table,
-                    schema: shape.schema,
-                    messages: bulkInserts,
-                    mapColumns: shape.mapColumns,
-                    primaryKey: shape.primaryKey,
-                    columnTypes: shape.columnTypes,
-                    debug,
-                  });
-                  bulkInserts.length = 0;
-                }
-                if (change) {
-                  await applyMessageToTable({
-                    pg: tx,
-                    table: shape.table,
-                    schema: shape.schema,
-                    message: change,
-                    mapColumns: shape.mapColumns,
-                    primaryKey: shape.primaryKey,
-                    debug,
-                  });
-                  change = null;
-                }
+              if (folded.deletes.length > 0) {
+                await applyBulkDeletesToTable({
+                  pg: tx,
+                  table: shape.table,
+                  schema: shape.schema,
+                  messages: folded.deletes,
+                  mapColumns: bulkMapColumns,
+                  primaryKey: shape.primaryKey,
+                  columnTypes: shape.columnTypes,
+                  debug,
+                });
+              }
+              if (folded.inserts.length > 0) {
+                await applyInsertsToTable({
+                  pg: tx,
+                  table: shape.table,
+                  schema: shape.schema,
+                  messages: folded.inserts,
+                  mapColumns: bulkMapColumns,
+                  primaryKey: shape.primaryKey,
+                  columnTypes: shape.columnTypes,
+                  debug,
+                });
+              }
+              if (folded.updates.length > 0) {
+                await applyBulkUpdatesToTable({
+                  pg: tx,
+                  table: shape.table,
+                  schema: shape.schema,
+                  messages: folded.updates,
+                  mapColumns: bulkMapColumns,
+                  primaryKey: shape.primaryKey,
+                  columnTypes: shape.columnTypes,
+                  debug,
+                });
               }
             }
           }

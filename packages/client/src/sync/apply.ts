@@ -391,7 +391,7 @@ export async function applyMessagesToTableWithCopy({
   if (debug) console.log(`Inserted ${messages.length} rows using COPY`);
 }
 
-function doMapColumns(mapColumns: MapColumns, message: ChangeMessage<Row<unknown>>): Row<unknown> {
+export function doMapColumns(mapColumns: MapColumns, message: ChangeMessage<Row<unknown>>): Row<unknown> {
   if (typeof mapColumns === "function") {
     return mapColumns(message);
   }
@@ -401,4 +401,161 @@ function doMapColumns(mapColumns: MapColumns, message: ChangeMessage<Row<unknown
     mappedColumns[key] = message.value[value];
   }
   return mappedColumns;
+}
+
+const JSON_RECORDSET_BATCH = 10_000;
+
+/**
+ * Resolves the `json_to_recordset` casts for an **explicit, ordered** column list — the bulk
+ * UPDATE/DELETE source relations need the PK columns (plus, for updates, the group's SET columns) in
+ * a known order. Prefers the statically-supplied {@link SyncColumnType}s (ADR-0009 decision 3 — no DB
+ * round-trip); falls back to an `information_schema` probe for the registry-less generic caller.
+ */
+async function recordsetColumnCasts(
+  pg: PGliteInterface | Transaction,
+  table: string,
+  schema: string,
+  columnNames: string[],
+  columnTypes: SyncColumnType[] | undefined,
+): Promise<JsonRecordsetColumn[]> {
+  if (columnTypes) {
+    const byName = new Map(columnTypes.map((column) => [column.name, column]));
+    return columnNames.map((name) => {
+      const column = byName.get(name);
+      if (!column) {
+        throw new Error(`recordsetColumnCasts: no registered type for column ${JSON.stringify(name)} on ${table}`);
+      }
+      return { name, castType: `${column.sqlType}${column.isArray ? "[]" : ""}` };
+    });
+  }
+
+  const rows = (
+    await pg.query<{ column_name: string; udt_name: string; data_type: string }>(
+      `
+        SELECT column_name, udt_name, data_type
+        FROM information_schema.columns
+        WHERE table_name = $1 AND table_schema = $2
+      `,
+      [table, schema],
+    )
+  ).rows;
+  const byName = new Map(rows.map((column) => [column.column_name, column]));
+  return columnNames.map((name) => {
+    const column = byName.get(name);
+    if (!column) {
+      throw new Error(`recordsetColumnCasts: column ${JSON.stringify(name)} not found on ${schema}.${table}`);
+    }
+    return { name, castType: `${column.udt_name.replace(/^_/, "")}${column.data_type === "ARRAY" ? "[]" : ""}` };
+  });
+}
+
+export interface BulkKeyedApplyOptions {
+  pg: PGliteInterface | Transaction;
+  table: string;
+  schema?: string | undefined;
+  /** Folded messages: for deletes the value carries the PK; for updates the PK plus merged columns. */
+  messages: ChangeMessage<Row<unknown>>[];
+  mapColumns?: MapColumns | undefined;
+  primaryKey: string[];
+  columnTypes?: SyncColumnType[] | undefined;
+  debug: boolean;
+}
+
+/**
+ * Bulk DELETE by primary key via `DELETE … USING json_to_recordset(…)` (ADR-0014 Phase 3). Safe
+ * because the read-path fold already left **one row per PK** — no same-PK duplicate in the source.
+ */
+export async function applyBulkDeletesToTable({
+  pg,
+  table,
+  schema = "public",
+  messages,
+  mapColumns,
+  primaryKey,
+  columnTypes,
+  debug,
+}: BulkKeyedApplyOptions) {
+  if (primaryKey.length === 0) throw new Error("applyBulkDeletesToTable requires a primary key");
+  if (messages.length === 0) return;
+
+  const rows = messages.map((message) => {
+    const data = mapColumns ? doMapColumns(mapColumns, message) : message.value;
+    return Object.fromEntries(primaryKey.map((column) => [column, data[column]]));
+  });
+
+  const casts = await recordsetColumnCasts(pg, table, schema, primaryKey, columnTypes);
+  const recordDef = casts.map((column) => `${quoteIdentifier(column.name)} ${column.castType}`).join(", ");
+  const whereJoin = primaryKey
+    .map((column) => `t.${quoteIdentifier(column)} = x.${quoteIdentifier(column)}`)
+    .join(" AND ");
+
+  for (let i = 0; i < rows.length; i += JSON_RECORDSET_BATCH) {
+    const batch = rows.slice(i, i + JSON_RECORDSET_BATCH);
+    await pg.query(
+      `DELETE FROM ${qualifiedTable(schema, table)} AS t USING json_to_recordset($1) AS x(${recordDef}) WHERE ${whereJoin}`,
+      [batch],
+    );
+  }
+
+  if (debug) console.log(`Deleted ${messages.length} rows using json_to_recordset`);
+}
+
+/**
+ * Bulk UPDATE via `UPDATE … FROM json_to_recordset(…)` (ADR-0014 Phase 3), **grouped by the set of
+ * non-PK columns** each row carries. Electric's default replica sends only the changed columns, so
+ * two rows in one batch can set different columns; one `UPDATE … FROM` per distinct column-set keeps
+ * each statement uniform. Safe from the same-PK join hazard because the fold already left one row per
+ * PK, so no PK appears twice within a group.
+ */
+export async function applyBulkUpdatesToTable({
+  pg,
+  table,
+  schema = "public",
+  messages,
+  mapColumns,
+  primaryKey,
+  columnTypes,
+  debug,
+}: BulkKeyedApplyOptions) {
+  if (primaryKey.length === 0) throw new Error("applyBulkUpdatesToTable requires a primary key");
+  if (messages.length === 0) return;
+
+  const pkSet = new Set(primaryKey);
+  const groups = new Map<string, { setColumns: string[]; rows: Row<unknown>[] }>();
+  for (const message of messages) {
+    const data = mapColumns ? doMapColumns(mapColumns, message) : message.value;
+    const setColumns = Object.keys(data)
+      .filter((column) => !pkSet.has(column))
+      .sort();
+    // A PK-only update sets nothing — the per-row applyMessageToTable returns early on this too.
+    if (setColumns.length === 0) continue;
+    const groupKey = setColumns.join(" ");
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = { setColumns, rows: [] };
+      groups.set(groupKey, group);
+    }
+    group.rows.push(Object.fromEntries([...primaryKey, ...setColumns].map((column) => [column, data[column]])));
+  }
+
+  for (const { setColumns, rows } of groups.values()) {
+    const casts = await recordsetColumnCasts(pg, table, schema, [...primaryKey, ...setColumns], columnTypes);
+    const recordDef = casts.map((column) => `${quoteIdentifier(column.name)} ${column.castType}`).join(", ");
+    const setClause = setColumns
+      .map((column) => `${quoteIdentifier(column)} = x.${quoteIdentifier(column)}`)
+      .join(", ");
+    const whereJoin = primaryKey
+      .map((column) => `t.${quoteIdentifier(column)} = x.${quoteIdentifier(column)}`)
+      .join(" AND ");
+
+    for (let i = 0; i < rows.length; i += JSON_RECORDSET_BATCH) {
+      const batch = rows.slice(i, i + JSON_RECORDSET_BATCH);
+      await pg.query(
+        `UPDATE ${qualifiedTable(schema, table)} AS t SET ${setClause} FROM json_to_recordset($1) AS x(${recordDef}) WHERE ${whereJoin}`,
+        [batch],
+      );
+    }
+  }
+
+  if (debug) console.log(`Updated ${messages.length} rows using json_to_recordset`);
 }
