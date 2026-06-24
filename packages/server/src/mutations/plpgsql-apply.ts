@@ -181,8 +181,16 @@ function buildTableBranch(entry: SyncTableEntry): string {
   // collected for the handler to turn into a `conflicted` ack. `last-write-wins` keeps today's apply
   // (now a named choice). The policy is known here at DDL-generation time, so each table emits the SQL
   // its policy needs; a create has no base (its conflict is a PK collision), so it is unchanged.
+  // #6: an UPDATE whose target row is MISSING (deleted by another writer after authoring) is also a
+  // conflict ('target row no longer exists', `currentServerVersion` NULL) — otherwise the edit would
+  // silently no-op and ack as success. A DELETE of a missing row stays idempotent success (the user
+  // wanted it gone), so the delete branch keeps its inner join and does not report missing targets.
   const serverVersionRef = serverVersionColumn ? quoteIdent(serverVersionColumn) : null;
   const rejectIfStale = entry.conflictPolicy === "reject-if-stale" && serverVersionRef != null;
+  // For the missing-target conflict (ADR-0015 #6): a LEFT JOIN whose right side is absent leaves the
+  // first PK column NULL. The Server version is NOT NULL on any existing writable row, so a NULL
+  // `currentServerVersion` in a returned conflict means exactly "the target row no longer exists".
+  const firstPkRef = quoteIdent(primaryKeyColumns[0]!.name);
 
   // The conflict-collect SELECT and the staleness guard need the base + mutation id alongside each
   // row, so reject-if-stale carries them in the recordset (`b bigint, m uuid`).
@@ -193,7 +201,7 @@ function buildTableBranch(entry: SyncTableEntry): string {
     ? `
         ${updateSetSelect}
 
-        EXECUTE '${`SELECT COALESCE(jsonb_agg(${conflictObjectSql("x")}), '[]'::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m uuid) JOIN ${qualifiedTableName} AS t ON ${pkUpdateJoin} WHERE x.b IS NOT NULL AND t.${serverVersionRef} > x.b`.replace(/'/g, "''")}'
+        EXECUTE '${`SELECT COALESCE(jsonb_agg(${conflictObjectSql("x")}), '[]'::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m uuid) LEFT JOIN ${qualifiedTableName} AS t ON ${pkUpdateJoin} WHERE t.${firstPkRef} IS NULL OR (x.b IS NOT NULL AND t.${serverVersionRef} > x.b)`.replace(/'/g, "''")}'
           INTO v_group_conflicts
           USING (
             SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
@@ -486,14 +494,16 @@ export async function verifyRlsAuthHelpers<TRegistry extends SyncTableRegistry>(
 }
 
 /**
- * A stale-write conflict the applier rejected under `reject-if-stale` (ADR-0015): the mutation was
- * authored against a Base server version the row has since advanced past. Carries the row's current
- * Server version so the handler can surface it on the `conflicted` ack.
+ * A conflict the applier rejected under `reject-if-stale` (ADR-0015): either a **stale** write (the
+ * Base server version the row has since advanced past — `currentServerVersion` is the row's current
+ * version) or an UPDATE whose **target row is missing** (deleted by another writer —
+ * `currentServerVersion` is `null`, the #6 discriminator). The handler surfaces it on the
+ * `conflicted` ack.
  */
 export interface MutationConflict {
   mutationId: string;
   tableName: string;
-  currentServerVersion: string;
+  currentServerVersion: string | null;
 }
 
 interface MutationConflictRow {
@@ -529,7 +539,7 @@ export async function executePlpgsqlBatch(
           {
             mutationId: row.mutationId,
             tableName: row.tableName ?? "",
-            currentServerVersion: row.currentServerVersion ?? "",
+            currentServerVersion: row.currentServerVersion,
           } satisfies MutationConflict,
         ]
       : [],

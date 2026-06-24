@@ -9,7 +9,7 @@ import {
 } from "@pgxsinkit/contracts";
 
 import { electricSync } from "./sync";
-import { createShapeAuthErrorHandler } from "./sync-auth";
+import { createShapeErrorHandler } from "./sync-auth";
 
 export interface ShapeSyncSpec {
   electricUrl: string;
@@ -50,8 +50,14 @@ export interface StartConfiguredSyncOptions {
    */
   onAuthError?: () => void;
   /**
+   * Notified when a shape hits a NON-auth stream error (#4): a transient 5xx/429/network (retried) or
+   * a structural 4xx (stops the stream). The runtime surfaces a `degraded` status from this so it
+   * never silently believes the read path is live while it has actually stalled.
+   */
+  onReadStreamError?: (error: Error) => void;
+  /**
    * Notified when a shape successfully delivers a batch — i.e. a fetch just succeeded (ADR-0013
-   * Phase 3). The runtime uses this to clear an `auth-needed` status once sync resumes on re-auth.
+   * Phase 3). The runtime uses this to clear an `auth-needed`/`degraded` status once sync resumes.
    */
   onSyncActivity?: () => void;
 }
@@ -127,6 +133,7 @@ export async function startConfiguredSync(
         ...(input.shapeHeaders ? { headers: input.shapeHeaders } : {}),
         ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
         ...(input.onAuthError ? { onAuthError: input.onAuthError } : {}),
+        ...(input.onReadStreamError ? { onReadStreamError: input.onReadStreamError } : {}),
         ...(input.onSyncActivity ? { onSyncActivity: input.onSyncActivity } : {}),
         onGroupInitialSync: () => {
           // The group is up-to-date as a unit; signal each member table, then advance the global
@@ -177,6 +184,7 @@ interface StartGroupSyncOptions {
   onGroupInitialSync?: () => void;
   onSyncError?: (error: Error) => void;
   onAuthError?: () => void;
+  onReadStreamError?: (error: Error) => void;
   onSyncActivity?: () => void;
 }
 
@@ -188,11 +196,13 @@ interface StartGroupSyncOptions {
 export async function startGroupSync(pg: SyncEnginePGlite, input: StartGroupSyncOptions) {
   const shapeHeaders = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
 
-  // Recover the read path from auth errors at the per-shape onError (ADR-0013 Phase 2): a 401/403
-  // returns retry so Electric re-resolves the async Authorization header for a fresh token, instead
-  // of permanently stopping the stream (Electric does not auto-retry 4xx). `onAuthError` (Phase 3)
-  // lets the runtime surface a distinct auth-needed status while it retries.
-  const onError = createShapeAuthErrorHandler(input.onAuthError ? { onAuthError: input.onAuthError } : {});
+  // The per-shape onError owns read-path auth recovery (ADR-0013 Phase 2: a 401/403 retries with a
+  // fresh token) AND read-stream error surfacing (#4: a non-auth error moves the runtime to
+  // `degraded`, retrying transient 5xx/429/network and stopping a structural 4xx).
+  const onError = createShapeErrorHandler({
+    ...(input.onAuthError ? { onAuthError: input.onAuthError } : {}),
+    ...(input.onReadStreamError ? { onReadStreamError: input.onReadStreamError } : {}),
+  });
 
   const shapes = Object.fromEntries(
     input.specs.map((spec) => [

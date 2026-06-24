@@ -228,6 +228,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // Whether the read path's first initial sync has completed, so a recovery from `auth-needed`
   // returns to the right steady-state phase (`ready` if already caught up, else `syncing`).
   let initialSyncCompleted = false;
+  // Why the runtime is `degraded` (#4). A read-stream error degraded clears on the next successful
+  // batch; a commit-failure degraded is sticky (a fetch can succeed while applies still fail), so a
+  // bare `onSyncActivity` must not clear it.
+  let degradedReason: "stream" | "commit" | null = null;
 
   status.isRunning = true;
 
@@ -258,27 +262,42 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       },
       onSyncError: (error) => {
         // A sync commit exhausted its retries (ADR-0009 decision 5): go degraded and surface it,
-        // rather than letting the read cache silently diverge from the server.
+        // rather than letting the read cache silently diverge from the server. Sticky (see below).
         status.phase = "degraded";
+        degradedReason = "commit";
         status.lastError = error.message;
         options.onStatusChange?.(status);
         options.onSyncError?.(error);
       },
+      // #4: a terminal/transient NON-auth read-stream error → `degraded`, so the runtime never keeps
+      // reporting healthy while the read stream has stalled. Does not override the more-actionable
+      // `auth-needed`, nor a commit-failure degraded. Cleared on the next successful batch below.
+      onReadStreamError: (error) => {
+        if (status.phase !== "auth-needed" && status.phase !== "degraded") {
+          status.phase = "degraded";
+          degradedReason = "stream";
+          status.lastError = error.message;
+          options.onStatusChange?.(status);
+        }
+      },
+      // Clear a recoverable status (auth-needed, or a read-stream degraded) the moment a batch is
+      // delivered again. A commit-failure degraded is NOT cleared here — a fetch can succeed while
+      // applies keep failing, so only `onSyncError` clearing (a clean commit) would lift it.
+      onSyncActivity: () => {
+        if (status.phase === "auth-needed" || (status.phase === "degraded" && degradedReason === "stream")) {
+          degradedReason = null;
+          status.phase = initialSyncCompleted ? "ready" : "syncing";
+          options.onStatusChange?.(status);
+        }
+      },
       // ADR-0013 Phase 3: surface a persistent read-path auth failure as a distinct `auth-needed`
-      // status (the app prompts re-login) while the stream keeps retrying for a fresh token; clear
-      // it back to the steady-state phase the moment a batch is delivered again (re-auth worked).
-      // Only wired when a token provider exists — without one there is no auth lifecycle to track.
+      // status (the app prompts re-login) while the stream keeps retrying for a fresh token. Only
+      // wired when a token provider exists — without one there is no auth lifecycle to track.
       ...(options.getAuthToken
         ? {
             onAuthError: () => {
               if (status.phase !== "auth-needed") {
                 status.phase = "auth-needed";
-                options.onStatusChange?.(status);
-              }
-            },
-            onSyncActivity: () => {
-              if (status.phase === "auth-needed") {
-                status.phase = initialSyncCompleted ? "ready" : "syncing";
                 options.onStatusChange?.(status);
               }
             },

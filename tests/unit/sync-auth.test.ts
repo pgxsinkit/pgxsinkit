@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildAuthShapeHeaders, createShapeAuthErrorHandler } from "../../packages/client/src/sync-auth";
+import { buildAuthShapeHeaders, createShapeErrorHandler } from "../../packages/client/src/sync-auth";
 
 /**
  * A stand-in for Electric's `FetchError` — the handler detects auth failures by the documented
@@ -46,37 +46,71 @@ describe("read-path identity — per-request token (ADR-0013 Phase 1)", () => {
 
 describe("read-path identity — auth-error recovery (ADR-0013 Phase 2)", () => {
   it("returns retry ({}) on 401 so Electric re-resolves the header for a fresh token", () => {
-    const handler = createShapeAuthErrorHandler();
+    const handler = createShapeErrorHandler();
     expect(handler(fetchError(401))).toEqual({});
   });
 
   it("returns retry ({}) on 403 too", () => {
-    const handler = createShapeAuthErrorHandler();
+    const handler = createShapeErrorHandler();
     expect(handler(fetchError(403))).toEqual({});
   });
 
   it("NEVER returns void/undefined for an auth error — that would stop the stream permanently", () => {
-    const handler = createShapeAuthErrorHandler();
+    const handler = createShapeErrorHandler();
     // Persistent 401 across many retries: every single one must request a retry, never give up.
     for (let i = 0; i < 25; i++) {
       expect(handler(fetchError(401))).not.toBeUndefined();
     }
   });
 
-  it("does not auth-retry a non-auth error — falls through to the engine's default stop", () => {
-    const handler = createShapeAuthErrorHandler();
-    // 500 reaches onError only after Electric exhausted its own backoff retries; a 404/400 is a
-    // genuine non-retryable client error. Neither is an identity problem, so we do not retry-loop.
-    expect(handler(fetchError(500))).toBeUndefined();
+  it("does not invoke the AUTH branch for a non-auth error", () => {
+    let authNotifications = 0;
+    const handler = createShapeErrorHandler({ onAuthError: () => (authNotifications += 1) });
+    void handler(fetchError(500));
+    void handler(fetchError(404));
+    void handler(new Error("boom"));
+    expect(authNotifications).toBe(0);
+  });
+});
+
+describe("read-path identity — non-auth read-stream error handling (#4)", () => {
+  it("retries transient faults (5xx / 429 / network) so a blip does not permanently stop the stream", () => {
+    const handler = createShapeErrorHandler();
+    expect(handler(fetchError(500))).toEqual({}); // server error
+    expect(handler(fetchError(503))).toEqual({});
+    expect(handler(fetchError(429))).toEqual({}); // rate limited
+    expect(handler(new Error("network down"))).toEqual({}); // no HTTP status → transport fault
+  });
+
+  it("stops on a structural non-auth 4xx — retrying re-fails", () => {
+    const handler = createShapeErrorHandler();
+    expect(handler(fetchError(400))).toBeUndefined();
     expect(handler(fetchError(404))).toBeUndefined();
-    expect(handler(new Error("boom"))).toBeUndefined();
+    expect(handler(fetchError(409))).toBeUndefined();
+  });
+
+  it("surfaces EVERY non-auth error via onReadStreamError (so the runtime can go degraded), never auth errors", () => {
+    const surfaced: number[] = [];
+    let authNotifications = 0;
+    const handler = createShapeErrorHandler({
+      onAuthError: () => (authNotifications += 1),
+      onReadStreamError: (error) => surfaced.push((error as { status?: number }).status ?? -1),
+    });
+
+    void handler(fetchError(500)); // transient → surfaced + retried
+    void handler(fetchError(404)); // terminal → surfaced + stopped
+    void handler(new Error("network")); // network → surfaced (-1) + retried
+    void handler(fetchError(401)); // auth → NOT surfaced as a stream error
+
+    expect(surfaced).toEqual([500, 404, -1]);
+    expect(authNotifications).toBe(1);
   });
 });
 
 describe("read-path identity — surfacing a persistent auth failure (ADR-0013 Phase 3)", () => {
   it("notifies onAuthError on every 401/403 while still requesting a retry (retry forever, never stop)", () => {
     let notifications = 0;
-    const handler = createShapeAuthErrorHandler({ onAuthError: () => (notifications += 1) });
+    const handler = createShapeErrorHandler({ onAuthError: () => (notifications += 1) });
 
     // A truly dead token 401s every retry: each one notifies AND requests a retry — there is no
     // attempt cap, so it can keep surfacing "re-login" and resume the instant re-auth succeeds.
@@ -88,7 +122,7 @@ describe("read-path identity — surfacing a persistent auth failure (ADR-0013 P
 
   it("does NOT notify onAuthError for a non-auth error", () => {
     let notifications = 0;
-    const handler = createShapeAuthErrorHandler({ onAuthError: () => (notifications += 1) });
+    const handler = createShapeErrorHandler({ onAuthError: () => (notifications += 1) });
 
     void handler(fetchError(500));
     void handler(fetchError(404));

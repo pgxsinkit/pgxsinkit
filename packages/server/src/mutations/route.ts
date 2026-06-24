@@ -253,10 +253,15 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
           const conflict = conflictByMutationId.get(mutation.mutationId);
 
           if (conflict) {
+            // #6: a null currentServerVersion means the target row no longer exists (an UPDATE whose
+            // row was deleted by another writer), distinct from a stale write over a row that moved.
             const conflictReason =
-              `Stale write rejected by the reject-if-stale conflict policy (ADR-0015): the row's current ` +
-              `server version ${conflict.currentServerVersion} is ahead of the base ` +
-              `${mutation.baseServerVersion ?? "(unknown)"} this write was authored against.`;
+              conflict.currentServerVersion == null
+                ? `Update rejected by the reject-if-stale conflict policy (ADR-0015): the target row no ` +
+                  `longer exists on the server (deleted by another writer after this write was authored).`
+                : `Stale write rejected by the reject-if-stale conflict policy (ADR-0015): the row's current ` +
+                  `server version ${conflict.currentServerVersion} is ahead of the base ` +
+                  `${mutation.baseServerVersion ?? "(unknown)"} this write was authored against.`;
 
             await logOperation(tx, operationsLogConfig, {
               tableName: mutation.tableName,

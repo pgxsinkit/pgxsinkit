@@ -518,6 +518,48 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
     }
   });
 
+  it("reject-if-stale UPDATE of a MISSING row → conflict (target deleted), nothing applied (#6)", async () => {
+    const db = await seedThing("reject_things", rejectConflictRegistry);
+    try {
+      // An external writer DELETED the row after the client authored its update.
+      await db.query(`DELETE FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
+
+      const conflicts = await applyForConflicts(db, [
+        conflictMutation("reject_things", "update", { label: "edit on a gone row" }, "100"),
+      ]);
+
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]?.mutationId).toBe("50000000-0000-4000-8000-00000000000a");
+      // A NULL currentServerVersion is the discriminator: the target no longer exists (not a version
+      // clash). Without this the edit would silently no-op and ack as success.
+      expect(conflicts[0]?.currentServerVersion ?? null).toBeNull();
+
+      // The update did NOT resurrect the row.
+      const row = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM reject_things WHERE id = $1`, [
+        CONFLICT_ID,
+      ]);
+      expect(row.rows[0]?.count).toBe(0);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("reject-if-stale DELETE of a missing row stays idempotent success — NOT a conflict (#6)", async () => {
+    const db = await seedThing("reject_things", rejectConflictRegistry);
+    try {
+      await db.query(`DELETE FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
+
+      const conflicts = await applyForConflicts(db, [
+        conflictMutation("reject_things", "delete", { id: CONFLICT_ID }, "100"),
+      ]);
+
+      // Deleting an already-gone row is idempotent success; surfacing it as a conflict would be wrong.
+      expect(conflicts).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  });
+
   it("reject-if-stale with no base (a create-like legacy write) skips the stale check and applies", async () => {
     const db = await seedThing("reject_things", rejectConflictRegistry);
     try {
