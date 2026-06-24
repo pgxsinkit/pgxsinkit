@@ -24,6 +24,7 @@ import { type LocalStoreVersionEvent, reconcileLocalStoreVersion } from "./local
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
 import { buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
 import { createElectricExtension, startConfiguredSync } from "./shape-sync";
+import { buildAuthShapeHeaders } from "./sync-auth";
 
 export { generateLocalSchemaSql };
 export {
@@ -240,11 +241,11 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     status.phase = "syncing";
     options.onStatusChange?.(status);
 
-    const syncAuthToken = options.getAuthToken ? await options.getAuthToken() : undefined;
-
     sync = await startConfiguredSync(pglite as unknown as Parameters<typeof startConfiguredSync>[0], {
       syncConfig: buildSyncConfigFromRegistry(options.registry, options.electricUrl),
-      ...(syncAuthToken ? { shapeHeaders: { Authorization: `Bearer ${syncAuthToken}` } } : {}),
+      // The read path resolves the token per request (ADR-0013), not frozen at boot — so a
+      // long-lived session never wedges on JWT expiry. Read and write share one token lifecycle.
+      ...(options.getAuthToken ? { shapeHeaders: buildAuthShapeHeaders(options.getAuthToken) } : {}),
       ...(options.onTableInitialSync ? { onTableInitialSync: options.onTableInitialSync } : {}),
       onInitialSync: () => {
         status.phase = "ready";

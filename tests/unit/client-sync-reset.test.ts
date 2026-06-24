@@ -26,7 +26,9 @@ const execMock = mock(async (_sql: string): Promise<void> => {
 });
 
 type StartConfiguredSyncInput = {
-  shapeHeaders?: Record<string, string>;
+  // ADR-0013: header values may be async functions resolved per request (the Authorization token),
+  // not just frozen strings.
+  shapeHeaders?: Record<string, string | (() => string | Promise<string>)>;
 };
 
 const startConfiguredSyncMock = mock(
@@ -235,7 +237,7 @@ describe("createSyncClient subscription reset", () => {
     ]);
   });
 
-  it("uses getAuthToken to set shape Authorization headers when authToken is omitted", async () => {
+  it("sets a per-request Authorization header function from getAuthToken, not a boot-frozen token (ADR-0013)", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const getAuthTokenMock = mock(async (): Promise<string | undefined> => "token-from-get-auth-token");
 
@@ -261,12 +263,19 @@ describe("createSyncClient subscription reset", () => {
       getAuthToken: getAuthTokenMock,
     });
 
-    expect(getAuthTokenMock).toHaveBeenCalledTimes(1);
+    // Boot does NOT consult the provider: the token is resolved per request, not frozen up front.
+    expect(getAuthTokenMock).not.toHaveBeenCalled();
     const syncInput = startConfiguredSyncMock.mock.calls[0]?.[1] as StartConfiguredSyncInput | undefined;
-    expect(syncInput?.shapeHeaders).toEqual({ Authorization: "Bearer token-from-get-auth-token" });
+    const authorization = syncInput?.shapeHeaders?.["Authorization"];
+    expect(typeof authorization).toBe("function");
+
+    // Electric resolves the function on each request → a fresh `Bearer <token>`, consulting the provider.
+    if (typeof authorization !== "function") throw new Error("expected an async header function");
+    expect(await authorization()).toBe("Bearer token-from-get-auth-token");
+    expect(getAuthTokenMock).toHaveBeenCalledTimes(1);
   });
 
-  it("does not set shape Authorization headers when getAuthToken returns undefined", async () => {
+  it("still installs the Authorization function when the token is momentarily undefined (resolves empty, resumes on re-auth)", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const getAuthTokenMock = mock(async (): Promise<string | undefined> => undefined);
 
@@ -292,8 +301,13 @@ describe("createSyncClient subscription reset", () => {
       getAuthToken: getAuthTokenMock,
     });
 
-    expect(getAuthTokenMock).toHaveBeenCalledTimes(1);
+    // The header is a function regardless of the token's current value — it is resolved per request,
+    // so a later re-auth is picked up without rebuilding the header (unlike a boot-time freeze, which
+    // would have omitted the header forever).
     const syncInput = startConfiguredSyncMock.mock.calls[0]?.[1] as StartConfiguredSyncInput | undefined;
-    expect(syncInput?.shapeHeaders).toBeUndefined();
+    const authorization = syncInput?.shapeHeaders?.["Authorization"];
+    expect(typeof authorization).toBe("function");
+    if (typeof authorization !== "function") throw new Error("expected an async header function");
+    expect(await authorization()).toBe(""); // no token yet → unauthenticated, not "Bearer undefined"
   });
 });

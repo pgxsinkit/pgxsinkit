@@ -1,3 +1,4 @@
+import type { ExternalHeadersRecord } from "@electric-sql/client";
 import type { PGlite, PGliteInterfaceExtensions } from "@electric-sql/pglite";
 
 import {
@@ -28,7 +29,11 @@ export interface ShapeSyncSpec {
 }
 
 export interface StartShapeSyncOptions extends ShapeSyncSpec {
-  headers?: Record<string, string>;
+  /**
+   * Shape request headers. Values may be async functions resolved per request (ADR-0013): the
+   * read-path `Authorization` header is one such function so every fetch presents a fresh token.
+   */
+  headers?: ExternalHeadersRecord;
   onInitialSync?: () => void;
   /** Commit-level error surfacing (ADR-0009 decision 5): a commit exhausted its retries. */
   onSyncError?: (error: Error) => void;
@@ -40,7 +45,11 @@ export interface ConfiguredShapeSyncSpec extends ShapeSyncSpec {
 
 export interface StartConfiguredSyncOptions {
   syncConfig: SyncConfigInput;
-  shapeHeaders?: Record<string, string>;
+  /**
+   * Shape request headers shared by every member shape. Values may be async functions resolved per
+   * request (ADR-0013) — the read-path `Authorization` token is one such function.
+   */
+  shapeHeaders?: ExternalHeadersRecord;
   onInitialSync?: () => void;
   onTableInitialSync?: (tableKey: string) => void;
   /** Commit-level error surfacing (ADR-0009 decision 5): a sync commit exhausted its retries. */
@@ -184,7 +193,7 @@ export async function startConfiguredSync(
 interface StartGroupSyncOptions {
   groupKey: string;
   specs: ConfiguredShapeSyncSpec[];
-  headers?: Record<string, string>;
+  headers?: ExternalHeadersRecord;
   onGroupInitialSync?: () => void;
   onSyncError?: (error: Error) => void;
 }
