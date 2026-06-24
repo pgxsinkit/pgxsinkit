@@ -132,6 +132,13 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
    * them. The library never silently drops these (ADR-0006 decision 4).
    */
   onQuarantine?: (quarantined: MutationDetail[]) => void | Promise<void>;
+  /**
+   * Invoked after a flush whenever mutations transition to `conflicted` — a stale write the
+   * server declined under the `reject-if-stale` Conflict policy (ADR-0015). Distinct from
+   * `onQuarantine` (structural rejection): the optimistic Overlay is KEPT, so the app surfaces a
+   * resolution/diff UI and resolves each as a new write (or `discardConflict`s it). Never silent.
+   */
+  onConflict?: (conflicted: MutationDetail[]) => void | Promise<void>;
 }
 
 interface TableContext {
@@ -173,6 +180,16 @@ export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
   ) => Promise<void>;
   delete: <TKey extends SyncTableName<TRegistry>>(table: TKey, entityKey: Record<string, string>) => Promise<void>;
   batch: (items: ReadonlyArray<MutationBatchItem<TRegistry>>) => Promise<void>;
+  /**
+   * Discard a `conflicted` entity (ADR-0015): clear its conflicted journal entries and the kept
+   * optimistic Overlay, so the Read model falls back to the synced (server) value. Use when the user
+   * abandons their stale edit instead of resolving it as a new write. No-op for an entity with no
+   * conflicted entry.
+   */
+  discardConflict: <TKey extends SyncTableName<TRegistry>>(
+    table: TKey,
+    entityKey: Record<string, string>,
+  ) => Promise<void>;
   flush: (table?: SyncTableName<TRegistry>) => Promise<void>;
   reconcile: (table?: SyncTableName<TRegistry>) => Promise<void>;
   retryFailed: (table?: SyncTableName<TRegistry>) => Promise<void>;
@@ -494,6 +511,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   const runFlush = async (table?: SyncTableName<TRegistry>) => {
     const affectedContexts = new Map<string, TableContext>();
     const quarantinedMutationIds = new Set<string>();
+    const conflictedMutationIds = new Set<string>();
     let processedCount = 0;
 
     do {
@@ -515,6 +533,10 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       for (const mutationId of batchResult.quarantinedMutationIds) {
         quarantinedMutationIds.add(mutationId);
       }
+
+      for (const mutationId of batchResult.conflictedMutationIds) {
+        conflictedMutationIds.add(mutationId);
+      }
     } while (processedCount > 0);
 
     for (const context of affectedContexts.values()) {
@@ -532,6 +554,20 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
 
       if (details.length > 0) {
         await options.onQuarantine(details);
+      }
+    }
+
+    // Surface newly-conflicted (stale) writes (ADR-0015). The optimistic Overlay is kept, so the app
+    // can show a resolution/diff UI and resolve each as a new write (or discard it). Never silent.
+    if (conflictedMutationIds.size > 0 && options.onConflict) {
+      const details = await readMutationDetailsForContexts(
+        options.db,
+        [...affectedContexts.values()],
+        conflictedMutationIds,
+      );
+
+      if (details.length > 0) {
+        await options.onConflict(details);
       }
     }
   };
@@ -576,6 +612,14 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       await runInTransaction(async () => {
         await enqueueBatch(items);
       });
+    },
+    discardConflict: async (table, entityKeyInput) => {
+      const context = getTableContext(table);
+      const entityKey = normalizeEntityKey(context, entityKeyInput);
+      const entityKeyJson = serializeEntityKey(entityKey);
+
+      // discardConflictedEntity owns its own transaction (like reconcileTable), so it is not wrapped.
+      await discardConflictedEntity(options.db, context, entityKey, entityKeyJson);
     },
     flush: async (table) => {
       const nextFlush = flushQueue.then(() => runFlush(table));
@@ -639,6 +683,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         sendingCount: 0,
         failedCount: 0,
         quarantinedCount: 0,
+        conflictedCount: 0,
         ackedCount: 0,
       };
 
@@ -649,6 +694,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
             COUNT(*) FILTER (WHERE status = 'sending')::int AS "sendingCount",
             COUNT(*) FILTER (WHERE status = 'failed')::int AS "failedCount",
             COUNT(*) FILTER (WHERE status = 'quarantined')::int AS "quarantinedCount",
+            COUNT(*) FILTER (WHERE status = 'conflicted')::int AS "conflictedCount",
             COUNT(*) FILTER (WHERE status = 'acked')::int AS "ackedCount"
           FROM ${context.journalTable}
         `);
@@ -662,6 +708,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         totals.sendingCount += row.sendingCount;
         totals.failedCount += row.failedCount;
         totals.quarantinedCount += row.quarantinedCount;
+        totals.conflictedCount += row.conflictedCount;
         totals.ackedCount += row.ackedCount;
       }
 
@@ -1394,6 +1441,8 @@ interface FlushBatchResult {
   affectedContexts: TableContext[];
   /** Mutation ids that transitioned to `quarantined` in this slice (ADR-0006), for surfacing. */
   quarantinedMutationIds: string[];
+  /** Mutation ids that transitioned to `conflicted` in this slice (ADR-0015), for surfacing. */
+  conflictedMutationIds: string[];
 }
 
 interface MutationStatusUpdate {
@@ -1507,6 +1556,7 @@ async function flushBatch(
   const contexts = filterContexts(tableContexts, tableFilter);
   const nowUs = nowMicroseconds();
   const quarantinedMutationIds: string[] = [];
+  const conflictedMutationIds: string[] = [];
 
   // Collect send-eligible mutations across all target tables.
   const pendingRows = await readPendingBatchRows(db, contexts, nowUs);
@@ -1556,6 +1606,7 @@ async function flushBatch(
       processedCount: 0,
       affectedContexts: [],
       quarantinedMutationIds,
+      conflictedMutationIds,
     };
   }
 
@@ -1712,6 +1763,7 @@ async function flushBatch(
       processedCount: pending.length,
       affectedContexts: [...new Set(pending.map((row) => row.context))],
       quarantinedMutationIds,
+      conflictedMutationIds,
     };
   }
 
@@ -1720,6 +1772,7 @@ async function flushBatch(
       processedCount: pending.length,
       affectedContexts: [...new Set(pending.map((row) => row.context))],
       quarantinedMutationIds,
+      conflictedMutationIds,
     };
   }
 
@@ -1733,6 +1786,26 @@ async function flushBatch(
       rows[0]!.context,
       rows.map((row) => {
         const ack = acksByMutationId.get(row.mutationId);
+
+        if (ack && ack.status === "conflicted") {
+          // ADR-0015: a stale write the reject-if-stale policy declined. Move to the terminal
+          // `conflicted` status — NOT a failure (never retried as-is, the base is still stale) — and
+          // KEEP the optimistic Overlay (reconcile only clears acked rows, so the user's edit stays
+          // visible). The server's current Server version rides on the journal row for the diff UI.
+          conflictedMutationIds.push(row.mutationId);
+          return {
+            mutationId: row.mutationId,
+            status: "conflicted" as const,
+            attemptCount: row.attemptCount + 1,
+            updatedAtUs: failedAtUs,
+            serverUpdatedAtUs: ack.serverUpdatedAtUs ?? null,
+            replaceServerUpdatedAtUs: true,
+            lastError: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
+            nextRetryAtUs: null,
+            lastHttpStatus: ack.httpStatus ?? 409,
+            conflictReason: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
+          };
+        }
 
         if (!ack || ack.status !== "acked") {
           const attemptCount = row.attemptCount + 1;
@@ -1792,6 +1865,7 @@ async function flushBatch(
     processedCount: pending.length,
     affectedContexts: [...new Set(pending.map((row) => row.context))],
     quarantinedMutationIds,
+    conflictedMutationIds,
   };
 }
 
@@ -1879,6 +1953,46 @@ function toSqlColumnPayload(context: TableContext, payload: Record<string, unkno
   }
 
   return normalized;
+}
+
+/**
+ * Discard a conflicted entity (ADR-0015): clear its `conflicted` journal entries and its kept
+ * optimistic Overlay row, so the Read model falls back to the synced (server) value. The overlay is
+ * removed only when no other journal row still owes the entity (a pending/sending/failed/acked write),
+ * mirroring reconcileTable's overlay-clear guard — so a discard never strips an overlay another
+ * un-resolved write still depends on.
+ */
+async function discardConflictedEntity(
+  db: MutationDb,
+  context: TableContext,
+  entityKey: Record<string, string>,
+  entityKeyJson: string,
+) {
+  await db.exec("BEGIN");
+
+  try {
+    await db.query(`DELETE FROM ${context.journalTable} WHERE status = 'conflicted' AND entity_key_json = $1`, [
+      entityKeyJson,
+    ]);
+
+    // Clear the kept overlay only when no journal row still owes this entity — so a discard never
+    // strips an overlay another un-resolved write (e.g. a resolution already enqueued) depends on.
+    const pkConditions = context.pkColumnNames.map((columnName, index) => `overlay.${columnName} = $${index + 1}`);
+    const pkValues = context.pkColumnNames.map((columnName) => entityKey[columnName]);
+    await db.query(
+      `DELETE FROM ${context.overlayTable} AS overlay
+       WHERE ${pkConditions.join(" AND ")}
+         AND NOT EXISTS (
+           SELECT 1 FROM ${context.journalTable} AS j WHERE j.entity_key_json = $${pkValues.length + 1}
+         )`,
+      [...pkValues, entityKeyJson],
+    );
+
+    await db.exec("COMMIT");
+  } catch (error) {
+    await db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 async function reconcileTable(db: MutationDb, context: TableContext) {

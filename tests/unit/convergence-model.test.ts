@@ -236,8 +236,12 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
       );
       expect(readModel.rows[0]?.count).toBe(0);
 
-      // ...and the reserved conflict_state slot surfaces a journal conflict_reason (ADR-0015 fills it).
-      await db.query(`UPDATE authors_mutations SET conflict_reason = '409 stale' WHERE id = $1`, [AUTHOR_ID]);
+      // ...and the conflict_state slot surfaces the reason of a `conflicted` write (ADR-0015 fills it,
+      // scoped to status = 'conflicted' so a non-conflict reason never leaks in).
+      await db.query(
+        `UPDATE authors_mutations SET status = 'conflicted', conflict_reason = '409 stale' WHERE id = $1`,
+        [AUTHOR_ID],
+      );
       expect((await readSyncState(db, AUTHOR_ID))?.conflict).toBe("409 stale");
     } finally {
       await db.close();

@@ -64,6 +64,12 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    */
   onQuarantine?: (quarantined: MutationDetail[]) => void | Promise<void>;
   /**
+   * Invoked when mutations are `conflicted` — a stale write the server declined under the
+   * `reject-if-stale` Conflict policy (ADR-0015). The optimistic Overlay is kept, so the app shows a
+   * resolution/diff UI and resolves each as a new write (`mutate.update`) or `discardConflict`s it.
+   */
+  onConflict?: (conflicted: MutationDetail[]) => void | Promise<void>;
+  /**
    * Invoked on boot when the registry fingerprint differs from the one the local store was
    * provisioned under (ADR-0006). `rebuilt` = the read cache was dropped and rebuilt at the
    * new shape; `deferred` = un-flushed/quarantined writes are still owed, so the rebuild is
@@ -136,6 +142,15 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
     delete: <TKey extends SyncTableName<TRegistry>>(table: TKey, entityKey: Record<string, string>) => Promise<void>;
     batch: (items: ReadonlyArray<MutationBatchItem<TRegistry>>) => Promise<void>;
   };
+  /**
+   * Discard a `conflicted` entity (ADR-0015): clear its conflicted journal entry and kept optimistic
+   * Overlay, so the Read model falls back to the synced (server) value. Use when the user abandons a
+   * stale edit instead of resolving it as a new write.
+   */
+  discardConflict: <TKey extends SyncTableName<TRegistry>>(
+    table: TKey,
+    entityKey: Record<string, string>,
+  ) => Promise<void>;
   diagnostics: (table?: SyncTableName<TRegistry>) => Promise<{ mutation: MutationDiagnostics }>;
 }
 
@@ -185,6 +200,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
     ...(options.maxMutationAttempts != null ? { maxMutationAttempts: options.maxMutationAttempts } : {}),
     ...(options.onQuarantine ? { onQuarantine: options.onQuarantine } : {}),
+    ...(options.onConflict ? { onConflict: options.onConflict } : {}),
   });
 
   // Reclaim any in-flight mutations interrupted by a previous shutdown (ADR-0005), then
@@ -307,7 +323,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     destroy: async (destroyOptions) => {
       if (!destroyOptions?.force) {
         const stats = await mutationRuntime.readMutationStats();
-        const owed = stats.pendingCount + stats.sendingCount + stats.failedCount + stats.quarantinedCount;
+        const owed =
+          stats.pendingCount + stats.sendingCount + stats.failedCount + stats.quarantinedCount + stats.conflictedCount;
 
         if (owed > 0) {
           throw new Error(
@@ -338,6 +355,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     recoverSending: (table) => mutationRuntime.recoverSending(table),
     readMutationDetails: (table) => mutationRuntime.readMutationDetails(table),
     mutate,
+    discardConflict: (table, entityKey) => mutationRuntime.discardConflict(table, entityKey),
     diagnostics: async (table) => ({
       mutation: await mutationRuntime.readMutationStats(table),
     }),

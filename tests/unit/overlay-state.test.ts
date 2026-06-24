@@ -1490,11 +1490,11 @@ describe("overlay state helpers", () => {
       const mutationById = new Map(mutations.map((mutation) => [mutation.entityKey["id"], mutation]));
 
       // ADR-0010: the acked create is HELD (status 'acked') until its synced echo arrives — none is
-      // simulated here, so it is not cleared. The 409 conflict is a structural rejection the server
-      // will never accept, so it is quarantined (terminal, ADR-0006) rather than retry-looped — but
-      // its conflict metadata is retained. The point: the two statuses apply without row-by-row drift.
+      // simulated here, so it is not cleared. The 409 `conflicted` ack is the distinct stale-write
+      // outcome (ADR-0015): it lands in the terminal `conflicted` state — NOT quarantined — keeping
+      // its conflict metadata. The point: the two statuses apply without row-by-row drift.
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f970")?.status).toBe("acked");
-      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.status).toBe("quarantined");
+      expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.status).toBe("conflicted");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.conflictReason).toBe("duplicate name");
       expect(mutationById.get("01963227-d4c7-72db-b858-f89f6af8f971")?.lastHttpStatus).toBe(409);
     } finally {

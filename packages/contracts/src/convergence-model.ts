@@ -69,8 +69,9 @@ export interface SyncStateViewProjection {
  *   from the **same** {@link buildOverlayResolutionBarrier} predicate the resolver uses (decision 4),
  *   so what the UI shows can never drift from what the resolver does.
  * - `local_delete_pending` — an optimistic delete is staged in the overlay.
- * - `conflict_state` — reserved slot, surfaced from the journal's `conflict_reason` (filled by the
- *   per-table conflict policy, ADR-0015).
+ * - `conflict_state` — the reason a `conflicted` (stale, reject-if-stale) write was declined, or NULL
+ *   when the entity has no conflicted mutation (ADR-0015). Surfaced from the journal's
+ *   `conflict_reason`, scoped to `status = 'conflicted'` so a stale failure reason never leaks in.
  *
  * The Read model stays lean (it already carries `overlay_kind`); an app that wants per-row
  * convergence status joins this view on the PK.
@@ -125,7 +126,7 @@ export function buildSyncStateView<TTable extends AnyPgTable>(
     `      AND journal.server_updated_at_us IS NOT NULL`,
     `      AND (${barrier}) IS NOT TRUE`,
     `    ), FALSE) AS has_acked_unobserved_write,`,
-    `    MAX(journal.conflict_reason) AS conflict_state`,
+    `    MAX(journal.conflict_reason) FILTER (WHERE journal.status = 'conflicted') AS conflict_state`,
     `  FROM ${projection.journalTable} AS journal`,
     `  WHERE ${pkEquality("journal", "k")}`,
     `) AS j ON TRUE`,

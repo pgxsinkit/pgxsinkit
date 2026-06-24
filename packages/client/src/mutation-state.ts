@@ -7,27 +7,34 @@
  * old single `failed` into transient (retryable `failed`) and permanent (`quarantined`).
  */
 
-export type MutationStatus = "pending" | "sending" | "acked" | "failed" | "quarantined";
+export type MutationStatus = "pending" | "sending" | "acked" | "failed" | "quarantined" | "conflicted";
 
 /**
  * Legal transitions. `acked` is terminal at the journal level — it is cleared by
  * reconciliation once the synced echo reaches the acknowledged server timestamp, not
  * by another status transition. `quarantined` is terminal too: the server will never
  * accept the mutation as-is, so it is surfaced (callback + diagnostics), never retried.
+ * `conflicted` (ADR-0015) is likewise terminal but a *different* outcome: the write was
+ * well-formed but **stale** (an external write interleaved) and the table's `reject-if-stale`
+ * policy declined it. The optimistic Overlay is KEPT (the user's edit is not lost) and the
+ * conflict is surfaced via `onConflict`; resolution is an ordinary NEW mutation, and `discard`
+ * clears the overlay + this entry. It is never retried as-is (the base would still be stale).
  *
  * - `pending     -> sending`      a flush claims the row and posts it.
  * - `sending     -> acked`        the server acknowledged the mutation.
  * - `sending     -> failed`       transient transport/server error (network, 5xx, …).
  * - `sending     -> quarantined`  structural 4xx rejection the server will never accept.
+ * - `sending     -> conflicted`   a stale write the reject-if-stale policy declined (ADR-0015).
  * - `sending     -> pending`      recoverSending re-queues an in-flight row on startup.
  * - `failed      -> pending`      retryFailed re-queues a failed row.
  * - `failed      -> quarantined`  the hard max-attempts cap is reached; stop retrying.
  */
 export const MUTATION_TRANSITIONS = {
   pending: ["sending"],
-  sending: ["acked", "failed", "quarantined", "pending"],
+  sending: ["acked", "failed", "quarantined", "conflicted", "pending"],
   failed: ["pending", "quarantined"],
   quarantined: [],
+  conflicted: [],
   acked: [],
 } as const satisfies Record<MutationStatus, readonly MutationStatus[]>;
 

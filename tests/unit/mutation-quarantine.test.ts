@@ -38,7 +38,10 @@ function rejectingFetch(httpStatus: number, conflictReason = "structural rejecti
       JSON.stringify({
         acks: requestBody.mutations.map((mutation) => ({
           mutationId: mutation.mutationId,
-          status: "conflicted",
+          // A non-acked ack carrying a 4xx httpStatus is the structural-rejection signal the failure
+          // branch quarantines (ADR-0006). NOT `conflicted` — that is now the distinct stale-write
+          // outcome (ADR-0015), routed to the kept-overlay terminal state, never quarantine.
+          status: "failed",
           httpStatus,
           conflictReason,
         })),
