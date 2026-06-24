@@ -12,8 +12,9 @@ function initials(name: string): string {
     .toUpperCase();
 }
 
-function formatTime(createdAtUs: string): string {
-  // Microseconds since epoch (PGlite returns int8 as a string) → ms.
+function formatTime(createdAtUs: bigint | string): string {
+  // Microseconds since epoch → ms. Declared `bigint` (column mode), returned as a string by PGlite;
+  // `Number(...)` handles both.
   return new Date(Number(createdAtUs) / 1000).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
@@ -30,7 +31,7 @@ function MessageRowView({
 }: {
   authorId: string;
   body: string;
-  createdAtUs: string;
+  createdAtUs: bigint | string;
   profiles: Map<string, ProfileRow>;
 }) {
   const author = profiles.get(authorId);
