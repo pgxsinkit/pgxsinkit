@@ -69,6 +69,7 @@ export default defineConfig({
           items: [
             { label: "What is pgxsinkit?", slug: "start/overview" },
             { label: "Getting started", slug: "start/getting-started" },
+            { label: "Deploying the server", slug: "start/deploying-the-server" },
             { label: "Use these docs with your AI assistant", slug: "start/ai-assistants" },
           ],
         },

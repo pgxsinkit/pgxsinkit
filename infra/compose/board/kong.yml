@@ -1,0 +1,43 @@
+_format_version: "2.1"
+_transform: true
+
+# Board demo API gateway (Kong, DB-less). Routes the three surfaces the board client touches through
+# one origin (http://localhost:54331), so `@supabase/supabase-js` is configured with a single
+# SUPABASE_URL. `strip_path: true` removes the `/<surface>/v1` prefix before proxying.
+#
+# Deliberately minimal: no key-auth/acl. The Edge functions verify the GoTrue JWT themselves
+# (supabase/functions/_shared/auth.ts), so gateway-level key-auth would only add bring-up fragility
+# to a local demo. A production gateway should add key-auth + acl with the anon/service consumers.
+
+services:
+  - name: auth-v1
+    url: http://auth:9999/
+    routes:
+      - name: auth-v1-route
+        strip_path: true
+        paths:
+          - /auth/v1/
+    plugins:
+      - name: cors
+
+  - name: rest-v1
+    url: http://rest:3000/
+    routes:
+      - name: rest-v1-route
+        strip_path: true
+        paths:
+          - /rest/v1/
+    plugins:
+      - name: cors
+
+  # /functions/v1/board-write and /functions/v1/board-sync → the edge-runtime main router, which
+  # dispatches by the first path segment (board ADR-0001). strip_path leaves `/board-write` etc.
+  - name: functions-v1
+    url: http://functions:9000/
+    routes:
+      - name: functions-v1-route
+        strip_path: true
+        paths:
+          - /functions/v1/
+    plugins:
+      - name: cors

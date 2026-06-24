@@ -1,0 +1,158 @@
+# Board demo — a trimmed self-hosted Supabase + Electric stack (board ADR-0001).
+#
+# Separate from the toolkit harness (infra/compose/docker-compose.yml): the board runs on its OWN
+# database + ports so it can stand up alongside the integration lane without colliding. Trimmed to
+# what the demo exercises — db, auth (GoTrue), rest (PostgREST), meta + studio, kong (gateway),
+# functions (edge-runtime running board-write/board-sync), and electric. Dropped vs. full Supabase:
+# realtime, storage, imgproxy, analytics, vector, pooler (Storage/attachments are a board v2).
+#
+# Relative paths are resolved from THIS file's directory (infra/compose). Bring up with
+# `bun run infra:board:up` (passes --env-file board.env). Image tags track the official self-hosted
+# compose and may need periodic bumps; electric + postgres match the harness.
+
+name: pgxsinkit-board
+
+services:
+  db:
+    image: docker.io/supabase/postgres:17.6.1.116
+    container_name: board-db
+    # No entrypoint mask here (unlike the harness): the image's own init runs in full so the auth
+    # schema + standard roles exist. 99-board-roles.sql is ADDED (not masked over) to set service-role
+    # passwords + (re)assert the auth.uid()/role()/jwt() helpers the toolkit RLS reads.
+    volumes:
+      - ./board/db-init/99-board-roles.sql:/docker-entrypoint-initdb.d/99-board-roles.sql:ro
+    environment:
+      POSTGRES_USER: supabase_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "54322:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d ${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  auth:
+    image: docker.io/supabase/gotrue:v2.179.0
+    container_name: board-auth
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: ${BOARD_API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      GOTRUE_SITE_URL: ${BOARD_SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: "*"
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      # No mail server in the demo: confirm signups automatically so admin-API-seeded users log in.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+    ports:
+      - "54334:9999"
+
+  rest:
+    image: docker.io/postgrest/postgrest:v12.2.12
+    container_name: board-rest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+
+  meta:
+    image: docker.io/supabase/postgres-meta:v0.89.3
+    container_name: board-meta
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: "8080"
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: "5432"
+      PG_META_DB_NAME: ${POSTGRES_DB}
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+  studio:
+    image: docker.io/supabase/studio:2025.06.30-sha-6f5982d
+    container_name: board-studio
+    depends_on:
+      - meta
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: pgxsinkit-board
+      DEFAULT_PROJECT_NAME: board
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${BOARD_API_EXTERNAL_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+    ports:
+      - "54333:3000"
+
+  kong:
+    image: docker.io/library/kong:2.8.1
+    container_name: board-kong
+    depends_on:
+      - auth
+      - rest
+      - functions
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+    volumes:
+      - ./board/kong.yml:/home/kong/kong.yml:ro
+    ports:
+      - "54331:8000"
+
+  functions:
+    image: docker.io/supabase/edge-runtime:v1.69.12
+    container_name: board-functions
+    depends_on:
+      db:
+        condition: service_healthy
+    # The main router (functions-dist/main) dispatches /board-write and /board-sync to their bundled
+    # workers. Bundles are produced by `bun run edge:build` into supabase/functions-dist.
+    command: ["start", "--main-service", "/home/deno/functions/main", "--port", "9000"]
+    volumes:
+      - ../../supabase/functions-dist:/home/deno/functions:ro
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      # The board functions read these directly (board-write → SUPABASE_DB_URL; board-sync → ELECTRIC).
+      SUPABASE_DB_URL: postgres://supabase_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      ELECTRIC_SHAPE_URL: http://electric:3000/v1/shape
+      BOARD_ALLOWED_ORIGINS: ${BOARD_SITE_URL},http://localhost:5174
+
+  electric:
+    image: docker.io/electricsql/electric:1.7.2
+    container_name: board-electric
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      ELECTRIC_INSECURE: "true"
+      # Preview feature the board's membership row-filters require (cross-table subquery `where`).
+      ELECTRIC_FEATURE_FLAGS: allow_subqueries,tagged_subqueries
+    ports:
+      - "54330:3000"

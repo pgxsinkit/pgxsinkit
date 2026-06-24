@@ -99,12 +99,15 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
      --registry ./sync-registry.ts \
      --export registry \
      --project-dir ./db \
+     --config drizzle.config.ts \
      --name sync_artifact
    ```
 
    This writes a standard drizzle-kit migration you commit and apply through your normal migration
-   flow. (`bun run sync:function:generate` is the equivalent script **inside this repository** for
-   the demo registry.)
+   flow. The migration lands wherever your drizzle config's `out` points — pass `--config` and the
+   generator reads `out` from it (or set `--out` explicitly); with neither it probes `drizzle/` and
+   `infra/drizzle/`. (`bun run sync:function:generate` is the equivalent script **inside this
+   repository** for the demo registry.)
 
 3. **Create the server** and serve its `fetch`. All writes go through `POST /api/mutations`; the
    ownership-enforcing shape proxy is served from the same app. There is no per-table CRUD and no
@@ -128,6 +131,10 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    // `server.fetch` is a web-standard handler — deploy it on Bun, Deno, Supabase Edge
    // Functions, or Cloudflare Workers. Only the optional `server.start()` helper needs Bun.
    ```
+
+   Deploying onto a non-Bun runtime (Deno / Supabase Edge Functions) has a few concrete steps —
+   bundling, a path rewrite, and resolving claims from the platform's JWT. See
+   [Deploying the server](/start/deploying-the-server/).
 
 </Steps>
 

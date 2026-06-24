@@ -52,3 +52,48 @@ new material appears in the regenerated `llms-full.txt`).
    suit and inlined its admin predicate (board ADR-0005). The "hand-author beyond the
    builders" pointer added in Phase 1 finding 4 is the right home if this ever needs a
    sentence.
+
+## Phase 2 — partial Supabase stack + the two edge functions
+
+Phase 2 is the first time the toolkit is consumed from a **non-Bun runtime** (Deno, in
+Supabase Edge Functions). That boundary surfaced the densest batch of findings — three
+genuine ones plus a toolkit code fix.
+
+8. **`pgxsinkit-generate` could not find a non-default migration `out` dir.** The CLI
+   probed only `drizzle` / `infra/drizzle`; the board's drizzle history lives in
+   `infra/board-drizzle` (declared via `out` in its drizzle config). A real consumer
+   with any non-standard layout hits a hard "could not find drizzle output directory".
+   → **ergonomics** (fixed upstream, `packages/server/src/cli/generate.ts`): the CLI now
+   derives `out` from the `--config` drizzle config (and accepts an explicit `--out`),
+   falling back to the probe. New `resolveDrizzleOutDir` + 3 tests. The board's
+   `db:board:sync-fn` script proves it end-to-end.
+9. **Deploying the server to Deno/Edge needs a bundle step — the docs implied source
+   would "just run".** The "runtime-portable `fetch` handler" claim is true at the API
+   level, but Deno will not load the toolkit's **source** directly: it imports its deps
+   with bare, extensionless specifiers (a bundler/Node convention Deno's resolver
+   rejects), and a demo's own registry package is unpublished (no `npm:` form). The
+   working recipe is to **bundle each function self-contained** (`bun build`, target
+   `node`, ESM), with one wrinkle: Bun leaves builtins as **bare** (`"net"`) but Deno
+   only resolves them under the `node:` scheme — so the bundle plugin must normalize
+   builtins to `node:*` and keep them external. → **resolved**: new
+   `start/deploying-the-server` guide documents the bundle recipe + the `node:`
+   normalization; the "portable handler" note in `getting-started` now links to it
+   instead of implying source-deploys.
+10. **Edge Functions prepend the function name to the request path; the mutation route
+    does not expect it.** A POST to `/functions/v1/board-write` arrives at the worker as
+    `/board-write`, but `registerMutationRoute` serves `/mutations` (+ `/api/mutations`),
+    deployment-name-agnostic by design. Without a rewrite the route 404s. → **resolved**:
+    the new deploy guide shows the one-line "strip the function prefix before
+    `server.fetch`" adapter (what any reverse proxy in front of the server already does).
+11. **`verify_jwt` is a platform concept; on raw edge-runtime you verify in-function.**
+    The portable path is to resolve identity from the GoTrue access token yourself —
+    HS256-verify with the shared `JWT_SECRET`, then hand the decoded claims (already
+    `JwtClaims`-shaped: `sub` + top-level `role` + `app_metadata.roles`) to the single
+    `resolveAuthClaims` adapter both paths share. → **resolved**: the deploy guide shows
+    the GoTrue-JWT `resolveAuthClaims` recipe and the read/write split.
+
+> Live shake-out (tracked, requires the container stack up): the exact edge-runtime
+> image tags, GoTrue/PostgREST env names, and **postgres.js running under Deno's node
+> compat** are verified by bringing the stack up (`bun run infra:board:up`) — the
+> static layer (bundles build to valid ESM, migrations generate, types/lint/format/tests
+> green) is all confirmed. Findings from the live run append here.

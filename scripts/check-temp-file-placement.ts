@@ -35,6 +35,7 @@ const allowedRootEntries = new Set([
   "package.json",
   "packages",
   "scripts",
+  "supabase",
   "tests",
   "tmp",
   "tools",

@@ -29,6 +29,7 @@ function parseArgs(argv: string[]) {
   let projectDir = process.cwd();
   let migrationName = "sync_artifact";
   let drizzleConfig = "";
+  let outDir: string | undefined;
   let exportName: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -41,6 +42,8 @@ function parseArgs(argv: string[]) {
       migrationName = argv[++i]!;
     } else if (arg === "--config" && argv[i + 1]) {
       drizzleConfig = argv[++i]!;
+    } else if (arg === "--out" && argv[i + 1]) {
+      outDir = argv[++i]!;
     } else if (arg === "--export" && argv[i + 1]) {
       exportName = argv[++i]!;
     }
@@ -48,12 +51,12 @@ function parseArgs(argv: string[]) {
 
   if (!registryPath) {
     console.error(
-      "Usage: pgxsinkit-generate --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts]",
+      "Usage: pgxsinkit-generate --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts] [--out drizzle]",
     );
     process.exit(1);
   }
 
-  return { registryPath, projectDir, migrationName, drizzleConfig, exportName };
+  return { registryPath, projectDir, migrationName, drizzleConfig, outDir, exportName };
 }
 
 /** Registry source paths are relative to the invocation directory, not the migration output directory. */
@@ -113,14 +116,49 @@ function runDrizzleGenerate(projectDir: string, name: string, drizzleConfig?: st
   }
 }
 
-function findDrizzleDir(projectDir: string): string | null {
+async function readOutFromConfig(configPath: string): Promise<string | undefined> {
+  try {
+    const mod = (await import(pathToFileURL(configPath).href)) as { default?: { out?: unknown } };
+    const out = mod.default?.out;
+    return typeof out === "string" ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolves where drizzle-kit writes migrations for this project, in precedence order:
+ *   1. an explicit `--out` (relative to `--project-dir`),
+ *   2. the `out` field of the `--config` drizzle config — so a consumer whose migrations
+ *      live somewhere non-default (e.g. `infra/board-drizzle`) never has to repeat the path,
+ *   3. a probe of the conventional `drizzle` / `infra/drizzle` locations.
+ */
+export async function resolveDrizzleOutDir(
+  projectDir: string,
+  drizzleConfig?: string,
+  outFlag?: string,
+): Promise<string | null> {
   const cwd = join(process.cwd(), projectDir);
+
+  if (outFlag) {
+    return isAbsolute(outFlag) ? outFlag : join(cwd, outFlag);
+  }
+
+  if (drizzleConfig) {
+    const configPath = isAbsolute(drizzleConfig) ? drizzleConfig : join(cwd, drizzleConfig);
+    const out = await readOutFromConfig(configPath);
+    if (out) {
+      return isAbsolute(out) ? out : join(cwd, out);
+    }
+  }
+
   for (const name of ["drizzle", "infra/drizzle"]) {
     const full = join(cwd, name);
     try {
       if (readdirSync(full).length > 0) return full;
     } catch {}
   }
+
   return null;
 }
 
@@ -145,7 +183,9 @@ function findNewMigrationFile(drizzleDir: string): string | null {
 }
 
 async function main() {
-  const { registryPath, projectDir, migrationName, drizzleConfig, exportName } = parseArgs(process.argv.slice(2));
+  const { registryPath, projectDir, migrationName, drizzleConfig, outDir, exportName } = parseArgs(
+    process.argv.slice(2),
+  );
 
   console.log(`Importing registry from ${registryPath}...`);
   const registry = await importRegistry(registryPath, exportName);
@@ -156,7 +196,7 @@ async function main() {
   console.log(`Creating empty migration via drizzle-kit generate --custom --name ${migrationName}...`);
   runDrizzleGenerate(projectDir, migrationName, drizzleConfig);
 
-  const drizzleDir = findDrizzleDir(projectDir);
+  const drizzleDir = await resolveDrizzleOutDir(projectDir, drizzleConfig, outDir);
   if (!drizzleDir) {
     console.error("Could not find drizzle output directory in", projectDir);
     process.exit(1);
