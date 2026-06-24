@@ -231,7 +231,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
         const batchRequest = sanitizeRestrictedFields(body, registry);
         await tx.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
 
-        await executePlpgsqlBatch(
+        const conflicts = await executePlpgsqlBatch(
           tx as unknown as TransactionClient,
           batchRequest,
           context.req.path,
@@ -244,7 +244,48 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
           await tx.execute(sql`RESET ROLE`);
         }
 
+        // ADR-0015: a reject-if-stale stale write was NOT applied — the applier returned it here.
+        // Surface a `conflicted` ack (distinct from a failure) carrying the row's current Server
+        // version, so the client keeps the optimistic overlay and resolves it as a new write.
+        const conflictByMutationId = new Map(conflicts.map((conflict) => [conflict.mutationId, conflict]));
+
         for (const mutation of batchRequest.mutations) {
+          const conflict = conflictByMutationId.get(mutation.mutationId);
+
+          if (conflict) {
+            const conflictReason =
+              `Stale write rejected by the reject-if-stale conflict policy (ADR-0015): the row's current ` +
+              `server version ${conflict.currentServerVersion} is ahead of the base ` +
+              `${mutation.baseServerVersion ?? "(unknown)"} this write was authored against.`;
+
+            await logOperation(tx, operationsLogConfig, {
+              tableName: mutation.tableName,
+              operationKind: mutation.kind,
+              entityKey: mutation.entityKey,
+              payload: mutation.payload,
+              status: "conflicted",
+              errorMessage: conflictReason,
+              httpStatus: 409,
+              mutationId: mutation.mutationId,
+              mutationSeq: mutation.mutationSeq,
+              clientTimestampUs: mutation.clientTimestampUs,
+              requestPath: context.req.path,
+              userId: actorUserId,
+            });
+
+            acks.push({
+              tableName: mutation.tableName,
+              entityKey: mutation.entityKey,
+              mutationId: mutation.mutationId,
+              mutationSeq: mutation.mutationSeq,
+              status: "conflicted",
+              ...(conflict.currentServerVersion ? { serverUpdatedAtUs: conflict.currentServerVersion } : {}),
+              conflictReason,
+              httpStatus: 409,
+            });
+            continue;
+          }
+
           const serverUpdatedAtUs = await readServerUpdatedAtUs(
             tx,
             registry[mutation.tableName as keyof TRegistry] as SyncTableEntry,

@@ -175,7 +175,42 @@ function buildTableBranch(entry: SyncTableEntry): string {
         );
       `.trim();
 
-  const updateBranch = `
+  // ADR-0015: a `reject-if-stale` table compares each targeted row's current Server version to the
+  // mutation's Base server version (`x.b`). `current > base` ⇒ stale (an external write interleaved):
+  // the row is NOT applied, and the conflict (mutation id + the row's current Server version) is
+  // collected for the handler to turn into a `conflicted` ack. `last-write-wins` keeps today's apply
+  // (now a named choice). The policy is known here at DDL-generation time, so each table emits the SQL
+  // its policy needs; a create has no base (its conflict is a PK collision), so it is unchanged.
+  const serverVersionRef = serverVersionColumn ? quoteIdent(serverVersionColumn) : null;
+  const rejectIfStale = entry.conflictPolicy === "reject-if-stale" && serverVersionRef != null;
+
+  // The conflict-collect SELECT and the staleness guard need the base + mutation id alongside each
+  // row, so reject-if-stale carries them in the recordset (`b bigint, m uuid`).
+  const conflictObjectSql = (alias: string) =>
+    `jsonb_build_object('mutationId', ${alias}.m, 'tableName', '${toSqlLiteral(tableName)}', 'currentServerVersion', t.${serverVersionRef})`;
+
+  const updateBranch = rejectIfStale
+    ? `
+        ${updateSetSelect}
+
+        EXECUTE '${`SELECT COALESCE(jsonb_agg(${conflictObjectSql("x")}), '[]'::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m uuid) JOIN ${qualifiedTableName} AS t ON ${pkUpdateJoin} WHERE x.b IS NOT NULL AND t.${serverVersionRef} > x.b`.replace(/'/g, "''")}'
+          INTO v_group_conflicts
+          USING (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+            FROM jsonb_array_elements(v_rows) AS elem
+          );
+        v_conflicts := v_conflicts || v_group_conflicts;
+
+        dml_sql := format(
+          '${`UPDATE ${qualifiedTableName} AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m uuid) WHERE ${pkUpdateJoin} AND (x.b IS NULL OR t.${serverVersionRef} <= x.b)`.replace(/'/g, "''")}',
+          concat_ws(', ', nullif(v_set, ''), ${toSqlTextOrNull(updateManagedAssignmentsSql)})
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+      `.trim()
+    : `
         ${updateSetSelect}
 
         dml_sql := format(
@@ -188,7 +223,22 @@ function buildTableBranch(entry: SyncTableEntry): string {
         );
       `.trim();
 
-  const deleteBranch = `
+  const deleteBranch = rejectIfStale
+    ? `
+        EXECUTE '${`SELECT COALESCE(jsonb_agg(${conflictObjectSql("x")}), '[]'::jsonb) FROM jsonb_to_recordset($1) AS x(${pkRecordDef}, b bigint, m uuid) JOIN ${qualifiedTableName} AS t ON ${pkDeleteJoin} WHERE x.b IS NOT NULL AND t.${serverVersionRef} > x.b`.replace(/'/g, "''")}'
+          INTO v_group_conflicts
+          USING (
+            SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+            FROM jsonb_array_elements(v_rows) AS elem
+          );
+        v_conflicts := v_conflicts || v_group_conflicts;
+
+        EXECUTE '${`DELETE FROM ${qualifiedTableName} AS t USING jsonb_to_recordset($1) AS x(${pkRecordDef}, b bigint, m uuid) WHERE ${pkDeleteJoin} AND (x.b IS NULL OR t.${serverVersionRef} <= x.b)`.replace(/'/g, "''")}' USING (
+          SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+      `.trim()
+    : `
         EXECUTE '${deleteSql}' USING (
           SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
           FROM jsonb_array_elements(v_rows) AS elem
@@ -221,13 +271,18 @@ export function buildPlpgsqlBatchFunctionDdl(
   const functionName = qualifyIdent(options.functionSchema, "pgxsinkit_apply_mutations");
 
   return `
+-- ADR-0015: the function now RETURNS the per-mutation conflicts (a reject-if-stale stale write). A
+-- return-type change cannot be a bare CREATE OR REPLACE, so drop the prior (void-returning) signature
+-- first. Idempotent: re-running installs the same definition.
+DROP FUNCTION IF EXISTS ${functionName}(jsonb, text, boolean, boolean, jsonb);
+
 CREATE OR REPLACE FUNCTION ${functionName}(
   p_batch jsonb,
   p_request_path text,
   p_log_enabled boolean,
   p_rls_enabled boolean,
   p_user_claims jsonb
-) RETURNS void LANGUAGE plpgsql AS $$
+) RETURNS TABLE(mutation_id uuid, table_name text, current_server_version bigint) LANGUAGE plpgsql AS $$
 DECLARE
   dml_sql text;
   v_table text;
@@ -237,6 +292,10 @@ DECLARE
   v_cols text;
   v_vals text;
   v_set text;
+  -- ADR-0015: stale-write conflicts collected across the batch (mutationId + the row's current
+  -- Server version), returned to the handler which turns them into 'conflicted' acks.
+  v_conflicts jsonb := '[]'::jsonb;
+  v_group_conflicts jsonb;
   _claims jsonb;
   _target_role text;
   _previous_role text;
@@ -354,6 +413,15 @@ BEGIN
     PERFORM set_config('request.jwt.claims', COALESCE(_previous_claims, ''), true);
     PERFORM set_config('request.jwt.claim.sub', COALESCE(_previous_claim_sub, ''), true);
   END IF;
+
+  -- ADR-0015: return the collected stale-write conflicts. Empty under last-write-wins (or when no
+  -- write was stale), so the handler simply acks everything as today.
+  RETURN QUERY
+  SELECT
+    (c->>'mutationId')::uuid,
+    c->>'tableName',
+    (c->>'currentServerVersion')::bigint
+  FROM jsonb_array_elements(v_conflicts) AS c;
 END;
 $$;
 `.trim();
@@ -417,6 +485,23 @@ export async function verifyRlsAuthHelpers<TRegistry extends SyncTableRegistry>(
   }
 }
 
+/**
+ * A stale-write conflict the applier rejected under `reject-if-stale` (ADR-0015): the mutation was
+ * authored against a Base server version the row has since advanced past. Carries the row's current
+ * Server version so the handler can surface it on the `conflicted` ack.
+ */
+export interface MutationConflict {
+  mutationId: string;
+  tableName: string;
+  currentServerVersion: string;
+}
+
+interface MutationConflictRow {
+  mutationId: string | null;
+  tableName: string | null;
+  currentServerVersion: string | null;
+}
+
 export async function executePlpgsqlBatch(
   tx: TransactionClient,
   batch: BatchMutationRequest,
@@ -427,11 +512,26 @@ export async function executePlpgsqlBatch(
   options: {
     functionSchema?: string;
   } = {},
-): Promise<void> {
+): Promise<MutationConflict[]> {
   const normalizedClaims = userClaims ?? {};
   const functionName = qualifyIdent(options.functionSchema, "pgxsinkit_apply_mutations");
 
-  await tx.execute(
-    sql`SELECT ${sql.raw(functionName)}(${JSON.stringify(batch)}::text::jsonb, ${requestPath}, ${logEnabled}, ${rlsEnabled}, ${JSON.stringify(normalizedClaims)}::text::jsonb)`,
+  // The applier RETURNS the stale-write conflicts (ADR-0015). Read them from the function's result
+  // set; an empty set (the last-write-wins case, or nothing stale) means every mutation applied.
+  const result = await tx.execute(
+    sql`SELECT "mutation_id"::text AS "mutationId", "table_name" AS "tableName", "current_server_version"::text AS "currentServerVersion" FROM ${sql.raw(functionName)}(${JSON.stringify(batch)}::text::jsonb, ${requestPath}, ${logEnabled}, ${rlsEnabled}, ${JSON.stringify(normalizedClaims)}::text::jsonb)`,
+  );
+
+  const rows = Array.from(result as Iterable<unknown>, (row) => row as MutationConflictRow);
+  return rows.flatMap((row) =>
+    row.mutationId != null
+      ? [
+          {
+            mutationId: row.mutationId,
+            tableName: row.tableName ?? "",
+            currentServerVersion: row.currentServerVersion ?? "",
+          } satisfies MutationConflict,
+        ]
+      : [],
   );
 }

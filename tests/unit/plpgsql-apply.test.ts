@@ -138,7 +138,7 @@ function compositeBatch(
 }
 
 async function applyBatch(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, batch: unknown) {
-  await db.query(`SELECT pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb)`, [
+  await db.query(`SELECT * FROM pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb)`, [
     JSON.stringify(batch),
   ]);
 }
@@ -288,7 +288,7 @@ function todoMutation(
 }
 
 async function applyMutations(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, mutations: unknown[]) {
-  await db.query(`SELECT pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb)`, [
+  await db.query(`SELECT * FROM pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb)`, [
     JSON.stringify({ mutations }),
   ]);
 }
@@ -372,6 +372,181 @@ describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase
         { id: ID_A, title: "new" }, // updated
         { id: ID_C, title: "C" }, // created (ID_B deleted)
       ]);
+    } finally {
+      await db.close();
+    }
+  });
+});
+
+// ADR-0015 Phase 3: server-side stale-write detection. The applier compares each row's CURRENT
+// Server version to the mutation's Base server version and acts per the table's Conflict policy.
+const lwwConflictRegistry = defineSyncRegistry({
+  things: defineSyncTable({
+    tableName: "lww_things",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
+    mode: "readwrite",
+    primaryKey: ["id"],
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+
+const rejectConflictRegistry = defineSyncRegistry({
+  things: defineSyncTable({
+    tableName: "reject_things",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    }),
+    mode: "readwrite",
+    primaryKey: ["id"],
+    conflictPolicy: "reject-if-stale",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+
+const CONFLICT_ID = "40000000-0000-4000-8000-00000000000a";
+
+function conflictMutation(
+  tableName: string,
+  kind: "update" | "delete",
+  payload: Record<string, unknown>,
+  baseServerVersion: string | null,
+) {
+  return {
+    tableName,
+    kind,
+    entityKey: { id: CONFLICT_ID },
+    payload,
+    mutationId: "50000000-0000-4000-8000-00000000000a",
+    mutationSeq: 1,
+    clientTimestampUs: "1000",
+    ...(baseServerVersion != null ? { baseServerVersion } : {}),
+  };
+}
+
+/** Applies a batch and returns the conflicts the function reports (ADR-0015). */
+async function applyForConflicts(
+  db: Awaited<ReturnType<typeof createFreshTestPGlite>>,
+  mutations: unknown[],
+): Promise<Array<{ mutationId: string; tableName: string; currentServerVersion: string }>> {
+  const result = await db.query<{ mutationId: string; tableName: string; currentServerVersion: string }>(
+    `SELECT mutation_id::text AS "mutationId", table_name AS "tableName", current_server_version::text AS "currentServerVersion"
+     FROM pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb)`,
+    [JSON.stringify({ mutations })],
+  );
+  return result.rows;
+}
+
+describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
+  async function seedThing(table: string, registry: Parameters<typeof buildPlpgsqlBatchFunctionDdl>[0]) {
+    const db = await createFreshTestPGlite();
+    await db.exec(`CREATE TABLE ${table} (
+      id uuid PRIMARY KEY,
+      label varchar(120) NOT NULL,
+      updated_at_us bigint NOT NULL DEFAULT 0
+    )`);
+    await db.exec(buildPlpgsqlBatchFunctionDdl(registry));
+    // The row sits at version 100; an external writer then advances it to 200 (the interleave).
+    await db.query(`INSERT INTO ${table} (id, label, updated_at_us) VALUES ($1, 'original', 200)`, [CONFLICT_ID]);
+    return db;
+  }
+
+  it("last-write-wins applies a stale update anyway and reports no conflict", async () => {
+    const db = await seedThing("lww_things", lwwConflictRegistry);
+    try {
+      // base 100 < current 200 → stale. last-write-wins applies it regardless.
+      const conflicts = await applyForConflicts(db, [
+        conflictMutation("lww_things", "update", { label: "clobbered" }, "100"),
+      ]);
+
+      expect(conflicts).toEqual([]);
+      const row = await db.query<{ label: string }>(`SELECT label FROM lww_things WHERE id = $1`, [CONFLICT_ID]);
+      expect(row.rows[0]?.label).toBe("clobbered");
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("reject-if-stale leaves the row untouched and reports the conflict with the current Server version", async () => {
+    const db = await seedThing("reject_things", rejectConflictRegistry);
+    try {
+      // base 100 < current 200 → stale. reject-if-stale must NOT apply, and must report it.
+      const conflicts = await applyForConflicts(db, [
+        conflictMutation("reject_things", "update", { label: "rejected" }, "100"),
+      ]);
+
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]?.mutationId).toBe("50000000-0000-4000-8000-00000000000a");
+      expect(conflicts[0]?.tableName).toBe("reject_things");
+      expect(conflicts[0]?.currentServerVersion).toBe("200");
+
+      // The row keeps the external writer's value — the stale write was not applied.
+      const row = await db.query<{ label: string }>(`SELECT label FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
+      expect(row.rows[0]?.label).toBe("original");
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("reject-if-stale applies a non-stale update (base == current) and reports no conflict", async () => {
+    const db = await seedThing("reject_things", rejectConflictRegistry);
+    try {
+      // base 200 == current 200 → not stale. The write applies and bumps the Server version.
+      const conflicts = await applyForConflicts(db, [
+        conflictMutation("reject_things", "update", { label: "fresh" }, "200"),
+      ]);
+
+      expect(conflicts).toEqual([]);
+      const row = await db.query<{ label: string; bumped: boolean }>(
+        `SELECT label, (updated_at_us > 200) AS bumped FROM reject_things WHERE id = $1`,
+        [CONFLICT_ID],
+      );
+      expect(row.rows[0]?.label).toBe("fresh");
+      expect(row.rows[0]?.bumped).toBe(true);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("reject-if-stale with no base (a create-like legacy write) skips the stale check and applies", async () => {
+    const db = await seedThing("reject_things", rejectConflictRegistry);
+    try {
+      // No baseServerVersion ⇒ no stale check; the write applies (degrades to last-write-wins).
+      const conflicts = await applyForConflicts(db, [
+        conflictMutation("reject_things", "update", { label: "no-base" }, null),
+      ]);
+
+      expect(conflicts).toEqual([]);
+      const row = await db.query<{ label: string }>(`SELECT label FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
+      expect(row.rows[0]?.label).toBe("no-base");
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("reject-if-stale rejects a stale delete and keeps the row", async () => {
+    const db = await seedThing("reject_things", rejectConflictRegistry);
+    try {
+      const conflicts = await applyForConflicts(db, [
+        conflictMutation("reject_things", "delete", { id: CONFLICT_ID }, "100"),
+      ]);
+
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]?.currentServerVersion).toBe("200");
+      const row = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM reject_things WHERE id = $1`, [
+        CONFLICT_ID,
+      ]);
+      expect(row.rows[0]?.count).toBe(1);
     } finally {
       await db.close();
     }

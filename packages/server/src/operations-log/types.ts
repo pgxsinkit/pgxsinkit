@@ -1,7 +1,7 @@
 import type { SQLWrapper } from "drizzle-orm";
 import type { AnyPgTable } from "drizzle-orm/pg-core";
 
-export type OpsLogStatus = "succeeded" | "validation_failed" | "not_found" | "execution_failed";
+export type OpsLogStatus = "succeeded" | "validation_failed" | "not_found" | "execution_failed" | "conflicted";
 
 export interface OperationsLogConfig {
   enabled: boolean;
