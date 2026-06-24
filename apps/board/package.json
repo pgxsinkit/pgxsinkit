@@ -9,6 +9,7 @@
   "dependencies": {
     "@mantine/core": "9.4.0",
     "@mantine/hooks": "9.4.0",
+    "@pgxsinkit/board-schema": "workspace:*",
     "@pgxsinkit/client": "workspace:*",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/react": "workspace:*",

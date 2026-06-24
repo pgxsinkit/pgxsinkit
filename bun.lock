@@ -7,6 +7,7 @@
       "devDependencies": {
         "@electric-sql/pglite": "0.5.3",
         "@electric-sql/pglite-prepopulatedfs": "0.5.3",
+        "@pgxsinkit/board-schema": "workspace:*",
         "@types/node": "26.0.0",
         "@types/react": "19.2.17",
         "@types/react-dom": "19.2.3",
@@ -31,6 +32,7 @@
       "dependencies": {
         "@mantine/core": "9.4.0",
         "@mantine/hooks": "9.4.0",
+        "@pgxsinkit/board-schema": "workspace:*",
         "@pgxsinkit/client": "workspace:*",
         "@pgxsinkit/contracts": "workspace:*",
         "@pgxsinkit/react": "workspace:*",
@@ -83,6 +85,13 @@
         "drizzle-orm": "1.0.0-rc.2",
         "hono": "4.12.27",
         "zod": "4.4.3",
+      },
+    },
+    "packages/board-schema": {
+      "name": "@pgxsinkit/board-schema",
+      "dependencies": {
+        "@pgxsinkit/contracts": "workspace:*",
+        "drizzle-orm": "1.0.0-rc.2",
       },
     },
     "packages/client": {
@@ -410,7 +419,7 @@
 
     "@microsoft/fetch-event-source": ["@microsoft/fetch-event-source@2.0.1", "", {}, "sha512-W6CLUJ2eBMw3Rec70qrsEW0jOm/3twwJv21mrmj2yORiaVmVYGS4sSS5yUwvQc1ZlDLYGPnClVWmUUMagKNsfA=="],
 
-    "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.5", "", { "dependencies": { "@tybys/wasm-util": "^0.10.2" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-AWPoBRJ9tsnVhor4sjO7rkni+7p+2IAEFj6cx06UgP10jkQHqay/36uRV/bFkgrh18D9vb4cr8Q0Pthskgzy+Q=="],
+    "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.6", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-ZLv/JdUfkvOy9eCnnBaGfiO+XimbjebAeO+MRQqD/B+FR1tnRN0tpKSJHRbE8sFfS6aqsXZ67TQjfwfsxULVbg=="],
 
     "@oslojs/encoding": ["@oslojs/encoding@1.1.0", "", {}, "sha512-70wQhgYmndg4GCPxPPxPGevRKqTIJ2Nh4OkiMWmDAVYsTQ+Ta7Sq+rPevXyXGdzr30/qZBnyOalCszoMxlyldQ=="],
 
@@ -521,6 +530,8 @@
     "@pagefind/windows-x64": ["@pagefind/windows-x64@1.5.2", "", { "os": "win32", "cpu": "x64" }, "sha512-Fa2Iyw7kaDRzGMfNYNUXNW2zbL5FQVDgSOcbDHdzBrDEdpqOqg8TcZ68F22ol6NJ9IGzvUdmeyZypLW5dyhqsg=="],
 
     "@pgxsinkit/board": ["@pgxsinkit/board@workspace:apps/board"],
+
+    "@pgxsinkit/board-schema": ["@pgxsinkit/board-schema@workspace:packages/board-schema"],
 
     "@pgxsinkit/client": ["@pgxsinkit/client@workspace:packages/client"],
 
