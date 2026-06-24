@@ -62,6 +62,16 @@ The `operations_log` table is a Drizzle-managed internal server table included i
 - Synced tables are updated by shape sync from ElectricSQL and are treated as replication targets.
 - A flush failure is durable and classified (see [adr/0006](adr/0006-local-schema-evolution.md)): a transient error (network / `5xx` / transient `4xx`) stays a retryable `failed` under jittered, capped backoff; a structural `4xx` rejection — or exhausting the hard attempt cap — becomes a terminal `quarantined`, surfaced via the `onQuarantine` callback and never retried.
 
+## Read-path identity and the token provider contract
+
+The read path and the write path share **one** token lifecycle (see [adr/0013](adr/0013-read-path-identity-refresh.md); the client mirror of [adr/0003](adr/0003-secured-sync-ingress.md)'s server-side one-identity decision). The client consults the consumer's `getAuthToken` **per request** — never frozen at boot:
+
+- Each shape's `Authorization` header is an async function (`async () => Bearer ${await getAuthToken()}`) that Electric resolves on every request and every retry, so a long-lived offline-first session always presents a fresh token instead of one captured at startup. An absent token resolves to an empty value (unauthenticated), never the literal `Bearer undefined`.
+- A read-path auth error (`401`/`403`) is recovered at the per-shape `onError`, which returns retry so Electric re-resolves the header for a fresh token. Electric already auto-retries network/`5xx`/`429`, but **not** `4xx`, so this is the gap the toolkit closes. It never returns `void` for an auth error — `void` stops the stream permanently, which is wrong for offline-first.
+- A persistent auth failure retries forever with jittered backoff (no attempt cap) and surfaces a distinct **`auth-needed`** status through `onStatusChange` (kept separate from `degraded`, a commit-retry exhaustion), so the app can prompt re-login. Sync auto-resumes — the status returns to `ready`/`syncing` — the instant re-authentication makes `getAuthToken` valid again; the read path never silently wedges or permanently dies.
+
+**Provider contract — `getAuthToken` must be refresh-deduping.** It is now called per request by **both** paths, so it must return the cached valid token and refresh **single-flight**: an N-shape consistency group resolves the header per request, and a momentarily-expired token must trigger exactly **one** refresh, not N. The consumer owns this dedup; the toolkit calls the provider and assumes it.
+
 ## Client lifecycle and the local store
 
 - The local store is keyed by the registry fingerprint (recorded in `pgxsinkit_local_meta`), not a manual `idb://…-vN` suffix. On boot the client reconciles a fingerprint change with a drain-then-drop rebuild of the read cache, deferring the rebuild while writes are still owed so nothing is dropped (see [adr/0006](adr/0006-local-schema-evolution.md)).

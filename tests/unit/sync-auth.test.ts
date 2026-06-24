@@ -96,3 +96,43 @@ describe("read-path identity — surfacing a persistent auth failure (ADR-0013 P
     expect(notifications).toBe(0);
   });
 });
+
+describe("read-path identity — the refresh-deduping provider contract (ADR-0013 Phase 4)", () => {
+  // A reference single-flight provider, exactly what the docs require the consumer to supply: return
+  // the cached valid token, and refresh at most once even under concurrent callers.
+  function createRefreshDedupingProvider(refresh: () => Promise<string>): () => Promise<string> {
+    let cached: string | null = null;
+    let inflight: Promise<string> | null = null;
+    return async () => {
+      if (cached !== null) return cached;
+      inflight ??= refresh().then((token) => {
+        cached = token;
+        inflight = null;
+        return token;
+      });
+      return inflight;
+    };
+  }
+
+  it("collapses an N-shape group's concurrent per-request header resolutions into ONE refresh", async () => {
+    let refreshes = 0;
+    const provider = createRefreshDedupingProvider(async () => {
+      refreshes += 1;
+      return "fresh-token";
+    });
+    const headers = buildAuthShapeHeaders(provider);
+    const authorization = headers["Authorization"];
+    if (typeof authorization !== "function") throw new Error("expected an async header function");
+
+    // Five shapes in one consistency group each resolve the Authorization header concurrently against
+    // a momentarily-expired token — the toolkit calls the provider per request, but a deduping
+    // provider must refresh single-flight.
+    // Electric's header type allows sync OR async values, so wrap each resolution to normalise the
+    // `string | Promise<string>` return to a Promise before aggregating.
+    const resolved = await Promise.all(Array.from({ length: 5 }, () => Promise.resolve(authorization())));
+
+    expect(resolved).toHaveLength(5);
+    expect(resolved.every((value) => value === "Bearer fresh-token")).toBe(true);
+    expect(refreshes).toBe(1); // single-flight: one refresh for the whole group, not five
+  });
+});
