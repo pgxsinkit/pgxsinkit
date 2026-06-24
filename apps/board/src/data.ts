@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { useMemo } from "react";
 
-import { channelTable, issueView, messageView, profileTable, teamTable } from "@pgxsinkit/board-schema";
+import { channelTable, issueView, messageView, profileTable, teamMemberView, teamTable } from "@pgxsinkit/board-schema";
 
 import { useLiveDrizzleRows } from "./board-client";
 
@@ -66,6 +66,39 @@ export function useProfileMap(): Map<string, ProfileRow> {
     for (const row of rows) map.set(row.id, row);
     return map;
   }, [rows]);
+}
+
+export type MembershipRow = { teamId: string; userId: string };
+
+/**
+ * Every Team membership the store holds. The read path already scopes this to the signed-in identity
+ * (a Member syncs the memberships of their own Teams; an Admin syncs all), so callers just group the
+ * rows by `teamId` to build per-Team assignee lists — no extra filtering needed.
+ */
+export function useTeamMemberships(): MembershipRow[] {
+  const { rows } = useLiveDrizzleRows(
+    (client) =>
+      client.drizzle.select({ teamId: teamMemberView.teamId, userId: teamMemberView.userId }).from(teamMemberView),
+    [],
+  );
+  return rows;
+}
+
+/** Group memberships into `teamId → member profiles` (sorted) for the per-card assignee menu. */
+export function buildAssignableByTeam(
+  memberships: readonly MembershipRow[],
+  profiles: Map<string, ProfileRow>,
+): Map<string, ProfileRow[]> {
+  const map = new Map<string, ProfileRow[]>();
+  for (const { teamId, userId } of memberships) {
+    const profile = profiles.get(userId);
+    if (profile == null) continue;
+    const list = map.get(teamId);
+    if (list != null) list.push(profile);
+    else map.set(teamId, [profile]);
+  }
+  for (const list of map.values()) list.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return map;
 }
 
 const issueColumns = {

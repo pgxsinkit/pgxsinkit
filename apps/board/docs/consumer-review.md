@@ -97,3 +97,68 @@ genuine ones plus a toolkit code fix.
 > compat** are verified by bringing the stack up (`bun run infra:up`) — the
 > static layer (bundles build to valid ESM, migrations generate, types/lint/format/tests
 > green) is all confirmed. Findings from the live run append here.
+
+## Phase 3 — seed + one-click login + client boot
+
+No new pgxsinkit **doc** gaps: the read-path client API (`createSyncClient` +
+`createSyncClientHooks`) consumed cleanly straight from `getting-started`. The findings
+here were board-internal infra, not toolkit gaps — recorded for completeness:
+
+- Seeding uses `drizzle-seed` at the same unified `1.0.0-rc.2` tag as the rest of the
+  drizzle stack (`drizzle-orm`/`drizzle-kit`/`drizzle-seed` move together); structural
+  fixtures are deterministic inserts, bulk Issues/Messages are `drizzle-seed`.
+- One-click identities are provisioned through the **GoTrue admin API** with
+  `app_metadata.roles` carrying `admin` — the same claim the read filters and RLS read.
+- A signed-out store must not be torn down in place (a live query still subscribed to the
+  PGlite handle deadlocks the WASM thread); sign-out hard-navigates to `/login` instead.
+
+## Phase 4 — read path (board / chat / admin all-teams)
+
+Two genuine **toolkit code** findings, both fixed upstream with a regression test (the
+read path is otherwise faithful to the docs):
+
+12. **`useLiveDrizzleRows` returned rows keyed by the underlying snake_case column
+    names, not the select's field keys.** The hook runs a Drizzle select's `.toSQL()`
+    through PGlite's live query, which yields raw DB-named columns; typed access on the
+    builder keys (`row.assigneeId`) then silently read `undefined` (every assignee
+    avatar rendered "?"). → **ergonomics** (fixed upstream, `packages/react`): new
+    `remapLiveRow` uses the select's `_.selectedFields` metadata to map snake_case rows
+    back to the builder keys (Column → `row[column.name]`, aliased SQL by key, nested
+    selects recurse). 4 unit tests; the board's `data.ts` is back on typed
+    `useLiveDrizzleRows`. (commit 1ccfbb7)
+13. **Electric tags shape responses with a long, CDN-oriented `cache-control`** (`max-age`
+    - `stale-while-revalidate`) that assumes a CDN keyed on the full URL. Behind a
+      same-origin proxy with **no CDN**, the browser HTTP cache serves those responses
+      _stale_ once a shape handle rotates server-side (re-seed/re-login/restart) — the
+      client then loops on "expired shape handle" 409s before self-healing. → board-side
+      mitigation: `board-sync` forces `cache-control: no-store` so the browser never reuses
+      a stale shape (Electric's own offset/handle bookkeeping makes resumption cheap). A
+      docs note on `deploying-the-server` ("a shape proxy without a CDN should send
+      `no-store`") would save the next consumer the same dig. (commit 48b34ea)
+
+## Phase 5 — issue write path (drag status, reassign, admin cross-team move)
+
+The write API consumed cleanly — `client.tables.issue.update({ id }, patch)` with
+`autoSync: createBrowserConvergenceTrigger()` is the whole optimistic→converged loop, and
+the registry's `reject-if-stale` policy + the cross-team-move trigger enforced exactly as
+designed (verified live: member writes in their teams; the Admin-only "Move to team" moved
+an Issue out of one member's shape and into another's, live). One real **toolkit code**
+finding:
+
+14. **A missing _optional_ `operations_log` table 500'd every write instead of degrading
+    to "logging disabled".** Operation logging is opt-out (`operationsLog.enabled`
+    defaults to `true`) and `ensureOperationsLogSchema` documents/warns "logging will be
+    disabled until the table exists" — returning `false` when the table is absent. But
+    `createSyncServer` called it as `…​.then(() => {})`, **discarding that boolean**, so
+    `config.enabled` stayed `true`: the success-path `logOperation` then `INSERT`ed into
+    the missing table _inside the write transaction_, and the `42P01` rolled the user's
+    mutation back (board-write returned 500, every Issue edit silently failed). The board
+    legitimately ships **without** the table — so a consumer that never opts into logging
+    is exactly the configuration that broke. → **ergonomics** (fixed upstream,
+    `packages/server/src/index.ts`): the probe's boolean is now threaded into the effective
+    config (`enabled = enabled && tablePresent`); the route awaits the readiness gate
+    before any `logOperation`, so a missing optional table degrades to "no logging" and
+    writes succeed. New integration regression (`write-api.integration.test.ts`: drop the
+    table, assert a default-enabled write still applies and the table stays absent). A docs
+    note on the operations-log feature ("either create the table or it auto-disables; it is
+    never auto-created") is the matching content gap.

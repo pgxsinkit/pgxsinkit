@@ -3,19 +3,26 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo } from "react";
 
 import { useAuth } from "../auth/auth";
-import { useAllIssues, useProfileMap, useTeams } from "../data";
+import { useIssueActions } from "../board/use-issue-actions";
+import { buildAssignableByTeam, useAllIssues, useProfileMap, useTeamMemberships, useTeams } from "../data";
 import { BoardColumns } from "../features/board";
 
 // Admin-only cross-team view: every Issue the store holds, labelled by Team. For an Admin the read
 // path returns all rows (the admin bypass in every `*ReadFilter`), so this is "Admin sees all" made
-// concrete. A non-admin who reaches it is redirected home.
+// concrete. Writes here exercise the Admin authority too: any Status/assignee edit on any Team, plus
+// the cross-team "Move to team" move (a row leaving one member's shape and entering another's, live).
+// A non-admin who reaches it is redirected home.
 export function AllRoute() {
   const { session, isAdmin } = useAuth();
   const navigate = useNavigate();
   const { issues, loading } = useAllIssues();
   const profiles = useProfileMap();
+  const memberships = useTeamMemberships();
   const { teams } = useTeams();
+  const actions = useIssueActions();
+
   const teamNameById = useMemo(() => new Map(teams.map((team) => [team.id, team.name])), [teams]);
+  const assignableByTeam = useMemo(() => buildAssignableByTeam(memberships, profiles), [memberships, profiles]);
 
   useEffect(() => {
     if (session && !isAdmin) void navigate({ to: "/" });
@@ -34,7 +41,14 @@ export function AllRoute() {
           <Loader />
         </Center>
       ) : (
-        <BoardColumns issues={issues} profiles={profiles} teamNameById={teamNameById} />
+        <BoardColumns
+          issues={issues}
+          profiles={profiles}
+          actions={actions}
+          assignableByTeam={assignableByTeam}
+          teamNameById={teamNameById}
+          moveTeams={teams}
+        />
       )}
     </Stack>
   );
