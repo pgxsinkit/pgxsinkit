@@ -72,6 +72,15 @@ export interface SyncStateViewProjection {
  * - `conflict_state` — the reason a `conflicted` (stale, reject-if-stale) write was declined, or NULL
  *   when the entity has no conflicted mutation (ADR-0015). Surfaced from the journal's
  *   `conflict_reason`, scoped to `status = 'conflicted'` so a stale failure reason never leaks in.
+ * - `quarantined_count` — terminal local writes the server permanently rejected (ADR-0006): a poison
+ *   mutation named in a batch rejection, or one that exhausted the attempt cap. Quarantine blocks
+ *   sync and *keeps* the optimistic overlay, so without this the view would show an entity with
+ *   `pending_count = 0` and `conflict_state = NULL` yet still carrying un-converged local intent.
+ * - `quarantine_state` — the `last_error` of a quarantined write (the rejection reason), or NULL when
+ *   the entity has none. The reason counterpart to `quarantined_count`, mirroring `conflict_state`.
+ *
+ * Note `pending_count` is the *retryable* owed set (pending/sending/failed); a quarantined write is
+ * terminal, counted separately so a blocked write is never mistaken for one still in flight.
  *
  * The Read model stays lean (it already carries `overlay_kind`); an app that wants per-row
  * convergence status joins this view on the PK.
@@ -109,7 +118,9 @@ export function buildSyncStateView<TTable extends AnyPgTable>(
     `  COALESCE(j.pending_count, 0) AS pending_count,`,
     `  COALESCE(j.has_acked_unobserved_write, FALSE) AS has_acked_unobserved_write,`,
     `  COALESCE(o.local_delete_pending, FALSE) AS local_delete_pending,`,
-    `  j.conflict_state`,
+    `  j.conflict_state,`,
+    `  COALESCE(j.quarantined_count, 0) AS quarantined_count,`,
+    `  j.quarantine_state`,
     `FROM (`,
     `  SELECT DISTINCT ${keyColumnList} FROM ${projection.journalTable}`,
     `  UNION`,
@@ -126,7 +137,9 @@ export function buildSyncStateView<TTable extends AnyPgTable>(
     `      AND journal.server_updated_at_us IS NOT NULL`,
     `      AND (${barrier}) IS NOT TRUE`,
     `    ), FALSE) AS has_acked_unobserved_write,`,
-    `    MAX(journal.conflict_reason) FILTER (WHERE journal.status = 'conflicted') AS conflict_state`,
+    `    MAX(journal.conflict_reason) FILTER (WHERE journal.status = 'conflicted') AS conflict_state,`,
+    `    COUNT(*) FILTER (WHERE journal.status = 'quarantined') AS quarantined_count,`,
+    `    MAX(journal.last_error) FILTER (WHERE journal.status = 'quarantined') AS quarantine_state`,
     `  FROM ${projection.journalTable} AS journal`,
     `  WHERE ${pkEquality("journal", "k")}`,
     `) AS j ON TRUE`,
@@ -165,6 +178,11 @@ export const CONVERGENCE_EVENTS = [
   },
   { event: "resolution", effect: "clear overlay/journal only through the shared barrier predicate (decision 4)" },
   { event: "conflict detected", effect: "conflict_state recorded on the journal row (ADR-0015); surfaced in the view" },
+  {
+    event: "mutation quarantined",
+    effect:
+      "journal row → quarantined (terminal, ADR-0006), overlay kept; surfaced as quarantined_count/quarantine_state",
+  },
   {
     event: "shape must-refetch",
     effect: "subscription reset + re-stream; affected entity state re-derives from the fresh synced rows",

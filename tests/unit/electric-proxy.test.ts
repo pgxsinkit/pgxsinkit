@@ -113,6 +113,57 @@ describe("electric proxy", () => {
     });
   });
 
+  describe("forwarded-param allowlist (ADR-0003 ISS-08)", () => {
+    it("does not forward client-supplied shape-defining or unknown params (columns/replica/unknown)", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      // A client tries to narrow/alter the upstream shape and smuggle ambient params.
+      const request = new Request(
+        "http://localhost:3001/v1/electric-proxy?table=authors&offset=-1&columns=id&replica=full&unknown=x",
+      );
+
+      await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        { registry: demoSyncRegistry, electricUrl: "http://localhost:3000/v1/shape" },
+      );
+
+      const [targetUrl] = fetchMock.mock.calls[0]!;
+      const params = new URL(readFetchTargetUrl(targetUrl)).searchParams;
+      // Shape identity is the registry's alone: client columns/replica/unknown never reach Electric.
+      expect(params.get("columns")).toBeNull();
+      expect(params.get("replica")).toBeNull();
+      expect(params.get("unknown")).toBeNull();
+      // The validated table and the registry-derived ownership where still apply.
+      expect(params.get("table")).toBe("authors");
+      expect(params.get("where")).toBe(`"owner_id" = '${DEMO_USER1_ID}'`);
+    });
+
+    it("forwards legitimate Electric resume/control params (offset/handle/live/cursor)", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const request = new Request(
+        "http://localhost:3001/v1/electric-proxy?table=authors&offset=0_0&handle=h1&live=true&cursor=123",
+      );
+
+      await proxyElectricShapeRequest(
+        request,
+        { sub: DEMO_USER1_ID },
+        { registry: demoSyncRegistry, electricUrl: "http://localhost:3000/v1/shape" },
+      );
+
+      const [targetUrl] = fetchMock.mock.calls[0]!;
+      const params = new URL(readFetchTargetUrl(targetUrl)).searchParams;
+      // These drive resumption/long-poll and must survive for real sync to work.
+      expect(params.get("offset")).toBe("0_0");
+      expect(params.get("handle")).toBe("h1");
+      expect(params.get("live")).toBe("true");
+      expect(params.get("cursor")).toBe("123");
+    });
+  });
+
   describe("ownership filtering", () => {
     it("adds ownership filter from registry rowFilter for authenticated users", async () => {
       fetchMock.mockResolvedValue(

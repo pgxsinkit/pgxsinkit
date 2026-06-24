@@ -80,6 +80,26 @@ const renamedPkRegistry = defineSyncRegistry({
   }),
 });
 
+// Audit finding 4: a writable table whose Server version managed field is NOT the conventional
+// `updated_at_us`. Governance resolves it generically, so the optimistic local path must materialise
+// it by governance too — not by the `createdAtUs`/`updatedAtUs` name. `modified_at_us` is NOT NULL
+// with no client-materialisable default, so only the governance-driven fill can populate it.
+const customServerVersionRegistry = defineSyncRegistry({
+  customVersionItems: defineSyncTable({
+    tableName: "custom_version_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      title: varchar("title", { length: 120 }).notNull(),
+      modifiedAtUs: bigint("modified_at_us", { mode: "bigint" }).notNull(),
+    }),
+    mode: "readwrite",
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [{ column: "modifiedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+
 async function createOverlayTestContext() {
   const db = await createFreshTestPGlite();
   await db.exec(overlaySchemaSql);
@@ -218,6 +238,55 @@ describe("overlay state helpers", () => {
       researchExcluded: true,
       channel: "explicit-channel",
     });
+
+    await db.close();
+  });
+
+  it("materialises a custom-named Server version on optimistic create (governance-driven, not by convention) — finding 4", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(generateLocalSchemaSql(customServerVersionRegistry));
+    const runtime = createMutationRuntime({ db, registry: customServerVersionRegistry, writeUrl });
+
+    // `modifiedAtUs` is a managed-on-create field, so it is omitted from the create input; the
+    // optimistic overlay must fill it from governance. Before finding 4 the convention-only fill left
+    // it NULL → NOT NULL violation on the overlay INSERT.
+    await runtime.create("customVersionItems", {
+      id: "01963227-d4c7-72db-b858-f89f6af8fb01",
+      title: "Custom version field",
+    });
+
+    const rows = await db.query<{ modifiedAtUs: string | null }>(
+      `SELECT modified_at_us::text AS "modifiedAtUs" FROM custom_version_items_overlay WHERE id = $1`,
+      ["01963227-d4c7-72db-b858-f89f6af8fb01"],
+    );
+    expect(rows.rows[0]?.modifiedAtUs).not.toBeNull();
+    expect(Number(rows.rows[0]?.modifiedAtUs)).toBeGreaterThan(0);
+
+    await db.close();
+  });
+
+  it("re-stamps a custom-named Server version on optimistic update — finding 4", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(generateLocalSchemaSql(customServerVersionRegistry));
+    const runtime = createMutationRuntime({ db, registry: customServerVersionRegistry, writeUrl });
+
+    const id = "01963227-d4c7-72db-b858-f89f6af8fb02";
+    await runtime.create("customVersionItems", { id, title: "v1" });
+
+    // Force a known-stale managed value so a successful re-stamp is unmistakable (the wall clock is
+    // millisecond-grained, so a fresh create+update could otherwise share a value).
+    await db.query(`UPDATE custom_version_items_overlay SET modified_at_us = 1 WHERE id = $1`, [id]);
+
+    await runtime.update("customVersionItems", { id }, { title: "v2" });
+
+    const rows = await db.query<{ title: string; modifiedAtUs: string | null }>(
+      `SELECT title, modified_at_us::text AS "modifiedAtUs" FROM custom_version_items_overlay WHERE id = $1`,
+      [id],
+    );
+    expect(rows.rows[0]?.title).toBe("v2");
+    // The on-update stamp targeted `modified_at_us` generically (not a hard-coded `updatedAtUs`),
+    // overwriting the sentinel with a fresh now-microseconds value.
+    expect(Number(rows.rows[0]?.modifiedAtUs)).toBeGreaterThan(1);
 
     await db.close();
   });

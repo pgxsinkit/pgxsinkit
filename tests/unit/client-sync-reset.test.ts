@@ -310,4 +310,79 @@ describe("createSyncClient subscription reset", () => {
     if (typeof authorization !== "function") throw new Error("expected an async header function");
     expect(await authorization()).toBe(""); // no token yet → unauthenticated, not "Bearer undefined"
   });
+
+  // #4 + audit finding 5: the read-stream degraded status surfaced through createSyncClient.
+  function degradedTestRegistry(): SyncTableRegistry {
+    return {
+      items: {
+        table: itemsTable,
+        mode: "readwrite",
+        primaryKey: { columns: ["id"] },
+        shape: { tableName: "items", shapeKey: "schema.items" },
+        routes: { basePath: "/api/items" },
+        clientProjection: { syncedTable: "items", overlayTable: "items_overlay", journalTable: "items_mutations" },
+      },
+    } as unknown as SyncTableRegistry;
+  }
+
+  type DegradedSyncCallbacks = {
+    onReadStreamError?: (error: Error) => void;
+    onSyncActivity?: () => void;
+    onSyncError?: (error: Error) => void;
+  };
+
+  it("refreshes lastError on each new read-stream fault, then clears the stream-degraded status on recovery", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+
+    const client = await createSyncClient({
+      registry: degradedTestRegistry(),
+      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      writeUrl: "http://127.0.0.1:3101",
+      dataDir: "memory:/client-sync-reset-degraded-refresh",
+    });
+
+    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+
+    // First non-auth read-stream fault → degraded, carrying its message.
+    input.onReadStreamError?.(new Error("blip-1"));
+    expect(client.status.phase).toBe("degraded");
+    expect(client.status.lastError).toBe("blip-1");
+
+    // A *different* fault while still degraded must refresh lastError (finding 5: not frozen at the
+    // first), staying degraded.
+    input.onReadStreamError?.(new Error("blip-2"));
+    expect(client.status.phase).toBe("degraded");
+    expect(client.status.lastError).toBe("blip-2");
+
+    // A delivered batch clears a stream-degraded status (initial sync never completed here, so it
+    // returns to `syncing`, not `ready`).
+    input.onSyncActivity?.();
+    expect(client.status.phase).toBe("syncing");
+  });
+
+  it("a read-stream fault never overwrites a sticky commit-failure degraded status", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+
+    const client = await createSyncClient({
+      registry: degradedTestRegistry(),
+      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      writeUrl: "http://127.0.0.1:3101",
+      dataDir: "memory:/client-sync-reset-degraded-commit",
+    });
+
+    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+
+    // A commit exhausted its retries → degraded with the more-serious commit cause.
+    input.onSyncError?.(new Error("commit-dead"));
+    expect(client.status.phase).toBe("degraded");
+    expect(client.status.lastError).toBe("commit-dead");
+
+    // A transient stream blip must NOT mask the commit cause, and a delivered batch must NOT clear a
+    // commit-failure degraded (only a clean commit lifts it).
+    input.onReadStreamError?.(new Error("stream-blip"));
+    expect(client.status.lastError).toBe("commit-dead");
+    input.onSyncActivity?.();
+    expect(client.status.phase).toBe("degraded");
+    expect(client.status.lastError).toBe("commit-dead");
+  });
 });

@@ -273,12 +273,17 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // reporting healthy while the read stream has stalled. Does not override the more-actionable
       // `auth-needed`, nor a commit-failure degraded. Cleared on the next successful batch below.
       onReadStreamError: (error) => {
-        if (status.phase !== "auth-needed" && status.phase !== "degraded") {
-          status.phase = "degraded";
-          degradedReason = "stream";
-          status.lastError = error.message;
-          options.onStatusChange?.(status);
-        }
+        // Never mask the more-actionable auth-needed, nor a sticky commit-failure degraded (its
+        // lastError is the more serious signal — a stream blip must not overwrite it).
+        if (status.phase === "auth-needed") return;
+        if (status.phase === "degraded" && degradedReason === "commit") return;
+        // Enter, or refresh, a stream-degraded status. Refreshing keeps `lastError` pointing at the
+        // most recent stream fault (and re-emits) rather than freezing on the first one, so a stream
+        // that fails one way then another reports the current cause (observability).
+        status.phase = "degraded";
+        degradedReason = "stream";
+        status.lastError = error.message;
+        options.onStatusChange?.(status);
       },
       // Clear a recoverable status (auth-needed, or a read-stream degraded) the moment a batch is
       // delivered again. A commit-failure degraded is NOT cleared here — a fetch can succeed while

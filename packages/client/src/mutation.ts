@@ -159,6 +159,22 @@ interface TableContext {
    */
   serverVersionColumnName: string | null;
   serverVersionPropertyKey: string | null;
+  /**
+   * Property keys of the table's `nowMicroseconds` managed fields (governance), resolved generically
+   * rather than by the `createdAtUs`/`updatedAtUs` naming convention. The optimistic overlay stamps
+   * these client-side so a custom-named managed timestamp (e.g. a Server version not called
+   * `updated_at_us`) is materialised correctly — closing the split interpreter between the generic
+   * server applier (which reads governance) and the local path (ADR-0004).
+   *
+   * - `managedNowMicrosecondsPropertyKeys` — every `nowMicroseconds` field, stamped on create.
+   * - `updateManagedNowMicrosecondsPropertyKeys` — those that apply on update, re-stamped each update.
+   *
+   * These augment, and never remove, the convention fill in `createOptimisticRecordFromContext`,
+   * which remains the safety net for a `created_at_us`/`updated_at_us` column that carries a SQL
+   * `DEFAULT` (unmaterialisable client-side) yet is not declared a managed field.
+   */
+  managedNowMicrosecondsPropertyKeys: string[];
+  updateManagedNowMicrosecondsPropertyKeys: string[];
   recordIncludesOverlayState: boolean;
   columns: Array<{
     propertyKey: string;
@@ -429,7 +445,10 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
                 {
                   ...entityState.record,
                   ...item.patch,
-                  updatedAtUs: item.nowUs,
+                  // Re-stamp the on-update managed timestamp(s) generically (governance-driven) — for a
+                  // convention table this is exactly `updatedAtUs`, for a custom-named Server version
+                  // it is that column, so the optimistic row never carries a stale managed value.
+                  ...buildUpdateManagedNowStamp(context, item.nowUs),
                 },
                 {
                   overlayKind,
@@ -970,6 +989,22 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     ? (columns.find((candidate) => candidate.column.name === serverVersionColumnName)?.propertyKey ?? null)
     : null;
 
+  // Resolve the `nowMicroseconds` managed fields generically from governance, not by property name.
+  // `field.column` is a drizzle property key, but tolerate a column-name declaration too.
+  const resolveManagedPropertyKey = (fieldColumn: string): string | undefined =>
+    columns.find((candidate) => candidate.propertyKey === fieldColumn || candidate.column.name === fieldColumn)
+      ?.propertyKey;
+  const nowMicrosecondsManagedFields = (entry.governance?.managedFields ?? []).filter(
+    (field) => field.strategy === "nowMicroseconds",
+  );
+  const managedNowMicrosecondsPropertyKeys = nowMicrosecondsManagedFields
+    .map((field) => resolveManagedPropertyKey(field.column as string))
+    .filter((propertyKey): propertyKey is string => propertyKey !== undefined);
+  const updateManagedNowMicrosecondsPropertyKeys = nowMicrosecondsManagedFields
+    .filter((field) => field.applyOn.includes("update"))
+    .map((field) => resolveManagedPropertyKey(field.column as string))
+    .filter((propertyKey): propertyKey is string => propertyKey !== undefined);
+
   return {
     key,
     entry,
@@ -990,6 +1025,8 @@ function buildTableContext(key: string, entry: SyncTableEntry<AnyPgTable>, local
     pkPropertyKeys,
     serverVersionColumnName,
     serverVersionPropertyKey,
+    managedNowMicrosecondsPropertyKeys,
+    updateManagedNowMicrosecondsPropertyKeys,
     recordIncludesOverlayState: "overlayTable" in (entry.clientProjection ?? {}),
     columns,
   };
@@ -1055,6 +1092,15 @@ function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableConte
     record["updatedAtUs"] = nowUs;
   }
 
+  // Generic managed-timestamp fill (governance-driven): stamp any `nowMicroseconds` managed field the
+  // convention block above did not — e.g. a Server version column not named `updated_at_us`. Additive
+  // and idempotent, so convention tables are unaffected (their fields are already filled).
+  for (const propertyKey of context.managedNowMicrosecondsPropertyKeys) {
+    if (record[propertyKey] === undefined) {
+      record[propertyKey] = nowUs;
+    }
+  }
+
   for (const { propertyKey, column } of context.columns) {
     if (record[propertyKey] !== undefined) {
       continue;
@@ -1070,6 +1116,18 @@ function createOptimisticRecordFromContext<TCreate, TRecord>(context: TableConte
     overlayKind: "pending_create",
     localUpdatedAtUs: nowUs,
   }) as TRecord;
+}
+
+/**
+ * Stamp every on-update `nowMicroseconds` managed field with `nowUs` (governance-driven, ADR-0004),
+ * keyed by drizzle property key. For a convention table this is exactly `{ updatedAtUs: nowUs }`; for
+ * a custom-named Server version it targets that column — so the local optimistic path never assumes
+ * the demo naming the generic server applier does not.
+ */
+function buildUpdateManagedNowStamp(context: TableContext, nowUs: string): Record<string, string> {
+  return Object.fromEntries(
+    context.updateManagedNowMicrosecondsPropertyKeys.map((propertyKey) => [propertyKey, nowUs]),
+  );
 }
 
 function buildOptimisticRecord(

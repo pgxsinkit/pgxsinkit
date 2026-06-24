@@ -115,34 +115,64 @@ function decideProxyTarget(
   return { kind: "forward", targetUrl: buildProxyTargetUrl(request, claims, options) };
 }
 
+/**
+ * Electric protocol resume/control query params a client may legitimately set on a shape request.
+ * These drive resumption and long-poll; they do **not** define the shape's data. Every
+ * shape-DEFINING param (`table`, `where`, `columns`, and any shape option such as `replica`) is
+ * derived from the registry below, never forwarded from the client (ADR-0003 ISS-08).
+ *
+ * Kept as an explicit local allowlist — mirroring the `*_QUERY_PARAM` constants in
+ * `@electric-sql/client` (1.5.x) — so the proxy fails **closed** on any unknown or future param
+ * rather than lending it upstream Electric authority. `@electric-sql/client` exposes no aggregate
+ * "protocol params" export to import, and `@pgxsinkit/server` deliberately takes no client-package
+ * dependency, so the set is enumerated here with each Electric param it maps to.
+ */
+const ELECTRIC_CONTROL_QUERY_PARAMS: ReadonlySet<string> = new Set([
+  "offset", // OFFSET_QUERY_PARAM — resume position
+  "handle", // SHAPE_HANDLE_QUERY_PARAM — shape handle
+  "live", // LIVE_QUERY_PARAM — long-poll mode
+  "cursor", // LIVE_CACHE_BUSTER_QUERY_PARAM — live cursor
+  "cache-buster", // CACHE_BUSTER_QUERY_PARAM
+  "expired_handle", // EXPIRED_HANDLE_QUERY_PARAM — resume after a handle expires
+  "experimental_live_sse", // EXPERIMENTAL_LIVE_SSE_QUERY_PARAM
+  "live_sse", // LIVE_SSE_QUERY_PARAM
+  "log", // LOG_MODE_QUERY_PARAM
+]);
+
 function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options: ElectricProxyOptions): string {
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(options.electricUrl);
 
-  // Merge incoming request params into the electric URL, preserving any pre-existing
-  // params (e.g. the secret API token from electricUrl). The client-supplied `where` is
-  // deliberately NOT forwarded: authorization must never depend on client-controlled SQL
-  // (ADR-0003). There is no safe way to merge untrusted raw SQL into the ownership
-  // predicate — unbalanced parens/operators escape any wrapping (e.g. `1=1) OR (1=1`
-  // becomes `(1=1) OR (1=1) AND (owner=…)`, which precedence reduces to all-rows). The
-  // only `where` that reaches Electric is the registry-derived filter set below.
-  requestUrl.searchParams.forEach((value, key) => {
-    if (key === "where") {
-      return;
-    }
-    targetUrl.searchParams.set(key, value);
-  });
-  // Belt-and-braces: never let a `where` from `electricUrl`'s own query string survive
-  // either — the row filter is the sole authority.
+  // The registry entry — keyed by its exact Electric target — is the sole shape authority
+  // (ADR-0003). Strip any shape-defining param riding on `electricUrl` and re-derive `table`,
+  // `where`, and `columns` from the registry. The client-supplied `where` never reaches here
+  // either: authorization must never depend on client-controlled SQL — there is no safe way to
+  // merge untrusted raw SQL into the ownership predicate (`1=1) OR (1=1` escapes any wrapping and
+  // precedence-reduces to all-rows), so the registry row filter is the only `where`.
   targetUrl.searchParams.delete("where");
+  targetUrl.searchParams.delete("columns");
 
-  const table = targetUrl.searchParams.get("table");
+  const entry = resolveEntryByElectricTarget(options.registry, requestUrl.searchParams.get("table") ?? "");
+  const electricTarget = electricTargetForEntry(entry);
 
-  if (!table) {
+  if (!electricTarget) {
+    // Defensive only: decideProxyTarget already validated the table against the registry before we
+    // get here. Without a registry-resolved target there is no governed shape to serve.
     return targetUrl.toString();
   }
 
-  const rowFilter = resolveEntryByElectricTarget(options.registry, table)?.shape?.rowFilter;
+  targetUrl.searchParams.set("table", electricTarget);
+
+  // Forward ONLY Electric protocol resume/control params from the client. A client-supplied
+  // `columns`, `replica`, or any unknown/future param is never lent upstream authority — it cannot
+  // alter the shape beyond what the registry authorized.
+  requestUrl.searchParams.forEach((value, key) => {
+    if (ELECTRIC_CONTROL_QUERY_PARAMS.has(key)) {
+      targetUrl.searchParams.set(key, value);
+    }
+  });
+
+  const rowFilter = entry?.shape?.rowFilter;
 
   if (!rowFilter) {
     return targetUrl.toString();
@@ -154,7 +184,9 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
     targetUrl.searchParams.set("where", whereClause);
   }
 
-  // Apply column projection from registry if configured
+  // Registry-declared column projection (an explicit opt-in). Per-row `omitColumns` is enforced
+  // separately by post-hoc JSON stripping (below), so an omitted column never reaches the client
+  // even when no projection is set here.
   if (rowFilter.columns && rowFilter.columns.length > 0) {
     targetUrl.searchParams.set("columns", rowFilter.columns.join(","));
   }

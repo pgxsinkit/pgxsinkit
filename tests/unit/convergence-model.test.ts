@@ -52,6 +52,8 @@ interface SyncStateRow {
   unobserved: boolean;
   deletePending: boolean;
   conflict: string | null;
+  quarantined: number;
+  quarantineState: string | null;
 }
 
 async function readSyncState(db: PGliteDb, id: string): Promise<SyncStateRow | null> {
@@ -63,7 +65,9 @@ async function readSyncState(db: PGliteDb, id: string): Promise<SyncStateRow | n
         pending_count::int AS "pending",
         has_acked_unobserved_write AS "unobserved",
         local_delete_pending AS "deletePending",
-        conflict_state AS "conflict"
+        conflict_state AS "conflict",
+        quarantined_count::int AS "quarantined",
+        quarantine_state AS "quarantineState"
       FROM authors_sync_state
       WHERE id = $1
     `,
@@ -119,6 +123,8 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
         unobserved: false,
         deletePending: false,
         conflict: null,
+        quarantined: 0,
+        quarantineState: null,
       });
 
       // Acked, echo not yet at the acked version → acked-unobserved. The resolver must AGREE: the
@@ -132,6 +138,8 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
         unobserved: true,
         deletePending: false,
         conflict: null,
+        quarantined: 0,
+        quarantineState: null,
       });
       expect(await journalCount(db, AUTHOR_ID)).toBe(1);
 
@@ -163,6 +171,8 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
         unobserved: true,
         deletePending: false,
         conflict: null,
+        quarantined: 0,
+        quarantineState: null,
       });
 
       // The real echo reaches the acked version → resolved on both sides.
@@ -205,6 +215,8 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
         unobserved: false,
         deletePending: false,
         conflict: null,
+        quarantined: 0,
+        quarantineState: null,
       });
       expect(await journalCount(db, AUTHOR_ID)).toBe(1);
 
@@ -248,6 +260,30 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
     }
   });
 
+  it("surfaces a quarantined terminal write the resolver/view would otherwise hide (audit finding 3)", async () => {
+    const { db, runtime } = await createContext();
+    try {
+      await seedSyncedAuthor(db, AUTHOR_ID, 100);
+      await runtime.update("authors", { id: AUTHOR_ID }, { name: "Edited" });
+
+      // Drive the journal row to the terminal `quarantined` state (ADR-0006: a poison write the
+      // server permanently rejected). Quarantine keeps the optimistic overlay and is NOT a pending
+      // retry, so before this fix the entity showed pending=0/conflict=null and no terminal signal.
+      await db.query(
+        `UPDATE authors_mutations SET status = 'quarantined', last_error = '413 payload too large' WHERE id = $1`,
+        [AUTHOR_ID],
+      );
+
+      const state = await readSyncState(db, AUTHOR_ID);
+      expect(state?.pending).toBe(0); // not a retryable owed write...
+      expect(state?.conflict).toBeNull(); // ...and not a conflict...
+      expect(state?.quarantined).toBe(1); // ...but the blocked terminal intent IS surfaced.
+      expect(state?.quarantineState).toBe("413 payload too large");
+    } finally {
+      await db.close();
+    }
+  });
+
   it("keeps the read model lean — no convergence columns leak into it (ADR-0011 decision 2)", async () => {
     const { db } = await createContext();
     try {
@@ -264,6 +300,8 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
         "has_acked_unobserved_write",
         "local_delete_pending",
         "conflict_state",
+        "quarantined_count",
+        "quarantine_state",
       ]) {
         expect(readModelColumns.has(convergenceColumn)).toBe(false);
       }
@@ -272,6 +310,8 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
       const syncStateColumns = new Set(syncState.fields.map((field) => field.name));
       expect(syncStateColumns.has("has_acked_unobserved_write")).toBe(true);
       expect(syncStateColumns.has("conflict_state")).toBe(true);
+      expect(syncStateColumns.has("quarantined_count")).toBe(true);
+      expect(syncStateColumns.has("quarantine_state")).toBe(true);
     } finally {
       await db.close();
     }
@@ -310,6 +350,7 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
     expect(events).toContain("Electric delete observed");
     expect(events).toContain("resolution");
     expect(events).toContain("conflict detected");
+    expect(events).toContain("mutation quarantined");
     expect(events).toContain("shape must-refetch");
   });
 });
