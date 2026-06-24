@@ -29,17 +29,6 @@ export interface ShapeSyncSpec {
   consistencyGroup?: string;
 }
 
-export interface StartShapeSyncOptions extends ShapeSyncSpec {
-  /**
-   * Shape request headers. Values may be async functions resolved per request (ADR-0013): the
-   * read-path `Authorization` header is one such function so every fetch presents a fresh token.
-   */
-  headers?: ExternalHeadersRecord;
-  onInitialSync?: () => void;
-  /** Commit-level error surfacing (ADR-0009 decision 5): a commit exhausted its retries. */
-  onSyncError?: (error: Error) => void;
-}
-
 export interface ConfiguredShapeSyncSpec extends ShapeSyncSpec {
   key: string;
 }
@@ -106,28 +95,6 @@ export function buildConfiguredShapeSpecs(input: SyncConfigInput): ConfiguredSha
 
 export function createElectricExtension() {
   return electricSync({ debug: false });
-}
-
-export async function startShapeSync(pg: SyncEnginePGlite, input: StartShapeSyncOptions) {
-  const config = buildShapeConfig({
-    electricUrl: input.electricUrl,
-    tableName: input.tableName,
-    ...(input.schema !== undefined ? { schema: input.schema } : {}),
-    shapeKey: input.shapeKey,
-    primaryKey: input.primaryKey,
-    ...(input.electricTable !== undefined ? { electricTable: input.electricTable } : {}),
-  });
-
-  const shapeHeaders = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
-
-  return getElectricNamespace(pg).syncShapeToTable({
-    ...config,
-    ...(shapeHeaders ? { shape: { ...config.shape, headers: shapeHeaders } } : {}),
-    ...(input.onInitialSync ? { onInitialSync: input.onInitialSync } : {}),
-    ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
-    ...(input.applyStrategy ? { applyStrategy: input.applyStrategy } : {}),
-    ...(input.columnTypes ? { columnTypes: input.columnTypes } : {}),
-  });
 }
 
 export async function startConfiguredSync(
