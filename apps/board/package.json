@@ -13,6 +13,7 @@
     "@pgxsinkit/client": "workspace:*",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/react": "workspace:*",
+    "@supabase/supabase-js": "2.108.2",
     "@tanstack/react-router": "1.170.16",
     "react": "19.2.7",
     "react-dom": "19.2.7",

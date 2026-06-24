@@ -6,6 +6,7 @@ node_modules/*
 coverage/*
 dist/*
 packages/*/dist/*
+apps/board/dist/*
 apps/perf-lab/dist/*
 apps/docs/dist/*
 apps/docs/.astro/*
