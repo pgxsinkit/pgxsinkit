@@ -5,10 +5,10 @@ import { defineConfig } from "vite";
 
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 const workspaceAliases = {
+  "@pgxsinkit/board-schema": fileURLToPath(new URL("../../packages/board-schema/src/index.ts", import.meta.url)),
   "@pgxsinkit/client": fileURLToPath(new URL("../../packages/client/src/index.ts", import.meta.url)),
   "@pgxsinkit/contracts": fileURLToPath(new URL("../../packages/contracts/src/index.ts", import.meta.url)),
   "@pgxsinkit/react": fileURLToPath(new URL("../../packages/react/src/index.ts", import.meta.url)),
-  "@pgxsinkit/schema": fileURLToPath(new URL("../../packages/schema/src/index.ts", import.meta.url)),
 };
 
 export default defineConfig({
