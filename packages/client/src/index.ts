@@ -225,6 +225,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   const syncEnabled = options.syncEnabled ?? true;
   let sync: Awaited<ReturnType<typeof startConfiguredSync>> | null = null;
   let convergenceDriver: ConvergenceDriver | null = null;
+  // Whether the read path's first initial sync has completed, so a recovery from `auth-needed`
+  // returns to the right steady-state phase (`ready` if already caught up, else `syncing`).
+  let initialSyncCompleted = false;
 
   status.isRunning = true;
 
@@ -248,6 +251,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       ...(options.getAuthToken ? { shapeHeaders: buildAuthShapeHeaders(options.getAuthToken) } : {}),
       ...(options.onTableInitialSync ? { onTableInitialSync: options.onTableInitialSync } : {}),
       onInitialSync: () => {
+        initialSyncCompleted = true;
         status.phase = "ready";
         options.onStatusChange?.(status);
         resolveReady();
@@ -260,6 +264,26 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         options.onStatusChange?.(status);
         options.onSyncError?.(error);
       },
+      // ADR-0013 Phase 3: surface a persistent read-path auth failure as a distinct `auth-needed`
+      // status (the app prompts re-login) while the stream keeps retrying for a fresh token; clear
+      // it back to the steady-state phase the moment a batch is delivered again (re-auth worked).
+      // Only wired when a token provider exists — without one there is no auth lifecycle to track.
+      ...(options.getAuthToken
+        ? {
+            onAuthError: () => {
+              if (status.phase !== "auth-needed") {
+                status.phase = "auth-needed";
+                options.onStatusChange?.(status);
+              }
+            },
+            onSyncActivity: () => {
+              if (status.phase === "auth-needed") {
+                status.phase = initialSyncCompleted ? "ready" : "syncing";
+                options.onStatusChange?.(status);
+              }
+            },
+          }
+        : {}),
     });
   } else {
     status.phase = "ready";

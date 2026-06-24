@@ -72,3 +72,27 @@ describe("read-path identity — auth-error recovery (ADR-0013 Phase 2)", () => 
     expect(handler(new Error("boom"))).toBeUndefined();
   });
 });
+
+describe("read-path identity — surfacing a persistent auth failure (ADR-0013 Phase 3)", () => {
+  it("notifies onAuthError on every 401/403 while still requesting a retry (retry forever, never stop)", () => {
+    let notifications = 0;
+    const handler = createShapeAuthErrorHandler({ onAuthError: () => (notifications += 1) });
+
+    // A truly dead token 401s every retry: each one notifies AND requests a retry — there is no
+    // attempt cap, so it can keep surfacing "re-login" and resume the instant re-auth succeeds.
+    for (let i = 0; i < 10; i++) {
+      expect(handler(fetchError(i % 2 === 0 ? 401 : 403))).toEqual({});
+    }
+    expect(notifications).toBe(10);
+  });
+
+  it("does NOT notify onAuthError for a non-auth error", () => {
+    let notifications = 0;
+    const handler = createShapeAuthErrorHandler({ onAuthError: () => (notifications += 1) });
+
+    void handler(fetchError(500));
+    void handler(fetchError(404));
+    void handler(new Error("network down"));
+    expect(notifications).toBe(0);
+  });
+});

@@ -1,6 +1,12 @@
-export type SyncRuntimePhase = "booting" | "syncing" | "ready" | "degraded";
+export type SyncRuntimePhase = "booting" | "syncing" | "ready" | "degraded" | "auth-needed";
 
 export interface SyncRuntimeStatus {
+  /**
+   * `auth-needed` (ADR-0013): the read path is hitting auth errors (401/403) and is retrying
+   * forever with backoff — distinct from `degraded` (a sync commit exhausted its retries). The app
+   * should prompt re-login; sync auto-resumes (phase returns to `ready`/`syncing`) the instant
+   * re-authentication makes the token valid again. It never silently wedges or permanently stops.
+   */
   phase: SyncRuntimePhase;
   isRunning: boolean;
   lastError?: string;

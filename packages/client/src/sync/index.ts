@@ -106,6 +106,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
     onInitialSync,
     onError,
     onSyncError,
+    onSyncActivity,
     maxCommitRetries = DEFAULT_MAX_COMMIT_RETRIES,
   }: SyncShapesToTablesOptions): Promise<SyncShapesToTablesResult> => {
     let unsubscribed = false;
@@ -459,6 +460,9 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       if (unsubscribed) {
         return;
       }
+      // A delivered batch means a fetch just succeeded — the read path is alive (ADR-0013 Phase 3),
+      // so the runtime can clear an auth-needed status once a fresh token starts working again.
+      onSyncActivity?.();
       if (debug) {
         console.log("received messages", messages.length);
       }

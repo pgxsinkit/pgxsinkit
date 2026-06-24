@@ -53,6 +53,12 @@ export interface SyncShapesToTablesOptions {
    * read cache cannot silently diverge; recovery is a later commit or a restart/refetch.
    */
   onSyncError?: ((error: Error) => void) | undefined;
+  /**
+   * Fired whenever the stream delivers a batch — i.e. a fetch just succeeded (ADR-0013 Phase 3).
+   * The runtime uses this as the read path's "alive again" signal to clear an `auth-needed` status
+   * once sync resumes after re-authentication.
+   */
+  onSyncActivity?: (() => void) | undefined;
   /** Hard cap on commit-transaction attempts before going degraded. Defaults to {@link DEFAULT_MAX_COMMIT_RETRIES}. */
   maxCommitRetries?: number | undefined;
 }
