@@ -433,6 +433,135 @@ describe("write api implementation integration", () => {
     const remainingAuthors = await server.drizzle.select().from(authorsTable);
     expect(remainingAuthors.map((author) => author.id).sort()).toEqual([a1, a2].sort()); // a3 deleted
   });
+
+  // ADR-0015 Phase 5: the interleave proof against real Postgres. An external write advances the row
+  // BETWEEN a mutation's Base server version and its apply; the table's Conflict policy decides the
+  // outcome. The applier ran via the regenerated sync-function migration (db:migrate) + the runtime
+  // install, so this also proves the RETURNS TABLE function applies on a real database.
+  it("reject-if-stale: an interleaving external write conflicts a stale write instead of clobbering it", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8c001";
+    const todoId = "01963227-d4c7-72db-b858-f89f6af8c002";
+
+    await expectResponseStatus(
+      await postBatchMutations(server, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "a1000000-0000-4000-8000-000000000001",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "Author" },
+        }),
+      ]),
+      200,
+    );
+
+    // Create the reject-if-stale todo and capture the Server version the first client now "sees".
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a1000000-0000-4000-8000-000000000002",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: todoId, title: "original", author_id: authorId },
+      }),
+    ]);
+    const baseVersion = (await readFirstAck(createResponse)).serverUpdatedAtUs;
+    if (baseVersion === undefined) {
+      throw new Error("create ack did not carry a Server version");
+    }
+
+    // An external writer (authored against the same base, so NOT itself stale) advances the row.
+    const externalResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a1000000-0000-4000-8000-000000000003",
+        mutationSeq: 2,
+        kind: "update",
+        payload: { title: "external write" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    const externalAck = await readFirstAck(externalResponse);
+    expect(externalAck.status).toBe("acked");
+    const currentVersion = externalAck.serverUpdatedAtUs!;
+    expect(BigInt(currentVersion)).toBeGreaterThan(BigInt(baseVersion));
+
+    // A second client, still on the OLD base, submits its edit — the row has moved on: stale.
+    const staleResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a1000000-0000-4000-8000-000000000004",
+        mutationSeq: 3,
+        kind: "update",
+        payload: { title: "stale write" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    expect(staleResponse.status).toBe(200);
+    const staleAck = await readFirstAck(staleResponse);
+    expect(staleAck.status).toBe("conflicted");
+    expect(staleAck.serverUpdatedAtUs).toBe(currentVersion);
+    expect(staleAck.conflictReason).toContain("reject-if-stale");
+
+    // The row keeps the external writer's value — the stale write was NOT applied.
+    const row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId)))[0];
+    expect(row?.title).toBe("external write");
+  });
+
+  it("last-write-wins: a stale write is applied anyway — today's behaviour, now a named choice", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8c003";
+
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000001",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: authorId, name: "v0" },
+      }),
+    ]);
+    const baseVersion = (await readFirstAck(createResponse)).serverUpdatedAtUs;
+    if (baseVersion === undefined) {
+      throw new Error("create ack did not carry a Server version");
+    }
+
+    const externalResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000002",
+        mutationSeq: 2,
+        kind: "update",
+        payload: { name: "external" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    expect((await readFirstAck(externalResponse)).status).toBe("acked");
+
+    // A stale write on the old base: last-write-wins applies it (and acks), clobbering the external
+    // write — the deliberate, named choice (no silent default).
+    const staleResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000003",
+        mutationSeq: 3,
+        kind: "update",
+        payload: { name: "stale-but-applied" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    const staleAck = await readFirstAck(staleResponse);
+    expect(staleAck.status).toBe("acked");
+
+    const row = (await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId)))[0];
+    expect(row?.name).toBe("stale-but-applied");
+  });
 });
 
 describe("write api deferred FK behavior", () => {
@@ -979,11 +1108,29 @@ function buildBatchMutation(input: {
   mutationSeq: number;
   kind: "create" | "update" | "delete";
   payload: Record<string, unknown>;
+  baseServerVersion?: string;
 }) {
   return {
     ...input,
     clientTimestampUs: String(Date.now() * 1000),
   };
+}
+
+interface AckShape {
+  status: string;
+  serverUpdatedAtUs?: string;
+  conflictReason?: string;
+}
+
+/** Read the first ack of a /api/mutations response with a typed shape (ADR-0015 proofs). */
+async function readFirstAck(response: Response): Promise<AckShape> {
+  const text = await response.clone().text();
+  const body = JSON.parse(text) as { acks?: AckShape[] };
+  const ack = body.acks?.[0];
+  if (!ack) {
+    throw new Error(`expected at least one ack (HTTP ${response.status}): ${text}`);
+  }
+  return ack;
 }
 
 async function postBatchMutations(

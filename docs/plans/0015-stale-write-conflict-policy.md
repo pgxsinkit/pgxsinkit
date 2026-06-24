@@ -93,3 +93,50 @@ in the Podman integration lane against real Postgres.
 - Silent last-write-wins is impossible; where wanted it is a conscious per-table choice.
 - `validate` green; the interleave, no-self-conflict, and keep-overlay/resolve proofs green in
   the integration lane.
+
+## Build notes (BUILT — all five phases, order P2 → P1 → P3 → P4 → P5)
+
+Built in dependency order, each phase its own `validate:full`-green commit on `develop`.
+
+- **P2 — required Conflict policy.** `ConflictPolicy` + `CONFLICT_POLICIES` + `isConflictPolicy` in
+  `config.ts`; `conflictPolicy?` on `SyncTableEntry` and the `defineSyncTable` input;
+  `validateSyncTableEntry` rejects an undeclared policy on a writable table (the third hard-require,
+  right after the Server-version one). Swept every writable registry: demo `authors`=last-write-wins
+  / `todos`=reject-if-stale, integration `projects`=reject-if-stale + the rest last-write-wins, perf +
+  test fixtures. The raw `TableSpecInput`-shaped test configs (client-sync-reset / perf-lab-pglite /
+  shape-sync) bypass `validateSyncTableEntry`, so they need no policy.
+- **P1 — Base server version capture.** Optional `baseServerVersion` on `mutationEnvelopeSchema`. The
+  enqueue path stamps a chain head's base = the synced Server version at enqueue (captured BEFORE the
+  optimistic record overwrites it); a chained write stamps NULL and resolves at flush in
+  `readPendingBatchRows` via `COALESCE(base_server_version, MAX acked-predecessor
+server_updated_at_us, current synced version)`; a create gets none. The resolved base is re-stamped
+  into the journal at mark-as-sending and carried on the envelope.
+- **P3 — server detection (the crux, the only migration-touching part).** `buildTableBranch` emits
+  per-policy SQL: reject-if-stale carries `b bigint, m uuid` in the `json_to_recordset`, collects
+  stale rows (`t.<serverVersion> > x.b`) into a conflict accumulator, and guards the apply with
+  `(x.b IS NULL OR t.<serverVersion> <= x.b)`. `pgxsinkit_apply_mutations` now
+  `RETURNS TABLE(mutation_id, table_name, current_server_version)` — a return-type change, so the DDL
+  (and the regenerated migration) `DROP FUNCTION` first. `executePlpgsqlBatch` returns the conflicts;
+  the handler turns each into a `conflicted` ack (HTTP 409) + a `conflicted` operations-log row.
+  Migration regenerated via `bun run sync:function:generate` → `infra/drizzle/20260623235948_sync_artifact`.
+- **P4 — client conflict handling.** `conflicted` added to the journal state machine (terminal,
+  `sending -> conflicted`). The flush ack loop routes a `conflicted` ack to the terminal state KEEPING
+  the overlay (reconcile only clears acked, so the optimistic value stays); surfaced via the new
+  `onConflict` callback and the sync-state view's `conflict_state` (now scoped to `status =
+'conflicted'`). `discardConflict(table, entityKey)` clears the kept overlay + conflicted entry.
+  Resolution is an ordinary new mutation (its base resolves to the caught-up synced version).
+- **P5 — proofs.** Unit (PGlite, real-execution): `conflict-base-capture.test.ts` (no-self-conflict),
+  the detection block in `plpgsql-apply.test.ts` (both policies, update + delete, no-base, non-stale),
+  `conflict-handling.test.ts` (keep-overlay / onConflict / sync-state view / discard / resolve).
+  Integration (Podman, real Postgres): the interleave proof in `write-api.integration.test.ts` proves
+  reject-if-stale conflicts (row keeps the external value) and last-write-wins clobbers — and that the
+  regenerated `RETURNS TABLE` migration applies on a real database.
+
+GOTCHAs found during build: the demo/test mocks had used a `conflicted` ack as a generic "rejected"
+marker before the status had meaning (mutation-quarantine used it for a structural 4xx → quarantine;
+overlay-state asserted quarantine) — updated to `failed`/`conflicted` per the new semantics. Manual
+integration-test envelopes must use COLUMN names in the payload (`author_id`, not `authorId`) — the
+applier reads `x.p->>'<column>'`.
+
+Anton's steps: apply the regenerated sync-function migration to the dev DB
+(`bun run db:migrate`); the Podman lane already applied it to fresh containers.
