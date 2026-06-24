@@ -219,4 +219,89 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
       await db.close();
     }
   });
+
+  it("retires a conflicted row via the reconcile-on-sync trigger when the resolver's echo lands first (regression)", async () => {
+    // The race the `reconcileTable` retire alone cannot win: the resolution (a later acked write) is
+    // cleared by the reconcile-on-sync TRIGGER the instant its echo lands. If that beats the
+    // post-flush `reconcileTable` pass, the acked resolver is gone before reconcileTable's
+    // supersede-retire can see it, and the conflicted row ORPHANS — its `conflict_state` surfaces a
+    // resolved conflict forever. The trigger must do the retire itself (it has the echo context).
+    const db = await createFreshTestPGlite();
+    await db.exec(schemaSql);
+    await db.query(
+      `INSERT INTO projects (id, name, created_at_us, updated_at_us) VALUES ($1, 'seed', $2::bigint, $2::bigint)`,
+      [PROJECT_ID, SYNCED_VERSION],
+    );
+
+    try {
+      const entityKeyJson = JSON.stringify({ id: PROJECT_ID });
+      const RESOLVER_VERSION = "201"; // the version the server assigned to the acked resolution
+
+      // The kept optimistic overlay (the user's edit, preserved through the conflict).
+      await db.query(
+        `INSERT INTO projects_overlay (id, name, created_at_us, updated_at_us, overlay_kind, local_updated_at_us)
+         VALUES ($1, 'my edit, retried', $2::bigint, $3::bigint, 'pending_update', $3::bigint)`,
+        [PROJECT_ID, SYNCED_VERSION, RESOLVER_VERSION],
+      );
+      // seq 1 — the stale write the server rejected: terminal `conflicted`, kept for resolution.
+      await db.query(
+        `INSERT INTO projects_mutations
+           (mutation_id, id, entity_key_json, mutation_seq, mutation_kind, status, base_server_version,
+            payload_json, conflict_reason, server_updated_at_us, enqueued_at_us, updated_at_us)
+         VALUES ($1, $2, $3, 1, 'update', 'conflicted', $4::bigint, $5, 'reject-if-stale', $6::bigint, $7::bigint, $7::bigint)`,
+        [
+          crypto.randomUUID(),
+          PROJECT_ID,
+          entityKeyJson,
+          SYNCED_VERSION,
+          JSON.stringify({ name: "my edit" }),
+          SERVER_VERSION,
+          SYNCED_VERSION,
+        ],
+      );
+      // seq 2 — the resolution (re-applied edit) the server ACKED; its echo is about to land.
+      await db.query(
+        `INSERT INTO projects_mutations
+           (mutation_id, id, entity_key_json, mutation_seq, mutation_kind, status, payload_json,
+            server_updated_at_us, enqueued_at_us, acked_at_us, updated_at_us)
+         VALUES ($1, $2, $3, 2, 'update', 'acked', $4, $5::bigint, $6::bigint, $6::bigint, $6::bigint)`,
+        [
+          crypto.randomUUID(),
+          PROJECT_ID,
+          entityKeyJson,
+          JSON.stringify({ name: "my edit, retried" }),
+          RESOLVER_VERSION,
+          RESOLVER_VERSION,
+        ],
+      );
+
+      // The resolver's echo arrives: the synced row catches up to RESOLVER_VERSION, firing the
+      // reconcile-on-sync trigger (the ONLY cleanup that runs here — reconcileTable never does).
+      await db.query(`UPDATE projects SET name = 'my edit, retried', updated_at_us = $2::bigint WHERE id = $1`, [
+        PROJECT_ID,
+        RESOLVER_VERSION,
+      ]);
+
+      // Both journal rows are gone: seq 1 retired (the regression — it used to orphan), seq 2 cleared.
+      const remaining = await db.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM projects_mutations WHERE id = $1`,
+        [PROJECT_ID],
+      );
+      expect(remaining.rows[0]?.count).toBe(0);
+
+      // No conflict lingers in the convergence view, and the overlay (nothing owes it) is cleared, so
+      // the read model is the converged server value.
+      const syncState = await db.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM projects_sync_state WHERE id = $1`,
+        [PROJECT_ID],
+      );
+      expect(syncState.rows[0]?.count).toBe(0);
+
+      const readModel = await readReadModel(db);
+      expect(readModel?.name).toBe("my edit, retried");
+      expect(readModel?.overlayKind).toBe("synced");
+    } finally {
+      await db.close();
+    }
+  });
 });

@@ -180,6 +180,19 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     statements.push(
       `CREATE OR REPLACE FUNCTION ${projection.reconcileFunction}() RETURNS TRIGGER AS $$\n` +
         `BEGIN\n` +
+        `  -- ADR-0015: retire a terminal 'conflicted' row once a LATER write on the same entity has\n` +
+        `  -- been acked — that later write IS the resolution. The acked resolver is cleared by the\n` +
+        `  -- acked-delete below the moment its echo lands; if that echo wins the race against the\n` +
+        `  -- post-flush reconcileTable pass, the resolver is gone before reconcileTable's supersede-\n` +
+        `  -- retire can see it and the conflicted row orphans (its surfaced conflict_state never\n` +
+        `  -- clears). Doing the retire here too — in the trigger that has the echo context, BEFORE the\n` +
+        `  -- acked-clear — closes that race. Mirrors reconcileTable's retire (mutation.ts).\n` +
+        `  DELETE FROM ${projection.journalTable} AS "conflicted"\n` +
+        `  USING ${projection.journalTable} AS "resolver"\n` +
+        `  WHERE "conflicted".status = 'conflicted' AND (${pkMatchSql("conflicted")})\n` +
+        `    AND "resolver".entity_key_json = "conflicted".entity_key_json\n` +
+        `    AND "resolver".mutation_seq > "conflicted".mutation_seq\n` +
+        `    AND "resolver".status = 'acked';\n` +
         `  DELETE FROM ${projection.journalTable} AS "journal"\n` +
         `  WHERE status = 'acked' AND (${pkMatchSql("journal")})\n` +
         `    AND (\n` +
