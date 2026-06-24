@@ -21,8 +21,21 @@ export default { fetch: server.fetch }; // Bun.serve picks this up
 
 ## Deno / Supabase Edge Functions
 
-Three things bite when you move off Bun. None are toolkit limitations — they are how Deno and the
-Edge platform work — but you will hit all three, so here they are with their fixes.
+Deno runs TypeScript natively, so there is no inherent build step. How you feed it the toolkit
+decides whether you need one:
+
+- **Importing the published `npm:@pgxsinkit/server`** (built, with proper `exports`) — Deno resolves
+  it directly. No bundle, no flags; write your function as raw TS and deploy. This is the path most
+  adopters want.
+- **Importing unbuilt workspace source** (a monorepo where the toolkit lives next to your app) — Deno
+  rejects the source's extensionless relative imports, so you either enable Deno's `sloppy-imports`
+  unstable flag, or **bundle** each function ahead of time. Bundling needs zero runtime resolution,
+  so it runs on any Edge runtime version offline — the trade is a build step. The board demo bundles
+  for exactly this reason (it consumes the toolkit as unpublished workspace source).
+
+The rest of this section covers the bundle path plus the two runtime concerns (path prefix, claims)
+that apply **either way**. None are toolkit limitations — they are how Deno and the Edge platform
+work — but you will hit them, so here they are with their fixes.
 
 <Steps>
 

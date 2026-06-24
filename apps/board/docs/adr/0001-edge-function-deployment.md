@@ -61,3 +61,26 @@ What the decision became in code, with the deltas worth recording:
 - **Live shake-out** (needs the stack up): image tags, GoTrue/PostgREST env, and
   postgres.js under Deno's node-compat. The static layer (bundles → valid ESM,
   migrations generate, validate green) is confirmed without containers.
+
+### Why bundle, rather than run raw TS
+
+Deno runs TypeScript natively, so the functions _could_ run unbundled. The friction
+is not TS execution — it is **module resolution of unbuilt monorepo source**: the
+toolkit packages import their internals with extensionless specifiers
+(`./electric-proxy`, not `./electric-proxy.ts`), which Deno's resolver rejects, and
+`@pgxsinkit/board-schema` is unpublished (no `npm:` form). Three options were weighed:
+
+- **Raw source + Deno `sloppy-imports`** — mount `packages/`, an import map
+  (`@pgxsinkit/*` → source, deps → `npm:`), and the `sloppy-imports` unstable flag to
+  accept the extensionless imports. No build, but leans on edge-runtime honoring that
+  flag (unverified, and an unstable surface).
+- **Published `npm:@pgxsinkit/*` + raw TS** — the zero-flag path a real adopter uses;
+  rejected for the _local_ loop because it couples the demo to publishing the
+  still-moving toolkit on every change.
+- **Bundle (chosen)** — needs zero runtime resolution, so it comes up on any
+  edge-runtime version, offline, first try. The cost is one Bun build step
+  (`edge:build`); accepted because demo reliability outweighs avoiding it.
+
+The extensionless-import friction is purely a property of consuming **unbuilt
+source** — an external adopter importing the published, built package skips all of it
+(documented in the toolkit's deploy guide).
