@@ -106,7 +106,16 @@ export function createSyncServer<
 
   let address: SyncServerAddress | null = null;
   const operationsLogConfig = resolveOperationsLogConfig(options.operationsLog);
-  const operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig).then(() => {});
+  // Thread the presence probe into the effective config. operations_log is an *optional* feature
+  // (default-enabled), so if logging was requested but the table is absent, disable it at runtime
+  // rather than letting every write fail on a missing table — the documented degradation
+  // (ensureOperationsLogSchema warns and returns `false`). The route awaits `operationsLogReady`
+  // before any logOperation, so the corrected flag is in effect by the time logging runs, and the
+  // route holds this same config object. (Board dogfooding finding: discarding this boolean made a
+  // missing optional table 500 every mutation.)
+  const operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig).then((present) => {
+    operationsLogConfig.enabled = operationsLogConfig.enabled && present;
+  });
 
   if (ownsApp) {
     const corsMiddleware = cors({

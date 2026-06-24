@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { count, eq } from "drizzle-orm";
+import { count, eq, sql } from "drizzle-orm";
 
 import {
   authorsTable,
@@ -1091,6 +1091,113 @@ describe("write api demo auth RLS", () => {
     expect(authors[0]?.modifiedBy).toBe(demoAdminId);
     expect(authors[0]?.updatedAtUs).toBeTypeOf("bigint");
     expect(authors[0]?.updatedAtUs).toBeGreaterThan(beforeUpdatedAtUs ?? 0n);
+  });
+});
+
+describe("write api tolerates a missing operations_log table", () => {
+  // Regression (board dogfooding): operations_log is an *optional*, default-enabled feature. A
+  // consumer that leaves it enabled but never creates the table (exactly the board's setup) must still
+  // have writes succeed — the startup probe disables logging when the table is absent. The bug: the
+  // probe's boolean was discarded, so the success-path log INSERT 500'd on the missing table and
+  // rolled back every write. The suite shares one database (db:migrate runs once), so this drops the
+  // table for the scenario and restores it afterwards for the later integration files.
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
+  let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+
+  beforeAll(async () => {
+    await serverDb.db.execute(sql`DROP TABLE IF EXISTS operations_log`);
+    server = createSyncServer({
+      registry: demoSyncRegistry,
+      db: serverDb.db,
+      resolveAuthClaims: () => ({ role: "authenticated", sub: DEMO_USER1_ID }),
+      // operationsLog omitted → defaults to { enabled: true }, the board's configuration.
+    });
+    await installPlpgsqlBatchFunction(server.drizzle, demoSyncRegistry);
+  });
+
+  afterAll(async () => {
+    // Restore the optional table (and its indexes — mirrors operations-log/schema.ts) so the later
+    // integration files that share this database keep logging.
+    await serverDb.db.execute(sql`
+      CREATE TABLE IF NOT EXISTS operations_log (
+        id bigserial PRIMARY KEY,
+        table_name varchar(255),
+        operation_kind varchar(24),
+        user_id uuid,
+        entity_key_json jsonb,
+        payload_json jsonb,
+        status varchar(32) NOT NULL,
+        error_message text,
+        http_status integer,
+        mutation_id uuid,
+        mutation_seq integer,
+        client_timestamp_us bigint,
+        request_path text,
+        server_timestamp_us bigint NOT NULL DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * 1000000::numeric))),
+        created_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await serverDb.db.execute(
+      sql`CREATE INDEX IF NOT EXISTS operations_log_created_at_idx ON operations_log (created_at DESC)`,
+    );
+    await serverDb.db.execute(
+      sql`CREATE INDEX IF NOT EXISTS operations_log_table_name_idx ON operations_log (table_name)`,
+    );
+    await serverDb.db.execute(sql`CREATE INDEX IF NOT EXISTS operations_log_user_id_idx ON operations_log (user_id)`);
+    await serverDb.db.execute(sql`CREATE INDEX IF NOT EXISTS operations_log_status_idx ON operations_log (status)`);
+    await serverDb.db.execute(
+      sql`CREATE INDEX IF NOT EXISTS operations_log_mutation_id_idx ON operations_log (mutation_id)`,
+    );
+    await server.stop();
+    await serverDb.close();
+  });
+
+  beforeEach(async () => {
+    await serverDb.db.delete(todosTable);
+    await serverDb.db.delete(authorsTable);
+  });
+
+  it("applies a write with operation logging silently disabled", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8fa01";
+    const todoId = "01963227-d4c7-72db-b858-f89f6af8fa02";
+
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "0a111111-0000-4000-8000-000000000001",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: authorId, name: "No-ops-log author" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "0a111111-0000-4000-8000-000000000002",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Write without an operations_log table",
+          description: null,
+          author_id: authorId,
+          status: "todo",
+          priority: "medium",
+        },
+      }),
+    ]);
+
+    expect(response.status).toBe(200);
+
+    const rows = await serverDb.db.select().from(todosTable).where(eq(todosTable.id, todoId));
+    expect(rows).toHaveLength(1);
+
+    // Degraded, not auto-created: the optional table is still absent.
+    const presence = await serverDb.db.execute<{ tableName: string | null }>(
+      sql`SELECT to_regclass('public.operations_log')::text AS "tableName"`,
+    );
+    const presenceRow = Array.from(presence as Iterable<unknown>, (e) => e as { tableName: string | null })[0];
+    expect(presenceRow?.tableName).toBeNull();
   });
 });
 
