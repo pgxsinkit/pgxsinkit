@@ -20,7 +20,10 @@ This page gets you from zero to a working read + write path. For what each packa
   Without it, sync fails closed (no rows stream). See
   [The Electric subquery requirement](/concepts/electric-subqueries/).
 
-- **Bun** for the write API runtime, and **Drizzle** (`drizzle-orm@1.0.0-rc.2`+) for schema.
+- **A runtime that serves a web `fetch` handler** for the write API — Bun, Deno, **Supabase Edge
+  Functions**, Cloudflare Workers, etc. The server core is runtime-neutral (Hono + web-standard
+  `Request`/`Response`, with the DB client injected); only the optional `server.start()` helper is
+  Bun-specific. And **Drizzle** (`drizzle-orm@1.0.0-rc.2`+) for schema.
 
 <Aside type="caution" title="Enum columns in shape filters">
   A PostgreSQL `enum` referenced in a shape `where` must be cast to `text` —
@@ -48,7 +51,10 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    ```ts
    // sync-registry.ts
    import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
-   import { uuid, varchar } from "drizzle-orm/pg-core";
+   import { sql } from "drizzle-orm";
+   import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+
+   const nowMicros = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)`;
 
    export const registry = defineSyncRegistry({
      widgets: defineSyncTable({
@@ -58,12 +64,30 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
          id: uuid("id").primaryKey(),
          label: varchar("label", { length: 120 }).notNull(),
          ownerId: uuid("owner_id"),
+         // Server version: a strictly-monotonic per-row token convergence keys on.
+         updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(nowMicros),
        }),
-       // Optionally add governance.managedFields (owner/timestamps) and a
-       // shape.rowFilter for ownership-based row filtering.
+       // Both are REQUIRED for a writable table — no silent default:
+       conflictPolicy: "reject-if-stale", // or "last-write-wins"
+       governance: {
+         managedFields: [
+           { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+           { column: "ownerId", applyOn: ["create"], strategy: "authUid" },
+         ],
+       },
+       // Add a shape.rowFilter for row-level read filtering (see the security note below).
      }),
    });
    ```
+
+   <Aside type="caution" title="Writable tables have two hard requirements">
+     `defineSyncRegistry` throws unless every `readwrite` table declares **both**: a **Server
+     version** (a `nowMicroseconds`-on-`update` managed field, conventionally `updated_at_us`) that
+     optimistic convergence keys on, and a **`conflictPolicy`** (`reject-if-stale` |
+     `last-write-wins`) — there is no silent default, because a silent last-write-wins is exactly the
+     data loss the choice exists to surface. Fields stamped by `authUid` / `nowMicroseconds` are
+     server-assigned; the write API rejects them if present in a client write payload.
+   </Aside>
 
 2. **Provision the apply function.** The write path applies batches through one in-database PL/pgSQL
    function, `pgxsinkit_apply_mutations`. Generate a drizzle-kit migration that installs it from your
@@ -101,9 +125,28 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    });
 
    export default { fetch: server.fetch };
+   // `server.fetch` is a web-standard handler — deploy it on Bun, Deno, Supabase Edge
+   // Functions, or Cloudflare Workers. Only the optional `server.start()` helper needs Bun.
    ```
 
 </Steps>
+
+<Aside type="note" title="Two execution contexts enforce the same authorization">
+  Authorization runs in two different engines, so the subject is referenced two ways — derive both
+  from one predicate so a row is never readable-but-unwritable (or the reverse) by accident:
+
+- **Write path — RLS in Postgres:** policies use `auth.uid()` /
+  `current_setting('request.jwt.claims')`; the applier sets the claims before applying a batch.
+- **Read path — the shape `rowFilter`:** the proxy builds the Electric shape `where` and
+  **Electric** runs it, not Postgres — so a `customWhere` filters on the **literal** `claims.sub`
+  (escaped with `escapeSqlLiteral`), with any enum cast to `text`.
+
+For RLS, `@pgxsinkit/contracts` ships `buildSupabaseOwnerOrAdminNativePolicies` and
+`buildSupabaseMembershipNativePolicies` for the owner and membership shapes; for anything beyond
+them (e.g. collaborative any-member writes), compose your own from `pgPolicy` + the exported
+predicate builders.
+
+</Aside>
 
 ## Stand up the read path
 

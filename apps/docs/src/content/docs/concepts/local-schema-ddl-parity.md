@@ -60,6 +60,10 @@ PGlite would not.
 ## Practical implications
 
 - Don't rely on a local default, CHECK, FK, or UNIQUE firing **today** — they aren't emitted yet.
+- Because the local schema has **no foreign keys**, you never need `deferrableConstraints` for the
+  _local_ apply — even when a child and its parent sync in one consistency group. `deferrableConstraints`
+  governs only the **server** apply, where the FKs are real and a batch may stage a parent and child
+  together.
 - Enums _are_ created locally; other prerequisite objects go through `prepareLocalDbBeforeSchema`.
 - Treat the server as the only place integrity and security are guaranteed; the local schema exists
   to serve fast offline reads and to stage optimistic writes.
