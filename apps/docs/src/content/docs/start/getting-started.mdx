@@ -141,6 +141,19 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
    generator reads `out` from it (or set `--out` explicitly); with neither it probes `drizzle/` and
    `infra/drizzle/`.
 
+   The generated function carries a fingerprint of itself (a `COMMENT ON FUNCTION`). At startup the
+   server compares it to the registry it is running and **refuses to serve writes** if they disagree —
+   so a registry change or a `@pgxsinkit/server` upgrade that you forgot to regenerate + apply fails loud
+   instead of applying writes against a stale function (soften with `applyFunctionDriftCheck: "warn" | "off"`).
+   To catch the same drift in CI before it ships, run the generator in `--check` mode — read-only, writes
+   nothing, non-zero exit on drift:
+
+   ```bash
+   bunx pgxsinkit-generate --check \
+     --registry ./sync-registry.ts --export registry \
+     --project-dir ./db --config drizzle.config.ts
+   ```
+
 3. **Create the server** and serve its `fetch`. All writes go through `POST /api/mutations`; the
    ownership-enforcing shape proxy is served from the same app.
 

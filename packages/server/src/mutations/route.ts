@@ -21,7 +21,12 @@ import {
 import type { OperationsLogConfig } from "../operations-log/types";
 import { logOperation, logOperationSafely } from "../operations-log/writer";
 import type { FetchHandler } from "../router";
-import { executePlpgsqlBatch, verifyPlpgsqlBatchFunction, verifyRlsAuthHelpers } from "./plpgsql-apply";
+import {
+  executePlpgsqlBatch,
+  verifyPlpgsqlBatchFunction,
+  verifyRlsAuthHelpers,
+  type ApplyFunctionDriftCheck,
+} from "./plpgsql-apply";
 import type { TransactionClient } from "./types";
 
 const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
@@ -38,12 +43,13 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
   operationsLogConfig: OperationsLogConfig,
   operationsLogReady: Promise<void>,
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null,
+  applyFunctionDriftCheck?: ApplyFunctionDriftCheck,
 ): FetchHandler {
   let startupReadyPromise: Promise<void> | undefined;
 
   const startupReady = () => {
     if (!startupReadyPromise) {
-      startupReadyPromise = installStartupDdl(db, registry);
+      startupReadyPromise = installStartupDdl(db, registry, applyFunctionDriftCheck);
     }
 
     return startupReadyPromise;
@@ -630,8 +636,13 @@ async function readServerUpdatedAtUs(
 async function installStartupDdl<TRegistry extends SyncTableRegistry>(
   db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   registry: TRegistry,
+  applyFunctionDriftCheck?: ApplyFunctionDriftCheck,
 ): Promise<void> {
-  await verifyPlpgsqlBatchFunction(db);
+  await verifyPlpgsqlBatchFunction(
+    db,
+    registry,
+    applyFunctionDriftCheck ? { driftCheck: applyFunctionDriftCheck } : {},
+  );
 
   if (isRlsAuthContextRequired(registry)) {
     await verifyRlsAuthHelpers(db);

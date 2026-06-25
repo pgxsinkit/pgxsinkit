@@ -181,13 +181,16 @@ export function canonicalRegistryString(registry: SyncTableRegistry): string {
  * structural change produces a different one.
  */
 export function fingerprintRegistry(registry: SyncTableRegistry): string {
-  return fnv1a64Hex(canonicalRegistryString(registry));
+  return hashString(canonicalRegistryString(registry));
 }
 
-// FNV-1a over UTF-8 bytes, returned as 16 hex chars. Pure and dependency-free so it
-// runs identically in the browser and in Bun (no crypto import). A fingerprint, not
-// a security primitive.
-function fnv1a64Hex(input: string): string {
+/**
+ * FNV-1a over UTF-8 bytes, returned as 16 hex chars. Pure and dependency-free so it runs
+ * identically in the browser and in Bun (no crypto import). A fingerprint, not a security
+ * primitive — used both for the registry shape fingerprint (ADR-0004) and for the apply-function
+ * DDL fingerprint embedded in the generated migration (ADR-0018).
+ */
+export function hashString(input: string): string {
   const bytes = new TextEncoder().encode(input);
   const prime = 0x100000001b3n;
   const mask = (1n << 64n) - 1n;

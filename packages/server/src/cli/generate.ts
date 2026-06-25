@@ -22,9 +22,11 @@ import { pathToFileURL } from "node:url";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
-import { buildPlpgsqlBatchFunctionDdl } from "../mutations/plpgsql-apply";
+import { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "../mutations/plpgsql-apply";
 
 function parseArgs(argv: string[]) {
+  let check = false;
+  let functionSchema: string | undefined;
   let registryPath = "";
   let projectDir = process.cwd();
   let migrationName = "sync_artifact";
@@ -46,17 +48,21 @@ function parseArgs(argv: string[]) {
       outDir = argv[++i]!;
     } else if (arg === "--export" && argv[i + 1]) {
       exportName = argv[++i]!;
+    } else if (arg === "--check") {
+      check = true;
+    } else if (arg === "--function-schema" && argv[i + 1]) {
+      functionSchema = argv[++i]!;
     }
   }
 
   if (!registryPath) {
     console.error(
-      "Usage: pgxsinkit-generate --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts] [--out drizzle]",
+      "Usage: pgxsinkit-generate [--check] --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts] [--out drizzle] [--function-schema schema]",
     );
     process.exit(1);
   }
 
-  return { registryPath, projectDir, migrationName, drizzleConfig, outDir, exportName };
+  return { check, functionSchema, registryPath, projectDir, migrationName, drizzleConfig, outDir, exportName };
 }
 
 /** Registry source paths are relative to the invocation directory, not the migration output directory. */
@@ -182,13 +188,74 @@ function findNewMigrationFile(drizzleDir: string): string | null {
   return null;
 }
 
-async function main() {
-  const { registryPath, projectDir, migrationName, drizzleConfig, outDir, exportName } = parseArgs(
-    process.argv.slice(2),
+/**
+ * `--check` (ADR-0018): the read-only, pre-deploy half of apply-function drift detection. Computes the
+ * fingerprint the apply function SHOULD carry for this registry + applier codegen and asserts that a
+ * committed migration already embeds it. No drizzle-kit, no writes — safe to run in CI. The server
+ * enforces the same fingerprint at startup; this surfaces the drift before a deploy. Generic by design:
+ * a consumer points it at their own registry, drizzle config, and (optionally) function schema.
+ */
+async function runCheck(
+  registry: SyncTableRegistry,
+  options: {
+    projectDir: string;
+    drizzleConfig: string | undefined;
+    outDir: string | undefined;
+    functionSchema: string | undefined;
+    label: string;
+  },
+): Promise<void> {
+  const fingerprint = expectedApplyFingerprint(
+    registry,
+    options.functionSchema ? { functionSchema: options.functionSchema } : {},
   );
+
+  const drizzleDir = await resolveDrizzleOutDir(options.projectDir, options.drizzleConfig, options.outDir);
+  if (!drizzleDir) {
+    console.error(
+      `[pgxsinkit-generate --check] Could not resolve a drizzle migrations directory in ${options.projectDir}.`,
+    );
+    process.exit(1);
+  }
+
+  for (const entry of readdirSync(drizzleDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    try {
+      if (readFileSync(join(drizzleDir, entry.name, "migration.sql"), "utf-8").includes(fingerprint)) {
+        console.log(`[pgxsinkit-generate --check] ✓ ${options.label}: a committed migration carries ${fingerprint}`);
+        return;
+      }
+    } catch {}
+  }
+
+  console.error(
+    `[pgxsinkit-generate --check] ✗ ${options.label}: no committed migration in ${drizzleDir} carries the ` +
+      `current apply-function fingerprint (${fingerprint}).\n` +
+      `  The registry or @pgxsinkit/server codegen changed since the sync function migration was generated.\n` +
+      `  Regenerate it (drop --check) and commit + apply the new migration before deploying.`,
+  );
+  process.exit(1);
+}
+
+async function main() {
+  const { check, functionSchema, registryPath, projectDir, migrationName, drizzleConfig, outDir, exportName } =
+    parseArgs(process.argv.slice(2));
 
   console.log(`Importing registry from ${registryPath}...`);
   const registry = await importRegistry(registryPath, exportName);
+
+  if (check) {
+    await runCheck(registry, {
+      projectDir,
+      drizzleConfig,
+      outDir,
+      functionSchema,
+      label: exportName ?? "(conventional registry)",
+    });
+    return;
+  }
 
   console.log(`Generating DDL for ${Object.keys(registry).length} table(s)...`);
   const ddl = buildPlpgsqlBatchFunctionDdl(registry);

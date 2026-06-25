@@ -79,6 +79,10 @@ detail, in the `operating` skill (`@pgxsinkit/client`).
 
 ## Common mistakes
 
+- Deploying a registry change or a `@pgxsinkit/server` upgrade without regenerating + applying the sync
+  function migration. The server fingerprints the apply function and **refuses to serve writes** on a
+  mismatch (override with `applyFunctionDriftCheck: "warn" | "off"`); run `pgxsinkit-generate --check` in
+  CI to catch it before deploy.
 - Shipping toolkit source to Deno without bundling, or leaving builtins un-prefixed (not `node:*`).
 - Forgetting the path rewrite, so `/mutations` 404s behind the function name.
 - Verifying the JWT only at the gateway instead of in `resolveAuthClaims` (non-portable).

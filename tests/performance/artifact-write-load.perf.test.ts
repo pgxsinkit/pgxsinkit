@@ -51,7 +51,7 @@ describe("performance: artifact write load", () => {
         await provisioningServer.drizzle.execute(sql.raw(buildSyntheticServerSchemaSql(registry)));
         await provisioningServer.drizzle.execute(sql.raw(buildSyntheticGovernanceSql(registry)));
         await installPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
-        await verifyPlpgsqlBatchFunction(provisioningServer.drizzle);
+        await verifyPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
       } finally {
         await provisioningServer.stop();
       }

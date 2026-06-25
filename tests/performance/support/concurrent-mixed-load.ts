@@ -400,7 +400,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticServerSchemaSql(registry)));
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticGovernanceSql(registry)));
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
-      await verifyPlpgsqlBatchFunction(provisioningServer.drizzle);
+      await verifyPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
       const executeQuery = (query: ReturnType<typeof sql.raw>) => provisioningServer.drizzle.execute(query);
       await seedSyntheticRows(
         registry,
@@ -543,7 +543,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticServerSchemaSql(registry)));
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticGovernanceSql(registry)));
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
-      await verifyPlpgsqlBatchFunction(provisioningServer.drizzle);
+      await verifyPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
       const executeQuery = (query: ReturnType<typeof sql.raw>) => provisioningServer.drizzle.execute(query);
       await seedSyntheticRows(
         registry,

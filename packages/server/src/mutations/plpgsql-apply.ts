@@ -5,6 +5,7 @@ import { getColumns } from "drizzle-orm/utils";
 import {
   escapeSqlLiteral as toSqlLiteral,
   getProjectedColumns,
+  hashString,
   quoteIdentifier as quoteIdent,
   resolveServerVersionColumnName,
   type BatchMutationRequest,
@@ -267,7 +268,13 @@ function buildTableBranch(entry: SyncTableEntry): string {
     `.trim();
 }
 
-export function buildPlpgsqlBatchFunctionDdl(
+const APPLY_FUNCTION_NAME = "pgxsinkit_apply_mutations";
+const APPLY_FUNCTION_ARG_TYPES = "jsonb, text, boolean, boolean, jsonb";
+// ADR-0018: version-prefixed so the stored format can evolve; the reader parses the prefix and
+// treats an unknown prefix as "can't compare" (warn) rather than a mismatch (error).
+const APPLY_FINGERPRINT_PREFIX = "pgxsinkit:fp1:";
+
+function buildApplyFunctionBody(
   registry: SyncTableRegistry,
   options: {
     functionSchema?: string;
@@ -276,7 +283,7 @@ export function buildPlpgsqlBatchFunctionDdl(
   const tableBranches = Object.values(registry)
     .map((entry) => buildTableBranch(entry as SyncTableEntry))
     .join("\n");
-  const functionName = qualifyIdent(options.functionSchema, "pgxsinkit_apply_mutations");
+  const functionName = qualifyIdent(options.functionSchema, APPLY_FUNCTION_NAME);
 
   return `
 -- ADR-0015: the function now RETURNS the per-mutation conflicts (a reject-if-stale stale write). A
@@ -435,6 +442,39 @@ $$;
 `.trim();
 }
 
+/**
+ * The fingerprint the installed apply function should carry for this registry + applier codegen
+ * (ADR-0018). It is a hash of the exact generated DDL body, so it shifts on any registry-shape
+ * change AND on any change to how the applier emits SQL (e.g. a @pgxsinkit/server upgrade) — the
+ * two drift classes a bare signature check cannot see. It does NOT depend on TS-side row-filter /
+ * customWhere logic, which never enters the apply function (that shapes the read proxy, not writes).
+ */
+export function expectedApplyFingerprint(
+  registry: SyncTableRegistry,
+  options: {
+    functionSchema?: string;
+  } = {},
+): string {
+  return APPLY_FINGERPRINT_PREFIX + hashString(buildApplyFunctionBody(registry, options));
+}
+
+export function buildPlpgsqlBatchFunctionDdl(
+  registry: SyncTableRegistry,
+  options: {
+    functionSchema?: string;
+  } = {},
+): string {
+  const body = buildApplyFunctionBody(registry, options);
+  const functionName = qualifyIdent(options.functionSchema, APPLY_FUNCTION_NAME);
+  const fingerprint = APPLY_FINGERPRINT_PREFIX + hashString(body);
+
+  // ADR-0018: stamp the function with the fingerprint of this exact DDL body. Stored as a COMMENT
+  // because it is function-scoped, replaced atomically with the function, and read back in one line
+  // via obj_description — so the server (startup) and CI (pre-deploy) can both detect a function
+  // that is stale relative to the registry + codegen it is meant to serve.
+  return `${body}\n\nCOMMENT ON FUNCTION ${functionName}(${APPLY_FUNCTION_ARG_TYPES}) IS '${fingerprint}';`;
+}
+
 export async function installPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
   db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   registry: TRegistry,
@@ -448,17 +488,34 @@ export async function installPlpgsqlBatchFunction<TRegistry extends SyncTableReg
 
 type FunctionPresenceRow = {
   functionName: string | null;
+  fingerprintComment: string | null;
 };
+
+/**
+ * What `verifyPlpgsqlBatchFunction` does when the installed apply function's fingerprint does not
+ * match the registry + codegen this server is running (ADR-0018):
+ * - `"error"` (default): throw, refusing to serve writes against a stale applier.
+ * - `"warn"`: log loudly and continue (for unusual deploy orders, e.g. blue/green).
+ * - `"off"`: skip the comparison entirely.
+ * An absent or unknown-format comment (a function installed by an older pgxsinkit) is never a
+ * mismatch — it is reported as "cannot verify" and allowed through, so upgrading the server cannot
+ * break an already-correct deployment.
+ */
+export type ApplyFunctionDriftCheck = "error" | "warn" | "off";
 
 export async function verifyPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
   db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
+  registry: TRegistry,
   options: {
     functionSchema?: string;
+    driftCheck?: ApplyFunctionDriftCheck;
   } = {},
 ): Promise<void> {
   const functionSignature = `${options.functionSchema ? `${options.functionSchema}.` : "public."}pgxsinkit_apply_mutations(jsonb,text,boolean,boolean,jsonb)`;
   const result = await db.execute<FunctionPresenceRow>(sql`
-    SELECT to_regprocedure(${functionSignature})::text AS "functionName"
+    SELECT
+      to_regprocedure(${functionSignature})::text AS "functionName",
+      obj_description(to_regprocedure(${functionSignature})::oid, 'pg_proc') AS "fingerprintComment"
   `);
 
   const row = Array.from(result as Iterable<unknown>, (entry) => entry as FunctionPresenceRow)[0];
@@ -468,6 +525,40 @@ export async function verifyPlpgsqlBatchFunction<TRegistry extends SyncTableRegi
       "The write path requires the preinstalled function pgxsinkit_apply_mutations(jsonb,text,boolean,boolean,jsonb). Apply sync function migrations before starting the write API.",
     );
   }
+
+  const driftCheck = options.driftCheck ?? "error";
+  if (driftCheck === "off") {
+    return;
+  }
+
+  const expected = expectedApplyFingerprint(registry, options);
+  const installed = row.fingerprintComment;
+
+  if (installed == null || !installed.startsWith(APPLY_FINGERPRINT_PREFIX)) {
+    // Older pgxsinkit, or a hand-installed function: nothing to compare against. Surface it so the
+    // operator knows drift detection is off for this deployment, but do not block startup.
+    console.warn(
+      "[pgxsinkit] The installed pgxsinkit_apply_mutations function carries no fingerprint comment, " +
+        "so it cannot be checked against the current registry. Regenerate the sync function migration " +
+        "(pgxsinkit-generate) and apply it to enable apply-function drift detection.",
+    );
+    return;
+  }
+
+  if (installed === expected) {
+    return;
+  }
+
+  const message =
+    `The installed pgxsinkit_apply_mutations function does not match the current registry/applier ` +
+    `(installed ${installed}, expected ${expected}). It was generated from a different registry shape ` +
+    `or an older @pgxsinkit/server. Regenerate the sync function migration (pgxsinkit-generate) and ` +
+    `apply it before serving writes. Set applyFunctionDriftCheck:'warn' or 'off' to override.`;
+
+  if (driftCheck === "error") {
+    throw new Error(message);
+  }
+  console.warn(`[pgxsinkit] ${message}`);
 }
 
 type AuthHelperPresenceRow = {

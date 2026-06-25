@@ -10,6 +10,7 @@ import type {
 } from "@pgxsinkit/contracts";
 
 import { proxyElectricShapeRequest } from "./electric-proxy";
+import type { ApplyFunctionDriftCheck } from "./mutations/plpgsql-apply";
 import { batchMutationPaths, createMutationHandler } from "./mutations/route";
 import { ensureOperationsLogSchema } from "./operations-log/ddl";
 import type { OperationsLogConfig } from "./operations-log/types";
@@ -60,6 +61,13 @@ export interface CreateSyncServerOptions<
   idleTimeoutSeconds?: number;
   allowedOrigins?: string[];
   onStatusChange?: (status: SyncRuntimeStatus) => void;
+  /**
+   * What to do at startup if the installed `pgxsinkit_apply_mutations` function does not match the
+   * current registry + applier codegen (ADR-0018). Defaults to `"error"` (refuse to serve writes
+   * against a stale applier). Use `"warn"`/`"off"` only for deploy orders that update the function a
+   * beat after the server. An unfingerprinted function (older pgxsinkit) is never treated as drift.
+   */
+  applyFunctionDriftCheck?: ApplyFunctionDriftCheck;
 }
 
 export interface ServerDiagnostics<TRegistry extends SyncTableRegistry> {
@@ -154,6 +162,7 @@ export function createSyncServer<
     operationsLogConfig,
     operationsLogReady,
     options.resolveAuthClaims,
+    options.applyFunctionDriftCheck,
   );
   for (const path of batchMutationPaths) {
     router.post(path, mutationHandler);
@@ -271,7 +280,8 @@ function resolveOperationsLogConfig(options?: { enabled?: boolean }): Operations
 export { batchMutationPaths, createMutationHandler } from "./mutations/route";
 export type { CorsConfig, CorsScope, FetchHandler, RouterErrorHandler } from "./router";
 export { FetchRouter } from "./router";
-export { buildPlpgsqlBatchFunctionDdl } from "./mutations/plpgsql-apply";
+export { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "./mutations/plpgsql-apply";
+export type { ApplyFunctionDriftCheck } from "./mutations/plpgsql-apply";
 export { ensureOperationsLogSchema } from "./operations-log/ddl";
 export { operationsLogTable } from "./operations-log/schema";
 export { proxyElectricShapeRequest } from "./electric-proxy";
