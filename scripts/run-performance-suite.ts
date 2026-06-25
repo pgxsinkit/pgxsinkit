@@ -129,7 +129,9 @@ async function main() {
     await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL", SERVICE_START_TIMEOUT_MS);
 
     await runCommand("bun", ["run", "db:migrate"], testEnv);
-    await runCommand("bun", ["run", "vitest", "run", "--no-file-parallelism", ...testFiles], testEnv);
+    // The perf suites are bun:test files (each sets its own multi-minute per-test timeout). Run them
+    // through `bun test`, not a vitest binary the repo does not ship.
+    await runCommand("bun", ["test", ...testFiles], testEnv);
   } catch (error) {
     suiteError = error;
   } finally {
