@@ -13,7 +13,29 @@ const allowedOrigins = ["http://localhost:5173", "http://localhost:5174"];
 const operationsLogEnabled = writeApiEnv.WRITE_API_OPS_LOG_ENABLED;
 const idleTimeoutSeconds = writeApiEnv.WRITE_API_IDLE_TIMEOUT_SECONDS;
 
-console.log("Starting write-api...", { databaseUrl, electricUrl, operationsLogEnabled, idleTimeoutSeconds });
+// Never log the raw DATABASE_URL — it carries the password. Mask userinfo so the line stays
+// useful (host/database visible) without leaking credentials into logs a consumer might ship.
+function redactDatabaseUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (url.password) {
+      url.password = "***";
+    }
+    if (url.username) {
+      url.username = "***";
+    }
+    return url.toString();
+  } catch {
+    return "<unparseable database url>";
+  }
+}
+
+console.log("Starting write-api...", {
+  databaseUrl: redactDatabaseUrl(databaseUrl),
+  electricUrl,
+  operationsLogEnabled,
+  idleTimeoutSeconds,
+});
 
 const schema = buildRegistrySchema(demoMembershipSyncRegistry);
 const relations = defineRelations(schema);

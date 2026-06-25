@@ -17,10 +17,10 @@ version-matched, self-hosted **Supabase + Electric** stack: GoTrue auth, a Kong 
 toolkit edge functions (`board-write` for the governed mutation ingress, `board-sync` for the
 registry-filtered Electric shape proxy), Postgres, and Electric. Its job is twofold:
 
-- **Example code for consumers** — a working reference for wiring `createSyncClient`, staging and
-  flushing optimistic writes, reading reactively from PGlite, and surfacing convergence/conflict state.
-- **A smoke-testing ground for maintainers** — somewhere to see offline-first sync, membership
-  fan-out, optimistic writes, and conflict convergence working end-to-end, by hand.
+- **Example code** — a working reference for wiring `createSyncClient`, staging and flushing
+  optimistic writes, reading reactively from PGlite, and surfacing convergence/conflict state.
+- **A hands-on view of the behaviour** — somewhere to watch offline-first sync, membership fan-out,
+  optimistic writes, and conflict convergence working end-to-end.
 
 It uses a Linear-style domain (Teams, Issues, Channels, Messages). It is one _consumer_ of pgxsinkit —
 not pgxsinkit itself, and not any downstream product's data layer. Run it:
@@ -48,7 +48,7 @@ bun run dev:api            # the @pgxsinkit/server reference server
 ## How the toolkit is verified
 
 The toolkit is proven against **real** services in Podman compose stacks — never mocks. Three
-contributor-run lanes back it:
+verification lanes back it:
 
 - **Integration suites** (`tests/integration`) stand up an isolated, ephemeral PostgreSQL + Electric
   stack and assert the topology end-to-end: write validation, the in-database apply, membership
@@ -58,5 +58,5 @@ contributor-run lanes back it:
   proxy's claim-driven read filter, and the apply's RLS actor switch).
 - **Performance lab** (`apps/perf-lab`, `tests/performance`) measures the write/sync cycle under load.
 
-Each lane provisions its own services, applies the current schema, runs, and tears everything down. If
-you are contributing, the commands and the full model are in the repository's `docs/testing-strategy.md`.
+Each lane provisions its own services, applies the current schema, runs, and tears everything down —
+so a green suite means the whole topology, not a mocked slice of it, actually converged.
