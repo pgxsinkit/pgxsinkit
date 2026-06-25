@@ -11,9 +11,9 @@
  * false, frontier held) + `onSyncError`. Runs in its own `bun test` invocation because
  * `mock.module` is process-global (see package.json `test:unit`).
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { PGlite } from "@electric-sql/pglite";
+import { createFreshTestPGlite } from "../support/pglite";
 
 let capturedCb = null;
 
@@ -54,16 +54,9 @@ describe("sync commit queue (ADR-0009 Phase 2)", () => {
 
   beforeEach(async () => {
     capturedCb = null;
-    pg = await PGlite.create({ extensions: { electric: electricSync({ debug: false }) } });
+    // Prepopulated FS skips the ~1.5s WASM initdb each test.
+    pg = await createFreshTestPGlite({ extensions: { electric: electricSync({ debug: false }) } });
     await pg.exec(`CREATE TABLE IF NOT EXISTS todo (id INTEGER PRIMARY KEY, task TEXT); TRUNCATE todo;`);
-  });
-
-  afterEach(async () => {
-    try {
-      await pg.close();
-    } catch {
-      // already closed
-    }
   });
 
   async function startSync(opts = {}) {
@@ -72,6 +65,7 @@ describe("sync commit queue (ADR-0009 Phase 2)", () => {
       table: "todo",
       primaryKey: ["id"],
       shapeKey: null,
+      commitRetryDelayMs: () => 0, // immediate retry — don't sleep the real jittered backoff in tests
       ...opts,
     });
     if (!capturedCb) throw new Error("subscribe callback was not captured");

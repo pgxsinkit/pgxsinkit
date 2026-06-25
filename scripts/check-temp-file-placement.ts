@@ -13,6 +13,7 @@ const allowedRootEntries = new Set([
   ".github",
   ".gitignore",
   ".intent",
+  "bunfig.toml",
   ".oxfmtrc.jsonc",
   ".oxlintrc.jsonc",
   ".vscode",

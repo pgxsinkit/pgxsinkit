@@ -7,7 +7,6 @@ import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, demoSyncRegistry } from "@pgxsinkit/schema";
 
 import {
-  DEFAULT_FLUSH_BATCH_SIZE,
   computeBackoffDelayMs,
   computeNextRetryAtUs,
   computeRetryDelayMs,
@@ -15,7 +14,7 @@ import {
   nowMicroseconds,
 } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPGlite, createSchemaTestPGlite } from "../support/pglite";
 
 const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const writeUrl = "http://localhost:3001";
@@ -134,8 +133,7 @@ function fakeJwtWithSub(sub: string): string {
 }
 
 async function createOverlayTestContext() {
-  const db = await createFreshTestPGlite();
-  await db.exec(overlaySchemaSql);
+  const db = await createSchemaTestPGlite(overlaySchemaSql);
 
   return {
     db,
@@ -1266,8 +1264,7 @@ describe("overlay state helpers", () => {
   });
 
   it("forwards auth headers on batch mutation flushes", async () => {
-    const db = await createFreshTestPGlite();
-    await db.exec(overlaySchemaSql);
+    const db = await createSchemaTestPGlite(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,
@@ -1329,8 +1326,7 @@ describe("overlay state helpers", () => {
   });
 
   it("serializes concurrent batch flushes for the same mutation", async () => {
-    const db = await createFreshTestPGlite();
-    await db.exec(overlaySchemaSql);
+    const db = await createSchemaTestPGlite(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,
@@ -1393,8 +1389,7 @@ describe("overlay state helpers", () => {
   });
 
   it("uses an explicit batch endpoint as-is without appending legacy path segments", async () => {
-    const db = await createFreshTestPGlite();
-    await db.exec(overlaySchemaSql);
+    const db = await createSchemaTestPGlite(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,
@@ -1442,13 +1437,16 @@ describe("overlay state helpers", () => {
   });
 
   it("drains multiple batch slices in a single flush call", async () => {
-    const db = await createFreshTestPGlite();
-    await db.exec(overlaySchemaSql);
+    const db = await createSchemaTestPGlite(overlaySchemaSql);
 
+    // A small flush slice exercises the multi-slice drain (3 HTTP rounds) with 15 mutations instead
+    // of 205 — the behaviour under test is the slicing, not the count.
+    const flushBatchSize = 5;
     const runtime = createMutationRuntime({
       db,
       registry: demoSyncRegistry,
       writeUrl,
+      flushBatchSize,
     });
 
     const originalFetch = globalThis.fetch;
@@ -1474,7 +1472,7 @@ describe("overlay state helpers", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
-      const mutationCount = DEFAULT_FLUSH_BATCH_SIZE * 2 + 5;
+      const mutationCount = flushBatchSize * 2 + 5;
 
       for (let index = 0; index < mutationCount; index += 1) {
         await runtime.create("authors", {
@@ -1500,15 +1498,17 @@ describe("overlay state helpers", () => {
   });
 
   it("reconciles acknowledged batch updates after the full drain completes", async () => {
-    const db = await createFreshTestPGlite();
-    await db.exec(overlaySchemaSql);
+    const db = await createSchemaTestPGlite(overlaySchemaSql);
 
+    // Small flush slice: 6 mutations across 2 HTTP rounds, not 101 — same multi-slice drain.
+    const flushBatchSize = 5;
     const runtime = createMutationRuntime({
       db,
       registry: demoSyncRegistry,
       writeUrl,
+      flushBatchSize,
     });
-    const mutationCount = DEFAULT_FLUSH_BATCH_SIZE + 1;
+    const mutationCount = flushBatchSize + 1;
 
     for (let index = 0; index < mutationCount; index += 1) {
       const authorId = `01963227-d4c7-72db-b858-${(910000000000 + index).toString().padStart(12, "0")}`;
@@ -1567,8 +1567,7 @@ describe("overlay state helpers", () => {
   });
 
   it("applies mixed batch acknowledgements without row-by-row status drift", async () => {
-    const db = await createFreshTestPGlite();
-    await db.exec(overlaySchemaSql);
+    const db = await createSchemaTestPGlite(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,

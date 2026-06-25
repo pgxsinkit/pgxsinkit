@@ -127,6 +127,12 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
    */
   maxMutationAttempts?: number;
   /**
+   * Max mutations drained per flush HTTP request; a flush loops slices until the journal is empty.
+   * Defaults to {@link DEFAULT_FLUSH_BATCH_SIZE}. Primarily a test seam (a small value exercises the
+   * multi-slice drain path without enqueueing hundreds of mutations).
+   */
+  flushBatchSize?: number;
+  /**
    * Invoked after a flush whenever mutations transition to `quarantined` (terminal,
    * permanently rejected). Receives the newly-quarantined details so the app can surface
    * them. The library never silently drops these (ADR-0006 decision 4).
@@ -297,6 +303,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
 
   const tableContexts = buildTableContexts(options.registry);
   const maxMutationAttempts = options.maxMutationAttempts ?? DEFAULT_MAX_MUTATION_ATTEMPTS;
+  const flushBatchSize = options.flushBatchSize ?? DEFAULT_FLUSH_BATCH_SIZE;
   // The fingerprint (ADR-0004) stamped onto each enqueued mutation (ADR-0006). The runtime
   // owns the registry, so it derives this itself; an explicit override is honoured for tests.
   const registryVersion = options.registryVersion ?? fingerprintRegistry(options.registry);
@@ -594,6 +601,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         tableContexts as Record<string, TableContext>,
         options.writeUrl,
         maxMutationAttempts,
+        flushBatchSize,
         table,
         resolveAuthToken,
       );
@@ -1622,7 +1630,7 @@ function buildResolvedBaseServerVersionSql(context: TableContext): string {
   return `${expression}::text`;
 }
 
-async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], nowUs: string) {
+async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], nowUs: string, batchSize: number) {
   if (contexts.length === 0) {
     return [] as PendingBatchRow[];
   }
@@ -1671,7 +1679,7 @@ async function readPendingBatchRows(db: MutationDb, contexts: TableContext[], no
         ${unionSql}
       ) AS pending
       ORDER BY pending."enqueuedAtUs"::bigint ASC, pending."mutationSeq" ASC
-      LIMIT ${DEFAULT_FLUSH_BATCH_SIZE}
+      LIMIT ${batchSize}
     `,
     [nowUs],
   );
@@ -1684,6 +1692,7 @@ async function flushBatch(
   tableContexts: Record<string, TableContext>,
   batchWriteUrl: string,
   maxAttempts: number,
+  batchSize: number,
   tableFilter?: string,
   getAuthToken?: () => Promise<string | undefined>,
 ): Promise<FlushBatchResult> {
@@ -1693,7 +1702,7 @@ async function flushBatch(
   const conflictedMutationIds: string[] = [];
 
   // Collect send-eligible mutations across all target tables.
-  const pendingRows = await readPendingBatchRows(db, contexts, nowUs);
+  const pendingRows = await readPendingBatchRows(db, contexts, nowUs, batchSize);
   const pending: PreparedBatchRow[] = [];
   const pendingByTable = new Map<string, PreparedBatchRow[]>();
 

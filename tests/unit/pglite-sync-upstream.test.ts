@@ -1,27 +1,27 @@
-/* oxlint-disable -- vendored upstream test; preserved faithfully, not style-audited. */
-// @ts-nocheck -- vendored upstream test; run as a behavioural oracle (the value is its runtime
-// behaviour), deliberately NOT type-audited under this repo's strict tsgo config. See header.
 /**
- * Conformance baseline — VENDORED from electric-sql/pglite, packages/pglite-sync/test/sync.test.ts
- * Source:  https://github.com/electric-sql/pglite/tree/2eba679f64c4a9ddef57d25c052ec4f0287cc497/packages/pglite-sync
- * License: Apache-2.0 (upstream © ElectricSQL; see NOTICE). Ported from Vitest to bun:test;
- *          the test bodies are preserved so they remain a faithful behavioural oracle for the
- *          read-path engine now internalized into client/src/sync (ADR-0009). It is intentionally
- *          @ts-nocheck + oxlint-disable: we hold upstream's tests to upstream's standards, run
- *          them as a runtime oracle, and keep refresh cheap (re-pull + re-apply the framework
- *          shim below). Only the shim and the bun `.rejects`-takes-a-promise form are changed.
+ * Read-path engine oracle for the sync engine internalized into `client/src/sync` (ADR-0009).
+ *
+ * Originally seeded from electric-sql/pglite (packages/pglite-sync/test/sync.test.ts, Apache-2.0,
+ * © ElectricSQL — see NOTICE) and ported from Vitest to bun:test. We now own and maintain it as a
+ * first-class test of OUR engine, held to this repo's standards (typecheck + lint clean): it drives
+ * the engine through a process-global `MultiShapeStream` mock so its observable behaviour stays a
+ * faithful contract. Because `mock.module` is process-global, this file runs in its own `bun test`
+ * invocation (the parallel runner's ISOLATED set) so the mock never bleeds into other suites.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import type { ShapeStreamOptions } from "@electric-sql/client";
-import type { MultiShapeMessages } from "@electric-sql/experimental";
-import { PGlite, type PGliteInterfaceExtensions } from "@electric-sql/pglite";
+import type { PGlite, PGliteInterfaceExtensions } from "@electric-sql/pglite";
+
+// These upstream types resolve through the engine's own type surface (re-exported there), so this
+// root-level test needs no direct dependency on the Electric client packages.
+import type { MultiShapeMessages, Row, ShapeStreamOptions } from "../../packages/client/src/sync/types";
+import { createFreshTestPGlite } from "../support/pglite";
 
 // The vendored engine imports `MultiShapeStream` from @electric-sql/experimental; we replace it
 // with a controllable mock BEFORE importing the engine. bun's `mock.module` is process-global, so
 // this file runs in its own `bun test` invocation (see package.json `test:unit`) to avoid bleeding
 // the mock into suites that use the real stream.
-const MockMultiShapeStream = mock(() => ({
+const MockMultiShapeStream = mock((_initOpts?: ShapeStreamOptions) => ({
   subscribe: mock(),
   unsubscribeAll: mock(),
   isUpToDate: true,
@@ -42,7 +42,7 @@ afterAll(() => {
   mock.restore();
 });
 
-type MultiShapeMessage = MultiShapeMessages<Record<string, unknown>>;
+type MultiShapeMessage = MultiShapeMessages<Record<string, Row<unknown>>>;
 
 /** vitest's `vi.waitUntil`: poll until the predicate returns truthy or the timeout elapses. */
 async function waitUntil<T>(
@@ -68,7 +68,8 @@ describe("pglite-sync", () => {
   let pg: PGlite & PGliteInterfaceExtensions<{ electric: ReturnType<typeof electricSync> }>;
 
   beforeEach(async () => {
-    pg = await PGlite.create({
+    // Prepopulated FS (skips the ~1.5s WASM initdb each test) — shim change, behaviour-preserving.
+    pg = await createFreshTestPGlite({
       extensions: {
         electric: electricSync({ debug: false }),
       },
@@ -81,16 +82,6 @@ describe("pglite-sync", () => {
       );
     `);
     await pg.exec(`TRUNCATE todo;`);
-  });
-
-  // Ported addition: upstream (Vitest) never closes the per-test PGlite; bun force-exits (code 99)
-  // on the leaked WASM handles, so close it here. Behaviour-preserving — assertions run in the body.
-  afterEach(async () => {
-    try {
-      await pg.close();
-    } catch {
-      // already closed/unsubscribed by the test
-    }
   });
 
   it("passes onError through to MultiShapeStream.subscribe", async () => {
@@ -125,7 +116,7 @@ describe("pglite-sync", () => {
     });
 
     expect(subscribe).toHaveBeenCalled();
-    const [, passedOnError] = subscribe.mock.calls[0];
+    const [, passedOnError] = subscribe.mock.calls[0]!;
     expect(passedOnError).toBe(onError);
   });
 
@@ -307,14 +298,14 @@ describe("pglite-sync", () => {
     // should have processed microtask within few ms, not blocking main loop
     // expect(timeToProcessMicrotask).toBeLessThan(15) // TODO: flaky on CI
 
-    await shape.unsubscribe();
+    shape.unsubscribe();
   });
 
   it("persists shape stream state and automatically resumes", async () => {
     let feedMessages: (lsn: number, messages: MultiShapeMessage[]) => Promise<void> = async (_) => {};
     const shapeStreamInits = mock();
     let mockShapeId: string | void = undefined;
-    MockMultiShapeStream.mockImplementation((initOpts: ShapeStreamOptions) => {
+    MockMultiShapeStream.mockImplementation((initOpts?: ShapeStreamOptions) => {
       shapeStreamInits(initOpts);
       return {
         subscribe: mock((cb: (messages: MultiShapeMessage[]) => Promise<void>) => {
@@ -381,7 +372,7 @@ describe("pglite-sync", () => {
           count: number;
         }>`SELECT COUNT(*) as count FROM todo;`;
 
-        if (result.rows[0]?.count > totalRowCount) {
+        if ((result.rows[0]?.count ?? 0) > totalRowCount) {
           totalRowCount = result.rows[0]!.count;
           return true;
         }
@@ -391,8 +382,8 @@ describe("pglite-sync", () => {
 
       expect(shapeStreamInits).toHaveBeenCalledTimes(i + 1);
       if (i === 0) {
-        expect(shapeStreamInits.mock.calls[i][0]).not.toHaveProperty("shapeId");
-        expect(shapeStreamInits.mock.calls[i][0]).not.toHaveProperty("offset");
+        expect(shapeStreamInits.mock.calls[i]![0]).not.toHaveProperty("shapeId");
+        expect(shapeStreamInits.mock.calls[i]![0]).not.toHaveProperty("offset");
       }
 
       shape.unsubscribe();
@@ -403,7 +394,7 @@ describe("pglite-sync", () => {
     let feedMessages: (messages: MultiShapeMessage[]) => Promise<void> = async (_) => {};
     const shapeStreamInits = mock();
     let mockShapeId: string | void = undefined;
-    MockMultiShapeStream.mockImplementation((initOpts: ShapeStreamOptions) => {
+    MockMultiShapeStream.mockImplementation((initOpts?: ShapeStreamOptions) => {
       shapeStreamInits(initOpts);
       return {
         subscribe: mock((cb: (messages: MultiShapeMessage[]) => Promise<void>) => {
@@ -495,13 +486,13 @@ describe("pglite-sync", () => {
 
     expect(shapeStreamInits).toHaveBeenCalledTimes(2);
 
-    expect(shapeStreamInits.mock.calls[1][0]).not.toHaveProperty("shapeId");
-    expect(shapeStreamInits.mock.calls[1][0]).not.toHaveProperty("offset");
+    expect(shapeStreamInits.mock.calls[1]![0]).not.toHaveProperty("shapeId");
+    expect(shapeStreamInits.mock.calls[1]![0]).not.toHaveProperty("offset");
   });
 
   it("uses the specified metadata schema for subscription metadata", async () => {
     const metadataSchema = "foobar";
-    const db = await PGlite.create({
+    const db = await createFreshTestPGlite({
       extensions: {
         electric: electricSync({
           metadataSchema,
@@ -543,20 +534,25 @@ describe("pglite-sync", () => {
       shapeKey: null,
     });
 
-    // should throw if syncing more shapes into same table
-    // (ported: bun's `.rejects` unwraps a promise, so pass the call's promise directly
-    // rather than a function — the upstream Vitest form wrapped it in `async () => …`.)
-    await expect(
-      pg.electric.syncShapeToTable({
-        shape: {
-          url: "http://localhost:3000/v1/shape",
-          params: { table: "todo_alt" },
-        },
-        table: table,
-        primaryKey: ["id"],
-        shapeKey: null,
-      }),
-    ).rejects.toThrow(`Already syncing shape for table ${table}`);
+    // should throw if syncing a second shape into the same table. (Asserted via try/catch rather than
+    // `.rejects.toThrow(msg)` so the message check is plainly typed through the dynamically-imported
+    // engine namespace — the matcher-with-message overload isn't seen as thenable by the type-lint.)
+    const conflictingSync: Promise<unknown> = pg.electric.syncShapeToTable({
+      shape: {
+        url: "http://localhost:3000/v1/shape",
+        params: { table: "todo_alt" },
+      },
+      table: table,
+      primaryKey: ["id"],
+      shapeKey: null,
+    });
+    let conflictError: Error | undefined;
+    try {
+      await conflictingSync;
+    } catch (error) {
+      conflictError = error as Error;
+    }
+    expect(conflictError?.message).toBe(`Already syncing shape for table ${table}`);
 
     // should be able to sync shape into other table
     const altShape = await pg.electric.syncShapeToTable({

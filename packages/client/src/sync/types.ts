@@ -4,6 +4,11 @@ import type { Transaction } from "@electric-sql/pglite";
 import type { ApplyStrategy, SyncColumnType } from "@pgxsinkit/contracts";
 
 export type { ApplyStrategy };
+// Re-exported so in-repo tests (e.g. the internalized pglite-sync oracle) can name these upstream
+// types via this engine module — they resolve here, inside @pgxsinkit/client's dependency scope,
+// without the root workspace needing a direct dependency on the Electric client packages.
+export type { Row, ShapeStreamOptions } from "@electric-sql/client";
+export type { MultiShapeMessages } from "@electric-sql/experimental";
 
 export type Lsn = bigint;
 
@@ -61,6 +66,12 @@ export interface SyncShapesToTablesOptions {
   onSyncActivity?: (() => void) | undefined;
   /** Hard cap on commit-transaction attempts before going degraded. Defaults to {@link DEFAULT_MAX_COMMIT_RETRIES}. */
   maxCommitRetries?: number | undefined;
+  /**
+   * Backoff before re-attempting a failed commit, as a function of the attempt number. Defaults to
+   * the runtime's jittered backoff (`computeRetryDelayMs`). A test seam — pass `() => 0` for an
+   * immediate retry instead of sleeping the real backoff.
+   */
+  commitRetryDelayMs?: ((attempt: number) => number) | undefined;
 }
 
 export interface SyncShapesToTablesResult {
@@ -91,6 +102,8 @@ export interface SyncShapeToTableOptions {
   onSyncError?: ((error: Error) => void) | undefined;
   /** Hard cap on commit-transaction attempts before going degraded. Defaults to {@link DEFAULT_MAX_COMMIT_RETRIES}. */
   maxCommitRetries?: number | undefined;
+  /** Backoff before re-attempting a failed commit; see {@link SyncShapesToTablesOptions.commitRetryDelayMs}. */
+  commitRetryDelayMs?: ((attempt: number) => number) | undefined;
   onMustRefetch?: ((tx: Transaction) => Promise<void>) | undefined;
 }
 

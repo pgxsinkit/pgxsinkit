@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from "bun:test";
 
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
-import { DEFAULT_FLUSH_BATCH_SIZE, createMutationRuntime } from "../../packages/client/src/mutation";
+import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createFreshTestPGlite } from "../support/pglite";
 
@@ -15,10 +15,18 @@ import { createFreshTestPGlite } from "../support/pglite";
 const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const writeUrl = "http://localhost:3001";
 
-async function createAuthorsRuntime() {
+async function createAuthorsRuntime(flushBatchSize?: number) {
   const db = await createFreshTestPGlite();
   await db.exec(overlaySchemaSql);
-  return { db, runtime: createMutationRuntime({ db, registry: demoSyncRegistry, writeUrl }) };
+  return {
+    db,
+    runtime: createMutationRuntime({
+      db,
+      registry: demoSyncRegistry,
+      writeUrl,
+      ...(flushBatchSize !== undefined ? { flushBatchSize } : {}),
+    }),
+  };
 }
 
 interface SentMutation {
@@ -126,9 +134,11 @@ describe("Per-entity flush serialization (ADR-0014 Phase 5 — release gate)", (
   });
 
   it("respects the batch-size limit while never sending an entity twice in one batch", async () => {
-    const { runtime } = await createAuthorsRuntime();
+    // Small slice so a handful of entities exercises the truncation, not hundreds.
+    const flushBatchSize = 5;
+    const { runtime } = await createAuthorsRuntime(flushBatchSize);
     const { fetchMock, batches } = capturingAckFetch();
-    const count = DEFAULT_FLUSH_BATCH_SIZE + 10; // more eligible entities than one batch holds
+    const count = flushBatchSize + 3; // more eligible entities than one batch holds
 
     await withFetch(fetchMock, async () => {
       for (let i = 0; i < count; i++) {
@@ -140,9 +150,9 @@ describe("Per-entity flush serialization (ADR-0014 Phase 5 — release gate)", (
     });
 
     expectNoEntityTwicePerBatch(batches);
-    // The limit truncates at least one batch to exactly DEFAULT_FLUSH_BATCH_SIZE...
-    expect(Math.max(...batches.map((batch) => batch.length))).toBe(DEFAULT_FLUSH_BATCH_SIZE);
-    expect(batches.every((batch) => batch.length <= DEFAULT_FLUSH_BATCH_SIZE)).toBe(true);
+    // The limit truncates at least one batch to exactly the configured slice size...
+    expect(Math.max(...batches.map((batch) => batch.length))).toBe(flushBatchSize);
+    expect(batches.every((batch) => batch.length <= flushBatchSize)).toBe(true);
     // ...and every distinct entity is eventually sent (nothing starved by truncation).
     const sentIds = new Set(batches.flat().map((m) => m.entityKey["id"]));
     expect(sentIds.size).toBe(count);

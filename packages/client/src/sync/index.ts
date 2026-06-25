@@ -108,6 +108,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
     onSyncError,
     onSyncActivity,
     maxCommitRetries = DEFAULT_MAX_COMMIT_RETRIES,
+    commitRetryDelayMs = computeRetryDelayMs,
   }: SyncShapesToTablesOptions): Promise<SyncShapesToTablesResult> => {
     let unsubscribed = false;
     await initMetadataTables();
@@ -410,7 +411,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
             onSyncError?.(error instanceof Error ? error : new Error(String(error)));
             return false;
           }
-          await new Promise((resolve) => setTimeout(resolve, computeRetryDelayMs(attempt)));
+          await new Promise((resolve) => setTimeout(resolve, commitRetryDelayMs(attempt)));
         }
       }
     };
@@ -553,6 +554,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       onError: options.onError,
       onSyncError: options.onSyncError,
       maxCommitRetries: options.maxCommitRetries,
+      commitRetryDelayMs: options.commitRetryDelayMs,
     });
 
     return {
