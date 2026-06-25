@@ -6,8 +6,8 @@ sidebar:
 ---
 
 The client runs a local PGlite database whose schema is **generated** from your sync registry. It is
-a **read cache plus write-staging buffer** — not a mirror of your Postgres schema. Expecting full
-parity is the most common cause of confusion here, so this page is precise about the boundary.
+a **read cache plus write-staging buffer** — not a mirror of your Postgres schema. This page is
+precise about what it does and does not replicate.
 
 The governing fact behind everything below: **the client only ever holds a filtered subset of rows**
 (whatever the shapes stream down), and **the server is always the integrity and security authority**.

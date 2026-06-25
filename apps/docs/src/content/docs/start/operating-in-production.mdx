@@ -28,8 +28,8 @@ core to ~2% with **no change to convergence latency** (latency is bounded by the
 interval).
 
 <Aside type="tip" title="Don't tie latency to the interval">
-  A common mistake is to shorten the interval to "make writes faster." It does nothing — writes already
-  flush on enqueue. Shortening it only burns idle CPU. Leave it long.
+  A common mistake is to shorten the interval to "make writes faster." It does nothing — writes already flush on
+  enqueue. Shortening it only burns idle CPU. Leave it long.
 </Aside>
 
 ## Edge serverless cold starts
@@ -103,8 +103,7 @@ directly:
 - `live query updated → re-render` (the final UI hop)
 
 <Aside type="caution" title="Measure at the network boundary, not by polling PGlite">
-  Every PGlite query is ~50ms of WASM work on a single thread, so a tight `setInterval` that reads PGlite
-  to "watch" a value inflates the very latency it reports — a self-inflicted slowdown that repeatedly
-  masqueraded as a sync problem while dogfooding. Trust the instrumentation's network-boundary timings
-  (and a server-side `curl`) over a polling loop.
+  Every PGlite query is ~50ms of WASM work on a single thread, so a tight `setInterval` that reads PGlite to "watch" a
+  value inflates the very latency it reports — a self-inflicted slowdown that repeatedly masqueraded as a sync problem
+  while dogfooding. Trust the instrumentation's network-boundary timings (and a server-side `curl`) over a polling loop.
 </Aside>

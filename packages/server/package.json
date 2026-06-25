@@ -4,6 +4,7 @@
   "keywords": [
     "tanstack-intent"
   ],
+  "license": "MIT",
   "bin": {
     "pgxsinkit-generate": "src/cli/generate.ts"
   },

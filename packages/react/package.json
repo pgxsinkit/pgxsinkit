@@ -4,6 +4,7 @@
   "keywords": [
     "tanstack-intent"
   ],
+  "license": "MIT",
   "files": [
     "dist",
     "src",

@@ -7,17 +7,26 @@ sidebar:
 
 ## Support matrix
 
-pgxsinkit is pinned to specific versions of the systems it sits between. These are the versions it is
-built and tested against.
+pgxsinkit sits between several systems and is pinned to specific versions of each. The table below is
+what it is **built and tested against** — not a claim that nothing else can work.
 
-| System      | Version               | Notes                                                                          |
-| ----------- | --------------------- | ------------------------------------------------------------------------------ |
-| PostgreSQL  | 18+                   | Supabase-compatible; auth claims used for RLS context.                         |
-| ElectricSQL | ≥ 1.6 (CI pins 1.7.2) | **Must** run with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`. |
-| PGlite      | 0.5.3                 | local client database (peer dependency).                                       |
-| Drizzle ORM | 1.0.0-rc.2+           | authoritative server schema + migrations.                                      |
-| Bun         | current               | write API runtime.                                                             |
-| Zod         | v4+                   | transport validation.                                                          |
+| System         | Version                    | Notes                                                                                                                                            |
+| -------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| PostgreSQL     | 17+                        | Supabase-compatible; CI tests against Supabase Postgres 17.x. Auth claims drive the RLS context.                                                 |
+| ElectricSQL    | ≥ 1.7 (CI pins 1.7.2)      | **Must** run with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`.                                                                   |
+| PGlite         | 0.5.3                      | local client database (peer dependency).                                                                                                         |
+| Drizzle ORM    | 1.0.0-rc.2+                | authoritative server schema + migrations.                                                                                                        |
+| Server runtime | Bun / Deno / Supabase Edge | the server is a web-standard `fetch` handler — the board demo runs it on the **Supabase Edge (Deno)** runtime, the minimal reference on **Bun**. |
+| Zod            | v4+                        | transport validation.                                                                                                                            |
+
+### What "tested against" means
+
+CI exercises pgxsinkit against a **self-hosted Supabase + ElectricSQL** stack (Podman compose, at the
+versions pinned above), across both server runtimes: the minimal reference server on **Bun** and the
+board demo's two edge functions on the **Supabase Edge (Deno)** runtime. Because every endpoint is
+env-driven, the same code is expected to run unchanged against the **hosted** services — Supabase Cloud
+and Electric Cloud — but those are **not yet validated in CI**. Treat them as supported by design, not
+yet certified.
 
 ## Releasing
 
@@ -31,5 +40,6 @@ Full mechanics are in
 
 ## License & source
 
-pgxsinkit is open source. Source, issues, and ADRs live at
-[github.com/pgxsinkit/pgxsinkit](https://github.com/pgxsinkit/pgxsinkit).
+pgxsinkit is open source under the
+[**MIT License**](https://github.com/pgxsinkit/pgxsinkit/blob/main/LICENSE). Source, issues, and ADRs
+live at [github.com/pgxsinkit/pgxsinkit](https://github.com/pgxsinkit/pgxsinkit).

@@ -1,0 +1,129 @@
+---
+title: Deploying the server
+description: Run the pgxsinkit server on Bun, Deno, or Supabase Edge Functions — path rewrites, resolving claims from a platform JWT, and the HTTP/2 gateway requirement.
+---
+
+import { Steps, Aside } from "@astrojs/starlight/components";
+
+The server is a web-standard `fetch` handler, so it runs unmodified anywhere that speaks
+`Request → Response`. "Unmodified" is true at the **API** level — the few concrete steps below are
+about the runtime around it, not the toolkit code.
+
+## Bun
+
+The trivial case. Either export the handler, or use the bundled `start()` helper:
+
+```ts
+const server = createSyncServer({ registry, db, electricUrl, resolveAuthClaims });
+export default { fetch: server.fetch }; // Bun.serve picks this up
+// or: await server.start();           // the only Bun-specific helper
+```
+
+## Deno / Supabase Edge Functions
+
+Deno runs TypeScript natively and resolves `npm:` specifiers, so the common case needs **no build
+step**: import the published `npm:@pgxsinkit/server`, import your own registry as local TypeScript,
+and deploy.
+
+What you _do_ hit on Deno and the Edge platform are two runtime concerns — a path prefix and claims
+resolution. Neither is a toolkit limitation; they are how the platform routes and authenticates, and
+they apply however you deploy. Here they are with their fixes.
+
+<Aside type="note" title="Consuming the toolkit as unbuilt source in a monorepo? Bundle ahead of time">
+  If a function imports the toolkit (or your registry) as **unbuilt source** rather than as a published package, Deno's
+  strict resolver rejects the extensionless relative imports — bundle each function into one self-contained ESM file
+  ahead of time (keeping `node:*` builtins external). This repository's own board demo does exactly that; see its
+  `scripts/build-edge-functions.ts`.
+</Aside>
+
+<Steps>
+
+1. **Strip the function-name prefix before `server.fetch`.** Edge Functions route by the first path
+   segment, so a POST to `/functions/v1/write` arrives at your worker as `/write`. The mutation route
+   is served at `/mutations` (and `/api/mutations`), deployment-name-agnostic by design — so rewrite
+   the path first, exactly as a reverse proxy in front of the server would:
+
+   ```ts
+   const server = createSyncServer({ registry, db, resolveAuthClaims });
+
+   Deno.serve((request) => {
+     const url = new URL(request.url);
+     // /write or /write/... → /mutations
+     url.pathname = "/mutations";
+     return server.fetch(new Request(url, request));
+   });
+   ```
+
+   The **read** path needs no rewrite: `proxyElectricShapeRequest` keys off the query string, not the
+   path, so a shape-proxy function can hand it the request as-is.
+
+2. **Resolve claims from the platform JWT in `resolveAuthClaims`.** `verify_jwt` is a gateway
+   concept; the portable move is to verify the token yourself and return its claims. A GoTrue access
+   token is already `JwtClaims`-shaped — `sub`, a top-level `role` (the Postgres role), and
+   `app_metadata` — so once verified you return it directly:
+
+   ```ts
+   async function resolveAuthClaims(request: Request): Promise<JwtClaims | null> {
+     const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+     if (!token) return null; // fail closed: the proxy blocks all rows, the write route rejects
+     return await verifyHs256(token, Deno.env.get("JWT_SECRET")!); // your HS256 verify → claims | null
+   }
+   ```
+
+   The applier reads `role` to switch the RLS actor and `app_metadata.roles` for any admin predicate;
+   the read proxy reads `sub` + `app_metadata.roles` for the row filter. Both paths share this one
+   adapter, so read and write authorization can never drift.
+
+</Steps>
+
+### Read vs write as two functions
+
+Splitting the write route and the shape proxy into two deployments (e.g. a `write` function and a
+`sync` function) is a deployment choice, not a toolkit one:
+
+- **write** — `createSyncServer({ registry, db, resolveAuthClaims })` **without** `electricUrl`
+  registers only the mutation route. Wrap with the path rewrite from step 1.
+- **sync** — call `proxyElectricShapeRequest(request, claims, { registry, electricUrl })` directly.
+  No rewrite needed. Set the function's idle/wall-clock timeout **above** Electric's bounded
+  long-poll (~25s) so live updates are not cut off mid-cycle. If it is a **same-origin proxy with no
+  CDN**, also force `cache-control: no-store` on the response so the browser never serves a rotated
+  shape handle stale (the 409-loop fix in [Operating in production](/start/operating-in-production/)).
+
+Both import the same registry and share the same `resolveAuthClaims`, which is what keeps the two
+ingress points honest.
+
+### The gateway must speak HTTP/2 — one long-poll connection per shape
+
+Electric's client holds **one live long-poll connection open per synced shape**. A client that
+subscribes to six shapes therefore keeps six connections continuously busy. Browsers cap **HTTP/1.1 at
+~6 connections per origin**, so on a plain-HTTP gateway those long-polls consume every slot and the
+**write** request (which shares the origin) gets **Stalled in the browser's connection queue** — it is
+not even dispatched until a long-poll cycle frees a slot, adding seconds of latency that look like a
+slow server but are entirely client-side queuing.
+
+The fix is to serve the gateway over **HTTP/2** (or HTTP/3), which multiplexes every request over a
+single connection, so the per-origin cap never binds regardless of shape count. Any production-grade
+ingress already does this — Cloud Supabase, Electric Cloud, an istio/Envoy gateway, or any TLS
+reverse proxy. The one place it bites is a **local self-hosted stack served over plain `http://`**:
+browsers only negotiate HTTP/2 over TLS, so a plain-HTTP gateway is stuck on HTTP/1.1. The board demo
+fronts its kong gateway with a small TLS-terminating Caddy sidecar (h2 + h3) for exactly this reason.
+
+<Aside type="caution" title="This only shows up with ≥~6 shapes over plain HTTP/1.1">
+  A deployment with one or two shapes will not hit it; the symptom appears once concurrent shape long-polls reach the
+  browser's per-origin connection limit. Node and `curl` never reproduce it — they have no per-host cap — so it is
+  invisible to server-side benchmarks and only a real browser surfaces it. If writes feel slow only in the browser and
+  only once several shapes are live, check whether the gateway is HTTP/2: in DevTools → Network, a stuck `write` request
+  shows a long **Stalled** time.
+</Aside>
+
+<Aside type="note" title="Edge cold starts are a platform property, not a toolkit cost">
+  On a serverless Edge platform a worker is suspended when idle and evicted after longer idle, so the first request
+  after a quiet period pays a cold start — re-importing the bundle and re-establishing the Postgres connection. The
+  convergence machinery is fast (the write applies in a few ms, the echo streams back in well under a second), so this
+  shows up as the first write *after idle* lagging while steady-state writes are instant. Two mitigations, both
+  platform-level: keep the worker warm with a periodic cheap request, and set the worker's wall-clock budget **above**
+  your busiest held-open shape long-poll so a live subscription is not recycled mid-cycle (forcing a read-path
+  reconnect). A long-lived **Bun** (or Deno) deployment has neither characteristic — one warm process, a pooled
+  connection, no per-request worker lifecycle — which is the simplest answer if first-write latency matters more than
+  serverless scale-to-zero.
+</Aside>

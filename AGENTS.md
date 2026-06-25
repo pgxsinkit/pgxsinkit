@@ -69,6 +69,15 @@ vocabulary.
 
 ## Working rules
 
+- **The published docs site (`apps/docs/`) is consumer-facing.** Write every page for someone
+  installing and using `@pgxsinkit/*`, never for the maintainer or an AI assistant. Keep
+  maintainer-/contributor-only material out of it — monorepo / unbuilt-workspace-source workflows,
+  how the harness or perf lab is run, internal release mechanics, personal cross-repo standards,
+  repo-spelunking notes. That belongs in `docs/`, `AGENTS.md`/`CONTEXT.md`, or the README's
+  **Development & contributing** section (or nowhere). Never address the reader as "you, the
+  maintainer". The README's top is consumer-facing too; only its Development section is for
+  contributors. Pages that use Starlight components (`<Steps>`, `<Aside>`, `<Tabs>`, …) must be
+  `.mdx`, not `.md` — components silently render as plain text in `.md`.
 - Use `tmp/linearlite` and `tmp/pglite` only as reference inputs.
 - Do not treat `tmp/` as project code. It is reference material only.
 - The read-path ingest engine is internalized at `packages/client/src/sync/` (ADR-0009, originally vendored from upstream `@electric-sql/pglite-sync`). It is ours to evolve freely — there is no upstream-compatibility constraint. `tests/unit/pglite-sync-upstream.test.ts` + `tests/integration/pglite-sync-e2e.integration.test.ts` are the behavioural oracle; keep them green through refactors.

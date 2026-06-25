@@ -18,10 +18,10 @@ correct model without re-deriving it from the whole repository.
 
 ## How to use them
 
-- **Working in the pgxsinkit repo:** the canonical vocabulary lives in `CONTEXT.md`, and the agent
-  guide is `AGENTS.md`. Read those first.
 - **Working in a consuming codebase:** fetch `https://pgxsinkit.github.io/llms-full.txt` into your
   assistant's context before asking it to wire sync, or link it from your own agent guide.
+- **Contributing to pgxsinkit itself:** the canonical vocabulary lives in the repository's
+  `CONTEXT.md`, and the agent guide is `AGENTS.md` — read those first.
 
 ## The five things assistants get wrong
 

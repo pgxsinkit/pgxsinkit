@@ -16,9 +16,9 @@ deleted. There is no selectable backend, no strategy enum, and no per-table CRUD
 1. **Stage locally.** A client write is recorded into a local **overlay** table (the optimistic
    value the UI reads) and a durable **mutation journal** in PGlite. The app never mutates a synced
    table directly.
-2. **Flush a batch.** The client sends one or more journaled mutations to the write API as a batch:
-   `POST /api/mutations` (the `/mutations` alias is also accepted).
-3. **Validate.** The write API validates every mutation against the registry's Zod schema, rejecting
+2. **Flush a batch.** The client sends one or more journaled mutations to the server's write route as
+   a batch: `POST /api/mutations` (the `/mutations` alias is also accepted).
+3. **Validate.** The server validates every mutation against the registry's Zod schema, rejecting
    client-supplied server-managed or projected-away fields.
 4. **Apply in one call.** Inside a transaction, the API calls the single in-database function
    `pgxsinkit_apply_mutations(...)`, which applies the whole batch. Constraints are deferred for the
@@ -46,7 +46,7 @@ batch with 401.
 ## Managed fields
 
 Governance "managed fields" (e.g. `ownerId` via `authUid`, `createdAtUs`/`updatedAtUs` via
-`nowMicroseconds`) are written **by the database**, not the client. The write API strips any
+`nowMicroseconds`) are written **by the database**, not the client. The server strips any
 client-supplied values for these fields before applying.
 
 This shapes what you pass to a `create`. `SyncTableCreateInput` **omits** every managed-on-create
@@ -80,6 +80,5 @@ the store is a planned capability.
 
 ## What this means for you
 
-- Don't look for a `WRITE_API_BACKEND` setting or a `backend` option — they don't exist.
-- Don't add per-table REST routes — `POST /api/mutations` is the only write ingress.
-- Don't write to synced tables from app code — stage through the mutation runtime.
+- Don't write to synced tables from app code — stage through the mutation runtime; all writes flush
+  to the one write route (`POST /api/mutations`).

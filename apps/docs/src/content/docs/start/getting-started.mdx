@@ -3,15 +3,15 @@ title: Getting started
 description: Install the @pgxsinkit/* packages and stand up the read and write paths.
 ---
 
-import { Steps, Aside } from "@astrojs/starlight/components";
+import { Steps, Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
 This page gets you from zero to a working read + write path. For what each package does, see
 [Packages](/packages/); for the model behind it, see [Core concepts](/concepts/).
 
 ## Prerequisites
 
-- **PostgreSQL 18+** (Supabase-compatible; the write path uses Supabase-style auth claims for RLS).
-- **ElectricSQL ≥ 1.6**, run with the subquery feature flag — this is **mandatory**:
+- **PostgreSQL 17+** (Supabase-compatible; the write path uses Supabase-style auth claims for RLS).
+- **ElectricSQL ≥ 1.7**, run with the subquery feature flag — this is **mandatory**:
 
   ```bash
   ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries
@@ -20,17 +20,20 @@ This page gets you from zero to a working read + write path. For what each packa
   Without it, sync fails closed (no rows stream). See
   [The Electric subquery requirement](/concepts/electric-subqueries/).
 
-- **A runtime that serves a web `fetch` handler** for the write API — Bun, Deno, **Supabase Edge
+- **A runtime that serves a web `fetch` handler** for the pgxsinkit server — Bun, Deno, **Supabase Edge
   Functions**, Cloudflare Workers, etc. The server core is runtime-neutral (Hono + web-standard
   `Request`/`Response`, with the DB client injected); only the optional `server.start()` helper is
   Bun-specific. And **Drizzle** (`drizzle-orm@1.0.0-rc.2`+) for schema.
 
 <Aside type="caution" title="Enum columns in shape filters">
-  A PostgreSQL `enum` referenced in a shape `where` must be cast to `text` —
-  `"role"::text = 'manager'`, not `"role" = 'manager'`. The column stays an enum everywhere else.
+  A PostgreSQL `enum` referenced in a shape `where` must be cast to `text` — `"role"::text = 'manager'`, not `"role" =
+  'manager'`. The column stays an enum everywhere else.
 </Aside>
 
 ## Install
+
+<Tabs syncKey="pkg">
+<TabItem label="bun">
 
 ```bash
 bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
@@ -38,8 +41,39 @@ bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 bun add @pgxsinkit/react
 ```
 
-Packages are published to public npm. Peer dependencies include `drizzle-orm`, `@electric-sql/pglite`,
-`hono` (server), and `zod`.
+</TabItem>
+<TabItem label="pnpm">
+
+```bash
+pnpm add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional)
+pnpm add @pgxsinkit/react
+```
+
+</TabItem>
+<TabItem label="npm">
+
+```bash
+npm install @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional)
+npm install @pgxsinkit/react
+```
+
+</TabItem>
+<TabItem label="yarn">
+
+```bash
+yarn add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional)
+yarn add @pgxsinkit/react
+```
+
+</TabItem>
+</Tabs>
+
+The packages are published to public npm; install them with whichever package manager your app uses —
+pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql/pglite`, `hono`
+(server), and `zod`.
 
 ## Stand up the write path
 
@@ -81,12 +115,11 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    ```
 
    <Aside type="caution" title="Writable tables have two hard requirements">
-     `defineSyncRegistry` throws unless every `readwrite` table declares **both**: a **Server
-     version** (a `nowMicroseconds`-on-`update` managed field, conventionally `updated_at_us`) that
-     optimistic convergence keys on, and a **`conflictPolicy`** (`reject-if-stale` |
-     `last-write-wins`) — there is no silent default, because a silent last-write-wins is exactly the
-     data loss the choice exists to surface. Fields stamped by `authUid` / `nowMicroseconds` are
-     server-assigned; the write API rejects them if present in a client write payload.
+     `defineSyncRegistry` throws unless every `readwrite` table declares **both**: a **Server version** (a
+     `nowMicroseconds`-on-`update` managed field, conventionally `updated_at_us`) that optimistic convergence keys on,
+     and a **`conflictPolicy`** (`reject-if-stale` | `last-write-wins`) — there is no silent default, because a silent
+     last-write-wins is exactly the data loss the choice exists to surface. Fields stamped by `authUid` /
+     `nowMicroseconds` are server-assigned; the server rejects them if present in a client write payload.
    </Aside>
 
 2. **Provision the apply function.** The write path applies batches through one in-database PL/pgSQL
@@ -95,7 +128,8 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    your own project:
 
    ```bash
-   bun run pgxsinkit-generate \
+   # bunx; use `pnpm exec` / `npx` / `yarn` to run the bin with another package manager
+   bunx pgxsinkit-generate \
      --registry ./sync-registry.ts \
      --export registry \
      --project-dir ./db \
@@ -106,12 +140,10 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    This writes a standard drizzle-kit migration you commit and apply through your normal migration
    flow. The migration lands wherever your drizzle config's `out` points — pass `--config` and the
    generator reads `out` from it (or set `--out` explicitly); with neither it probes `drizzle/` and
-   `infra/drizzle/`. (`bun run sync:function:generate` is the equivalent script **inside this
-   repository** for the demo registry.)
+   `infra/drizzle/`.
 
 3. **Create the server** and serve its `fetch`. All writes go through `POST /api/mutations`; the
-   ownership-enforcing shape proxy is served from the same app. There is no per-table CRUD and no
-   backend to choose.
+   ownership-enforcing shape proxy is served from the same app.
 
    ```ts
    import { createSyncServer } from "@pgxsinkit/server";
@@ -132,8 +164,8 @@ Packages are published to public npm. Peer dependencies include `drizzle-orm`, `
    // Functions, or Cloudflare Workers. Only the optional `server.start()` helper needs Bun.
    ```
 
-   Deploying onto a non-Bun runtime (Deno / Supabase Edge Functions) has a few concrete steps —
-   bundling, a path rewrite, and resolving claims from the platform's JWT. See
+   Deploying onto a non-Bun runtime (Deno / Supabase Edge Functions) has a couple of concrete steps —
+   a path rewrite and resolving claims from the platform's JWT. See
    [Deploying the server](/start/deploying-the-server/).
 
 </Steps>
@@ -157,9 +189,9 @@ predicate builders.
 
 ## Stand up the read path
 
-The client writes locally into an overlay + a durable journal, flushes the journal to the write API,
-and subscribes to Electric shapes that land in local PGlite. Reads are served from PGlite; the write
-API's `/v1/electric-proxy` forwards shape requests to Electric and enforces ownership.
+The client writes locally into an overlay + a durable journal, flushes the journal to the server's
+write route, and subscribes to Electric shapes that land in local PGlite. Reads are served from
+PGlite; the server's **shape proxy** forwards shape requests to Electric and enforces ownership.
 
 ```ts
 import { createSyncClient } from "@pgxsinkit/client";
@@ -167,8 +199,8 @@ import { registry } from "./sync-registry";
 
 const client = await createSyncClient({
   registry,
-  electricUrl: "/v1/electric-proxy", // your write API's shape-proxy path
-  writeUrl: "/api", // your write API base
+  electricUrl: "/api/shape", // your shape-proxy path (createSyncServer's default route)
+  writeUrl: "/api", // your pgxsinkit server base (writes POST to /api/mutations)
   getAuthToken: async () => currentJwt(),
 });
 await client.ready;
@@ -180,8 +212,7 @@ await client.tables.widgets.create({ id: crypto.randomUUID(), label: "Hello" });
 const widgets = await client.drizzle.select().from(client.views.widgets);
 ```
 
-These snippets are the same surface the packed-fixture smoke (`bun run fixture:smoke`) compiles and
-runs against the published tarballs, so they cannot silently drift. See
+These snippets compile against the published packages, so they stay in step with the shipped API. See
 [The read path](/concepts/read-path/) and [The write path](/concepts/write-path/) for the full flow,
 and [Packages](/packages/) for the client entry points.
 
@@ -200,16 +231,14 @@ bun run dev:board
 ```
 
 <Aside type="note" title="The board's gateway is served over HTTPS (HTTP/2) — mkcert is a prerequisite">
-  The browser holds one Electric long-poll connection **per synced shape**, and the board syncs six.
-  Over plain HTTP/1.1 those long-polls exhaust the browser's ~6-connections-per-origin cap and writes
-  starve behind them (see [Deploying the server → the gateway must speak HTTP/2](/start/deploying-the-server/)).
-  So the demo fronts its gateway with a TLS-terminating **HTTP/2 + HTTP/3** Caddy sidecar, and the
-  board's browser origin is `https://localhost:54343`. `infra:up` issues the cert with
-  [`mkcert`](https://github.com/FiloSottile/mkcert), but the local CA must be **trusted** first —
-  `mkcert -install` (one-time) — because a browser `fetch()` to an untrusted cert fails outright (no
-  click-through), and HTTP/3's QUIC refuses an untrusted cert entirely. Without mkcert the stack still
-  comes up on plain `http://localhost:54331` (used by the integration tests and seed scripts); only the
-  fast browser path is unavailable.
+  The browser holds one Electric long-poll connection **per synced shape**, and the board syncs six. Over plain HTTP/1.1
+  those long-polls exhaust the browser's ~6-connections-per-origin cap and writes starve behind them (see [Deploying the
+  server → the gateway must speak HTTP/2](/start/deploying-the-server/)). So the demo fronts its gateway with a
+  TLS-terminating **HTTP/2 + HTTP/3** Caddy sidecar, and the board's browser origin is `https://localhost:54343`.
+  `infra:up` issues the cert with [`mkcert`](https://github.com/FiloSottile/mkcert), but the local CA must be
+  **trusted** first — `mkcert -install` (one-time) — because a browser `fetch()` to an untrusted cert fails outright (no
+  click-through), and HTTP/3's QUIC refuses an untrusted cert entirely. Without mkcert the stack still comes up on plain
+  `http://localhost:54331` (used by the integration tests and seed scripts); only the fast browser path is unavailable.
 </Aside>
 
 For the minimal `@pgxsinkit/server` reference instead, use `bun run infra:harness:up` (PostgreSQL +

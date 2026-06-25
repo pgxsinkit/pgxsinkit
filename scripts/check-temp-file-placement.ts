@@ -21,6 +21,7 @@ const allowedRootEntries = new Set([
   "CLAUDE.md",
   "CONTEXT-MAP.md",
   "CONTEXT.md",
+  "LICENSE",
   "NOTICE",
   "README.md",
   "RELEASING.md",

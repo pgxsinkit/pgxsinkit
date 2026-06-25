@@ -1,6 +1,7 @@
 {
   "name": "pgxsinkit",
   "private": true,
+  "license": "MIT",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -19,7 +20,9 @@
     "db:push": "bun --bun drizzle-kit push --config=infra/drizzle.config.ts",
     "dev:api": "cd apps/write-api && bun run dev",
     "dev:board": "cd apps/board && bun run dev",
-    "docs:build": "bun run --cwd apps/docs build",
+    "docs:adr": "bun scripts/generate-adr-index.ts",
+    "docs:adr:check": "bun scripts/generate-adr-index.ts --check",
+    "docs:build": "bun run docs:adr:check && bun run --cwd apps/docs build",
     "edge:build": "bun scripts/build-edge-functions.ts",
     "fixture:smoke": "bun scripts/fixture-smoke.ts",
     "format": "oxfmt --config .oxfmtrc.jsonc --check .",

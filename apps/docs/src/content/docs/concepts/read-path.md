@@ -5,13 +5,14 @@ sidebar:
   order: 4
 ---
 
-The read path streams rows from Postgres to the client and keeps local PGlite up to date. The app
-reads exclusively from PGlite; it never queries Postgres or Electric directly at read time.
+The read path streams rows from Postgres **through ElectricSQL** to the client and keeps local PGlite
+up to date — nothing goes from Postgres to the client directly. The app reads exclusively from PGlite;
+it never queries Postgres or Electric directly at read time.
 
 ## The flow
 
 ```
-PostgreSQL  →  ElectricSQL  →  write API shape proxy  →  PGlite (local)
+PostgreSQL  →  ElectricSQL  →  shape proxy  →  PGlite (local)
 ```
 
 1. **Shapes** define what a client may see — a table plus a `where` filter. Filters can be
@@ -22,7 +23,8 @@ PostgreSQL  →  ElectricSQL  →  write API shape proxy  →  PGlite (local)
    ```
 
 2. **ElectricSQL** turns each shape into a live stream from Postgres.
-3. **The shape proxy** (`/v1/electric-proxy`, served by the write API) forwards shape requests to
+3. **The shape proxy** (`proxyElectricShapeRequest`, served by the pgxsinkit server — `createSyncServer`
+   mounts it at `/api/shape` by default, but the path is yours to choose) forwards shape requests to
    Electric and **enforces owner filtering** for protected tables unless the caller is an admin. In
    the real path, clients talk to the proxy, not to Electric directly.
 4. **PGlite** subscribes through `@pgxsinkit/client`'s internal Electric ingest engine (`src/sync/`,
@@ -30,8 +32,8 @@ PostgreSQL  →  ElectricSQL  →  write API shape proxy  →  PGlite (local)
 
 ## The proxy is the gateway
 
-Reads do not hit Electric directly in a deployed system — they go through the write API's shape
-proxy, which is where ownership is enforced. Treat synced tables in PGlite as **replication
+Reads do not hit Electric directly in a deployed system — they go through the shape proxy, which is
+where ownership is enforced. Treat synced tables in PGlite as **replication
 targets**: they are written by this path and must never be mutated by application code (writes go
 through [the write path](/concepts/write-path/)).
 

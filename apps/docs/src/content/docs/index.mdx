@@ -30,25 +30,27 @@ import { Card, CardGrid } from "@astrojs/starlight/components";
 
 pgxsinkit is the **`@pgxsinkit/*`** library set. It gives a local-first app a read path that
 streams Postgres rows to PGlite through ElectricSQL, and a write path that takes local edits back
-to Postgres through a typed write API — with row-level security honoured on both.
+to Postgres through a typed write route — with per-row access control on both (Postgres row-level
+security on writes, a matching shape filter on reads).
 
 <CardGrid>
   <Card title="Read path" icon="seti:db">
     `PostgreSQL -> ElectricSQL -> PGlite`. Shapes (including membership fan-out via subquery
     `where`) stream into local PGlite. Reads never hit Electric directly — they go through the
-    write API's shape proxy, which enforces ownership.
+    **shape proxy**, which enforces ownership.
   </Card>
   <Card title="Write path" icon="pencil">
-    `client -> write API -> PostgreSQL`. Edits are staged locally, flushed as a batch, and applied
-    in a single in-database PL/pgSQL function. There is exactly one write path — no selectable
-    backend.
+    `client -> write route -> PostgreSQL`. Edits are staged locally, flushed as a batch, and applied
+    in a single in-database PL/pgSQL function — one path, no per-table CRUD.
   </Card>
-  <Card title="Proven, not promised" icon="approve-check">
-    The product is the toolkit. A demo app and a container-backed integration + performance harness
-    exist to prove and harden it against real PostgreSQL, Electric, and PGlite.
+  <Card title="Tested against real infrastructure" icon="approve-check">
+    A container-backed integration + performance harness runs every path against real PostgreSQL,
+    ElectricSQL, and PGlite — not mocks — so the toolkit's behaviour is proven, not asserted.
   </Card>
-  <Card title="AI-ready docs" icon="open-book">
-    These docs publish `llms.txt` so your coding assistant can load the correct mental model fast.
-    See [Use these docs with your AI assistant](/start/ai-assistants/).
+  <Card title="AI-ready" icon="open-book">
+    These docs publish `llms.txt`, and the `@pgxsinkit/*` packages ship
+    [TanStack Intent](https://tanstack.com/intent) **Agent Skills** — version-pinned guidance your
+    coding assistant can load to wire sync correctly. See
+    [Use these docs with your AI assistant](/start/ai-assistants/).
   </Card>
 </CardGrid>

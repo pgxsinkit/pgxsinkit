@@ -22,7 +22,7 @@ and load-bearing for convergence.
 - **Microseconds** give enough resolution to order rapid successive writes without collisions.
 - **Decimal strings** survive the JSON boundary intact. A 64-bit microsecond value exceeds
   `Number.MAX_SAFE_INTEGER`, so sending it as a JSON number would silently corrupt it. Strings keep
-  it exact from Postgres → write API → client and back.
+  it exact from Postgres → server → client and back.
 
 ## Where it shows up
 

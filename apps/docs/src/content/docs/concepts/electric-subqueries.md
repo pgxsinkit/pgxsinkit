@@ -5,8 +5,8 @@ sidebar:
   order: 5
 ---
 
-This is a **hard prerequisite**, not an optimisation. It is also the one prerequisite most likely to
-be missed, because it lives in ElectricSQL's configuration rather than in pgxsinkit's code.
+This is a **hard prerequisite**, not an optimisation — and because it lives in ElectricSQL's
+configuration rather than in pgxsinkit's code, it is easy to stand up a stack without it.
 
 ## The flag
 
@@ -21,7 +21,7 @@ The shape proxy forwards this verbatim as the ElectricSQL shape `where`, so it d
 preview capability:
 
 ```bash
-# ElectricSQL >= 1.6 (still flagged as of 1.7.2)
+# ElectricSQL >= 1.7 (subquery where is a flagged preview; the demo and tests pin 1.7.2)
 ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries
 ```
 

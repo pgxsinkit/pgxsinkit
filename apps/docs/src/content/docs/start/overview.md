@@ -1,38 +1,28 @@
 ---
 title: What is pgxsinkit?
-description: pgxsinkit is a sync toolkit, proven by a demo and a harness — not a demo repository.
+description: An offline-first sync toolkit for Postgres, ElectricSQL, Drizzle, and PGlite — what you install, and how its two paths fit together.
 ---
 
 pgxsinkit is an **offline-first sync toolkit**: the `@pgxsinkit/*` packages you install to give a
-local-first app a Postgres-backed read path and write path, with row-level security honoured on both
-ends.
+local-first app a Postgres-backed read path and a write path, with per-row access control on both —
+Postgres row-level security on the write path, and a matching row filter on the read path.
 
-## It is a toolkit, proven by a harness
+## A library, not an app
 
-This is the single most important thing to get right, because the repository contains three things
-and only one of them is the product:
-
-- **The toolkit** — the published `@pgxsinkit/*` packages. **This is the product.** It is what you
-  install and depend on.
-- **The demo app** (`apps/web`) — a reference application that drives the toolkit end-to-end so a
-  human can see it work. It is example code for consumers, not the product.
-- **The harness** (`tests/integration`, `apps/perf-lab`) — container-backed suites that prove the
-  toolkit against real PostgreSQL, ElectricSQL, and PGlite. It hardens the product, it is not the
-  product.
-
-The repository is **not** any particular application's data layer. It is a standalone open-source
-library with a generic example domain (authors, todos, projects). If you are reading the source and
-see "demo," read it as _"the thing that exercises the library,"_ never as _"throwaway scaffolding."_
+pgxsinkit is a standalone open-source **library** — the published `@pgxsinkit/*` packages are what you
+install and depend on. The repository also carries a demo app and a verification harness, but those
+exist to show the toolkit working and to keep it honest against real infrastructure; they are not the
+product, and not any application's data layer. See [Demo & harness](/demo-and-harness/).
 
 ## The two paths
 
-pgxsinkit is built around two **separate, asymmetric** paths. They are not one bidirectional
-channel — getting this wrong is the second most common misunderstanding.
+pgxsinkit is built around two **separate, asymmetric** paths — they are not one bidirectional channel.
+Writes do not travel back through Electric; the read and write sides use different mechanisms.
 
 |           | Read path                           | Write path                                |
 | --------- | ----------------------------------- | ----------------------------------------- |
 | Direction | server → client                     | client → server                           |
-| Route     | `PostgreSQL → ElectricSQL → PGlite` | `client → write API → PostgreSQL`         |
+| Route     | `PostgreSQL → ElectricSQL → PGlite` | `client → write route → PostgreSQL`       |
 | Carries   | shape streams (live rows)           | batches of staged mutations               |
 | Electric? | yes (the read transport)            | **no** — writes never go through Electric |
 
