@@ -127,6 +127,28 @@ services:
     ports:
       - "54331:8000"
 
+  # caddy — TLS-terminating HTTP/2 + HTTP/3 front for the gateway (board dogfooding finding). The
+  # browser holds one Electric long-poll connection PER synced shape — 6 for the board (the TEAM_SCOPE
+  # group's team/team_member/channel/issue, plus singleton profile + message). Over plain HTTP/1.1 the
+  # browser's ~6-connections-per-origin cap is fully consumed by those long-polls, so board-write (and
+  # chat sends) sit Stalled in the browser's queue for a whole long-poll cycle (~6–13s) before they are
+  # even dispatched — the demo's "writes are slow" symptom. h2/h3 multiplex every request over ONE
+  # connection, so the cap never binds. A real deployment already serves h2 over TLS at its gateway
+  # (istio); this gives the local demo the same property. The cert is a mkcert-issued localhost cert
+  # (infra:up generates it into ./certs; the local mkcert CA is already trusted, which h3/QUIC needs).
+  # The browser talks https://localhost:54343; tests + seed scripts still use kong directly on 54331.
+  caddy:
+    image: docker.io/caddy:2.11.4-alpine
+    container_name: board-caddy
+    depends_on:
+      - kong
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    ports:
+      - "54343:54343/tcp"
+      - "54343:54343/udp" # HTTP/3 (QUIC)
+
   functions:
     image: docker.io/supabase/edge-runtime:v1.74.0
     container_name: board-functions

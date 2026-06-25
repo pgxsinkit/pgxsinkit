@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import path from "node:path";
 
 import { waitForHttpOk, waitForPgReady, waitForTcpService } from "./lib";
 
@@ -21,8 +23,46 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv): void {
   }
 }
 
+const CERT_DIR = "infra/compose/certs";
+
+// Issue the board's TLS cert for the caddy HTTP/2 + HTTP/3 front (the fix for browser write-starvation
+// behind the board's 6 Electric long-polls — see board-compose.yml `caddy`). mkcert signs it with the
+// locally trusted CA, so the browser, and HTTP/3's QUIC (which refuses an untrusted cert), accept it
+// with no extra steps. Returns whether the cert is available so the readiness wait can skip 54343 when
+// it is not. mkcert is needed only for the interactive browser demo: the container lanes (integration
+// smoke) reach kong directly on 54331, so a missing mkcert must never fail them — warn and continue.
+function ensureBoardCert(): boolean {
+  const certFile = path.join(CERT_DIR, "localhost.pem");
+  const keyFile = path.join(CERT_DIR, "localhost-key.pem");
+  if (existsSync(certFile) && existsSync(keyFile)) return true;
+
+  if (spawnSync("mkcert", ["-CAROOT"], { stdio: "ignore" }).status !== 0) {
+    console.warn(
+      "[infra:up] mkcert not found — skipping the board TLS cert. The HTTP/2+3 front " +
+        "(https://localhost:54343) will be unavailable; the HTTP/1.1 gateway on :54331 still works. " +
+        "Install mkcert and run `mkcert -install` once for the fast browser demo.",
+    );
+    return false;
+  }
+
+  mkdirSync(CERT_DIR, { recursive: true });
+  const result = spawnSync("mkcert", ["-cert-file", certFile, "-key-file", keyFile, "localhost", "127.0.0.1", "::1"], {
+    stdio: "inherit",
+  });
+  if (result.status !== 0) {
+    console.warn(
+      "[infra:up] mkcert failed to issue the board cert; the caddy front is unavailable (:54331 still works).",
+    );
+    return false;
+  }
+  return true;
+}
+
 async function main(): Promise<void> {
   const env = { ...process.env, BOARD_DATABASE_URL };
+
+  // Issue the caddy TLS cert before bringing the stack up, so its h2/h3 front has a cert to load.
+  const certReady = ensureBoardCert();
 
   // The edge-runtime serves the bundled functions from supabase/functions-dist; build them first so a
   // fresh checkout (where the gitignored bundles are absent) comes up cleanly.
@@ -30,11 +70,17 @@ async function main(): Promise<void> {
 
   run("podman", ["compose", "-f", COMPOSE_FILE, "--env-file", ENV_FILE, "up", "-d"], env);
 
-  await Promise.all([
+  const readiness = [
     waitForTcpService("127.0.0.1", 54322, "board Postgres"),
     waitForTcpService("127.0.0.1", 54331, "board Kong gateway"),
     waitForTcpService("127.0.0.1", 54330, "board Electric"),
-  ]);
+  ];
+  // Only gate on the caddy front when its cert exists; otherwise it never comes up (and the container
+  // lanes do not need it), so waiting on 54343 would hang.
+  if (certReady) {
+    readiness.push(waitForTcpService("127.0.0.1", 54343, "board Caddy (HTTP/2+3 front)"));
+  }
+  await Promise.all(readiness);
   await waitForPgReady(BOARD_DATABASE_URL);
 
   // Apply the board's tables + RLS + cross-team trigger + the registry's apply function. GoTrue runs
@@ -47,9 +93,12 @@ async function main(): Promise<void> {
   await waitForHttpOk("http://localhost:54331/auth/v1/health", "board GoTrue");
 
   console.log("\nBoard stack is up:");
-  console.log("  • Gateway (supabase-js SUPABASE_URL): http://localhost:54331");
-  console.log("  • Studio:                              http://localhost:54333");
-  console.log("  • Postgres:                            localhost:54322");
+  if (certReady) {
+    console.log("  • Browser demo origin (HTTP/2+3 fast path): https://localhost:54343");
+  }
+  console.log("  • Gateway (HTTP/1.1; tests + seed scripts): http://localhost:54331");
+  console.log("  • Studio:                                   http://localhost:54333");
+  console.log("  • Postgres:                                 localhost:54322");
   console.log("\nNext: seed identities + fixtures (`bun run seed:board`), then `bun run dev:board`.");
 }
 

@@ -1,0 +1,22 @@
+{
+	# Serve HTTP/1.1, HTTP/2, and HTTP/3 on the TLS listener. h2 is what removes the browser's
+	# ~6-connections-per-origin cap (the actual fix for write starvation behind the board's 6 Electric
+	# long-polls); h3 (QUIC) is advertised via Alt-Svc and engaged opportunistically where the browser
+	# supports it. No public ACME — this is a local demo fronted by a mkcert-issued localhost cert.
+	servers {
+		protocols h1 h2 h3
+	}
+	auto_https off
+}
+
+# Front the kong gateway. Everything the board's browser uses — GoTrue (/auth/v1), board-sync, and
+# board-write — flows through here, so all of it multiplexes over one h2/h3 connection instead of
+# competing for HTTP/1.1 connection slots.
+:54343 {
+	tls /certs/localhost.pem /certs/localhost-key.pem
+	# -1 disables proxy response buffering so Electric's long-poll responses are forwarded the instant
+	# the gateway returns them, with no added latency from the proxy layer.
+	reverse_proxy kong:8000 {
+		flush_interval -1
+	}
+}
