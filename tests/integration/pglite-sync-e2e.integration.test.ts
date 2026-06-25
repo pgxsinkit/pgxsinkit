@@ -123,7 +123,7 @@ const deleteShape = async (table: string, handle: string) => {
     method: "DELETE",
   });
   if (res.status === 404 || res.status === 400) {
-    // Nothing (meaningful) to delete. Upstream only saw 404; Electric 1.7.2 (our pinned image)
+    // Nothing (meaningful) to delete. Upstream only saw 404; Electric 1.7.3 (our pinned image)
     // answers 400 for a stale/superseded handle (e.g. after a must-refetch), which is still a
     // best-effort cleanup no-op — the shape behaviour under test already asserted in the body.
     return;

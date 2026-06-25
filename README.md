@@ -31,7 +31,7 @@ a **required** ElectricSQL capability:
 - **ElectricSQL >= 1.7** running with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`.
 
 This is a hard prerequisite, not an optional optimisation. Subquery `where` support is a flagged
-preview feature (still flagged as of 1.7.2); without the flag Electric rejects any subquery `where`
+preview feature (still flagged as of 1.7.3); without the flag Electric rejects any subquery `where`
 with HTTP 400 (`{"where":["Subqueries are not supported"]}`). The sync then fails **closed** — no rows
 stream — it never silently fans out unfiltered data.
 

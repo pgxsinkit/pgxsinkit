@@ -21,12 +21,12 @@ The shape proxy forwards this verbatim as the ElectricSQL shape `where`, so it d
 preview capability:
 
 ```bash
-# ElectricSQL >= 1.7 (subquery where is a flagged preview; the demo and tests pin 1.7.2)
+# ElectricSQL >= 1.7 (subquery where is a flagged preview; the demo and tests pin 1.7.3)
 ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries
 ```
 
 Any deployment consuming pgxsinkit must run Electric with this flag. The repo's `infra/compose`
-pins `electricsql/electric:1.7.2` and sets it.
+pins `electricsql/electric:1.7.3` and sets it.
 
 ## It fails closed
 

@@ -13,7 +13,7 @@ what it is **built and tested against** — not a claim that nothing else can wo
 | System         | Version                    | Notes                                                                                                                                            |
 | -------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | PostgreSQL     | 17+                        | Supabase-compatible; CI tests against Supabase Postgres 17.x. Auth claims drive the RLS context.                                                 |
-| ElectricSQL    | ≥ 1.7 (CI pins 1.7.2)      | **Must** run with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`.                                                                   |
+| ElectricSQL    | ≥ 1.7 (CI pins 1.7.3)      | **Must** run with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`.                                                                   |
 | PGlite         | 0.5.3                      | local client database (peer dependency).                                                                                                         |
 | Drizzle ORM    | 1.0.0-rc.2+                | authoritative server schema + migrations.                                                                                                        |
 | Server runtime | Bun / Deno / Supabase Edge | the server is a web-standard `fetch` handler — the board demo runs it on the **Supabase Edge (Deno)** runtime, the minimal reference on **Bun**. |
