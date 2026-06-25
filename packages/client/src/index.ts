@@ -330,11 +330,28 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     void ready.then(() => convergenceDriver?.start());
   }
 
+  // Event-driven convergence: the moment a mutation is enqueued, ask the driver to run a pass so the
+  // write flushes immediately rather than waiting for the trigger's next interval tick. This is what
+  // lets the interval be a rare fallback (and so run far less often). No-op when `autoSync` is off — the
+  // caller drives `flush`/`reconcile` itself.
+  const requestConvergence = () => convergenceDriver?.requestPass();
   const mutate: SyncClient<TRegistry>["mutate"] = {
-    create: (table, input) => mutationRuntime.create(table, input),
-    update: (table, entityKey, patch) => mutationRuntime.update(table, entityKey, patch),
-    delete: (table, entityKey) => mutationRuntime.delete(table, entityKey),
-    batch: (items) => mutationRuntime.batch(items),
+    create: async (table, input) => {
+      await mutationRuntime.create(table, input);
+      requestConvergence();
+    },
+    update: async (table, entityKey, patch) => {
+      await mutationRuntime.update(table, entityKey, patch);
+      requestConvergence();
+    },
+    delete: async (table, entityKey) => {
+      await mutationRuntime.delete(table, entityKey);
+      requestConvergence();
+    },
+    batch: async (items) => {
+      await mutationRuntime.batch(items);
+      requestConvergence();
+    },
   };
 
   const client: SyncClient<TRegistry> = {

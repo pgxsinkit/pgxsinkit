@@ -74,6 +74,37 @@ describe("convergence driver (ADR-0005)", () => {
     await driver.stop();
   });
 
+  it("requestPass() drives an immediate event-driven pass (the local-write path)", async () => {
+    const client = countingClient();
+    const { trigger } = manualTrigger();
+    const driver = createConvergenceDriver({ client, trigger });
+
+    driver.start();
+    await tick();
+    expect(client.calls.flush).toBe(1); // the start pass
+
+    // A local write asks for a pass directly — no interval tick needed, so the interval can be a slow
+    // fallback without delaying writes.
+    driver.requestPass();
+    await tick();
+    expect(client.calls.flush).toBe(2);
+
+    await driver.stop();
+  });
+
+  it("requestPass() still respects shouldConverge() (a write made offline stages, does not flush)", async () => {
+    const client = countingClient();
+    const { trigger } = manualTrigger(false);
+    const driver = createConvergenceDriver({ client, trigger });
+
+    driver.start();
+    driver.requestPass();
+    await tick();
+
+    expect(client.calls.flush).toBe(0);
+    await driver.stop();
+  });
+
   it("coalesces signals that arrive mid-pass into a single follow-up pass", async () => {
     let flushCount = 0;
     let releaseFirstFlush!: () => void;

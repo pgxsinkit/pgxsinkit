@@ -24,7 +24,12 @@ export interface OfflineControl {
  * capability for later.
  */
 export function createOfflineControl(): OfflineControl {
-  const base = createBrowserConvergenceTrigger();
+  // A slow fallback cadence. Convergence is now event-driven — a local write requests a pass on enqueue
+  // (client requestPass), and the real-time <table>_reconcile_on_sync trigger clears overlays on the
+  // Electric echo — so this interval only catches retries/recovery, not the happy path. Every PGlite
+  // query costs ~50ms of WASM overhead regardless of complexity, so a frequent poll is the dominant
+  // idle-CPU cost; at 15s a fully idle board is effectively quiet.
+  const base = createBrowserConvergenceTrigger({ intervalMs: 15_000 });
   const listeners = new Set<() => void>();
   let online = true;
   let signal: (() => void) | null = null;

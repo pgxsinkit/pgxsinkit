@@ -47,6 +47,15 @@ export interface ConvergenceDriver {
    * safely close or wipe the underlying database without a pass racing against it. Idempotent.
    */
   stop: () => Promise<void>;
+  /**
+   * Request a convergence pass now — the event-driven path. The client calls this the moment a
+   * mutation is enqueued, so a local write flushes immediately instead of waiting for the trigger's
+   * next interval tick. Coalesced exactly like a trigger signal (one pass at a time; a request mid-pass
+   * queues a single follow-up) and still gated by `shouldConverge()`, so a write made while offline
+   * stages without flushing. With this, the trigger's interval is only a fallback (retries/recovery),
+   * which lets it run far less often — the interval, not real convergence, is what costs idle CPU.
+   */
+  requestPass: () => void;
 }
 
 /**
@@ -115,6 +124,9 @@ export function createConvergenceDriver(options: ConvergenceDriverOptions): Conv
       unsubscribe = null;
       // Await the in-flight pass (if any) so the DB is quiescent before the caller closes/wipes it.
       await currentPass;
+    },
+    requestPass: () => {
+      void runPass();
     },
   };
 }
