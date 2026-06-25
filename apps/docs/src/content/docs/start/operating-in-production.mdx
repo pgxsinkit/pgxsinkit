@@ -83,6 +83,30 @@ production ingress (Cloud Supabase, Electric Cloud, an istio/Envoy gateway, a TL
 speaks HTTP/2. Full detail and the symptom check are in
 [Deploying the server](/start/deploying-the-server/).
 
+## Read-path apply failures hold, they don't diverge
+
+If a local commit into PGlite keeps failing — a bad local migration, a storage/quota error, a corrupt
+local store — the read path retries with backoff and then **latches into a `degraded` phase** instead of
+advancing past the change it could not apply. It holds the read cache at the **last good commit**, so the
+client never silently diverges from the server. The failure is surfaced through the `onSyncError`
+callback you pass to `createSyncClient`, and the runtime's `status` reports the `degraded` phase.
+
+How it recovers depends on _why_ it degraded:
+
+- A **read-stream** error (a dropped shape connection) clears automatically on the next successful batch.
+- A **commit** failure is **sticky** — fetching can keep succeeding while applies fail — so it clears only
+  on the next commit that succeeds, _after_ you fix the underlying cause, or on a **client restart**.
+  There is no separate reset call for this; `recoverSending` rebuilds the _write_ journal, not the read
+  frontier.
+
+## `operations_log` records user content
+
+The optional write-side audit log (`operationsLog: { enabled: true }`, **off by default**) persists every
+mutation — table, kind, and **payload** — including the raw body of mutations that **failed validation**.
+Those payloads contain whatever your users typed. So treat the `operations_log` table as sensitive:
+restrict access and set a retention policy, and leave it disabled in environments where that content
+should not sit at rest.
+
 ## Debugging latency: `globalThis.__pgxsinkitDebug`
 
 `@pgxsinkit/client` ships opt-in, timestamped instrumentation that traces a write through every phase —

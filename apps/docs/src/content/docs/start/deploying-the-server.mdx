@@ -92,6 +92,16 @@ Splitting the write route and the shape proxy into two deployments (e.g. a `writ
 Both import the same registry and share the same `resolveAuthClaims`, which is what keeps the two
 ingress points honest.
 
+### Auth is bearer-token; the built-in CORS is credentialless
+
+`resolveAuthClaims` reads the **`Authorization: Bearer …` token** — pgxsinkit does not authenticate from
+cookies. To match that, the server's built-in CORS reflects your configured `allowedOrigins` and the
+request methods/headers but **does not send `Access-Control-Allow-Credentials`**, so browsers will not
+attach cookies on cross-origin calls. That is the right default for a token API. If you intend to drive
+the server from a **Supabase cookie session** (rather than a bearer token), that is a deliberate
+extension: terminate credentialled CORS at your own gateway and turn the cookie into a bearer token (or
+into `JwtClaims`) inside `resolveAuthClaims`.
+
 ### The gateway must speak HTTP/2 — one long-poll connection per shape
 
 Electric's client holds **one live long-poll connection open per synced shape**. A client that

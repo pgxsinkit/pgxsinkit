@@ -14,7 +14,7 @@
 
 Canonical timestamps are stored as bigint microseconds since the unix epoch and cross API/sync boundaries as decimal strings.
 
-📖 **[Documentation](https://pgxsinkit.github.io)** — start with [What is pgxsinkit?](https://pgxsinkit.github.io/start/overview/), then [Getting started](https://pgxsinkit.github.io/start/getting-started/) and [Core concepts](https://pgxsinkit.github.io/concepts/).
+📖 **[Documentation](https://pgxsinkit.github.io)** — start with [What is pgxsinkit?](https://pgxsinkit.github.io/start/overview/), then [Getting started](https://pgxsinkit.github.io/start/getting-started/) and [Core concepts](https://pgxsinkit.github.io/concepts/). Before you ship, read [Operating in production](https://pgxsinkit.github.io/start/operating-in-production/) — the runtime gotchas (convergence cadence, edge cold starts, the browser HTTP/2 connection budget) that decide whether a live app feels fast.
 
 ## Requirements
 
