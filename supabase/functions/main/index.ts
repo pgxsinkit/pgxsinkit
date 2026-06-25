@@ -140,7 +140,11 @@ Deno.serve(async (req: Request) => {
   console.error(`serving the request with ${servicePath}`);
 
   const memoryLimitMb = 150;
-  const workerTimeoutMs = 1 * 60 * 1000;
+  // Per-worker wall-clock budget. The board overrides this (EDGE_WORKER_TIMEOUT_MS) because the
+  // board-sync proxy holds Electric long-polls open continuously: at the stock 60s a long-poll worker
+  // accumulates wall-clock and is recycled mid-cycle (the "early termination" log + a read-path
+  // reconnect) about once a minute. A larger budget makes that churn rare. Unset → stock 60s.
+  const workerTimeoutMs = Number(Deno.env.get("EDGE_WORKER_TIMEOUT_MS")) || 1 * 60 * 1000;
   const noModuleCache = false;
   const importMapPath = null;
   const envVarsObj = Deno.env.toObject();

@@ -280,13 +280,40 @@ a capability **gap**, not a defect.
     long-polls and resumes from the persisted offset) so an offline mode can suspend both directions
     without tearing down the store. A future ADR.
 
-Observation (not a bug, logged for a profiling pass): an idle board sustains a non-trivial CPU baseline
-in the **sync/PGlite-worker layer** — toggling the convergence driver Offline did _not_ reduce it, so
-the cost is the inbound side (six Electric live long-polls + the PGlite worker), not the flush/reconcile
-churn. The main thread stays at 60fps (no render loop), so it is not a UX defect, but the steady-state
-cost of N live shape subscriptions is worth measuring — and is the likely culprit behind a long-lived
-tab that, after an HMR reload resumed a rotated shape handle, spun a shape refetch loop to 100%.
-
 Deferred to a later increment (no toolkit gap, just scope): the PGlite **REPL tab** (the board carries
 no `@electric-sql/pglite-repl` dependency yet) and a **team-scope frontier-LSN** readout (no client API
 surfaces the consistency group's frontier today).
+
+## Performance pass — idle CPU + write→converge latency
+
+A profiling pass on two things that _felt_ slow. Both turned out to be **outside the sync rail** — the
+toolkit's read/write/converge primitives are fast; the costs were a too-eager convergence cadence and the
+self-hosted edge-runtime's worker lifecycle. Measure CPU via a `/proc/<pid>/stat` utime+stime **delta**,
+not `ps %cpu` (a lifetime average); measure latency at the **network**, not by polling PGlite in a loop
+(every PGlite WASM query is ~50ms and serializes on the one worker thread, so a tight poll loop inflates
+the very number it reports — this bit us repeatedly).
+
+- **Idle CPU ~70% of a core → ~2% (no toolkit defect, a cadence fix).** The convergence driver polled
+  every 1.5s and each pass ran `reconcileTable` for every writable table unconditionally — a transaction
+  - clear/retire CTEs even on an empty journal — and those writes fired PGlite's live-query `NOTIFY`
+    triggers, re-running every mounted query. Fixes, all upstream: `reconcileTable` idle-skips behind one
+    cheap `EXISTS` probe; convergence is **event-driven** (`requestPass()` on enqueue) so the interval
+    drops to a 15s fallback. Convergence latency is unchanged (it is bounded by the echo, not the interval).
+
+- **The "convergence dot lingers ~8s" is an edge-function cold start, not the sync rail.** Measured legs,
+  server-side and clean: Electric replication→delivery **~75ms**; `board-write` apply **~20ms warm**; the
+  overlay/dot clears **~0.7–0.9s** after the ack + echo both land (the `<table>_reconcile_on_sync` trigger
+  works — it does **not** wait on the 15s fallback). The latency the learner feels is entirely the
+  `board-write` POST: **~20ms warm**, but **~0.45s** when the edge worker has been suspended for ~15s (a
+  Postgres reconnect on resume) and **~5.8s** when its module cache is cold (a fresh isolate re-imports the
+  whole bundle). Drag a card after the board sits idle → the first write hits a cold worker → ~6–8s.
+  This is a property of the **self-hosted edge-runtime deployment target**, not pgxsinkit: the same
+  `board-write`/`board-sync` logic on a long-lived Bun service (`apps/write-api`) or on Cloud Supabase's
+  managed warm pool has no cold start. Demo fix (infra only, see `infra/compose/board-compose.yml`): a
+  `warmer` sidecar pings both functions every 8s (a no-op empty-`mutations` POST — rejected at validation
+  _before_ any DB work, the cheapest request that still reaches the worker — keeps writes ~20ms after
+  idle), and `EDGE_WORKER_TIMEOUT_MS` raises the vendored main router's 60s per-worker wall-clock budget
+  so the board-sync long-poll is not recycled (and the read path forced to reconnect) once a minute.
+
+  Secondary, logged: reloading the board tab after editing a core client module (HMR full-reload while
+  PGlite resumes a rotated shape handle) can spin a shape refetch loop to 100% — dev-only friction.

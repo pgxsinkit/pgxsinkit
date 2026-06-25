@@ -127,3 +127,16 @@ Splitting the write route and the shape proxy into two deployments (e.g. a `writ
 
 Both import the same registry and share the same `resolveAuthClaims`, which is what keeps the two
 ingress points honest.
+
+<Aside type="note" title="Edge cold starts are a platform property, not a toolkit cost">
+  On a serverless Edge platform a worker is suspended when idle and evicted after longer idle, so the
+  first request after a quiet period pays a cold start — re-importing the bundle and re-establishing the
+  Postgres connection. The convergence machinery is fast (the write applies in a few ms, the echo streams
+  back in well under a second), so this shows up as the first write *after idle* lagging while steady-state
+  writes are instant. Two mitigations, both platform-level: keep the worker warm with a periodic cheap
+  request, and set the worker's wall-clock budget **above** your busiest held-open shape long-poll so a
+  live subscription is not recycled mid-cycle (forcing a read-path reconnect). A long-lived **Bun** (or
+  Deno) deployment has neither characteristic — one warm process, a pooled connection, no per-request
+  worker lifecycle — which is the simplest answer if first-write latency matters more than serverless
+  scale-to-zero.
+</Aside>

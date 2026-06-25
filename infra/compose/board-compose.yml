@@ -148,6 +148,10 @@ services:
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       ELECTRIC_SHAPE_URL: http://electric:3000/v1/shape
       BOARD_ALLOWED_ORIGINS: ${BOARD_SITE_URL},http://localhost:5174
+      # Keep a board-sync long-poll worker alive ~10min instead of the stock 60s, so the read path
+      # is not forced to reconnect every minute when the worker hits its wall-clock budget (read by
+      # the vendored main router). Demo realism: Cloud Supabase manages worker lifetime for you.
+      EDGE_WORKER_TIMEOUT_MS: "600000"
 
   electric:
     image: docker.io/electricsql/electric:1.7.2
@@ -162,3 +166,34 @@ services:
       ELECTRIC_FEATURE_FLAGS: allow_subqueries,tagged_subqueries
     ports:
       - "54330:3000"
+
+  # warmer — keeps the board-write + board-sync edge workers hot (board dogfooding finding).
+  #
+  # Self-hosted edge-runtime suspends an idle user worker within ~15s and evicts a cold one's module
+  # cache after longer idle. Without warming, a learner's first drag after a quiet period pays an
+  # edge cold start: ~5.8s to import the board-write bundle, or ~0.45s to re-establish the worker's
+  # Postgres connection after a shorter idle — felt as the convergence dot lingering for seconds even
+  # though the sync rail itself is fast (~75ms Electric echo, ~20ms apply). A cheap request every 8s
+  # keeps the workers active, so real writes stay ~20ms. The empty-`mutations` POST is rejected at
+  # validation (400) *before* any DB work — the cheapest request that still reaches the worker — and
+  # the anon `board-sync` shape (200, empty) warms the read proxy. Pure demo realism: a managed BaaS
+  # (Cloud Supabase) keeps functions warm for you, so nothing like this ships in the app.
+  warmer:
+    image: docker.io/curlimages/curl:8.11.1
+    container_name: board-warmer
+    depends_on:
+      - kong
+    environment:
+      ANON_KEY: ${ANON_KEY}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        while true; do
+          curl -fsS -o /dev/null -X POST "http://kong:8000/functions/v1/board-write/mutations" \
+            -H "apikey: $$ANON_KEY" -H "Authorization: Bearer $$ANON_KEY" \
+            -H "Content-Type: application/json" -d '{"mutations":[]}' 2>/dev/null || true
+          curl -fsS -o /dev/null "http://kong:8000/functions/v1/board-sync?table=team&offset=-1" \
+            -H "apikey: $$ANON_KEY" -H "Authorization: Bearer $$ANON_KEY" 2>/dev/null || true
+          sleep 8
+        done
