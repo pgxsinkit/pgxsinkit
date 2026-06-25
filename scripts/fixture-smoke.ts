@@ -31,7 +31,6 @@ const PEER_DEPS: Record<string, string> = {
   "@electric-sql/pglite": "0.5.3",
   "@electric-sql/client": "^1.5.21",
   "@electric-sql/experimental": "^6.0.21",
-  hono: "^4.12.26",
   react: "^19.2.7",
 };
 

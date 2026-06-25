@@ -1,7 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { Hono } from "hono";
-
 import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
   buildDemoMembershipSyncConfig,
@@ -16,7 +14,7 @@ import {
   workspaceMembersTable,
   workspacesTable,
 } from "@pgxsinkit/schema";
-import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
+import { createSyncServer } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
@@ -70,22 +68,17 @@ describe("demo membership sync (readonly workspaces + members + work_items) inte
       await provisioningServer.stop();
     }
 
-    const app = new Hono();
-    app.get("/v1/electric-proxy", async (context) =>
-      proxyElectricShapeRequest(context.req.raw, claimsFromHeader(context.req.raw), {
-        registry: membershipFanoutSyncRegistry,
-        electricUrl: env.electricUrl,
-      }),
-    );
-
+    // createSyncServer serves the shape proxy itself at a chosen path, sharing the one
+    // resolveAuthClaims adapter with the write route (ADR-0003) — no framework wrapper needed.
     server = createSyncServer({
-      app,
       registry: membershipFanoutSyncRegistry,
       db: serverDb.db,
       resolveAuthClaims: (request) => claimsFromHeader(request),
+      electricUrl: env.electricUrl,
+      shapeProxyPath: "/v1/electric-proxy",
     });
 
-    httpServer = Bun.serve({ port: 0, fetch: app.fetch });
+    httpServer = Bun.serve({ port: 0, fetch: server.fetch });
     proxyUrl = `http://127.0.0.1:${httpServer.port}/v1/electric-proxy`;
   });
 

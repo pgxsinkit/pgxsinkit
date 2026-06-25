@@ -3,7 +3,6 @@ import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 import { createSchemaFactory } from "drizzle-orm/zod";
-import type { Context, Hono } from "hono";
 
 import type {
   BatchMutationRequest,
@@ -21,6 +20,7 @@ import {
 
 import type { OperationsLogConfig } from "../operations-log/types";
 import { logOperation, logOperationSafely } from "../operations-log/writer";
+import type { FetchHandler } from "../router";
 import { executePlpgsqlBatch, verifyPlpgsqlBatchFunction, verifyRlsAuthHelpers } from "./plpgsql-apply";
 import type { TransactionClient } from "./types";
 
@@ -30,16 +30,16 @@ const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
 
 type RouteReadQueryClient = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations>, "select">;
 
-export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
-  app: Hono,
+export const batchMutationPaths = ["/api/mutations", "/mutations"] as const;
+
+export function createMutationHandler<TRegistry extends SyncTableRegistry>(
   db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   registry: TRegistry,
   operationsLogConfig: OperationsLogConfig,
   operationsLogReady: Promise<void>,
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null,
-) {
+): FetchHandler {
   let startupReadyPromise: Promise<void> | undefined;
-  const batchMutationPaths = ["/api/mutations", "/mutations"] as const;
 
   const startupReady = () => {
     if (!startupReadyPromise) {
@@ -49,13 +49,14 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
     return startupReadyPromise;
   };
 
-  const handleBatchMutation = async (context: Context) => {
+  const handleBatchMutation = async (request: Request): Promise<Response> => {
     await Promise.all([startupReady(), operationsLogReady]);
 
+    const requestPath = new URL(request.url).pathname;
     let rawBody: unknown;
 
     try {
-      rawBody = await context.req.json();
+      rawBody = await request.json();
     } catch (error) {
       await logOperationSafely(db, operationsLogConfig, {
         tableName: null,
@@ -65,15 +66,15 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
         status: "validation_failed",
         errorMessage: error instanceof Error ? error.message : "Invalid JSON request body",
         httpStatus: 400,
-        requestPath: context.req.path,
+        requestPath: requestPath,
       });
 
-      return context.json(
+      return Response.json(
         {
           message: "Invalid batch mutation request",
           issues: [],
         },
-        400,
+        { status: 400 },
       );
     }
 
@@ -90,15 +91,15 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
         status: "validation_failed",
         errorMessage: error instanceof Error ? error.message : "Invalid batch mutation request",
         httpStatus: 400,
-        requestPath: context.req.path,
+        requestPath: requestPath,
       });
 
-      return context.json(
+      return Response.json(
         {
           message: "Invalid batch mutation request",
           issues: isValidationError(error) ? error.issues : [],
         },
-        400,
+        { status: 400 },
       );
     }
 
@@ -174,14 +175,14 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
           mutationId: invalidMutation.mutation.mutationId,
           mutationSeq: invalidMutation.mutation.mutationSeq,
           clientTimestampUs: invalidMutation.mutation.clientTimestampUs,
-          requestPath: context.req.path,
+          requestPath: requestPath,
         });
       }
 
       // Attribute the rejection to the specific offending mutations. The batch is atomic
       // (nothing was applied), so the client can quarantine exactly these and keep the
       // innocent siblings retryable — one bad mutation never poisons the whole offline queue.
-      return context.json(
+      return Response.json(
         {
           message: `Payload validation failed: ${validationErrors.join("; ")}`,
           rejections: invalidMutations.map(({ mutation, message }) => ({
@@ -191,7 +192,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
             reason: message,
           })),
         },
-        400,
+        { status: 400 },
       );
     }
 
@@ -205,7 +206,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
         let userClaims: Record<string, unknown> = {};
 
         if (shouldApplyRlsContext) {
-          const resolvedClaims = await resolveAuthClaims?.(context.req.raw);
+          const resolvedClaims = await resolveAuthClaims?.(request);
 
           if (!isPlainObject(resolvedClaims)) {
             await logOperationSafely(db, operationsLogConfig, {
@@ -216,7 +217,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
               status: "validation_failed",
               errorMessage: "Missing validated JWT claims for RLS-enabled tables",
               httpStatus: 401,
-              requestPath: context.req.path,
+              requestPath: requestPath,
             });
 
             throw new UnauthorizedBatchMutationError(
@@ -234,7 +235,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
         const conflicts = await executePlpgsqlBatch(
           tx as unknown as TransactionClient,
           batchRequest,
-          context.req.path,
+          requestPath,
           false,
           shouldApplyRlsContext,
           userClaims,
@@ -274,7 +275,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
               mutationId: mutation.mutationId,
               mutationSeq: mutation.mutationSeq,
               clientTimestampUs: mutation.clientTimestampUs,
-              requestPath: context.req.path,
+              requestPath: requestPath,
               userId: actorUserId,
             });
 
@@ -307,7 +308,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
             mutationId: mutation.mutationId,
             mutationSeq: mutation.mutationSeq,
             clientTimestampUs: mutation.clientTimestampUs,
-            requestPath: context.req.path,
+            requestPath: requestPath,
             userId: actorUserId,
           });
 
@@ -323,7 +324,7 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
       });
     } catch (error) {
       if (error instanceof UnauthorizedBatchMutationError) {
-        return context.json({ message: error.message }, 401);
+        return Response.json({ message: error.message }, { status: 401 });
       }
 
       const errorMessage = formatBatchExecutionError(error);
@@ -340,20 +341,18 @@ export function registerMutationRoute<TRegistry extends SyncTableRegistry>(
           mutationId: mutation.mutationId,
           mutationSeq: mutation.mutationSeq,
           clientTimestampUs: mutation.clientTimestampUs,
-          requestPath: context.req.path,
+          requestPath: requestPath,
           userId: actorUserId,
         });
       }
 
-      return context.json({ message: errorMessage }, 500);
+      return Response.json({ message: errorMessage }, { status: 500 });
     }
 
-    return context.json({ acks });
+    return Response.json({ acks });
   };
 
-  for (const path of batchMutationPaths) {
-    app.post(path, handleBatchMutation);
-  }
+  return handleBatchMutation;
 }
 
 function isValidationError(error: unknown): error is { issues: unknown[] } {

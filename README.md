@@ -86,7 +86,7 @@ Contributor setup, the canonical vocabulary, and the agent guide live in [`AGENT
 and [`CONTEXT.md`](./CONTEXT.md). The repository is a Bun workspace:
 
 - `apps/board` — the substantial demo (Linear-style board + chat) on a partial Supabase + Electric stack.
-- `apps/write-api` — the minimal `@pgxsinkit/server` reference (Bun + Hono).
+- `apps/write-api` — the minimal `@pgxsinkit/server` reference (Bun, no web framework).
 - `packages/contracts` · `client` · `server` · `react` — the published toolkit.
 - `packages/schema`, `packages/board-schema` — example/demo registries (your app defines its own).
 - `infra/`, `tests/`, `supabase/functions` — compose stacks, suites, and the demo's edge functions.

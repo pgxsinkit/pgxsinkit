@@ -29,8 +29,8 @@ which Deno's strict resolver rejects, and your registry package is usually unpub
 function into one self-contained ESM file ahead of time (`bun build` / esbuild, `target: "node"`,
 `format: "esm"`). **The easy miss:** with `target: "node"`, Bun leaves builtins external but **bare**
 (`import net from "net"`); Deno only resolves them under the `node:` scheme, so add an `onResolve` plugin
-that rewrites every builtin to `node:*`. Everything else (drizzle, hono, zod, the toolkit, your registry)
-inlines.
+that rewrites every builtin to `node:*`. Everything else (drizzle, zod, the toolkit, your registry, plus
+any framework you chose) inlines.
 
 ## 2. Strip the function-name path prefix before `server.fetch`
 

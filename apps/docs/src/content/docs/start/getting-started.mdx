@@ -21,9 +21,9 @@ This page gets you from zero to a working read + write path. For what each packa
   [The Electric subquery requirement](/concepts/electric-subqueries/).
 
 - **A runtime that serves a web `fetch` handler** for the pgxsinkit server — Bun, Deno, **Supabase Edge
-  Functions**, Cloudflare Workers, etc. The server core is runtime-neutral (Hono + web-standard
-  `Request`/`Response`, with the DB client injected); only the optional `server.start()` helper is
-  Bun-specific. And **Drizzle** (`drizzle-orm@1.0.0-rc.2`+) for schema.
+  Functions**, Cloudflare Workers, etc. The server core is runtime-neutral and framework-free
+  (web-standard `Request`/`Response`, with the DB client injected); only the optional `server.start()`
+  helper is Bun-specific. And **Drizzle** (`drizzle-orm@1.0.0-rc.2`+) for schema.
 
 <Aside type="caution" title="Enum columns in shape filters">
   A PostgreSQL `enum` referenced in a shape `where` must be cast to `text` — `"role"::text = 'manager'`, not `"role" =
@@ -72,8 +72,7 @@ yarn add @pgxsinkit/react
 </Tabs>
 
 The packages are published to public npm; install them with whichever package manager your app uses —
-pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql/pglite`, `hono`
-(server), and `zod`.
+pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql/pglite`, and `zod`.
 
 ## Stand up the write path
 

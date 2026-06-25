@@ -29,5 +29,6 @@ complete as ADRs are added.
 - [ADR-0014 — Bulk apply on both paths, without the set-based ordering hazard](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0014-bulk-apply-ordering-safety.md)
 - [ADR-0015 — Stale-write conflict policy: detect by Server version, choose per table](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0015-stale-write-conflict-policy.md)
 - [ADR-0016 — Deferred read-path optimisations and their triggers to revisit](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0016-deferred-read-path-optimisations.md)
+- [ADR-0017 — Framework-neutral server: drop the Hono dependency](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0017-framework-neutral-server-drop-hono.md)
 
 <!-- adr:list:end -->

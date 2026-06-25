@@ -1,6 +1,4 @@
 import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
 
 import type {
   JwtClaims,
@@ -12,9 +10,10 @@ import type {
 } from "@pgxsinkit/contracts";
 
 import { proxyElectricShapeRequest } from "./electric-proxy";
-import { registerMutationRoute } from "./mutations/route";
+import { batchMutationPaths, createMutationHandler } from "./mutations/route";
 import { ensureOperationsLogSchema } from "./operations-log/ddl";
 import type { OperationsLogConfig } from "./operations-log/types";
+import { FetchRouter, type CorsScope } from "./router";
 
 const defaultAllowedOrigins = ["http://localhost:5173", "http://localhost:5174"];
 
@@ -40,8 +39,6 @@ export interface CreateSyncServerOptions<
 > {
   registry: TRegistry;
   db: TDb;
-  /** Existing Hono app to register routes on. If omitted, a new Hono app is created. */
-  app?: Hono;
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
   /**
    * When set, the server serves a read-path Electric shape proxy that shares the
@@ -56,7 +53,7 @@ export interface CreateSyncServerOptions<
   operationsLog?: {
     enabled?: boolean;
   };
-  /** Health check endpoint. Only applies when pgxsinkit owns the Hono app. */
+  /** Health check endpoint. Enabled by default at `/health`; `false` disables it, `{ path }` relocates it. */
   healthCheck?: boolean | { path: string };
   port?: number;
   host?: string;
@@ -94,9 +91,8 @@ export function createSyncServer<
     RegistryRelations<TRegistry>
   >,
 >(options: CreateSyncServerOptions<TRegistry, TDb>): SyncServer<TRegistry, TDb> {
-  const ownsApp = !options.app;
   const db = options.db;
-  const app = options.app ?? new Hono();
+  const router = new FetchRouter();
   let bunServer: BunServerHandle | undefined;
 
   const status: SyncRuntimeStatus = {
@@ -117,66 +113,62 @@ export function createSyncServer<
     operationsLogConfig.enabled = operationsLogConfig.enabled && present;
   });
 
-  if (ownsApp) {
-    const corsMiddleware = cors({
-      origin: options.allowedOrigins ?? defaultAllowedOrigins,
+  const shapeProxyPath = options.shapeProxyPath ?? "/api/shape";
+
+  // CORS mirrors the previous middleware scopes: everything under /api/*, the /mutations alias, and
+  // the shape proxy path (which may be relocated outside /api/).
+  const corsScopes: CorsScope[] = [{ prefix: "/api/" }, { exact: "/mutations" }];
+  if (options.electricUrl) {
+    corsScopes.push({ exact: shapeProxyPath });
+  }
+  router.setCors(
+    {
+      origins: options.allowedOrigins ?? defaultAllowedOrigins,
       allowMethods: ["GET", "POST", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"],
-    });
+    },
+    corsScopes,
+  );
 
-    app.use("/api/*", corsMiddleware);
-    app.use("/mutations", corsMiddleware);
+  router.setErrorHandler((error) => {
+    status.phase = "degraded";
+    status.lastError = error instanceof Error ? error.message : "Unexpected error";
+    options.onStatusChange?.(status);
 
-    if (options.electricUrl) {
-      app.use(options.shapeProxyPath ?? "/api/shape", corsMiddleware);
+    if (isValidationError(error)) {
+      return Response.json({ message: "Validation failed", issues: error.issues }, { status: 400 });
     }
 
-    app.onError((error, context) => {
-      status.phase = "degraded";
-      status.lastError = error instanceof Error ? error.message : "Unexpected error";
-      options.onStatusChange?.(status);
+    return Response.json({ message: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 });
+  });
 
-      if (isValidationError(error)) {
-        return context.json(
-          {
-            message: "Validation failed",
-            issues: error.issues,
-          },
-          400,
-        );
-      }
-
-      return context.json(
-        {
-          message: error instanceof Error ? error.message : "Unexpected error",
-        },
-        500,
-      );
-    });
-
-    const healthCheckPath = resolveHealthCheckPath(options.healthCheck, true);
-
-    if (healthCheckPath) {
-      app.get(healthCheckPath, (context) => {
-        return context.json({ ok: true });
-      });
-    }
+  const healthCheckPath = resolveHealthCheckPath(options.healthCheck, true);
+  if (healthCheckPath) {
+    router.get(healthCheckPath, () => Response.json({ ok: true }));
   }
 
-  // The single mutation ingress point — all writes go through POST /api/mutations
-  registerMutationRoute(app, db, options.registry, operationsLogConfig, operationsLogReady, options.resolveAuthClaims);
+  // The single mutation ingress point — all writes go through POST /api/mutations (and the /mutations alias).
+  const mutationHandler = createMutationHandler(
+    db,
+    options.registry,
+    operationsLogConfig,
+    operationsLogReady,
+    options.resolveAuthClaims,
+  );
+  for (const path of batchMutationPaths) {
+    router.post(path, mutationHandler);
+  }
 
   // The read-path shape proxy shares the same resolveAuthClaims adapter, so read and
   // write authorization can never diverge (ADR-0003).
   if (options.electricUrl) {
-    const shapeProxyPath = options.shapeProxyPath ?? "/api/shape";
     const electricUrl = options.electricUrl;
     const resolveAuthClaims = options.resolveAuthClaims;
     const resolveShapeParams = options.resolveShapeParams;
-    app.get(shapeProxyPath, async (context) => {
-      const claims = resolveAuthClaims ? await resolveAuthClaims(context.req.raw) : null;
-      const extraParams = resolveShapeParams?.(context.req.raw);
-      return proxyElectricShapeRequest(context.req.raw, claims, {
+    router.get(shapeProxyPath, async (request) => {
+      const claims = resolveAuthClaims ? await resolveAuthClaims(request) : null;
+      const extraParams = resolveShapeParams?.(request);
+      return proxyElectricShapeRequest(request, claims, {
         registry: options.registry,
         electricUrl,
         ...(extraParams ? { extraParams } : {}),
@@ -184,7 +176,7 @@ export function createSyncServer<
     });
   }
 
-  const fetch = async (request: Request) => app.fetch(request);
+  const fetch = router.fetch;
 
   return {
     drizzle: db,
@@ -196,10 +188,6 @@ export function createSyncServer<
     start: async () => {
       if (bunServer) {
         return;
-      }
-
-      if (!ownsApp) {
-        throw new Error("createSyncServer.start() requires pgxsinkit to own the Hono app (no external app provided)");
       }
 
       const bun = getBunNamespace();
@@ -215,7 +203,7 @@ export function createSyncServer<
         hostname: host,
         port,
         ...(idleTimeout !== undefined ? { idleTimeout } : {}),
-        fetch: app.fetch,
+        fetch,
       });
 
       status.isRunning = true;
@@ -280,7 +268,9 @@ function resolveOperationsLogConfig(options?: { enabled?: boolean }): Operations
   };
 }
 
-export { registerMutationRoute } from "./mutations/route";
+export { batchMutationPaths, createMutationHandler } from "./mutations/route";
+export type { CorsConfig, CorsScope, FetchHandler, RouterErrorHandler } from "./router";
+export { FetchRouter } from "./router";
 export { buildPlpgsqlBatchFunctionDdl } from "./mutations/plpgsql-apply";
 export { ensureOperationsLogSchema } from "./operations-log/ddl";
 export { operationsLogTable } from "./operations-log/schema";

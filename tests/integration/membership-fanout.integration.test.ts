@@ -1,7 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { Hono } from "hono";
-
 import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
   buildMembershipFanoutSyncConfig,
@@ -10,7 +8,7 @@ import {
   workspaceMembersTable,
   workspacesTable,
 } from "@pgxsinkit/schema";
-import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
+import { createSyncServer } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
@@ -81,24 +79,17 @@ describe("membership fan-out (readwrite) integration", () => {
       await provisioningServer.stop();
     }
 
-    // One Hono app serves both the write API (createSyncServer) and the shape proxy route,
-    // both resolving the test identity from the x-test-sub header.
-    const app = new Hono();
-    app.get("/v1/electric-proxy", async (context) =>
-      proxyElectricShapeRequest(context.req.raw, claimsFromHeader(context.req.raw), {
-        registry: membershipFanoutSyncRegistry,
-        electricUrl: env.electricUrl,
-      }),
-    );
-
+    // createSyncServer serves both the write route and the shape proxy from the one server,
+    // each resolving the test identity from the x-test-sub header via the shared adapter.
     server = createSyncServer({
-      app,
       registry: membershipFanoutSyncRegistry,
       db: serverDb.db,
       resolveAuthClaims: (request) => claimsFromHeader(request),
+      electricUrl: env.electricUrl,
+      shapeProxyPath: "/v1/electric-proxy",
     });
 
-    httpServer = Bun.serve({ port: 0, fetch: app.fetch });
+    httpServer = Bun.serve({ port: 0, fetch: server.fetch });
     proxyUrl = `http://127.0.0.1:${httpServer.port}/v1/electric-proxy`;
   });
 
