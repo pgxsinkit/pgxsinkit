@@ -140,6 +140,29 @@ await client.stop();
 console.log("FIXTURE SMOKE OK");
 `;
 
+/**
+ * Proves the `pgxsinkit-generate` bin actually resolves from a packed install: the `bin/` launcher
+ * shipped, and its relative path to the TypeScript CLI is correct from `node_modules`. Running it with
+ * no args makes the CLI print its usage and exit 1 — which only happens if the whole launcher → Bun →
+ * CLI (with its `@pgxsinkit/contracts` import) chain loaded.
+ */
+function assertGenerateBinResolves(appDir: string): void {
+  const binPath = join(appDir, "node_modules", ".bin", "pgxsinkit-generate");
+  let output = "";
+  let exitCode = 0;
+  try {
+    execFileSync(binPath, [], { cwd: appDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    const failure = error as { status?: number; stdout?: string; stderr?: string };
+    exitCode = failure.status ?? 1;
+    output = `${failure.stdout ?? ""}${failure.stderr ?? ""}`;
+  }
+
+  if (exitCode !== 1 || !output.includes("Usage:")) {
+    throw new Error(`pgxsinkit-generate bin did not resolve from the packed install (exit ${exitCode}): ${output}`);
+  }
+}
+
 async function main(): Promise<void> {
   console.log("[fixture-smoke] building public packages…");
   run("bun", ["run", "build:public-packages"], repoRoot);
@@ -184,6 +207,9 @@ async function main(): Promise<void> {
 
     console.log("[fixture-smoke] running the smoke against the published surface…");
     run("bun", ["smoke.ts"], appDir);
+
+    console.log("[fixture-smoke] checking the pgxsinkit-generate bin resolves from the install…");
+    assertGenerateBinResolves(appDir);
 
     console.log("[fixture-smoke] OK — the published install path works.");
   } finally {

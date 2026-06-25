@@ -124,10 +124,11 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
 2. **Provision the apply function.** The write path applies batches through one in-database PL/pgSQL
    function, `pgxsinkit_apply_mutations`. Generate a drizzle-kit migration that installs it from your
    registry with the published `pgxsinkit-generate` CLI (a `bin` of `@pgxsinkit/server`), run from
-   your own project:
+   your own project. The CLI **requires [Bun](https://bun.sh) on PATH** — it imports your TypeScript
+   registry and runs `drizzle-kit` — but the bin itself launches under any runner; `bunx`, or `npx` /
+   `pnpm exec` / `yarn` once Bun is installed (it prints a clear message if Bun is missing).
 
    ```bash
-   # bunx; use `pnpm exec` / `npx` / `yarn` to run the bin with another package manager
    bunx pgxsinkit-generate \
      --registry ./sync-registry.ts \
      --export registry \

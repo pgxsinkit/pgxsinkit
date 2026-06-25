@@ -6,9 +6,10 @@
   ],
   "license": "MIT",
   "bin": {
-    "pgxsinkit-generate": "src/cli/generate.ts"
+    "pgxsinkit-generate": "bin/pgxsinkit-generate.mjs"
   },
   "files": [
+    "bin",
     "dist",
     "src",
     "README.md",
