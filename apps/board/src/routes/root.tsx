@@ -3,6 +3,7 @@ import { Outlet } from "@tanstack/react-router";
 
 import { useAuth } from "../auth/auth";
 import { useBoardSyncStatus } from "../board/board-client-provider";
+import { SyncInspector } from "../board/sync-inspector";
 import { TeamNav } from "../components/team-nav";
 
 const PHASE_BADGE: Record<string, { label: string; color: string }> = {
@@ -42,6 +43,7 @@ export function RootLayout() {
           <Text fw={700}>pgxsinkit board</Text>
           {session ? (
             <Group gap="sm">
+              <SyncInspector />
               <SyncBadge />
               <Text size="sm" c="dimmed">
                 {session.user.email}

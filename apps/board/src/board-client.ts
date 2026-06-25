@@ -1,8 +1,9 @@
 import { boardSyncRegistry } from "@pgxsinkit/board-schema";
-import { createBrowserConvergenceTrigger, createSyncClient } from "@pgxsinkit/client";
+import { createSyncClient } from "@pgxsinkit/client";
 import type { SyncRuntimeStatus } from "@pgxsinkit/contracts";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 
+import { createOfflineControl, type OfflineControl } from "./board/offline";
 import { boardConfig } from "./config";
 import { supabase } from "./lib/supabase";
 
@@ -18,14 +19,22 @@ export const { SyncClientProvider, useSyncClient, useLiveRows, useLiveDrizzleRow
  * store is keyed by auth user id, so switching identity uses a separate IndexedDB rather than
  * inheriting the previous user's synced rows.
  *
- * `autoSync` is the browser convergence trigger (online / visibilitychange / a 1.5s fallback). It is
- * what drives the optimistic write path: each pass runs `flush` (send pending mutations to
- * `board-write`) → `reconcile` (clear the optimistic Overlay once the server value streams back via
- * Electric), started once sync is ready and stopped on `stop()`. Without it, `issue.update` would land
- * in the local Overlay and never reach Postgres.
+ * `autoSync` is a pausable convergence trigger (board Phase 8): the standard browser trigger (online /
+ * visibilitychange / a 1.5s fallback) gated behind the Offline toggle. Each pass runs `flush` (send
+ * pending mutations to `board-write`) → `reconcile` (clear the optimistic Overlay once the server value
+ * streams back via Electric), started once sync is ready and stopped on `stop()`. While the toggle is
+ * Offline the pass is suppressed, so writes stage into the local journal and only flush on reconnect.
+ * Returns the client paired with its {@link OfflineControl} so the UI can drive the toggle.
  */
-export function createBoardSyncClient(userId: string, onStatusChange?: (status: SyncRuntimeStatus) => void) {
-  return createSyncClient({
+export async function createBoardSyncClient(
+  userId: string,
+  onStatusChange?: (status: SyncRuntimeStatus) => void,
+): Promise<{
+  client: Awaited<ReturnType<typeof createSyncClient<typeof boardSyncRegistry>>>;
+  offline: OfflineControl;
+}> {
+  const offline = createOfflineControl();
+  const client = await createSyncClient({
     registry: boardSyncRegistry,
     electricUrl: boardConfig.electricUrl,
     writeUrl: boardConfig.writeUrl,
@@ -34,7 +43,8 @@ export function createBoardSyncClient(userId: string, onStatusChange?: (status: 
       return data.session?.access_token;
     },
     dataDir: `idb://pgxsinkit-board-${userId}`,
-    autoSync: createBrowserConvergenceTrigger(),
+    autoSync: offline.trigger,
     ...(onStatusChange ? { onStatusChange } : {}),
   });
+  return { client, offline };
 }

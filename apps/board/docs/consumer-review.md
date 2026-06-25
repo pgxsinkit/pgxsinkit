@@ -253,3 +253,40 @@ them; (b) `authUid` is filled in the optimistic overlay from the session `sub`, 
 owner/author column renders attributed before convergence; (c) subquery row-filters propagate
 source-table membership changes to **live** subscribers (the board's add-member fan-out),
 which is the mechanism behind the team-scope consistency group's atomic appearance.
+
+## Phase 8 — Sync Inspector + Offline toggle + convergence dots
+
+Phase 8 is pure showcase: it surfaces the convergence machinery the earlier phases relied on. Almost
+everything consumed cleanly off existing primitives — no new toolkit bug — and the one real finding is
+a capability **gap**, not a defect.
+
+- **Convergence dots** read the per-row derived convergence state (`issue_sync_state`, ADR-0011) the
+  board already exposes via `useIssueConvergence`; a card shows a dot only when not converged
+  (pending → yellow, conflict → orange, quarantined → red). Clean.
+- **The Sync Inspector journal** reads `client.readMutationDetails()` — a snapshot, so the drawer polls
+  it on a short interval while open to surface the pending → sending → acked → cleared transitions.
+  Clean, though a _live_ journal query (a view the consumer could subscribe to like `issue_sync_state`)
+  would be a nicer primitive than polling a snapshot — a small content/ergonomics nicety, noted.
+
+18. **No client-side pause/resume for the read path → an Offline toggle can only pause the outbound
+    half.** The Offline toggle pauses the **outbound** convergence driver cleanly with no toolkit
+    change: a custom `ConvergenceTrigger` whose `shouldConverge()` is gated behind an app `online`
+    flag (writes still stage into the journal; reconnect fires one pass to flush). But there is no
+    matching seam to pause the **inbound** Electric subscription without `client.stop()`, which closes
+    PGlite (teardown, not pause) — and re-subscribing has no client API. So a faithful "fully offline"
+    (also stop _receiving_) isn't expressible; the toggle is honestly "your edits queue locally and
+    sync on reconnect". → **capability gap** (no app-layer workaround attempted): the toolkit wants a
+    first-class read-path pause/resume (e.g. `client.setSyncEnabled(false)` that halts the shape
+    long-polls and resumes from the persisted offset) so an offline mode can suspend both directions
+    without tearing down the store. A future ADR.
+
+Observation (not a bug, logged for a profiling pass): an idle board sustains a non-trivial CPU baseline
+in the **sync/PGlite-worker layer** — toggling the convergence driver Offline did _not_ reduce it, so
+the cost is the inbound side (six Electric live long-polls + the PGlite worker), not the flush/reconcile
+churn. The main thread stays at 60fps (no render loop), so it is not a UX defect, but the steady-state
+cost of N live shape subscriptions is worth measuring — and is the likely culprit behind a long-lived
+tab that, after an HMR reload resumed a rotated shape handle, spun a shape refetch loop to 100%.
+
+Deferred to a later increment (no toolkit gap, just scope): the PGlite **REPL tab** (the board carries
+no `@electric-sql/pglite-repl` dependency yet) and a **team-scope frontier-LSN** readout (no client API
+surfaces the consistency group's frontier today).

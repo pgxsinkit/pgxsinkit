@@ -4,16 +4,23 @@ import { createContext, type ReactNode, useContext, useEffect, useState } from "
 import type { SyncRuntimeStatus } from "@pgxsinkit/contracts";
 
 import { createBoardSyncClient, SyncClientProvider } from "../board-client";
+import type { OfflineControl } from "./offline";
 
-type BoardSyncClient = Awaited<ReturnType<typeof createBoardSyncClient>>;
+type BoardSyncClient = Awaited<ReturnType<typeof createBoardSyncClient>>["client"];
 
 // The live sync status (booting/syncing/ready/degraded/auth-needed) for the header badge. Defaults to
 // `null` so a component may read it outside the provider (e.g. the header on the login screen) without
 // throwing — it simply renders nothing.
 const BoardSyncStatusContext = createContext<SyncRuntimeStatus | null>(null);
+// The Offline toggle control (board Phase 8). `null` outside the provider (login screen).
+const BoardOfflineContext = createContext<OfflineControl | null>(null);
 
 export function useBoardSyncStatus(): SyncRuntimeStatus | null {
   return useContext(BoardSyncStatusContext);
+}
+
+export function useBoardOffline(): OfflineControl | null {
+  return useContext(BoardOfflineContext);
 }
 
 /**
@@ -24,6 +31,7 @@ export function useBoardSyncStatus(): SyncRuntimeStatus | null {
  */
 export function BoardClientProvider({ userId, children }: { userId: string; children: ReactNode }) {
   const [client, setClient] = useState<BoardSyncClient | null>(null);
+  const [offline, setOffline] = useState<OfflineControl | null>(null);
   const [status, setStatus] = useState<SyncRuntimeStatus | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
@@ -31,12 +39,13 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
     let active = true;
     let created: BoardSyncClient | undefined;
     setClient(null);
+    setOffline(null);
     setStatus(null);
     setError(null);
 
     void (async () => {
       try {
-        const next = await createBoardSyncClient(userId, (value) => {
+        const { client: next, offline: nextOffline } = await createBoardSyncClient(userId, (value) => {
           if (active) setStatus(value);
         });
         await next.ready;
@@ -45,6 +54,7 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
           return;
         }
         created = next;
+        setOffline(nextOffline);
         // Dev-only console handle for poking the live client (stage a conflict, inspect convergence,
         // flush on demand). Never shipped — gated on the Vite dev build. The Phase 8 Sync Inspector is
         // the in-app surface; this is the REPL escape hatch behind it.
@@ -97,7 +107,9 @@ export function BoardClientProvider({ userId, children }: { userId: string; chil
 
   return (
     <BoardSyncStatusContext.Provider value={status}>
-      <SyncClientProvider client={client}>{children}</SyncClientProvider>
+      <BoardOfflineContext.Provider value={offline}>
+        <SyncClientProvider client={client}>{children}</SyncClientProvider>
+      </BoardOfflineContext.Provider>
     </BoardSyncStatusContext.Provider>
   );
 }

@@ -1,4 +1,4 @@
-import { ActionIcon, Alert, Avatar, Badge, Button, Card, Group, Menu, Stack, Text, Tooltip } from "@mantine/core";
+import { ActionIcon, Alert, Avatar, Badge, Box, Button, Card, Group, Menu, Stack, Text, Tooltip } from "@mantine/core";
 import { useRef, useState } from "react";
 
 import type { IssueActions } from "../board/use-issue-actions";
@@ -225,6 +225,38 @@ function ConflictNotice({
   );
 }
 
+/**
+ * The inline convergence dot (board Phase 8): one glance at where an Issue sits in the sync cycle,
+ * derived from the toolkit's `issue_sync_state` (ADR-0011). Shown only when the row is NOT fully
+ * converged, so a quiet board stays clean — a quarantine or conflict outranks a plain pending write.
+ */
+function ConvergenceDot({ convergence }: { convergence: IssueConvergence | undefined }) {
+  if (convergence == null) return null;
+  let color: string | null = null;
+  let label = "";
+  if (convergence.quarantinedCount > 0) {
+    color = "red";
+    label = "Rejected — quarantined (see Sync inspector)";
+  } else if (convergence.conflictState != null) {
+    color = "orange";
+    label = "Conflict — edited by someone else";
+  } else if (convergence.pendingCount > 0) {
+    color = "yellow";
+    label = "Syncing — change queued, awaiting the server";
+  }
+  if (color == null) return null;
+  return (
+    <Tooltip label={label} withArrow position="top">
+      <Box
+        w={8}
+        h={8}
+        style={{ borderRadius: "50%", backgroundColor: `var(--mantine-color-${color}-6)`, flexShrink: 0 }}
+        aria-label={label}
+      />
+    </Tooltip>
+  );
+}
+
 export function IssueCard({
   issue,
   profiles,
@@ -266,9 +298,12 @@ export function IssueCard({
     >
       <Stack gap={8}>
         <Group justify="space-between" gap="xs" wrap="nowrap" align="flex-start">
-          <Text size="sm" fw={500} lineClamp={2}>
-            {issue.title}
-          </Text>
+          <Group gap={6} wrap="nowrap" align="center" style={{ minWidth: 0 }}>
+            <ConvergenceDot convergence={convergence} />
+            <Text size="sm" fw={500} lineClamp={2}>
+              {issue.title}
+            </Text>
+          </Group>
           <IssueMenu issue={issue} assignable={assignable} moveTeams={moveTeams} actions={actions} />
         </Group>
         <Group justify="space-between" gap="xs">

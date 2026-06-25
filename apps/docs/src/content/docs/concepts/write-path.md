@@ -64,6 +64,20 @@ Because both sides resolve to the same identity, the value never flips when the 
 back. The flushed payload still omits these fields (it is built from your original input, not the
 overlay), so the server remains authoritative.
 
+## Pausing convergence (an offline toggle)
+
+The convergence driver decides _when_ to run flush/reconcile by asking its `ConvergenceTrigger`'s
+`shouldConverge()`. That is the seam for an app-built "offline" mode: wrap your trigger so
+`shouldConverge()` returns `false` while the app is offline. Writes still stage into the local journal
+(the optimistic overlay updates as usual) — they simply are not sent — so the journal fills visibly
+while offline. Flip back online and fire one signal, and the queued writes flush and reconcile. No
+teardown, no lost edits.
+
+This pauses the **outbound** half. The **inbound** read path (the Electric shape subscriptions) has no
+pause/resume today — `client.stop()` halts it but also closes the local store — so an app offline
+toggle built this way still _receives_ remote changes. Suspending both directions without tearing down
+the store is a planned capability.
+
 ## What this means for you
 
 - Don't look for a `WRITE_API_BACKEND` setting or a `backend` option — they don't exist.
