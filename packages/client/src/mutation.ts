@@ -2130,6 +2130,22 @@ async function discardConflictedEntity(
 }
 
 async function reconcileTable(db: MutationDb, context: TableContext) {
+  // Idle fast-path. Reconcile only retires/clears journal rows in a terminal-clearable state — 'acked'
+  // (clear the overlay once the echo lands) or 'conflicted' (retire once a later write resolved it). When
+  // none exist — the steady state of an idle entity set — all three statements below are no-ops, so skip
+  // the whole transaction. This matters because the convergence driver runs reconcile for EVERY writable
+  // table on its interval (default 1.5s), and each CTE pays full PGlite plan+execute cost even against an
+  // empty journal: left unguarded it is the dominant idle-CPU cost. The real-time cleanup path is the
+  // <table>_reconcile_on_sync trigger; this bulk pass is a fallback, so skipping it when there is nothing
+  // to clear changes no outcome. The guard is a single existence probe over the (small, usually empty)
+  // journal.
+  const work = await db.query<{ hasWork: boolean }>(
+    "SELECT EXISTS(SELECT 1 FROM " + context.journalTable + " WHERE status IN ('acked', 'conflicted')) AS \"hasWork\"",
+  );
+  if (work.rows[0]?.hasWork !== true) {
+    return;
+  }
+
   // The Convergence barrier (ADR-0010) gates the acked-row clearing below; the synced-table trigger
   // handles real-time cleanup, and this is the bulk recovery/fallback path that runs after every flush.
   await db.exec("BEGIN");

@@ -353,4 +353,35 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
     expect(events).toContain("mutation quarantined");
     expect(events).toContain("shape must-refetch");
   });
+
+  it("reconcile skips the transaction when no journal rows are acked/conflicted — idle fast-path (perf)", async () => {
+    const { db, runtime } = await createContext();
+    try {
+      await seedSyncedAuthor(db, AUTHOR_ID, 100);
+
+      // Count transaction openings: reconcileTable opens a BEGIN only when it has rows to clear/retire.
+      let beginCount = 0;
+      const originalExec = db.exec.bind(db);
+      db.exec = ((...args: Parameters<typeof db.exec>) => {
+        if (typeof args[0] === "string" && /^\s*BEGIN/i.test(args[0])) beginCount += 1;
+        return originalExec(...args);
+      }) as typeof db.exec;
+
+      // Idle: an empty journal has nothing acked/conflicted, so a reconcile pass must be a pure no-op —
+      // not open a transaction and run the three clear/retire CTEs. This is the dominant idle-CPU cost
+      // the convergence driver would otherwise pay every interval, for every writable table (and each
+      // such pass also fired the live-query NOTIFY triggers, re-running every UI query for nothing).
+      await runtime.reconcile("authors");
+      expect(beginCount).toBe(0);
+
+      // But an acked write leaves an 'acked' journal row, so the guard lets reconcile run and converge.
+      await runtime.update("authors", { id: AUTHOR_ID }, { name: "Edited" });
+      await flushWithAck(runtime, "200");
+      beginCount = 0;
+      await runtime.reconcile("authors");
+      expect(beginCount).toBeGreaterThan(0);
+    } finally {
+      await db.close();
+    }
+  });
 });
