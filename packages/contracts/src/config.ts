@@ -1,7 +1,11 @@
+import { sql, type AnyColumn, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
 import type { ApplyStrategy, SyncColumnType } from "./apply-strategy";
 import { escapeSqlLiteral } from "./sql-identifier";
+
+const pgDialect = new PgDialect();
 
 export type TableMode = "readonly" | "writeonly" | "readwrite";
 
@@ -202,7 +206,7 @@ export interface RowFilterSpec {
    * SQL-injection vector. Prefer `ownership`/`shared`, which escape their values for
    * you; reach for `customWhere` only when those cannot express the predicate.
    */
-  customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | null;
+  customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | SQL | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
   /**
@@ -290,10 +294,11 @@ export function buildRowFilterWhere(
     }
   }
 
-  // Custom where
+  // Custom where. A SQL fragment is handled by the proxy's parameterized path, not here — this
+  // legacy string composer ignores it (returns the ownership/shared parts, or null).
   if (customWhere) {
     const custom = customWhere(claims ?? {}, params);
-    if (custom) {
+    if (typeof custom === "string" && custom) {
       if (parts.length > 0) {
         return `(${parts.join(" ")}) AND (${custom})`;
       }
@@ -306,4 +311,48 @@ export function buildRowFilterWhere(
   }
 
   return parts.length > 1 ? `(${parts.join(" ")})` : parts[0]!;
+}
+
+/**
+ * A **bare** (table-unqualified) quoted identifier for a Drizzle column — `"workspace_id"`, never
+ * `"work_items"."workspace_id"`. Electric's shape `where` grammar requires *plain* column references
+ * (it rejects a qualified one with "Expected a plain column reference"), and Drizzle qualifies columns
+ * by default — so reference columns through `c()` when authoring a `customWhere` Drizzle fragment. The
+ * column object keeps the reference rename-safe and existence-checked at compile time; only the bare
+ * name reaches the wire. Subqueries must stay self-contained (not correlated), since bare names then
+ * resolve unambiguously to each FROM — a correlated subquery would need qualification Electric rejects.
+ */
+export function c(column: AnyColumn): SQL {
+  return sql`${sql.identifier(column.name)}`;
+}
+
+/** The parameterized shape filter the proxy sends to Electric: a `where` and its positional params. */
+export interface RowFilterShape {
+  where: string;
+  params: string[];
+}
+
+/**
+ * The parameterized form of {@link buildRowFilterWhere}, for the Electric shape proxy: returns the
+ * `where` string plus the positional `params` (`$1`, `$2`, …) it references. A `customWhere` that
+ * returns a Drizzle `SQL` fragment is serialized here, so request-derived values become **bound
+ * params** — never hand-escaped literals. `ownership`/`shared` and a string `customWhere` stay inline
+ * (no params), composed exactly as `buildRowFilterWhere` does; a SQL `customWhere` is ANDed on with its
+ * params appended (the inline part has no `$n`, so the fragment's `$1…$n` index the returned params).
+ */
+export function buildRowFilterShape(
+  filter: RowFilterSpec,
+  claims: JwtClaims | null,
+  params?: Record<string, unknown>,
+): RowFilterShape | null {
+  const inlinePart = buildRowFilterWhere(filter, claims, params);
+  const custom = filter.customWhere?.(claims ?? {}, params);
+
+  if (custom != null && typeof custom !== "string") {
+    const compiled = pgDialect.sqlToQuery(custom);
+    const where = inlinePart ? `(${inlinePart}) AND (${compiled.sql})` : compiled.sql;
+    return { where, params: compiled.params.map((value) => String(value)) };
+  }
+
+  return inlinePart != null ? { where: inlinePart, params: [] } : null;
 }

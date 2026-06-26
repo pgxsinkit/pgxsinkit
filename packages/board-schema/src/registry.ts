@@ -1,4 +1,6 @@
-import { defineSyncRegistry, escapeSqlLiteral, type JwtClaims } from "@pgxsinkit/contracts";
+import { sql } from "drizzle-orm";
+
+import { c, defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
 
 import {
   channelSyncEntry,
@@ -9,15 +11,23 @@ import {
   teamSyncEntry,
 } from "./schema";
 
+const team = teamSyncEntry.table;
+const teamMember = teamMemberSyncEntry.table;
+const channel = channelSyncEntry.table;
+const issue = issueSyncEntry.table;
+const message = messageSyncEntry.table;
+
 function isAdmin(claims: JwtClaims): boolean {
   return claims.app_metadata?.roles?.includes("admin") ?? false;
 }
 
 // The read-path twin of the RLS `memberOfTeam` predicate (policies.ts), but over the literal claim:
-// Electric runs this `where`, not Postgres, so there is no `auth.uid()` here. enum columns referenced
-// in a shape `where` must be cast to text (Electric's grammar) — see `channelReadFilter`.
-function memberTeamsSubquery(sub: string): string {
-  return `SELECT "team_id" FROM "team_member" WHERE "user_id" = '${escapeSqlLiteral(sub)}'`;
+// Electric runs this `where`, not Postgres, so there is no `auth.uid()` here. Built from the real
+// Drizzle columns — bare via `c()` (Electric's where-grammar needs plain, unqualified refs) with the
+// subject as a bound param (`$1`), never a hand-escaped literal. enum columns must be cast to text
+// (Electric's grammar) — see `channelReadFilter`.
+function memberTeams(sub: string) {
+  return sql`select ${c(teamMember.teamId)} from ${teamMember} where ${c(teamMember.userId)} = ${sub}`;
 }
 
 // Every authenticated user syncs all profiles (to render any author/assignee); nobody otherwise.
@@ -25,37 +35,36 @@ function profileReadFilter(claims: JwtClaims): string | null {
   return claims.sub ? null : "1 = 0";
 }
 
-function teamReadFilter(claims: JwtClaims): string | null {
+function teamReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
   if (!claims.sub) return "1 = 0";
-  return `"id" IN (${memberTeamsSubquery(claims.sub)})`;
+  return sql`${c(team.id)} in (${memberTeams(claims.sub)})`;
 }
 
-function teamMemberReadFilter(claims: JwtClaims): string | null {
+function teamMemberReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
   if (!claims.sub) return "1 = 0";
   // Fan-out: you sync every membership of your Teams, so you can see your co-members (assignee lists).
-  return `"team_id" IN (${memberTeamsSubquery(claims.sub)})`;
+  return sql`${c(teamMember.teamId)} in (${memberTeams(claims.sub)})`;
 }
 
-function channelReadFilter(claims: JwtClaims): string | null {
+function channelReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
   if (!claims.sub) return "1 = 0";
-  return `"kind"::text = 'global' OR "team_id" IN (${memberTeamsSubquery(claims.sub)})`;
+  return sql`${c(channel.kind)}::text = 'global' or ${c(channel.teamId)} in (${memberTeams(claims.sub)})`;
 }
 
-function issueReadFilter(claims: JwtClaims): string | null {
+function issueReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
   if (!claims.sub) return "1 = 0";
-  return `"team_id" IN (${memberTeamsSubquery(claims.sub)})`;
+  return sql`${c(issue.teamId)} in (${memberTeams(claims.sub)})`;
 }
 
-function messageReadFilter(claims: JwtClaims): string | null {
+function messageReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
   if (!claims.sub) return "1 = 0";
-  return `"channel_id" IN (SELECT "id" FROM "channel" WHERE "kind"::text = 'global' OR "team_id" IN (${memberTeamsSubquery(
-    claims.sub,
-  )}))`;
+  const visibleChannels = sql`select ${c(channel.id)} from ${channel} where ${c(channel.kind)}::text = 'global' or ${c(channel.teamId)} in (${memberTeams(claims.sub)})`;
+  return sql`${c(message.channelId)} in (${visibleChannels})`;
 }
 
 /**

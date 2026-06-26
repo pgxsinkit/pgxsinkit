@@ -135,9 +135,11 @@ describe("electric proxy", () => {
       expect(params.get("columns")).toBeNull();
       expect(params.get("replica")).toBeNull();
       expect(params.get("unknown")).toBeNull();
-      // The validated table and the registry-derived ownership where still apply.
+      // The validated table and the registry-derived ownership where still apply — now a parameterized
+      // Drizzle filter: a bound `$1` plus its value in `params[1]`, never an inlined literal.
       expect(params.get("table")).toBe("authors");
-      expect(params.get("where")).toBe(`"owner_id" = '${DEMO_USER1_ID}'`);
+      expect(params.get("where")).toBe(`"owner_id" = $1`);
+      expect(params.get("params[1]")).toBe(DEMO_USER1_ID);
     });
 
     it("forwards legitimate Electric resume/control params (offset/handle/live/cursor)", async () => {
@@ -189,7 +191,7 @@ describe("electric proxy", () => {
       const [targetUrl] = fetchMock.mock.calls[0]!;
 
       expect(readFetchTargetUrl(targetUrl)).toBe(
-        buildExpectedShapeUrl("authors", "offset=-1", `"owner_id" = '${DEMO_USER1_ID}'`),
+        buildExpectedShapeUrl("authors", "offset=-1", `"owner_id" = $1`, [DEMO_USER1_ID]),
       );
       // Proxy is transparent — headers flow through from Electric unchanged
     });
@@ -244,7 +246,7 @@ describe("electric proxy", () => {
       const [targetUrl] = fetchMock.mock.calls[0]!;
       // The client `where` (active=true) does not participate — only the registry ownership filter.
       expect(readFetchTargetUrl(targetUrl)).toBe(
-        buildExpectedShapeUrl("authors", "offset=-1", `"owner_id" = '${DEMO_USER1_ID}'`),
+        buildExpectedShapeUrl("authors", "offset=-1", `"owner_id" = $1`, [DEMO_USER1_ID]),
       );
     });
 
@@ -265,8 +267,10 @@ describe("electric proxy", () => {
       );
 
       const [targetUrl] = fetchMock.mock.calls[0]!;
-      const where = new URL(readFetchTargetUrl(targetUrl)).searchParams.get("where");
-      expect(where).toBe(`"owner_id" = '${DEMO_USER1_ID}'`);
+      const resultParams = new URL(readFetchTargetUrl(targetUrl)).searchParams;
+      // The crafted client `where` is dropped entirely; only the registry filter applies (parameterized).
+      expect(resultParams.get("where")).toBe(`"owner_id" = $1`);
+      expect(resultParams.get("params[1]")).toBe(DEMO_USER1_ID);
     });
   });
 
@@ -523,8 +527,9 @@ function readFetchTargetUrl(input: Parameters<typeof fetch>[0]): string {
   return input.url;
 }
 
-function buildExpectedShapeUrl(table: string, existingSearch: string, where: string): string {
+function buildExpectedShapeUrl(table: string, existingSearch: string, where: string, params: string[] = []): string {
   const url = new URL(`http://localhost:3000/v1/shape?table=${table}&${existingSearch}`);
   url.searchParams.set("where", where);
+  params.forEach((param, index) => url.searchParams.set(`params[${index + 1}]`, param));
   return url.toString();
 }

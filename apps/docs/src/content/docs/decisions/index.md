@@ -31,5 +31,6 @@ complete as ADRs are added.
 - [ADR-0016 — Deferred read-path optimisations and their triggers to revisit](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0016-deferred-read-path-optimisations.md)
 - [ADR-0017 — Framework-neutral server: drop the Hono dependency](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0017-framework-neutral-server-drop-hono.md)
 - [ADR-0018 — Apply-function drift detection via an embedded fingerprint](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0018-apply-function-drift-detection.md)
+- [ADR-0019 — Row filters as type-safe Drizzle fragments → parameterized Electric `where`](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0019-row-filters-as-drizzle-fragments.md)
 
 <!-- adr:list:end -->

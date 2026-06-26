@@ -1,4 +1,6 @@
-import { defineSyncRegistry, escapeSqlLiteral, type JwtClaims } from "@pgxsinkit/contracts";
+import { sql } from "drizzle-orm";
+
+import { c, defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
 
 import { membershipFanoutSyncRegistry } from "./integration";
 import { authorsSyncEntry, todosSyncEntry } from "./schema";
@@ -7,16 +9,18 @@ function isAdmin(claims: JwtClaims): boolean {
   return claims.app_metadata?.roles?.includes("admin") ?? false;
 }
 
-function ownershipRowFilter(claims: JwtClaims): string | null {
+function ownershipRowFilter(claims: JwtClaims) {
   if (isAdmin(claims)) {
     return null;
   }
 
-  if (claims.sub) {
-    return `"owner_id" = '${escapeSqlLiteral(claims.sub)}'`;
+  if (!claims.sub) {
+    return "1 = 0";
   }
 
-  return "1 = 0";
+  // authors + todos both carry owner_id; c() emits the bare name, identical for either table. The
+  // subject is a bound param, not a hand-escaped literal.
+  return sql`${c(authorsSyncEntry.table.ownerId)} = ${claims.sub}`;
 }
 
 export const demoSyncRegistry = defineSyncRegistry({

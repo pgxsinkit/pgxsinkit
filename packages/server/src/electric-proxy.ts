@@ -1,5 +1,5 @@
 import {
-  buildRowFilterWhere,
+  buildRowFilterShape,
   getOmittedProjectedColumnNames,
   type JwtClaims,
   type RowTransform,
@@ -178,10 +178,17 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
     return targetUrl.toString();
   }
 
-  const whereClause = buildRowFilterWhere(rowFilter, claims, options.extraParams);
+  // A `customWhere` that returns a Drizzle `SQL` fragment is emitted as a *parameterized* Electric
+  // where — `where=… $1 …` plus `params[1]=…` — so no request-derived value is ever inlined/escaped by
+  // hand (Drizzle owns identifiers + structure, Electric binds the leaves). `ownership`/`shared` and a
+  // string `customWhere` stay inline; `buildRowFilterShape` composes both forms.
+  const shape = buildRowFilterShape(rowFilter, claims, options.extraParams);
 
-  if (whereClause) {
-    targetUrl.searchParams.set("where", whereClause);
+  if (shape) {
+    targetUrl.searchParams.set("where", shape.where);
+    shape.params.forEach((param, index) => {
+      targetUrl.searchParams.set(`params[${index + 1}]`, param);
+    });
   }
 
   // Registry-declared column projection (an explicit opt-in). Per-row `omitColumns` is enforced

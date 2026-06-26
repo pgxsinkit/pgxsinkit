@@ -71,9 +71,15 @@ async function fetchShapeRows(table: string, token: string): Promise<Record<stri
     url.searchParams.set("offset", offset);
     if (handle) url.searchParams.set("handle", handle);
 
-    const response = await fetch(url, {
-      headers: { apikey: ANON_KEY, Authorization: `Bearer ${token}` },
-    });
+    const headers = { apikey: ANON_KEY, Authorization: `Bearer ${token}` };
+    let response = await fetch(url, { headers });
+    // Cold-start tolerance: the edge worker can return a transient 502/503/504 from the gateway while
+    // board-sync's bundle is (re)importing (~6s; see the header note). That is a local-compose artifact
+    // — a managed BaaS keeps functions warm — so retry the transient before failing the correctness smoke.
+    for (let attempt = 0; attempt < 20 && [502, 503, 504].includes(response.status); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      response = await fetch(url, { headers });
+    }
     if (!response.ok) {
       throw new Error(`board-sync ${table} failed (${response.status}): ${await response.text()}`);
     }

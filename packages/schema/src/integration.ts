@@ -5,9 +5,9 @@ import { authenticatedRole } from "drizzle-orm/supabase";
 import {
   buildSupabaseMembershipNativePolicies,
   buildSupabaseOwnerOrAdminNativePolicies,
+  c,
   defineSyncRegistry,
   defineSyncTable,
-  escapeSqlLiteral,
   type JwtClaims,
   type SyncConfigInput,
   type TableSpecInput,
@@ -234,34 +234,49 @@ export const workItemsView = workItemsSyncEntry.view!;
 // `role` is a pg enum, so it is cast to text (`"role"::text`) — Electric's where-grammar accepts an
 // enum only when the column is cast to text, never a bare enum literal. Returns no rows for an
 // unauthenticated subject.
-function workspaceVisibilityRowFilter(claims: JwtClaims): string | null {
+function workspaceVisibilityRowFilter(claims: JwtClaims) {
   if (!claims.sub) {
     return "1 = 0";
   }
 
-  const sub = escapeSqlLiteral(claims.sub);
-  const memberOf = `SELECT "workspace_id" FROM "workspace_members" WHERE "member_id" = '${sub}'`;
-  const managerOf = `SELECT "workspace_id" FROM "workspace_members" WHERE "member_id" = '${sub}' AND "role"::text = 'manager'`;
+  // SPIKE (Option C): the same predicate as before, but built from the actual Drizzle tables — so
+  // column names + structure are type-safe and the leaf value (`claims.sub`) is a *bound param*
+  // (`$1`/`$2`), never a hand-escaped literal. The proxy serializes this to Electric's `where` +
+  // `params[N]`. Two Electric where-grammar constraints shape this: (1) columns must be **plain**
+  // references — `"workspace_id"`, never `"work_items"."workspace_id"` — so we emit each column as a
+  // bare identifier via `c()` rather than the Drizzle column (which qualifies); the subqueries are
+  // self-contained (not correlated), so bare names resolve to each FROM unambiguously. (2) `role` is a
+  // pg enum → cast to text.
+  const wm = workspaceMembersSyncEntry.table;
+  const wi = workItemsSyncEntry.table;
+  const sub = claims.sub;
+  const c = (column: { name: string }) => sql.identifier(column.name);
 
-  return `"workspace_id" IN (${memberOf}) AND ("hidden" = false OR "workspace_id" IN (${managerOf}))`;
+  const memberOf = sql`select ${c(wm.workspaceId)} from ${wm} where ${c(wm.memberId)} = ${sub}`;
+  const managerOf = sql`select ${c(wm.workspaceId)} from ${wm} where ${c(wm.memberId)} = ${sub} and ${c(wm.role)}::text = 'manager'`;
+
+  return sql`${c(wi.workspaceId)} in (${memberOf}) and (${c(wi.hidden)} = false or ${c(wi.workspaceId)} in (${managerOf}))`;
 }
 
 // Read filters for the readonly container/membership tables: a member syncs the workspaces they
 // belong to (cross-table membership subquery) and only their own membership rows (simple equality).
-function workspacesRowFilter(claims: JwtClaims): string | null {
+// Built from the real Drizzle columns (bare via `c()`) with the subject as a bound param.
+function workspacesRowFilter(claims: JwtClaims) {
   if (!claims.sub) {
     return "1 = 0";
   }
 
-  return `"id" IN (SELECT "workspace_id" FROM "workspace_members" WHERE "member_id" = '${escapeSqlLiteral(claims.sub)}')`;
+  const ws = workspacesSyncEntry.table;
+  const wm = workspaceMembersSyncEntry.table;
+  return sql`${c(ws.id)} in (select ${c(wm.workspaceId)} from ${wm} where ${c(wm.memberId)} = ${claims.sub})`;
 }
 
-function workspaceMembersRowFilter(claims: JwtClaims): string | null {
+function workspaceMembersRowFilter(claims: JwtClaims) {
   if (!claims.sub) {
     return "1 = 0";
   }
 
-  return `"member_id" = '${escapeSqlLiteral(claims.sub)}'`;
+  return sql`${c(workspaceMembersSyncEntry.table.memberId)} = ${claims.sub}`;
 }
 
 // Server registry: each entry carries its read-filter (applied by the proxy). workspaces +
