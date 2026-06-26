@@ -15,4 +15,13 @@ export default defineConfig({
       process.env["BOARD_DATABASE_URL"] ??
       "postgresql://postgres:your-super-secret-and-long-postgres-password@localhost:54322/postgres?sslmode=disable",
   },
+  // Declare the Supabase-managed roles (authenticated/anon/service_role/…) to drizzle-kit so it treats
+  // them as external — referenced in `pgPolicy(to: authenticatedRole)` but never created/dropped — and
+  // so a future custom `pgRole(...)` would be managed while the built-ins stay excluded. A no-op for the
+  // current schema (we only *reference* `authenticated`); it generates no role DDL.
+  entities: {
+    roles: {
+      provider: "supabase",
+    },
+  },
 });
