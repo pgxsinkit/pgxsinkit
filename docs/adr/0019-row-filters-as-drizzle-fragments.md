@@ -58,3 +58,12 @@ A spike fired Drizzle-generated clauses at a real Electric and isolated two hard
   retries the documented cold-start transient (a local-compose artifact — a managed BaaS keeps functions
   warm). Verified end-to-end: board smoke 5/5 from a cold boot, all implementation integration suites
   green through real Electric.
+- **The write-path RLS policies got the same treatment** (the read/write mirror). The board `pgPolicy`
+  predicates are now built from the real Drizzle columns (passed in via each table's `extras` callback)
+  with operators (`or`/`eq`/`isNotNull`); only the irreducibly-Postgres bits stay `sql` — `auth.uid()`,
+  the SECURITY DEFINER membership helper `board_member_team_ids()`, and the admin claims check (no
+  Drizzle operator exists for those, and a literal in `eq(col, 'x')` would parameterize, which CREATE
+  POLICY DDL cannot carry — so constants use `sql`). drizzle-kit emits the same DDL it did before
+  (literals inlined, qualified columns — both fine for Postgres RLS, unlike Electric's bare-column
+  rule), so the change is a no-op at the database and the columns are now rename-tracked alongside the
+  read filters. Verified: board smoke 5/5 (RLS write tests) after regenerating the board policy migration.

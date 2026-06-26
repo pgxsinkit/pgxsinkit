@@ -1,5 +1,5 @@
-import { sql } from "drizzle-orm";
-import { pgPolicy, type PgRole } from "drizzle-orm/pg-core";
+import { eq, isNotNull, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import { pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
 
 /**
  * Hand-authored board RLS (board ADR-0005). The board is collaborative — any Member may edit any
@@ -8,14 +8,19 @@ import { pgPolicy, type PgRole } from "drizzle-orm/pg-core";
  * predicates compose every policy: member-of-team, the channel-visibility two-hop, and the global
  * Admin bypass.
  *
+ * Predicates are built from the **real Drizzle columns** (passed in from each table's `extras`
+ * callback) with Drizzle operators (`or`/`eq`/`isNotNull`), so column references are type-safe and
+ * rename-tracked. Only the irreducibly-Postgres bits stay `sql`: `auth.uid()`, the membership helper
+ * `board_member_team_ids()`, and the Admin claims check — none of which has a Drizzle operator.
+ *
  * Subject is `auth.uid()` (the JWT `sub`); membership is `board_member_team_ids()` — a SECURITY
  * DEFINER helper (its own migration) that reads `team_member` with RLS bypassed, so a membership
  * predicate ON `team_member` itself (or in the issue/message policies that read it) does not recurse
  * into team_member's RLS (`42P17 infinite recursion`); Admin is the inlined `BOARD_ADMIN_PREDICATE_SQL`.
  * All read `request.jwt.claims`, which the Mutation applier sets before applying a batch. These run
  * on the **write path** (Postgres-with-JWT). The **read path** filters the same way but over the
- * literal claim value (`escapeSqlLiteral(claims.sub)`) in the proxy `customWhere` (registry.ts),
- * because Electric runs that `where`, not Postgres — keep the two in sync.
+ * literal claim value in the proxy `customWhere` (registry.ts), because Electric runs that `where`,
+ * not Postgres — both now reference the same Drizzle columns, so they cannot silently drift.
  *
  * The readonly tables (profile/team/channel) carry SELECT-only policies: their reads are governed
  * the same way, and the absence of any write policy denies writes at the DB layer — Supabase's
@@ -32,31 +37,32 @@ import { pgPolicy, type PgRole } from "drizzle-orm/pg-core";
 export const BOARD_ADMIN_PREDICATE_SQL =
   "EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS r(role) WHERE r.role = 'admin')";
 
-const ADMIN = BOARD_ADMIN_PREDICATE_SQL;
+const ADMIN = sql.raw(BOARD_ADMIN_PREDICATE_SQL);
+const AUTH_UID = sql`auth.uid()`;
 
 type Command = "select" | "insert" | "update" | "delete";
 
 // `<teamColumn> IN (the teams the caller belongs to)`. Membership DOES need a table read
 // (`team_member`), and inlining it recurses (see board_member_team_ids' migration), so unlike ADMIN
-// this one routes through the SECURITY DEFINER helper. The helper is created by a migration that runs
-// *before* the policy migration, so the ordering trap is handled — see db:board:migrate sequence.
-function memberOfTeam(teamColumn: string): string {
-  return `${teamColumn} IN (SELECT board_member_team_ids())`;
+// this one routes through the SECURITY DEFINER helper — a Postgres function, so irreducibly `sql`.
+// The column is the real Drizzle column.
+function memberOfTeam(teamColumn: AnyColumn): SQL {
+  return sql`${teamColumn} in (select board_member_team_ids())`;
 }
 
 function policy(
   name: string,
   command: Command,
   role: PgRole,
-  predicate: string,
+  predicate: SQL,
   parts: { using?: boolean; withCheck?: boolean },
 ) {
   return pgPolicy(name, {
     as: "permissive",
     for: command,
     to: role,
-    ...(parts.using ? { using: sql.raw(predicate) } : {}),
-    ...(parts.withCheck ? { withCheck: sql.raw(predicate) } : {}),
+    ...(parts.using ? { using: predicate } : {}),
+    ...(parts.withCheck ? { withCheck: predicate } : {}),
   });
 }
 
@@ -66,15 +72,15 @@ function policy(
  * the missing write policies deny INSERT/UPDATE/DELETE at the DB layer. Mirrors `profileReadFilter`.
  */
 export function buildProfilePolicies(role: PgRole) {
-  return [policy("profile_select", "select", role, "auth.uid() IS NOT NULL", { using: true })];
+  return [policy("profile_select", "select", role, isNotNull(AUTH_UID), { using: true })];
 }
 
 /**
  * team: a Member reads the Teams they belong to; an Admin reads all. Readonly — no write policies,
  * so neither the write path nor a direct connection can mutate teams. Mirrors `teamReadFilter`.
  */
-export function buildTeamPolicies(role: PgRole) {
-  const memberOrAdmin = `(${memberOfTeam("id")}) OR ${ADMIN}`;
+export function buildTeamPolicies(role: PgRole, id: AnyColumn) {
+  const memberOrAdmin = or(memberOfTeam(id), ADMIN)!;
   return [policy("team_select", "select", role, memberOrAdmin, { using: true })];
 }
 
@@ -83,8 +89,8 @@ export function buildTeamPolicies(role: PgRole) {
  * Readonly — no write policies. Mirrors `channelReadFilter`; this SELECT policy is also what the
  * `message` policies' `channel` sub-select resolves against now that channel RLS is enabled.
  */
-export function buildChannelPolicies(role: PgRole) {
-  const visibleOrAdmin = `(kind = 'global' OR ${memberOfTeam("team_id")}) OR ${ADMIN}`;
+export function buildChannelPolicies(role: PgRole, kind: AnyColumn, teamId: AnyColumn) {
+  const visibleOrAdmin = or(eq(kind, sql`'global'`), memberOfTeam(teamId), ADMIN)!;
   return [policy("channel_select", "select", role, visibleOrAdmin, { using: true })];
 }
 
@@ -93,8 +99,8 @@ export function buildChannelPolicies(role: PgRole) {
  * Cross-team move (changing `team_id`) is blocked for non-Admins by the `BEFORE UPDATE` trigger in
  * the board migration — an RLS policy cannot compare `OLD.team_id` to `NEW.team_id`.
  */
-export function buildIssuePolicies(role: PgRole) {
-  const memberOrAdmin = `(${memberOfTeam("team_id")}) OR ${ADMIN}`;
+export function buildIssuePolicies(role: PgRole, teamId: AnyColumn) {
+  const memberOrAdmin = or(memberOfTeam(teamId), ADMIN)!;
   return [
     policy("issue_select", "select", role, memberOrAdmin, { using: true }),
     policy("issue_insert", "insert", role, memberOrAdmin, { withCheck: true }),
@@ -104,8 +110,8 @@ export function buildIssuePolicies(role: PgRole) {
 }
 
 /** team_member: a Member sees co-members of their Teams; only an Admin may add/remove members. */
-export function buildTeamMemberPolicies(role: PgRole) {
-  const memberOrAdmin = `(${memberOfTeam("team_id")}) OR ${ADMIN}`;
+export function buildTeamMemberPolicies(role: PgRole, teamId: AnyColumn) {
+  const memberOrAdmin = or(memberOfTeam(teamId), ADMIN)!;
   return [
     policy("team_member_select", "select", role, memberOrAdmin, { using: true }),
     policy("team_member_insert", "insert", role, ADMIN, { withCheck: true }),
@@ -117,11 +123,17 @@ export function buildTeamMemberPolicies(role: PgRole) {
 /**
  * Message: readable/writable in a global Channel or a Channel of one of your Teams (the two-hop
  * `message → channel → team` container); you may edit/delete only your own Message; Admin moderates.
+ * The container sub-select reads the `channel` table (passed in, so its columns are typed too).
  */
-export function buildMessagePolicies(role: PgRole) {
-  const channelVisible = `channel_id IN (SELECT id FROM channel WHERE kind = 'global' OR ${memberOfTeam("team_id")})`;
-  const visibleOrAdmin = `(${channelVisible}) OR ${ADMIN}`;
-  const authorOrAdmin = `author_id = auth.uid() OR ${ADMIN}`;
+export function buildMessagePolicies(
+  role: PgRole,
+  channelId: AnyColumn,
+  authorId: AnyColumn,
+  channel: AnyPgTable & { id: AnyColumn; kind: AnyColumn; teamId: AnyColumn },
+) {
+  const channelVisible = sql`${channelId} in (select ${channel.id} from ${channel} where ${or(eq(channel.kind, sql`'global'`), memberOfTeam(channel.teamId))})`;
+  const visibleOrAdmin = or(channelVisible, ADMIN)!;
+  const authorOrAdmin = or(eq(authorId, AUTH_UID), ADMIN)!;
   return [
     policy("message_select", "select", role, visibleOrAdmin, { using: true }),
     policy("message_insert", "insert", role, visibleOrAdmin, { withCheck: true }),
