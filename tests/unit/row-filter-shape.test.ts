@@ -3,7 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { sql } from "drizzle-orm";
 import { PgDialect, pgTable, uuid } from "drizzle-orm/pg-core";
 
-import { buildRowFilterShape, c, type JwtClaims, type RowFilterSpec } from "@pgxsinkit/contracts";
+import { buildRowFilterShape, c, DENY_ALL, type JwtClaims, type RowFilterSpec } from "@pgxsinkit/contracts";
 
 // A bare Drizzle table to author filters against (mirrors how a registry references real columns).
 const items = pgTable("items", {
@@ -37,8 +37,8 @@ describe("buildRowFilterShape", () => {
     expect(buildRowFilterShape({}, claims)).toBeNull();
   });
 
-  it("blocks all rows for an unauthenticated subject via the filter's own sentinel", () => {
-    const filter: RowFilterSpec = { customWhere: (cl) => (cl.sub ? sql`${c(items.ownerId)} = ${cl.sub}` : "1 = 0") };
-    expect(buildRowFilterShape(filter, null)).toEqual({ where: "1 = 0", params: [] });
+  it("blocks all rows for an unauthenticated subject via the DENY_ALL sentinel", () => {
+    const filter: RowFilterSpec = { customWhere: (cl) => (cl.sub ? sql`${c(items.ownerId)} = ${cl.sub}` : DENY_ALL) };
+    expect(buildRowFilterShape(filter, null)).toEqual({ where: "false", params: [] });
   });
 });

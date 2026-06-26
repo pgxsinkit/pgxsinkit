@@ -196,7 +196,7 @@ describe("electric proxy", () => {
       // Proxy is transparent — headers flow through from Electric unchanged
     });
 
-    it("blocks unauthenticated requests with 1=0 when ownership filter is configured", async () => {
+    it("blocks unauthenticated requests with the DENY_ALL (false) sentinel when a filter is configured", async () => {
       fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
       globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -208,7 +208,7 @@ describe("electric proxy", () => {
       });
 
       const [targetUrl] = fetchMock.mock.calls[0]!;
-      expect(readFetchTargetUrl(targetUrl)).toBe(buildExpectedShapeUrl("authors", "offset=-1", "1 = 0"));
+      expect(readFetchTargetUrl(targetUrl)).toBe(buildExpectedShapeUrl("authors", "offset=-1", "false"));
     });
 
     it("does not add ownership WHERE for admin users", async () => {

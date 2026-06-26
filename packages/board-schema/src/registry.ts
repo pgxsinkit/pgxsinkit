@@ -1,6 +1,6 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
-import { c, defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
+import { c, defineSyncRegistry, DENY_ALL, type JwtClaims } from "@pgxsinkit/contracts";
 
 import {
   channelSyncEntry,
@@ -31,38 +31,38 @@ function memberTeams(sub: string) {
 }
 
 // Every authenticated user syncs all profiles (to render any author/assignee); nobody otherwise.
-function profileReadFilter(claims: JwtClaims): string | null {
-  return claims.sub ? null : "1 = 0";
+function profileReadFilter(claims: JwtClaims): SQL | null {
+  return claims.sub ? null : DENY_ALL;
 }
 
 function teamReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
-  if (!claims.sub) return "1 = 0";
+  if (!claims.sub) return DENY_ALL;
   return sql`${c(team.id)} in (${memberTeams(claims.sub)})`;
 }
 
 function teamMemberReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
-  if (!claims.sub) return "1 = 0";
+  if (!claims.sub) return DENY_ALL;
   // Fan-out: you sync every membership of your Teams, so you can see your co-members (assignee lists).
   return sql`${c(teamMember.teamId)} in (${memberTeams(claims.sub)})`;
 }
 
 function channelReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
-  if (!claims.sub) return "1 = 0";
+  if (!claims.sub) return DENY_ALL;
   return sql`${c(channel.kind)}::text = 'global' or ${c(channel.teamId)} in (${memberTeams(claims.sub)})`;
 }
 
 function issueReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
-  if (!claims.sub) return "1 = 0";
+  if (!claims.sub) return DENY_ALL;
   return sql`${c(issue.teamId)} in (${memberTeams(claims.sub)})`;
 }
 
 function messageReadFilter(claims: JwtClaims) {
   if (isAdmin(claims)) return null;
-  if (!claims.sub) return "1 = 0";
+  if (!claims.sub) return DENY_ALL;
   const visibleChannels = sql`select ${c(channel.id)} from ${channel} where ${c(channel.kind)}::text = 'global' or ${c(channel.teamId)} in (${memberTeams(claims.sub)})`;
   return sql`${c(message.channelId)} in (${visibleChannels})`;
 }

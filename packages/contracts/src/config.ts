@@ -230,6 +230,15 @@ export function c(column: AnyColumn): SQL {
   return sql`${sql.identifier(column.name)}`;
 }
 
+/**
+ * The deny-all row filter: a `customWhere` returns this to make **no** rows visible (e.g. an
+ * unauthenticated request), the counterpart to returning `null` (which bypasses filtering — all rows
+ * visible). It is a Drizzle `SQL` fragment (`false`), so it stays on the typed/parameterized path
+ * with the rest of the filter rather than being a hand-written `"1 = 0"` string. `WHERE false`
+ * matches nothing; Electric accepts it (verified) exactly as it accepts `1 = 0`.
+ */
+export const DENY_ALL: SQL = sql`false`;
+
 /** The parameterized shape filter the proxy sends to Electric: a `where` and its positional params. */
 export interface RowFilterShape {
   where: string;

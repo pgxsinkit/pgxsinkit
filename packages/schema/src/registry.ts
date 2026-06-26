@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import { c, defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
+import { c, defineSyncRegistry, DENY_ALL, type JwtClaims } from "@pgxsinkit/contracts";
 
 import { membershipFanoutSyncRegistry } from "./integration";
 import { authorsSyncEntry, todosSyncEntry } from "./schema";
@@ -15,7 +15,7 @@ function ownershipRowFilter(claims: JwtClaims) {
   }
 
   if (!claims.sub) {
-    return "1 = 0";
+    return DENY_ALL;
   }
 
   // authors + todos both carry owner_id; c() emits the bare name, identical for either table. The

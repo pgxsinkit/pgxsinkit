@@ -55,7 +55,7 @@ describe("createSyncServer shape proxy", () => {
     fetchMock.mockResolvedValue(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     // Same adapter as the write path: returning null must block all rows via the
-    // ownership filter (1 = 0), proving the proxy used the resolved claims.
+    // filter's DENY_ALL sentinel (false), proving the proxy used the resolved claims.
     const server = makeServer(() => null);
 
     await server.fetch(new Request("http://localhost/api/shape?table=authors&offset=-1"));
@@ -64,7 +64,7 @@ describe("createSyncServer shape proxy", () => {
     const [target] = fetchMock.mock.calls[0]!;
     // proxyElectricShapeRequest fetches with a string URL (buildProxyTargetUrl).
     const targetUrl = new URL(target as string);
-    expect(targetUrl.searchParams.get("where")).toBe("1 = 0");
+    expect(targetUrl.searchParams.get("where")).toBe("false");
   });
 
   it("does not register a shape proxy when electricUrl is omitted", async () => {

@@ -8,6 +8,7 @@ import {
   c,
   defineSyncRegistry,
   defineSyncTable,
+  DENY_ALL,
   type JwtClaims,
   type SyncConfigInput,
   type TableSpecInput,
@@ -236,7 +237,7 @@ export const workItemsView = workItemsSyncEntry.view!;
 // unauthenticated subject.
 function workspaceVisibilityRowFilter(claims: JwtClaims) {
   if (!claims.sub) {
-    return "1 = 0";
+    return DENY_ALL;
   }
 
   // Built from the actual Drizzle tables — column names + structure are type-safe and the leaf value
@@ -261,7 +262,7 @@ function workspaceVisibilityRowFilter(claims: JwtClaims) {
 // Built from the real Drizzle columns (bare via `c()`) with the subject as a bound param.
 function workspacesRowFilter(claims: JwtClaims) {
   if (!claims.sub) {
-    return "1 = 0";
+    return DENY_ALL;
   }
 
   const ws = workspacesSyncEntry.table;
@@ -271,7 +272,7 @@ function workspacesRowFilter(claims: JwtClaims) {
 
 function workspaceMembersRowFilter(claims: JwtClaims) {
   if (!claims.sub) {
-    return "1 = 0";
+    return DENY_ALL;
   }
 
   return sql`${c(workspaceMembersSyncEntry.table.memberId)} = ${claims.sub}`;
