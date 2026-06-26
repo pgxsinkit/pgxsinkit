@@ -96,13 +96,20 @@ column rename or a typo:
   them, so call them inside `defineSyncTable`'s `extras: (t) => …` callback (where the columns carry their
   table), not the `policies:` array.
 - Beyond them (e.g. collaborative any-member writes): compose your own with `pgPolicy` + Drizzle operators
-  (`and`/`or`/`eq`) over the columns. Drop to `sql` only for genuinely-Postgres leaves (`auth.uid()`, a
-  SECURITY DEFINER membership helper, a `current_setting('request.jwt.claims')` admin check) and for
-  inlined literals — pass a literal through an `sql` fragment, because a bare value handed to `eq` would
-  parameterize and `CREATE POLICY` DDL cannot carry a `$n`. Inline such a predicate rather than
-  referencing a not-yet-created SQL function — `CREATE POLICY` needs it to exist first. For "compare OLD
-  vs NEW" rules (column immutability), RLS cannot help (`WITH CHECK` sees only NEW, `USING` only OLD) —
+  (`and`/`or`/`eq`) over the columns. Use the official `drizzle-orm/supabase` helpers for the auth leaves —
+  `authUid` (emits `(select auth.uid())`, the Supabase per-statement-eval performance idiom, not a per-row
+  bare `auth.uid()`), `authenticatedRole`, etc. Inline a literal with `eq(col, value).inlineParams()` (the
+  value stays type-checked against the column and is inlined into the DDL — a bare `$n` is something
+  `CREATE POLICY` cannot carry). Drop to raw `sql` only for things with no Drizzle equivalent: a SECURITY
+  DEFINER membership helper or a `current_setting('request.jwt.claims')` admin check. Inline such a
+  predicate rather than referencing a not-yet-created SQL function — `CREATE POLICY` needs it to exist
+  first. For "compare OLD vs NEW" rules (column immutability), RLS cannot help (`WITH CHECK` sees only NEW,
+  `USING` only OLD) —
   use a `BEFORE UPDATE` trigger.
+
+Give drizzle-kit `entities: { roles: { provider: "supabase" } }` in `drizzle.config.ts` so it treats the
+Supabase roles (`authenticated`/`anon`/`service_role`/…) as externally managed — referenced in a policy's
+`to:` but never created or dropped.
 
 ## Provision the apply function from the registry
 
@@ -124,6 +131,8 @@ bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
 - Letting the read filter and RLS policy diverge instead of building both from the same Drizzle columns.
 - Calling the native policy builders in the `policies:` array (they need `extras: (t) => …` to derive the
   table from the columns), or referencing a custom SQL function in `CREATE POLICY` before it exists.
+- In a hand-written policy: bare `auth.uid()` instead of `authUid` (per-row vs per-statement), or a bound
+  literal (`eq(col, x)`) where `CREATE POLICY` needs an inlined one (`eq(col, x).inlineParams()`).
 
 For the surrounding model (two paths, one write path, fail-closed subquery flag), load the `core` skill
 from `@pgxsinkit/client`. Full prose: <https://pgxsinkit.github.io/start/getting-started/>.
