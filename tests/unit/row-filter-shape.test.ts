@@ -3,7 +3,14 @@ import { describe, expect, it } from "bun:test";
 import { sql } from "drizzle-orm";
 import { PgDialect, pgTable, uuid } from "drizzle-orm/pg-core";
 
-import { buildRowFilterShape, c, DENY_ALL, type JwtClaims, type RowFilterSpec } from "@pgxsinkit/contracts";
+import {
+  buildRowFilterShape,
+  c,
+  DENY_ALL,
+  defineSyncTable,
+  type JwtClaims,
+  type RowFilterSpec,
+} from "@pgxsinkit/contracts";
 
 // A bare Drizzle table to author filters against (mirrors how a registry references real columns).
 const items = pgTable("items", {
@@ -40,5 +47,38 @@ describe("buildRowFilterShape", () => {
   it("blocks all rows for an unauthenticated subject via the DENY_ALL sentinel", () => {
     const filter: RowFilterSpec = { customWhere: (cl) => (cl.sub ? sql`${c(items.ownerId)} = ${cl.sub}` : DENY_ALL) };
     expect(buildRowFilterShape(filter, null)).toEqual({ where: "false", params: [] });
+  });
+});
+
+describe("defineSyncTable — function-form rowFilter (all-in-one, typed columns)", () => {
+  it("resolves shape.rowFilter against the built columns, so c(columns.x) targets the real identifier", () => {
+    const entry = defineSyncTable({
+      tableName: "widgets",
+      makeColumns: () => ({
+        id: uuid("id").primaryKey(),
+        ownerId: uuid("owner_id"),
+      }),
+      shape: {
+        rowFilter: (columns) => ({
+          customWhere: (cl) => (cl.sub ? sql`${c(columns.ownerId)} = ${cl.sub}` : DENY_ALL),
+        }),
+      },
+    });
+
+    const filter = entry.shape?.rowFilter;
+    expect(filter).toBeDefined();
+    // Authenticated → parameterized, bare-column predicate built from the real (typed) column object.
+    expect(buildRowFilterShape(filter!, claims)).toEqual({ where: `"owner_id" = $1`, params: ["u-1"] });
+    // Unauthenticated → deny sentinel.
+    expect(buildRowFilterShape(filter!, null)).toEqual({ where: "false", params: [] });
+  });
+
+  it("still accepts a static RowFilterSpec unchanged (backward compatible)", () => {
+    const entry = defineSyncTable({
+      tableName: "widgets_static",
+      makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id") }),
+      shape: { rowFilter: { customWhere: () => `"owner_id" = 'u-1'` } },
+    });
+    expect(buildRowFilterShape(entry.shape!.rowFilter!, claims)).toEqual({ where: `"owner_id" = 'u-1'`, params: [] });
   });
 });

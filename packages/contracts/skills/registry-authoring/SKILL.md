@@ -84,6 +84,31 @@ self-contained (not correlated). Returning a raw **string** is the escape hatch 
 value yourself with `escapeSqlLiteral` (a string is NOT escaped for you); return `DENY_ALL` (not `"1 = 0"`)
 to block all rows.
 
+**Inline (all-in-one `defineSyncTable`) — `rowFilter` as a function of the columns.** The example above
+references `widgets.ownerId`, which assumes the table is built _elsewhere_ (e.g. a separate schema file the
+registry imports). When you declare a table and its filter together in **one** `defineSyncTable` call, the
+table object doesn't exist yet at the call site — so don't fall back to hand-written column-name strings.
+Give `shape.rowFilter` a **function of the built columns** (the same typed columns `extras` receives) and
+keep using `c()`:
+
+```ts
+defineSyncTable({
+  tableName: "widgets",
+  makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id") }),
+  shape: {
+    rowFilter: (columns) => ({
+      customWhere: (claims) => (claims.sub ? sql`${c(columns.ownerId)} = ${claims.sub}` : DENY_ALL),
+    }),
+  },
+});
+```
+
+A static `RowFilterSpec` (`rowFilter: { customWhere }`) still works unchanged — reach for the function form
+only when you need typed, rename-safe column refs inside an all-in-one definition. **Prefer it over the
+string escape hatch:** a `customWhere` that returns `null`/`""` means _no filter — all rows visible_, so a
+hand-built owner filter that returns `null` for "no claim" silently exposes every row; the typed form makes
+`DENY_ALL` the obvious deny.
+
 ## RLS: derive read and write from the same Drizzle columns
 
 Authorization runs in two engines (Postgres RLS for writes; the Electric `where` for reads). Build both

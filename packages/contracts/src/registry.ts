@@ -32,6 +32,7 @@ import {
   type ManagedFieldSpec,
   type ManagedFieldStrategy,
   type PrimaryKeySpec,
+  type RowFilterSpec,
   type ServerProjectionSpec,
   type ShapeSpec,
   type ShapeSpecInput,
@@ -182,6 +183,25 @@ export type SyncTableInputProjection<
 };
 
 /**
+ * A row filter for {@link defineSyncTable}'s `shape`: either a static {@link RowFilterSpec}, or a
+ * function of the table's built (typed) columns. The function form is the all-in-one way to author a
+ * typed-Drizzle row filter inline — reference columns through `c(columns.x)` exactly as `extras`
+ * does with its `self` argument, so `customWhere` builds parameterized Electric `where`s from real,
+ * rename-safe column objects instead of hand-written column-name strings.
+ */
+export type RowFilterInput<TColumns extends Record<string, ColumnBuilderBase>> =
+  | RowFilterSpec
+  | ((columns: PgBuildExtraConfigColumns<TColumns>) => RowFilterSpec);
+
+/** {@link ShapeSpecInput} whose `rowFilter` may also be a function of the built columns (typed by `TColumns`). */
+export type ShapeSpecInputFor<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
+  ShapeSpecInput,
+  "rowFilter"
+> & {
+  rowFilter?: RowFilterInput<TColumns>;
+};
+
+/**
  * Input for `defineSyncTable`. Supply `tableName + makeColumns` — the Drizzle table
  * (and, for `readwrite` mode, the read-model view) are created internally.
  *
@@ -211,7 +231,7 @@ export type SyncTableInput<
    * Use an array with multiple entries for composite keys.
    */
   primaryKey?: string[];
-  shape?: ShapeSpecInput;
+  shape?: ShapeSpecInputFor<TColumns>;
   clientProjection?: SyncTableInputProjection<TColumns, TOmittedColumns>;
   /** Server-side response-path projection (e.g. `rowTransform`). Server authority, not client shape. */
   serverProjection?: ServerProjectionSpec;
@@ -355,16 +375,6 @@ export function defineSyncTable<
         }
       : undefined;
 
-  const resolvedShape: ShapeSpec | undefined =
-    resolvedMode !== "writeonly" || shape != null
-      ? {
-          tableName: shape?.tableName ?? tableName,
-          shapeKey: shape?.shapeKey ?? shape?.tableName ?? tableName,
-          ...(shape?.electricTable != null ? { electricTable: shape.electricTable } : {}),
-          ...(shape?.rowFilter != null ? { rowFilter: shape.rowFilter } : {}),
-        }
-      : undefined;
-
   const extrasFn =
     policies || extras
       ? (self: PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>) => [
@@ -373,6 +383,24 @@ export function defineSyncTable<
         ]
       : undefined;
   const table = schema ? schema.table(tableName, makeColumns(), extrasFn) : pgTable(tableName, makeColumns(), extrasFn);
+
+  // A function-form `shape.rowFilter` is resolved here against the built (typed) columns, so an
+  // all-in-one `defineSyncTable` can author a row filter with `c(columns.x)` Drizzle fragments — the
+  // same typed columns `extras` receives — instead of hand-written column-name strings. A static
+  // `RowFilterSpec` passes through unchanged.
+  const resolvedRowFilter: RowFilterSpec | undefined =
+    typeof shape?.rowFilter === "function"
+      ? shape.rowFilter(getColumns(table) as unknown as PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>)
+      : (shape?.rowFilter ?? undefined);
+  const resolvedShape: ShapeSpec | undefined =
+    resolvedMode !== "writeonly" || shape != null
+      ? {
+          tableName: shape?.tableName ?? tableName,
+          shapeKey: shape?.shapeKey ?? shape?.tableName ?? tableName,
+          ...(shape?.electricTable != null ? { electricTable: shape.electricTable } : {}),
+          ...(resolvedRowFilter != null ? { rowFilter: resolvedRowFilter } : {}),
+        }
+      : undefined;
 
   const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
   const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);

@@ -193,7 +193,12 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
   **Electric** runs it, not Postgres — so a `customWhere` returns a Drizzle `SQL` fragment built from
   the table's columns: reference each column through `c()` (a bare identifier, as Electric requires)
   and bind `claims.sub` as a `$n` param rather than hand-escaping it, with any enum cast to `text`.
-  Return `DENY_ALL` to block all rows, or `null` to bypass filtering.
+  Return `DENY_ALL` to block all rows, or `null` to bypass filtering — note `null`/`""` means _no
+  filter, all rows visible_, so an owner filter must return `DENY_ALL` (not `null`) when the claim is
+  absent. When you define the table and its filter **together in one `defineSyncTable`**, write
+  `shape.rowFilter` as a **function of the built columns** — `rowFilter: (columns) => ({ customWhere:
+(claims) => … c(columns.ownerId) … })` — so `c()` references the real typed columns this call is
+  creating (the same columns `extras` receives), with no separately-built table needed.
 
 For RLS, `@pgxsinkit/contracts` ships `buildSupabaseOwnerOrAdminNativePolicies` and
 `buildSupabaseMembershipNativePolicies` for the owner and membership shapes — they take **Drizzle
