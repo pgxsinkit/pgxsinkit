@@ -109,6 +109,42 @@ string escape hatch:** a `customWhere` that returns `null`/`""` means _no filter
 hand-built owner filter that returns `null` for "no claim" silently exposes every row; the typed form makes
 `DENY_ALL` the obvious deny.
 
+## Cross-table filters: compose a self-contained subquery from the typed columns, never a string
+
+A **membership fan-out** — "sync a row only if the subject belongs to its container" — is a `customWhere`
+whose predicate is a **subquery over another table** (`container_id IN (SELECT … FROM memberships …)`).
+Author it the same typed way as an owner filter, never as a hand-built string: `c()` for every column
+(bare, as Electric needs), the **table object** for the `FROM`, and the subject as a **bound param**.
+Factor the subquery into a small helper so the read filter — and any narrower variant — share one
+definition (the read-path twin of the membership RLS predicate):
+
+```ts
+import { c, DENY_ALL, type JwtClaims } from "@pgxsinkit/contracts";
+import { sql, type SQL } from "drizzle-orm";
+
+// The containers a subject belongs to, as a self-contained subquery: bare columns via c(), the FROM
+// from the table object, the subject bound as $n. The subquery references `membership`'s OWN columns,
+// so its bare names resolve to its own FROM — it is self-contained, not correlated.
+function memberContainers(subject: string): SQL {
+  return sql`select ${c(membership.containerId)} from ${membership} where ${c(membership.memberId)} = ${subject}`;
+}
+
+function widgetsReadFilter(claims: JwtClaims): SQL {
+  if (!claims.sub) return DENY_ALL; // no claim → deny (NOT null, which would expose every row)
+  return sql`${c(widgets.containerId)} in (${memberContainers(claims.sub)})`;
+}
+```
+
+What the typed form buys over a string: the columns stay rename-safe and existence-checked, and the
+subject is a `$n` param (`params: ["…"]`), never an escaped literal — so a quote in the value can't break
+or inject the predicate. **Subqueries nest by interpolation** — wrap one `sql` fragment in another to
+narrow a fan-out (e.g. a group _within_ an offering): `` sql`${c(post.offeringId)} in (${memberOfferings(sub)}) and (${c(post.groupId)} is null or ${c(post.groupId)} in (${memberGroups(sub)}))` `` (each `${sub}`
+is its own bound param). Two constraints hold: the subquery must stay **self-contained** (not correlated —
+it gets its own `FROM`, so bare names resolve to it), and the subquery `where` is the **flagged Electric
+preview** — run Electric with `allow_subqueries,tagged_subqueries` or the shape fails closed (no rows).
+Combine with the function form when the table is defined all-in-one: the row's own column comes from
+`(columns) => …`, the foreign table + its columns are imported already-built.
+
 ## RLS: derive read and write from the same Drizzle columns
 
 Authorization runs in two engines (Postgres RLS for writes; the Electric `where` for reads). Build both

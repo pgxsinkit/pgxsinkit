@@ -22,6 +22,26 @@ PostgreSQL  →  ElectricSQL  →  shape proxy  →  PGlite (local)
    container_id IN (SELECT container_id FROM memberships WHERE member_id = <subject>)
    ```
 
+   Author that predicate with the typed Drizzle helpers, never as a hand-built string — `c()` for each
+   (bare) column, the table object for the `FROM`, and the subject as a **bound param** (so a quote in
+   the value can't inject the predicate). Factor the subquery into a helper to share it with any narrower
+   variant:
+
+   ```ts
+   import { c, DENY_ALL } from "@pgxsinkit/contracts";
+   import { sql, type SQL } from "drizzle-orm";
+
+   const memberContainers = (subject: string): SQL =>
+     sql`select ${c(memberships.containerId)} from ${memberships} where ${c(memberships.memberId)} = ${subject}`;
+
+   const widgetsReadFilter = (claims) =>
+     claims.sub ? sql`${c(widgets.containerId)} in (${memberContainers(claims.sub)})` : DENY_ALL;
+   ```
+
+   The subquery must be **self-contained** (not correlated). See
+   [Authoring a registry → cross-table filters](/start/getting-started/) for the full pattern and the
+   `null` (no filter) vs `DENY_ALL` (no rows) trap.
+
 2. **ElectricSQL** turns each shape into a live stream from Postgres.
 3. **The shape proxy** (`proxyElectricShapeRequest`, served by the pgxsinkit server — `createSyncServer`
    mounts it at `/api/shape` by default, but the path is yours to choose) forwards shape requests to

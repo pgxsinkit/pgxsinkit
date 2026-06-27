@@ -200,6 +200,23 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
 (claims) => … c(columns.ownerId) … })` — so `c()` references the real typed columns this call is
   creating (the same columns `extras` receives), with no separately-built table needed.
 
+For a **cross-table membership fan-out** (sync a row only if the subject belongs to its container), the
+`customWhere` predicate is a subquery — author it the same typed way, never a string: `c()` for each
+column, the **table object** for the `FROM`, the subject as a **bound param**, factored into a helper so
+read filter and any narrower variant share it:
+
+```ts
+const memberContainers = (subject: string): SQL =>
+  sql`select ${c(memberships.containerId)} from ${memberships} where ${c(memberships.memberId)} = ${subject}`;
+const widgetsReadFilter = (claims: JwtClaims) =>
+  claims.sub ? sql`${c(widgets.containerId)} in (${memberContainers(claims.sub)})` : DENY_ALL;
+```
+
+Subqueries **nest** by interpolation (wrap one `sql` fragment in another to narrow a fan-out) and must
+be **self-contained** (not correlated). The subquery `where` is the flagged Electric preview — run with
+`allow_subqueries,tagged_subqueries` or it fails closed. `apps/board`'s `packages/board-schema/src/registry.ts`
+is a worked end-to-end example.
+
 For RLS, `@pgxsinkit/contracts` ships `buildSupabaseOwnerOrAdminNativePolicies` and
 `buildSupabaseMembershipNativePolicies` for the owner and membership shapes — they take **Drizzle
 columns** and derive the table from them, so call them inside `defineSyncTable`'s `extras: (t) => …`
