@@ -46,11 +46,13 @@ describe("performance: RLS read load", () => {
         for (const scenario of scenarios) {
           console.log(`[perf] rls-read-load ${scenario.scenario}`, {
             visibleRowEstimate: scenario.visibleRowEstimate,
-            // The headline ratios: how much slower the naive (correlated) policy is, how much the index
-            // buys the correct policy, and how close the direct-read RLS cost is to the Electric shape query.
             cliffRatioP95: round(scenario.cliffRatioP95),
             indexSpeedupP95: round(scenario.indexSpeedupP95),
-            rlsVsShapeP95: round(scenario.rlsVsShapeP95),
+            // Each RLS variant's indexed p95 as a multiple of the Electric shape query (1.0 = as fast).
+            // rls-anyarray / rls-fnrows are the planner-guiding experiments; ~1 means they close the gap.
+            vsShapeP95: Object.fromEntries(
+              Object.entries(scenario.vsShapeP95).map(([mode, ratio]) => [mode, round(ratio)]),
+            ),
             modes: scenario.modes.map((mode) => ({
               mode: mode.mode,
               indexed: mode.indexed,
@@ -62,10 +64,16 @@ describe("performance: RLS read load", () => {
         }
 
         console.log("[perf] rls-read-load report", { reportPath });
-        // Sanity: the correct, indexed RLS read returns a bounded, non-empty visible set (the filter filters).
+        // Correctness gate: every RLS variant (correct / naive / the anyarray / fnrows experiments) must
+        // return the SAME non-empty visible set as the privileged shape query — otherwise a rewrite changed
+        // the authorization, and any speed comparison is meaningless.
         for (const scenario of scenarios) {
-          const correctIndexed = scenario.modes.find((mode) => mode.mode === "rls-correct" && mode.indexed);
-          expect(correctIndexed?.rowsReturned).toBeGreaterThan(0);
+          const shapeIndexed = scenario.modes.find((mode) => mode.mode === "shape-query" && mode.indexed);
+          expect(shapeIndexed?.rowsReturned).toBeGreaterThan(0);
+          const rlsIndexed = scenario.modes.filter((mode) => mode.mode.startsWith("rls-") && mode.indexed);
+          for (const mode of rlsIndexed) {
+            expect(mode.rowsReturned).toBe(shapeIndexed?.rowsReturned ?? -1);
+          }
         }
 
         assertPerfBudgets(budgetResults);

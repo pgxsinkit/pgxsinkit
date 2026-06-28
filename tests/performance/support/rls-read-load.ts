@@ -135,6 +135,11 @@ function grantScopeClaims(config: RlsReadConfig): JwtClaims {
 
 type ScenarioKey = "membership" | "grant-scope";
 
+interface RlsVariant {
+  mode: string;
+  policies: ReturnType<typeof pgPolicy>[];
+}
+
 interface ScenarioSpec {
   key: ScenarioKey;
   tableName: string;
@@ -142,6 +147,8 @@ interface ScenarioSpec {
   indexDdl: string[];
   correctPolicies: ReturnType<typeof pgPolicy>[];
   naivePolicies: ReturnType<typeof pgPolicy>[];
+  /** Extra RLS forms to measure against the correct/naive baseline — the planner-guiding experiments. */
+  extraVariants: RlsVariant[];
   claims: JwtClaims;
   shapeWhere: string;
 }
@@ -160,6 +167,54 @@ function buildNaiveMembershipPolicies(): ReturnType<typeof pgPolicy>[] {
   const predicate = sql`exists (select 1 from ${workspaceMembersTable} where ${workspaceMembersTable.memberId} = ${subject} and ${workspaceMembersTable.workspaceId} = ${workItemsTable.workspaceId})`;
   return [
     pgPolicy(`${PREFIX}work_items_select_membership_naive`, {
+      as: "permissive",
+      for: "select",
+      to: authenticatedPgRole,
+      using: predicate,
+    }),
+  ];
+}
+
+// Shared SQL fragments for the experimental variants (the grants jsonb array; the JWT subject uuid).
+const GRANTS_JSONB = `coalesce((coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb #> '{app_metadata,authorization,grants}'), '[]'::jsonb)`;
+const SUBJECT_UUID = `(select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid)`;
+const CALLER_OFFERINGS_FN = `${PREFIX}caller_offerings`;
+
+// Experiment 1 — restructure `IN (subquery)` → `= ANY(ARRAY(subquery))`. The ARRAY() materializes the
+// (uncorrelated) set once and `= ANY(<array>)` is a ScalarArrayOp, which the planner CAN drive as an
+// index scan — unlike the hashed-subplan semi-join that `IN (subquery)` produces.
+function buildAnyArrayMembershipPolicies(): ReturnType<typeof pgPolicy>[] {
+  const subject = sql.raw(SUBJECT_UUID);
+  const predicate = sql`${workItemsTable.workspaceId} = any(array(select ${workspaceMembersTable.workspaceId} from ${workspaceMembersTable} where ${workspaceMembersTable.memberId} = ${subject}))`;
+  return [
+    pgPolicy(`${PREFIX}work_items_select_membership_anyarray`, {
+      as: "permissive",
+      for: "select",
+      to: authenticatedPgRole,
+      using: predicate,
+    }),
+  ];
+}
+
+function buildAnyArrayGrantScopePolicies(): ReturnType<typeof pgPolicy>[] {
+  const predicate = sql`${enrolmentsTable.offeringId} = any(array(select (grant_elem -> 'scope' ->> 'offeringId')::uuid from jsonb_array_elements(${sql.raw(GRANTS_JSONB)}) as grant_elem where grant_elem -> 'scope' ->> 'kind' = 'offering' and grant_elem ->> 'role' = 'teacher'))`;
+  return [
+    pgPolicy(`${PREFIX}enrolments_select_grant_scope_anyarray`, {
+      as: "permissive",
+      for: "select",
+      to: authenticatedPgRole,
+      using: predicate,
+    }),
+  ];
+}
+
+// Experiment 2 — a STABLE SETOF function with a ROWS cardinality declaration. Postgres has no
+// comment hints, but `ROWS n` tells the planner the function yields ~n rows, so the `IN (SELECT fn())`
+// semi-join is estimated at ~n (not the default guess that drives the seq scan). Defined in provision().
+function buildFnRowsGrantScopePolicies(): ReturnType<typeof pgPolicy>[] {
+  const predicate = sql`${enrolmentsTable.offeringId} in (select ${sql.raw(`${CALLER_OFFERINGS_FN}()`)})`;
+  return [
+    pgPolicy(`${PREFIX}enrolments_select_grant_scope_fnrows`, {
       as: "permissive",
       for: "select",
       to: authenticatedPgRole,
@@ -190,6 +245,7 @@ function membershipScenario(): ScenarioSpec {
       managerRoleColumn: workspaceMembersTable.role,
     }),
     naivePolicies: buildNaiveMembershipPolicies(),
+    extraVariants: [{ mode: "rls-anyarray", policies: buildAnyArrayMembershipPolicies() }],
     claims: membershipClaims(),
     shapeWhere,
   };
@@ -216,13 +272,18 @@ function grantScopeScenario(config: RlsReadConfig): ScenarioSpec {
       roleValues: ["teacher"],
       naive: true,
     }),
+    extraVariants: [
+      { mode: "rls-anyarray", policies: buildAnyArrayGrantScopePolicies() },
+      { mode: "rls-fnrows", policies: buildFnRowsGrantScopePolicies() },
+    ],
     claims: grantScopeClaims(config),
     shapeWhere: buildGrantScopeShapeWhere("offering_id", ids),
   };
 }
 
 export interface RlsReadModeMetric {
-  mode: "baseline" | "shape-query" | "rls-correct" | "rls-naive";
+  /** "baseline" | "shape-query" | "rls-<variant>" (rls-correct, rls-naive, rls-anyarray, rls-fnrows, …). */
+  mode: string;
   indexed: boolean;
   latencyMs: ReturnType<typeof computePercentiles>;
   rowsReturned: number;
@@ -236,9 +297,10 @@ export interface RlsReadScenarioMetric {
   modes: RlsReadModeMetric[];
   cliffRatioP95: number; // rls-naive p95 / rls-correct p95 (indexed)
   indexSpeedupP95: number; // rls-correct no-index p95 / rls-correct indexed p95
-  rlsVsShapeP95: number; // rls-correct indexed p95 / shape-query indexed p95
-  explainCorrectIndexed: string;
-  explainNaiveIndexed: string;
+  /** indexed RLS p95 ÷ indexed shape-query p95, per RLS variant (1.0 = as fast as the Electric shape). */
+  vsShapeP95: Record<string, number>;
+  /** indexed EXPLAIN ANALYZE plan, per RLS variant. */
+  explains: Record<string, string>;
 }
 
 // ── provisioning + seeding ──────────────────────────────────────────────────
@@ -282,6 +344,21 @@ async function provision(db: RlsReadDb): Promise<void> {
   for (const tableName of [`${PREFIX}work_items`, `${PREFIX}enrolments`]) {
     await db.execute(sql.raw(`ALTER TABLE ${tableName} ENABLE ROW LEVEL SECURITY`));
   }
+
+  // The ROWS-hinted grant-set resolver for the rls-fnrows experiment: a STABLE SETOF function whose
+  // `ROWS 8` declaration gives the planner the cardinality the runtime jsonb subquery hides from it.
+  // It reads only the JWT (no table), so no SECURITY DEFINER is needed; current_setting is session
+  // state, visible regardless of the function's security context.
+  await db.execute(
+    sql.raw(
+      `CREATE OR REPLACE FUNCTION ${CALLER_OFFERINGS_FN}() RETURNS SETOF uuid LANGUAGE sql STABLE ROWS 8 AS $fn$
+        SELECT (grant_elem -> 'scope' ->> 'offeringId')::uuid
+        FROM jsonb_array_elements(${GRANTS_JSONB}) AS grant_elem
+        WHERE grant_elem -> 'scope' ->> 'kind' = 'offering' AND grant_elem ->> 'role' = 'teacher'
+      $fn$`,
+    ),
+  );
+  await db.execute(sql.raw(`GRANT EXECUTE ON FUNCTION ${CALLER_OFFERINGS_FN}() TO authenticated`));
 }
 
 async function seed(db: RlsReadDb, config: RlsReadConfig): Promise<void> {
@@ -476,6 +553,11 @@ async function explainUnderRls(db: RlsReadDb, query: string, claims: JwtClaims):
 
 async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadConfig): Promise<RlsReadScenarioMetric> {
   const modes: RlsReadModeMetric[] = [];
+  const rlsVariants: RlsVariant[] = [
+    { mode: "rls-correct", policies: spec.correctPolicies },
+    { mode: "rls-naive", policies: spec.naivePolicies },
+    ...spec.extraVariants,
+  ];
 
   // Privileged baselines (no RLS) — independent of policy variant; measured per index state.
   for (const indexed of [false, true]) {
@@ -506,14 +588,11 @@ async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadCon
       timedOut: shaped.timedOut,
     });
 
-    for (const [variant, policies] of [
-      ["rls-correct", spec.correctPolicies],
-      ["rls-naive", spec.naivePolicies],
-    ] as const) {
-      await installPolicies(db, spec.tableName, policies);
+    for (const variant of rlsVariants) {
+      await installPolicies(db, spec.tableName, variant.policies);
       const measured = await timeUnderRls(db, spec.readQuery, spec.claims, config.samples);
       modes.push({
-        mode: variant,
+        mode: variant.mode,
         indexed,
         latencyMs: computePercentiles(measured.ms),
         rowsReturned: measured.rows,
@@ -522,15 +601,21 @@ async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadCon
     }
   }
 
-  // EXPLAIN captures on the indexed correct + naive policies.
-  await installPolicies(db, spec.tableName, spec.correctPolicies);
-  const explainCorrectIndexed = await explainUnderRls(db, spec.readQuery, spec.claims);
-  await installPolicies(db, spec.tableName, spec.naivePolicies);
-  const explainNaiveIndexed = await explainUnderRls(db, spec.readQuery, spec.claims);
+  // EXPLAIN capture per RLS variant (indexed) — the plan is the experiment's primary evidence.
+  const explains: Record<string, string> = {};
+  for (const variant of rlsVariants) {
+    await installPolicies(db, spec.tableName, variant.policies);
+    explains[variant.mode] = await explainUnderRls(db, spec.readQuery, spec.claims);
+  }
 
-  const pick = (mode: RlsReadModeMetric["mode"], indexed: boolean) =>
+  const pick = (mode: string, indexed: boolean) =>
     modes.find((m) => m.mode === mode && m.indexed === indexed)?.latencyMs.p95 ?? 0;
   const correctIndexed = pick("rls-correct", true) || 1;
+  const shapeIndexed = pick("shape-query", true) || 1;
+  const vsShapeP95: Record<string, number> = {};
+  for (const variant of rlsVariants) {
+    vsShapeP95[variant.mode] = pick(variant.mode, true) / shapeIndexed;
+  }
 
   return {
     scenario: spec.key,
@@ -538,9 +623,8 @@ async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadCon
     modes,
     cliffRatioP95: pick("rls-naive", true) / correctIndexed,
     indexSpeedupP95: pick("rls-correct", false) / correctIndexed,
-    rlsVsShapeP95: correctIndexed / (pick("shape-query", true) || 1),
-    explainCorrectIndexed,
-    explainNaiveIndexed,
+    vsShapeP95,
+    explains,
   };
 }
 
