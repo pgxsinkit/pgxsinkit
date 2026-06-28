@@ -513,6 +513,10 @@ function buildSyncTableInput(entry: SyncTableEntry, tableKey: string) {
     // Carry the consistency group (ADR-0009 decision 2) so the sync starter buckets grouped tables
     // onto one MultiShapeStream; absent → singleton group.
     ...(entry.consistencyGroup ? { consistencyGroup: entry.consistencyGroup } : {}),
+    // Carry the lifecycle axes (ADR-0021) so the sync starter can hold lazy groups out of the eager
+    // boot set and provision ephemeral clusters as TEMP; absent → eager/persistent (today's path).
+    ...(entry.subscription ? { subscription: entry.subscription } : {}),
+    ...(entry.retention ? { retention: entry.retention } : {}),
   };
 }
 

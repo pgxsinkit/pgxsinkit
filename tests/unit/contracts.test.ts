@@ -249,3 +249,99 @@ describe("buildRowFilterWhere (inline string view of customWhere)", () => {
     expect(buildRowFilterWhere({ customWhere: () => sql`"owner_id" = ${"user-1"}` }, { sub: "user-1" })).toBeNull();
   });
 });
+
+describe("ADR-0021 sync lifecycle axes (subscription, retention)", () => {
+  const makeRefColumns = () => ({
+    id: uuid("id").primaryKey(),
+    label: varchar("label", { length: 80 }).notNull(),
+  });
+
+  it("carries subscription/retention on the entry; absent → omitted (default eager/persistent)", () => {
+    const lazyEphemeral = defineSyncTable({
+      tableName: "ref_lazy",
+      makeColumns: makeRefColumns,
+      subscription: "lazy",
+      retention: "ephemeral",
+    });
+    expect(lazyEphemeral.subscription).toBe("lazy");
+    expect(lazyEphemeral.retention).toBe("ephemeral");
+
+    const plain = defineSyncTable({ tableName: "ref_plain", makeColumns: makeRefColumns });
+    expect(plain.subscription).toBeUndefined();
+    expect(plain.retention).toBeUndefined();
+  });
+
+  it("rejects an invalid subscription or retention value", () => {
+    expect(() =>
+      defineSyncTable({ tableName: "ref_bad_sub", makeColumns: makeRefColumns, subscription: "sometimes" as never }),
+    ).toThrow(/invalid subscription/);
+    expect(() =>
+      defineSyncTable({ tableName: "ref_bad_ret", makeColumns: makeRefColumns, retention: "forever" as never }),
+    ).toThrow(/invalid retention/);
+  });
+
+  it("rejects a consistency group that mixes subscription OR retention (ADR-0021 §4)", () => {
+    expect(() =>
+      defineSyncRegistry({
+        a: defineSyncTable({
+          tableName: "grp_a",
+          makeColumns: makeRefColumns,
+          consistencyGroup: "g",
+          subscription: "lazy",
+        }),
+        b: defineSyncTable({
+          tableName: "grp_b",
+          makeColumns: makeRefColumns,
+          consistencyGroup: "g",
+          subscription: "eager",
+        }),
+      }),
+    ).toThrow(/mixes lifecycle/);
+
+    expect(() =>
+      defineSyncRegistry({
+        a: defineSyncTable({
+          tableName: "grp_ra",
+          makeColumns: makeRefColumns,
+          consistencyGroup: "gr",
+          retention: "ephemeral",
+        }),
+        b: defineSyncTable({
+          tableName: "grp_rb",
+          makeColumns: makeRefColumns,
+          consistencyGroup: "gr",
+          retention: "persistent",
+        }),
+      }),
+    ).toThrow(/mixes lifecycle/);
+  });
+
+  it("accepts a uniform group, and leaves ungrouped singletons unconstrained", () => {
+    expect(() =>
+      defineSyncRegistry({
+        a: defineSyncTable({
+          tableName: "grp2_a",
+          makeColumns: makeRefColumns,
+          consistencyGroup: "g2",
+          subscription: "lazy",
+          retention: "ephemeral",
+        }),
+        b: defineSyncTable({
+          tableName: "grp2_b",
+          makeColumns: makeRefColumns,
+          consistencyGroup: "g2",
+          subscription: "lazy",
+          retention: "ephemeral",
+        }),
+      }),
+    ).not.toThrow();
+
+    // No consistencyGroup → each table is its own singleton group, so differing lifecycle is fine.
+    expect(() =>
+      defineSyncRegistry({
+        a: defineSyncTable({ tableName: "solo_a", makeColumns: makeRefColumns, subscription: "lazy" }),
+        b: defineSyncTable({ tableName: "solo_b", makeColumns: makeRefColumns, subscription: "eager" }),
+      }),
+    ).not.toThrow();
+  });
+});

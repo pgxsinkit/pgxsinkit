@@ -25,6 +25,10 @@ import { type ApplyStrategy, classifyApplyStrategy, type SyncColumnType } from "
 import {
   CONFLICT_POLICIES,
   isConflictPolicy,
+  isRetention,
+  isSubscriptionTiming,
+  RETENTIONS,
+  SUBSCRIPTION_TIMINGS,
   type ClientProjectionSpec,
   type ConflictPolicy,
   type DeferrableConstraintSpec,
@@ -32,10 +36,12 @@ import {
   type ManagedFieldSpec,
   type ManagedFieldStrategy,
   type PrimaryKeySpec,
+  type Retention,
   type RowFilterSpec,
   type ServerProjectionSpec,
   type ShapeSpec,
   type ShapeSpecInput,
+  type SubscriptionTiming,
   type TableGovernanceSpec as TableGovernanceSpecBase,
   type TableMode,
 } from "./config";
@@ -123,6 +129,20 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
    * group advances only as fast as its slowest shape) is contained to the tables that opt in.
    */
   consistencyGroup?: string;
+  /**
+   * Subscription timing (ADR-0021): `eager` (default) | `lazy`. A `lazy` table is excluded from the
+   * boot subscription set and subscribed on first query-reference. A property of the **consistency
+   * group** — every table sharing a `consistencyGroup` must agree (validated). See
+   * {@link SubscriptionTiming}.
+   */
+  subscription?: SubscriptionTiming;
+  /**
+   * Retention (ADR-0021): `persistent` (default) | `ephemeral`. An `ephemeral` table's whole local
+   * cluster is emitted as `TEMP` — no durable trace, no durable offline write queue. A property of the
+   * consistency group — every table sharing a `consistencyGroup` must agree (validated). See
+   * {@link Retention}.
+   */
+  retention?: Retention;
 }
 
 /** Column property key names from a `makeColumns` factory function. */
@@ -248,6 +268,15 @@ export type SyncTableInput<
    * {@link SyncTableEntry.consistencyGroup}.
    */
   consistencyGroup?: string;
+  /**
+   * Subscription timing (ADR-0021): `eager` (default) | `lazy`. See
+   * {@link SyncTableEntry.subscription}.
+   */
+  subscription?: SubscriptionTiming;
+  /**
+   * Retention (ADR-0021): `persistent` (default) | `ephemeral`. See {@link SyncTableEntry.retention}.
+   */
+  retention?: Retention;
 };
 
 export type SyncTableRegistry = Record<string, SyncTableEntry>;
@@ -453,6 +482,7 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
     for (const entry of getRegistryEntries(input.tables)) {
       validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
     }
+    validateRegistryLifecycleGroups(input.tables);
 
     return attachSyncRegistrySchema(input.tables, input.schema);
   }
@@ -460,8 +490,49 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
   for (const entry of getRegistryEntries(input)) {
     validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
   }
+  validateRegistryLifecycleGroups(input);
 
   return input;
+}
+
+/**
+ * ADR-0021 §4: subscription timing and retention are properties of a **consistency group**, not a
+ * single table — a group commits atomically on one `MultiShapeStream` and so cannot be partly lazy or
+ * partly ephemeral. Reject a registry whose grouped tables disagree. Tables without a
+ * `consistencyGroup` are their own singleton group and are unconstrained.
+ */
+function validateRegistryLifecycleGroups(registry: SyncTableRegistry) {
+  const groups = new Map<
+    string,
+    Array<{ tableName: string; subscription: SubscriptionTiming; retention: Retention }>
+  >();
+
+  for (const entry of getRegistryEntries(registry)) {
+    if (!entry.consistencyGroup) {
+      continue;
+    }
+
+    const members = groups.get(entry.consistencyGroup) ?? [];
+    members.push({
+      tableName: getTableConfig(entry.table).name,
+      subscription: entry.subscription ?? "eager",
+      retention: entry.retention ?? "persistent",
+    });
+    groups.set(entry.consistencyGroup, members);
+  }
+
+  for (const [group, members] of groups) {
+    const subscriptions = new Set(members.map((member) => member.subscription));
+    const retentions = new Set(members.map((member) => member.retention));
+
+    if (subscriptions.size > 1 || retentions.size > 1) {
+      throw new Error(
+        `consistency group "${group}" mixes lifecycle (ADR-0021 §4): every table in a group must ` +
+          `share one subscription and one retention; got ` +
+          members.map((member) => `${member.tableName}=${member.subscription}/${member.retention}`).join(", "),
+      );
+    }
+  }
 }
 
 export function getProjectedColumns<TTable extends AnyPgTable>(entry: SyncTableEntry<TTable>) {
@@ -653,6 +724,22 @@ function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
       `writable table ${tableName} must declare a Conflict policy (ADR-0015): conflictPolicy must be ` +
         `one of ${CONFLICT_POLICIES.join(", ")}` +
         (entry.conflictPolicy === undefined ? " (none was declared)" : ` (got ${String(entry.conflictPolicy)})`),
+    );
+  }
+
+  // ADR-0021: the lifecycle axes are optional (default eager/persistent), but a declared value must be
+  // valid. Group-level uniformity (every table in a consistency group agrees) is checked at the
+  // registry level in defineSyncRegistry, where the whole table set is visible.
+  if (entry.subscription !== undefined && !isSubscriptionTiming(entry.subscription)) {
+    throw new Error(
+      `table ${tableName} has an invalid subscription (ADR-0021): must be one of ` +
+        `${SUBSCRIPTION_TIMINGS.join(", ")} (got ${String(entry.subscription)})`,
+    );
+  }
+  if (entry.retention !== undefined && !isRetention(entry.retention)) {
+    throw new Error(
+      `table ${tableName} has an invalid retention (ADR-0021): must be one of ` +
+        `${RETENTIONS.join(", ")} (got ${String(entry.retention)})`,
     );
   }
 

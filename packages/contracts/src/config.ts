@@ -34,6 +34,48 @@ export function isConflictPolicy(value: unknown): value is ConflictPolicy {
 }
 
 /**
+ * Subscription timing for a synced table (ADR-0021): **when** its Electric shape subscribes.
+ *
+ * - `eager` (default) — subscribed in the boot set, as today.
+ * - `lazy` — excluded from boot; subscribed on first query-reference. With `persistent` retention,
+ *   first use is a one-time ignition that promotes the table to a normal eager table for subsequent
+ *   sessions; with `ephemeral` retention it is session-scoped.
+ *
+ * A property of the **consistency group**: every table sharing a `consistencyGroup` must agree, since
+ * a group commits atomically on one `MultiShapeStream` and cannot be partly lazy (ADR-0021 §4).
+ */
+export type SubscriptionTiming = "eager" | "lazy";
+
+/** The {@link SubscriptionTiming} values. Source of truth for registry validation. */
+export const SUBSCRIPTION_TIMINGS = ["eager", "lazy"] as const satisfies readonly SubscriptionTiming[];
+
+/** Type guard: is `value` a {@link SubscriptionTiming}? */
+export function isSubscriptionTiming(value: unknown): value is SubscriptionTiming {
+  return typeof value === "string" && (SUBSCRIPTION_TIMINGS as readonly string[]).includes(value);
+}
+
+/**
+ * Retention for a synced table (ADR-0021): **whether** its local copy is durable.
+ *
+ * - `persistent` (default) — the durable PGlite backend with a resumable subscription-state.
+ * - `ephemeral` — the table's whole per-table local cluster (read cache, overlay, journal, sequence,
+ *   views, reconcile trigger/function) is emitted as `TEMP`, so reads **and** writes leave no durable
+ *   trace. Consequence: no durable offline write queue — pair a must-not-lose write with a pessimistic
+ *   flush (ADR-0022).
+ *
+ * Like {@link SubscriptionTiming}, a property of the consistency group: every table in a group agrees.
+ */
+export type Retention = "persistent" | "ephemeral";
+
+/** The {@link Retention} values. Source of truth for registry validation. */
+export const RETENTIONS = ["persistent", "ephemeral"] as const satisfies readonly Retention[];
+
+/** Type guard: is `value` a {@link Retention}? */
+export function isRetention(value: unknown): value is Retention {
+  return typeof value === "string" && (RETENTIONS as readonly string[]).includes(value);
+}
+
+/**
  * Minimal verified-JWT claim shape the sync layer understands. Providers may
  * attach arbitrary extra claims; those stay reachable through index access and
  * ownership claim paths (e.g. "app_metadata.person_id"). Parse decoded JWT
@@ -153,6 +195,16 @@ export interface TableSpecInput {
    * and commit atomically at a shared LSN frontier. Absent → the table is its own singleton group.
    */
   consistencyGroup?: string;
+  /**
+   * Subscription timing (ADR-0021). Absent → `eager`. A `lazy` table is excluded from the boot
+   * subscription set and subscribed on first query-reference. See {@link SubscriptionTiming}.
+   */
+  subscription?: SubscriptionTiming;
+  /**
+   * Retention (ADR-0021). Absent → `persistent`. An `ephemeral` table's whole local cluster is emitted
+   * as `TEMP` — no durable trace. See {@link Retention}.
+   */
+  retention?: Retention;
 }
 
 export interface SyncConfigInput<TTables extends Record<string, TableSpecInput> = Record<string, TableSpecInput>> {
