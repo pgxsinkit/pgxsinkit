@@ -13,7 +13,13 @@ import { availableParallelism } from "node:os";
 // tests/support/setup.ts) keeps each shard's process flat regardless of how many files it holds.
 
 // Suites that call `mock.module` (process-global) — must each run in their own process.
-const ISOLATED = new Set(["client-sync-reset", "perf-lab-pglite", "pglite-sync-upstream", "sync-commit-queue"]);
+const ISOLATED = new Set([
+  "client-lazy-facade",
+  "client-sync-reset",
+  "perf-lab-pglite",
+  "pglite-sync-upstream",
+  "sync-commit-queue",
+]);
 
 // Rough per-file cost (seconds) for balancing the bins; unlisted files default to 1. Only affects how
 // evenly work is spread, never correctness.

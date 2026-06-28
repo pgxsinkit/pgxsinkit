@@ -90,6 +90,12 @@ export interface StartConfiguredSyncResult {
   ensureGroupStarted: (groupKey: string) => Promise<void>;
   /** The consistency-group key a table belongs to — maps a queried table to its {@link ensureGroupStarted}. */
   groupKeyForTable: (tableKey: string) => string | undefined;
+  /**
+   * Whether a table's consistency group has started and completed its initial sync, so its reads are
+   * hydrated (ADR-0021). False for a `lazy` group still held out of the boot set. Drives the read-path
+   * tripwire — a lazy relation read while this is false would return empty/stale rows.
+   */
+  isTableStarted: (tableKey: string) => boolean;
 }
 
 export function buildShapeUrl(electricUrl: string, table: string) {
@@ -240,6 +246,11 @@ export async function startConfiguredSync(
       return group ? startGroup(group, false) : Promise.resolve();
     },
     groupKeyForTable: (tableKey) => groupKeyByTable.get(tableKey),
+    isTableStarted: (tableKey) => {
+      const groupKey = groupKeyByTable.get(tableKey);
+      if (groupKey == null) return false;
+      return groups.get(groupKey)?.result != null;
+    },
   };
 }
 

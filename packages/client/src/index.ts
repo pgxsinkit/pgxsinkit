@@ -20,6 +20,12 @@ import type {
 import { classifyTableApplyStrategy, deriveSyncColumnTypes, getSyncRegistrySchema } from "@pgxsinkit/contracts";
 
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
+import {
+  assertLazyRefsActivated,
+  buildLazyGuardIndex,
+  createRecordingClient,
+  detectKeysFromBuilder,
+} from "./lazy-guard";
 import { type LocalStoreVersionEvent, reconcileLocalStoreVersion } from "./local-store";
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
 import { buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
@@ -112,6 +118,21 @@ export interface SyncClientTableHandle<TRegistry extends SyncTableRegistry, TKey
   delete: (entityKey: Record<string, string>) => Promise<void>;
 }
 
+/** Minimal shape of a Drizzle select builder: inspectable via `.toSQL()` and awaitable for its rows. */
+export interface DrizzleQueryBuilder<TRows extends readonly unknown[]> extends PromiseLike<TRows> {
+  toSQL(): { sql: string; params: unknown[] };
+}
+
+/**
+ * A declared-safe query (ADR-0021). `use` names the lazy relations the query reads — they are
+ * activated and awaited before it runs. `build` receives the client; reach relations through
+ * `c.views` / `c.drizzle` / a directly-imported synced table as usual.
+ */
+export interface GuardedQuerySpec<TRegistry extends SyncTableRegistry, TRows extends readonly unknown[]> {
+  use?: readonly SyncTableName<TRegistry>[];
+  build: (client: SyncClient<TRegistry>) => DrizzleQueryBuilder<TRows>;
+}
+
 export interface SyncClient<TRegistry extends SyncTableRegistry> {
   drizzle: PgliteDatabase<RegistryRelations<TRegistry>>;
   pglite: ClientPGlite;
@@ -163,6 +184,30 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
     entityKey: Record<string, string>,
   ) => Promise<void>;
   diagnostics: (table?: SyncTableName<TRegistry>) => Promise<{ mutation: MutationDiagnostics }>;
+  /**
+   * Run a one-shot (non-live) typed query with the lazy-relation safety net (ADR-0021). The lazy
+   * relations the query reads are activated and awaited before it runs — declare them in `use`, and/or
+   * let pgxsinkit auto-detect them from the builder — and the tripwire rejects any lazy relation the
+   * compiled SQL still references but that is not active, so the result can never be silently
+   * empty/stale. The guaranteed-safe alternative to a bare `client.drizzle` read.
+   */
+  query: <TRows extends readonly unknown[]>(spec: GuardedQuerySpec<TRegistry, TRows>) => Promise<TRows>;
+  /** {@link query} returning the first row, or null when empty. */
+  queryRow: <TRows extends readonly unknown[]>(
+    spec: GuardedQuerySpec<TRegistry, TRows>,
+  ) => Promise<TRows[number] | null>;
+  /**
+   * Activate one or more lazy relations (ADR-0021): open their consistency-group subscription if held
+   * out of the eager boot, resolving once their initial sync completes. Idempotent — eager or
+   * already-started relations resolve immediately. Use to pre-activate before a raw/`client.drizzle`
+   * read, or as the manual escape hatch the tripwire points to.
+   */
+  ensureSynced: (keys: readonly SyncTableName<TRegistry>[]) => Promise<void>;
+  /**
+   * Whether a relation's group has started and hydrated (ADR-0021). False for a still-dormant `lazy`
+   * relation; true for eager relations once boot completes (and always when sync is disabled).
+   */
+  isSynced: (key: SyncTableName<TRegistry>) => boolean;
 }
 
 export type { MutationBatchItem, MutationDetail, MutationDiagnostics, MutationKind };
@@ -231,6 +276,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   }
 
   const drizzleDb = createDrizzleDatabase(pglite, buildSchema(options.registry));
+  // Static index of the registry's lazy relations (ADR-0021), driving the read-path safety net.
+  const lazyGuardIndex = buildLazyGuardIndex(options.registry);
 
   const syncEnabled = options.syncEnabled ?? true;
   let sync: Awaited<ReturnType<typeof startConfiguredSync>> | null = null;
@@ -364,6 +411,45 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     },
   };
 
+  // ─── Lazy-relation activation + the declared-safe query facade (ADR-0021) ──────────────────────
+  const ensureSynced: SyncClient<TRegistry>["ensureSynced"] = async (keys) => {
+    const activeSync = sync;
+    if (activeSync == null || keys.length === 0) return;
+    const groupKeys = new Set<string>();
+    for (const key of keys) {
+      const groupKey = activeSync.groupKeyForTable(key);
+      if (groupKey != null) groupKeys.add(groupKey);
+    }
+    await Promise.all([...groupKeys].map((groupKey) => activeSync.ensureGroupStarted(groupKey)));
+  };
+
+  const isSynced: SyncClient<TRegistry>["isSynced"] = (key) => {
+    const activeSync = sync;
+    // Sync disabled → local-only: reads hit whatever is in the local store, so nothing is "dormant".
+    if (activeSync == null) return true;
+    return activeSync.isTableStarted(key);
+  };
+
+  const runGuardedQuery = async <TRows extends readonly unknown[]>(
+    spec: GuardedQuerySpec<TRegistry, TRows>,
+  ): Promise<TRows> => {
+    // (A) record relations reached through the client during build, ∪ (C) structural detection of the
+    // builder's FROM/JOIN, ∪ the explicit `use` declaration — the precise auto-activation set.
+    const recording = createRecordingClient(client);
+    const builder = spec.build(recording.client);
+    const detected = detectKeysFromBuilder(builder, lazyGuardIndex);
+    const toActivate = new Set<string>([...(spec.use ?? []), ...recording.accessed, ...detected]);
+    await ensureSynced([...toActivate] as SyncTableName<TRegistry>[]);
+    // The tripwire (the guaranteed floor): any lazy relation the COMPILED SQL still references that is
+    // not active → throw, rather than silently read empty/stale rows. Runs before the query executes.
+    assertLazyRefsActivated({
+      sql: builder.toSQL().sql,
+      index: lazyGuardIndex,
+      isActive: (key) => isSynced(key as SyncTableName<TRegistry>),
+    });
+    return builder;
+  };
+
   const client: SyncClient<TRegistry> = {
     drizzle: drizzleDb,
     pglite,
@@ -435,6 +521,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     diagnostics: async (table) => ({
       mutation: await mutationRuntime.readMutationStats(table),
     }),
+    query: (spec) => runGuardedQuery(spec),
+    queryRow: async (spec) => {
+      const rows = await runGuardedQuery(spec);
+      return rows[0] ?? null;
+    },
+    ensureSynced,
+    isSynced,
   };
 
   return client;

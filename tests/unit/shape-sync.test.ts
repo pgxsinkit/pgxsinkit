@@ -211,10 +211,12 @@ describe("shape sync", () => {
     expect(calls).toEqual(["profile-shape"]);
     expect(initialSyncCount).toBe(1);
 
-    // Both tables are exposed; the lazy one reports not-up-to-date until it is started.
+    // Both tables are exposed; the lazy one reports not-up-to-date / not-started until it is started.
     expect(Object.keys(result.tables).sort()).toEqual(["archive", "profile"]);
     expect(result.tables["profile"]?.isUpToDate).toBe(true);
     expect(result.tables["archive"]?.isUpToDate).toBe(false);
+    expect(result.isTableStarted("profile")).toBe(true);
+    expect(result.isTableStarted("archive")).toBe(false);
 
     // The lazy table's group is discoverable and starts on demand, after which it reports up-to-date —
     // without re-firing the boot gate.
@@ -223,6 +225,7 @@ describe("shape sync", () => {
     expect(calls).toHaveLength(2);
     expect(calls).toContain("archive-shape");
     expect(result.tables["archive"]?.isUpToDate).toBe(true);
+    expect(result.isTableStarted("archive")).toBe(true);
     expect(initialSyncCount).toBe(1);
 
     // Single-flight / idempotent: starting it again does not re-subscribe.
