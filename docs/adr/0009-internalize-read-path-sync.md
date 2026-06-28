@@ -1,6 +1,6 @@
 # Internalize the read-path sync (break with pglite-sync)
 
-Status: proposed (2026-06-22)
+Status: accepted (2026-06-22); implemented
 
 [ADR-0007](0007-absorb-sync-engine.md) absorbed the thin `sync-engine` wrapper into
 the client but **kept** `@pgxsinkit/pglite-sync` as a "vendored Electric adapter
