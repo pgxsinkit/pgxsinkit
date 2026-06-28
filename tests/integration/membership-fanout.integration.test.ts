@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
+import { eq } from "drizzle-orm";
+
 import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
   buildMembershipFanoutSyncConfig,
@@ -146,6 +148,57 @@ describe("membership fan-out (readwrite) integration", () => {
       nonMember.sync.unsubscribe();
       await coMemberPg.close();
       await nonMemberPg.close();
+    }
+  }, 30_000);
+
+  // The REVOCATION twin of the fan-out test: deleting a member's membership row — the SOURCE of the
+  // work_items subquery row-filter (`workspace_id IN (SELECT workspace_id FROM workspace_members WHERE
+  // member_id = $sub)`) — must stream a move-out delete to that member's LIVE-following shape, so the
+  // rows they could see leave their local store. This is the exact mechanism the board demo relies on
+  // when an admin removes someone from a team (the team's board + issues should disappear). The
+  // documented caveat (apps/board/docs/consumer-review.md) is that only a *live* shape receives this
+  // delta; this test holds a live subscription throughout, so it proves the live path end-to-end.
+  it("revokes a member's rows from their LIVE shape when their membership is deleted (move-out)", async () => {
+    // Fully-isolated identities so Electric serves this subject a BRAND-NEW shape (a unique `sub` →
+    // unique where-params → no cached handle from the fan-out test, whose churn would otherwise mask the
+    // result). The only thing under test is: live shape + delete the subquery's SOURCE row → move-out.
+    const REV_WS = "2c4e1e3b-0000-4000-8000-0000000009ff";
+    const REV_MEMBER = "1b3f0d2a-0000-4000-8000-0000000009ff";
+    const REV_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000009ff";
+    const REV_ITEM = "3d5f2f4c-0000-4000-8000-0000000009ff";
+
+    await server.drizzle.insert(workspacesTable).values({ id: REV_WS, ownerId: REV_MEMBER });
+    await server.drizzle
+      .insert(workspaceMembersTable)
+      .values({ id: REV_MEMBERSHIP, workspaceId: REV_WS, memberId: REV_MEMBER, role: "member" });
+    await server.drizzle
+      .insert(workItemsTable)
+      .values({ id: REV_ITEM, workspaceId: REV_WS, ownerId: REV_MEMBER, body: "revoke me" });
+
+    const memberPg = await createLocalWorkItemStore();
+    const member = await startMemberSync(memberPg, proxyUrl, REV_MEMBER);
+
+    try {
+      await member.initialSyncDone;
+
+      // The member receives their workspace's item on the live shape — the precondition.
+      await waitFor(async () => {
+        const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
+        expect(rows.rows[0]?.count).toBe(1);
+      });
+
+      // Admin removes the member from the workspace: delete the SOURCE row of their subquery filter
+      // (`workspace_id IN (SELECT workspace_id FROM workspace_members WHERE member_id = $sub)`).
+      await server.drizzle.delete(workspaceMembersTable).where(eq(workspaceMembersTable.id, REV_MEMBERSHIP));
+
+      // Electric must re-evaluate the dependent shape and stream the move-out; the item leaves the store.
+      await waitFor(async () => {
+        const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
+        expect(rows.rows[0]?.count).toBe(0);
+      });
+    } finally {
+      member.sync.unsubscribe();
+      await memberPg.close();
     }
   }, 30_000);
 

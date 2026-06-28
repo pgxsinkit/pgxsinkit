@@ -1,4 +1,4 @@
-import type { Row } from "@electric-sql/client";
+import type { EventMessage, MovePattern, Row } from "@electric-sql/client";
 import { isChangeMessage, isControlMessage } from "@electric-sql/client";
 import type { ChangeMessage, ShapeStreamOptions } from "@electric-sql/client";
 import { MultiShapeStream } from "@electric-sql/experimental";
@@ -24,6 +24,7 @@ import {
   type SubscriptionState,
   updateSubscriptionState,
 } from "./subscription-state";
+import { applyShapeMoveOut, applyShapeTagSync, clearShapeTags, shapeTableId } from "./tags";
 import {
   DEFAULT_MAX_COMMIT_RETRIES,
   type ElectricSyncOptions,
@@ -67,6 +68,21 @@ function readReplicationHeaders(headers: ChangeMessage["headers"]): { lsn: bigin
     lsn: typeof rawLsn === "string" ? BigInt(rawLsn) : BigInt(0),
     isLastOfLsn: headers["last"] === true,
   };
+}
+
+/**
+ * Electric's tagged-subquery `EventMessage` (ADR-0023) — `headers.event` is `move-out` | `move-in`,
+ * carrying `patterns`. It is neither a change nor a control message, so `@electric-sql/client` exposes
+ * no guard; we detect it by the `event` header. `MultiShapeStream` adds `.shape` like every message.
+ */
+type ShapeEventMessage = EventMessage & { shape: string };
+
+function isEventMessage(message: unknown): message is ShapeEventMessage {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    typeof (message as { headers?: { event?: unknown } }).headers?.event === "string"
+  );
 }
 
 async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) {
@@ -238,6 +254,17 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       // cleared only once the commit has succeeded.
       const shapesToTruncate = new Set(truncateNeeded);
 
+      // Snapshot the buffered tagged-subquery move-outs (ADR-0023) the same way: drained here so a
+      // retried commit still evicts, and (like the change drain) a degraded commit re-streams them on
+      // resume because the persisted offset is not advanced.
+      const moveOutsToCommit = new Map<string, MovePattern[][]>();
+      for (const shapeName of Object.keys(shapes)) {
+        const pending = inbox.drainMoveOuts(shapeName);
+        if (pending.length > 0) {
+          moveOutsToCommit.set(shapeName, pending);
+        }
+      }
+
       const runCommit = () =>
         pg.transaction(async (tx) => {
           if (debug) {
@@ -251,6 +278,9 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
             const shapeMethod = shapeInsertMethod.get(shapeName)!;
             let messages = initialMessages;
 
+            // ADR-0023: the shape's tag store key (synced table, schema-qualified).
+            const shapeTable = shapeTableId(shape.schema, shape.table);
+
             if (shapesToTruncate.has(shapeName)) {
               if (debug) {
                 console.log("truncating table", shape.table);
@@ -261,7 +291,22 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
                 const schema = shape.schema || "public";
                 await tx.exec(`DELETE FROM ${quoteIdentifier(schema)}.${quoteIdentifier(shape.table)};`);
               }
+              // The re-snapshot rebuilds tags from scratch, so drop this shape's stale tag-set too
+              // (ADR-0023 Slice 2: a must-refetch/​rebuild must not leave orphan tags).
+              await clearShapeTags({ pg: tx, metadataSchema, shapeTable });
             }
+
+            // Maintain the tag-set from the RAW drained batch (ADR-0023) — before the data apply and
+            // the move-out eviction, so an add-then-remove within one commit resolves correctly. Uses
+            // `initialMessages` (the full batch) since the insert/​fold split below reduces `messages`.
+            await applyShapeTagSync({
+              pg: tx,
+              metadataSchema,
+              shapeTable,
+              messages: initialMessages,
+              mapColumns: shape.mapColumns,
+              primaryKey: shape.primaryKey,
+            });
 
             if (!useInsert.get(shapeName)) {
               const initialInserts: InsertChangeMessage[] = [];
@@ -352,6 +397,24 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
                 });
               }
             }
+
+            // ADR-0023: after the data + tag state is current, apply this shape's buffered move-outs —
+            // withdraw the revoked tag and evict any row left with no tag (via the bulk-delete path, so
+            // the reconcile trigger fires and the read model converges).
+            const patternSets = moveOutsToCommit.get(shapeName);
+            if (patternSets) {
+              await applyShapeMoveOut({
+                pg: tx,
+                metadataSchema,
+                shapeTable,
+                table: shape.table,
+                schema: shape.schema,
+                primaryKey: shape.primaryKey,
+                columnTypes: shape.columnTypes,
+                patternSets,
+                debug,
+              });
+            }
           }
 
           if (key) {
@@ -428,7 +491,10 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
         const target = lowestCompleteLsn();
         const isCommitNeeded = target > committedLsn;
         const isMustRefetchAndCatchingUp = target >= committedLsn && truncateNeeded.size > 0;
-        if (isCommitNeeded || isMustRefetchAndCatchingUp) {
+        // A buffered move-out (ADR-0023) must be committed even if no change advanced the frontier — the
+        // revocation has to land. Its `up-to-date` normally advances `target`, but don't rely on that.
+        const hasPendingMoveOuts = target >= committedLsn && inbox.hasPendingMoveOuts();
+        if (isCommitNeeded || isMustRefetchAndCatchingUp || hasPendingMoveOuts) {
           const applied = await commitUpToLsn(target);
           if (!applied) {
             return;
@@ -501,6 +567,19 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               truncateNeeded.add(message.shape);
               break;
             }
+          }
+        } else if (isEventMessage(message)) {
+          // ADR-0023: a tagged-subquery move-out — a grant was revoked, so the rows it kept in the shape
+          // must be evicted. Buffer the patterns; the eviction runs in the next commit (decision 3). A
+          // `move-in` needs no action here — its newly-matched rows arrive as ordinary tagged inserts.
+          // `MultiShapeStream`'s callback type does not declare `EventMessage` (the prior guards narrow
+          // `message` to `never` here), so reach the runtime-present event through an explicit cast.
+          const eventMessage = message as unknown as ShapeEventMessage;
+          if (eventMessage.headers.event === "move-out") {
+            if (debug) {
+              console.log("received move-out", eventMessage);
+            }
+            inbox.ingestMoveOut(eventMessage.shape, eventMessage.headers.patterns);
           }
         }
       });

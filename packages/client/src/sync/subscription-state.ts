@@ -1,6 +1,7 @@
 import type { Offset } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 
+import { shapeRowTagsDdl } from "./tags";
 import { type Lsn, type SubscriptionKey } from "./types";
 
 const subscriptionTableName = "subscriptions_metadata";
@@ -128,6 +129,7 @@ export async function migrateSubscriptionMetadataTables({
         shape_metadata JSONB NOT NULL,
         last_lsn TEXT NOT NULL
       );
+      ${shapeRowTagsDdl(metadataSchema)}
     `,
   );
 }

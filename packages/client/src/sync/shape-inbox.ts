@@ -1,4 +1,4 @@
-import type { ChangeMessage, Row } from "@electric-sql/client";
+import type { ChangeMessage, MovePattern, Row } from "@electric-sql/client";
 
 import type { InsertChangeMessage, Lsn } from "./types";
 
@@ -18,11 +18,16 @@ export class ShapeInbox {
   private readonly changes = new Map<string, Map<Lsn, ChangeMessage<Row<unknown>>[]>>();
   // Per shape: the highest LSN known complete (every change at or below it has been received).
   private readonly completeLsns = new Map<string, Lsn>();
+  // Per shape: buffered `move-out` events (ADR-0023), one pattern set per event. The event carries no
+  // LSN, so it cannot key `changes`; it is drained and applied at the next commit (the `up-to-date`
+  // that follows it), in the same transaction as that frontier's changes.
+  private readonly moveOuts = new Map<string, MovePattern[][]>();
 
   constructor(shapeNames: Iterable<string>) {
     for (const shapeName of shapeNames) {
       this.changes.set(shapeName, new Map());
       this.completeLsns.set(shapeName, BigInt(-1));
+      this.moveOuts.set(shapeName, []);
     }
   }
 
@@ -65,10 +70,31 @@ export class ShapeInbox {
     this.completeLsns.set(shapeName, globalLastSeenLsn);
   }
 
+  /** Buffer a `move-out` event's patterns for a shape (ADR-0023); applied at the next commit. */
+  ingestMoveOut(shapeName: string, patterns: MovePattern[]): void {
+    this.moveOuts.get(shapeName)?.push(patterns);
+  }
+
+  /** Remove and return a shape's buffered `move-out` pattern sets (one per event), in arrival order. */
+  drainMoveOuts(shapeName: string): MovePattern[][] {
+    const pending = this.moveOuts.get(shapeName) ?? [];
+    this.moveOuts.set(shapeName, []);
+    return pending;
+  }
+
+  /** Whether any shape has a buffered `move-out` awaiting a commit. */
+  hasPendingMoveOuts(): boolean {
+    for (const pending of this.moveOuts.values()) {
+      if (pending.length > 0) return true;
+    }
+    return false;
+  }
+
   /** Reset a shape on `must-refetch`: drop its buffer and rewind its frontier (the applier truncates). */
   resetShape(shapeName: string): void {
     this.changes.get(shapeName)?.clear();
     this.completeLsns.set(shapeName, BigInt(-1));
+    this.moveOuts.set(shapeName, []);
   }
 
   /** The lowest complete frontier across all shapes — the atomic group commit target. */
