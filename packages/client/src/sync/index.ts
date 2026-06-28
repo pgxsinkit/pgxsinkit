@@ -24,7 +24,7 @@ import {
   type SubscriptionState,
   updateSubscriptionState,
 } from "./subscription-state";
-import { applyShapeMoveOut, applyShapeTagSync, clearShapeTags, shapeTableId } from "./tags";
+import { applyShapeMoveOut, applyShapeTagSync, clearShapeTags, DEFAULT_METADATA_SCHEMA, shapeTableId } from "./tags";
 import {
   DEFAULT_MAX_COMMIT_RETRIES,
   type ElectricSyncOptions,
@@ -90,7 +90,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
   // pgxsinkit-owned metadata namespace (ADR-0009 decision 6): this is our local bookkeeping (the
   // subscription-state table) and the sync-origin GUC (`<schema>.syncing`), not Electric's — so it
   // lives under our own schema, renamed from the upstream `electric` default.
-  const metadataSchema = options?.metadataSchema ?? "pgxsinkit";
+  const metadataSchema = options?.metadataSchema ?? DEFAULT_METADATA_SCHEMA;
   const streams: Array<{
     stream: MultiShapeStream<Record<string, Row<unknown>>>;
     aborter: AbortController;

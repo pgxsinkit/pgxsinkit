@@ -1,7 +1,7 @@
 import type { ChangeMessage, MovePattern, Row } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 
-import type { SyncColumnType } from "@pgxsinkit/contracts";
+import { quoteSqlLiteral, type SyncColumnType } from "@pgxsinkit/contracts";
 
 import { applyBulkDeletesToTable, doMapColumns } from "./apply";
 import type { MapColumns } from "./types";
@@ -27,6 +27,13 @@ import type { MapColumns } from "./types";
 
 const SHAPE_ROW_TAGS_TABLE = "shape_row_tags";
 
+/**
+ * The pgxsinkit-owned metadata schema (ADR-0009 decision 6) the tag store + subscription state live in.
+ * The sync engine defaults its `metadataSchema` to this, and `createSyncClient` never overrides it — so
+ * the desync path (which is outside the engine) can key the tag store by this same constant.
+ */
+export const DEFAULT_METADATA_SCHEMA = "pgxsinkit";
+
 export function shapeRowTagsTableName(metadataSchema: string): string {
   return `"${metadataSchema}"."${SHAPE_ROW_TAGS_TABLE}"`;
 }
@@ -48,6 +55,22 @@ export function shapeRowTagsDdl(metadataSchema: string): string {
 /** The `shape_table` key for the tag store: the synced table, schema-qualified (defaults `public`). */
 export function shapeTableId(schema: string | undefined, table: string): string {
   return `${schema ?? "public"}.${table}`;
+}
+
+/**
+ * Static SQL to drop a shape's tag-set, **guarded** by `to_regclass` so it is a no-op when the tag store
+ * does not exist. Used by `buildDesyncTableSql` (ADR-0023 Slice 2), which may be exec'd standalone (a
+ * caller/test that builds the local schema without booting the sync engine that creates the store). The
+ * engine's own `clearShapeTags` runs inside a commit where the store is guaranteed present, so it is not
+ * guarded.
+ */
+export function buildClearShapeTagsSql(shapeTable: string, metadataSchema: string = DEFAULT_METADATA_SCHEMA): string {
+  const table = shapeRowTagsTableName(metadataSchema);
+  return `DO $$ BEGIN
+  IF to_regclass(${quoteSqlLiteral(table)}) IS NOT NULL THEN
+    DELETE FROM ${table} WHERE shape_table = ${quoteSqlLiteral(shapeTable)};
+  END IF;
+END $$;`;
 }
 
 /**

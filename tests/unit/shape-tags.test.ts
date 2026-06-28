@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
   applyShapeMoveOut,
   applyShapeTagSync,
+  buildClearShapeTagsSql,
+  clearShapeTags,
   serializeRowPk,
   shapeRowTagsDdl,
   splitTagComponents,
@@ -179,5 +181,41 @@ describe("move-out eviction (ADR-0023, PGlite)", () => {
     expect(evicted).toBe(1);
     expect(await itemCount(pg, "keep")).toBe(1);
     expect(await itemCount(pg, "drop")).toBe(0);
+  });
+
+  // ADR-0023 Slice 2: a must-refetch/​rebuild (and a desync) must drop the shape's tags so a re-snapshot
+  // rebuilds them, leaving no orphans.
+  it("clearShapeTags drops a shape's whole tag-set (must-refetch / rebuild)", async () => {
+    const pg = await freshStore();
+    await applyShapeTagSync({
+      pg,
+      metadataSchema: META,
+      shapeTable: SHAPE_TABLE,
+      messages: [insertMessage("row1", ["tagA", "tagB"]), insertMessage("row2", ["tagC"])],
+      primaryKey: ["id"],
+    });
+    expect(await tagCount(pg, "row1")).toBe(2);
+
+    await clearShapeTags({ pg, metadataSchema: META, shapeTable: SHAPE_TABLE });
+    expect(await tagCount(pg, "row1")).toBe(0);
+    expect(await tagCount(pg, "row2")).toBe(0);
+  });
+
+  it("the desync tag-clear SQL drops the shape's tags, and is a no-op when the tag store is absent", async () => {
+    // Present store: it deletes only this shape's tags.
+    const pg = await freshStore();
+    await applyShapeTagSync({
+      pg,
+      metadataSchema: META,
+      shapeTable: SHAPE_TABLE,
+      messages: [insertMessage("row1", ["tagA"])],
+      primaryKey: ["id"],
+    });
+    await pg.exec(buildClearShapeTagsSql(SHAPE_TABLE, META));
+    expect(await tagCount(pg, "row1")).toBe(0);
+
+    // Absent store (engine never booted): the guarded statement must not error.
+    const bare = await createFreshTestPGlite();
+    await bare.exec(buildClearShapeTagsSql(SHAPE_TABLE, META));
   });
 });

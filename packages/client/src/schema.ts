@@ -13,6 +13,8 @@ import {
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
+import { buildClearShapeTagsSql, shapeTableId } from "./sync/tags";
+
 /** Internal fully-qualified projection used within schema generation. */
 interface ResolvedProjection {
   syncedTable: string;
@@ -588,6 +590,13 @@ export function buildDesyncTableSql<TRegistry extends SyncTableRegistry>(
       );
     }
   }
+
+  // ADR-0023 Slice 2: a desync reverts the relation to dormant and deletes its subscription, so the next
+  // activation re-streams from scratch — drop this shape's tag-set too, or it would orphan tags for rows
+  // that never come back. The key matches what the engine writes (`shapeTableId(shape.schema, table)`):
+  // for ephemeral the engine passes no schema (→ `public`), exactly this `objectSchema`.
+  const syncedTableNameRaw = baseProjection(entry, tableKey).syncedTable ?? tableKey;
+  statements.push(buildClearShapeTagsSql(shapeTableId(objectSchema, syncedTableNameRaw)));
 
   return `${statements.join("\n")}\n`;
 }

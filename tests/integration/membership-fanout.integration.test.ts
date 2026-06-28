@@ -202,6 +202,54 @@ describe("membership fan-out (readwrite) integration", () => {
     }
   }, 30_000);
 
+  // ADR-0023 Slice 2 — the security-critical OFFLINE case: the member is removed while their client is
+  // shut down (here: unsubscribed), then reconnects. The resume from the persisted offset must replay
+  // the move-out and evict the now-unauthorised rows — a revoked member must never resume into a stale
+  // board + tickets. The SAME local store is reused across the two sessions so the second resumes from
+  // the first's persisted subscription offset/handle (not a fresh snapshot).
+  it("revokes a member's rows across an OFFLINE gap: removed while unsubscribed, evicted on resume (ADR-0023 Slice 2)", async () => {
+    const RES_WS = "2c4e1e3b-0000-4000-8000-0000000008ff";
+    const RES_MEMBER = "1b3f0d2a-0000-4000-8000-0000000008ff";
+    const RES_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000008ff";
+    const RES_ITEM = "3d5f2f4c-0000-4000-8000-0000000008ff";
+
+    await server.drizzle.insert(workspacesTable).values({ id: RES_WS, ownerId: RES_MEMBER });
+    await server.drizzle
+      .insert(workspaceMembersTable)
+      .values({ id: RES_MEMBERSHIP, workspaceId: RES_WS, memberId: RES_MEMBER, role: "member" });
+    await server.drizzle
+      .insert(workItemsTable)
+      .values({ id: RES_ITEM, workspaceId: RES_WS, ownerId: RES_MEMBER, body: "offline-revoke" });
+
+    const memberPg = await createLocalWorkItemStore();
+
+    // Session 1: sync, receive the item, persist the tag-set + offset, then go OFFLINE (unsubscribe)
+    // while keeping the local store.
+    const first = await startMemberSync(memberPg, proxyUrl, RES_MEMBER);
+    await first.initialSyncDone;
+    await waitFor(async () => {
+      const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
+      expect(rows.rows[0]?.count).toBe(1);
+    });
+    first.sync.unsubscribe();
+
+    // While offline: the admin removes the membership.
+    await server.drizzle.delete(workspaceMembersTable).where(eq(workspaceMembersTable.id, RES_MEMBERSHIP));
+
+    // Session 2: resume on the SAME store. Catch-up from the persisted offset must deliver the move-out.
+    const second = await startMemberSync(memberPg, proxyUrl, RES_MEMBER);
+    try {
+      await second.initialSyncDone;
+      await waitFor(async () => {
+        const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
+        expect(rows.rows[0]?.count).toBe(0);
+      });
+    } finally {
+      second.sync.unsubscribe();
+      await memberPg.close();
+    }
+  }, 30_000);
+
   it("lets a member write into their workspace but rejects a non-member (RLS WITH CHECK)", async () => {
     const memberWrite = await server.request("/api/mutations", {
       method: "POST",

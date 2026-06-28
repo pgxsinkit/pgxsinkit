@@ -1,6 +1,6 @@
 # Subquery move-out: applying Electric's tagged-subquery eviction in the local store
 
-Status: accepted (2026-06-28) — Slice 1 implemented; Slice 2 in progress
+Status: accepted (2026-06-28) — Slices 1 & 2 implemented and tested (Electric 1.7.4)
 
 ## Context
 
@@ -79,14 +79,19 @@ From the wire evidence and `@electric-sql/client`'s type doc-comments:
    arrive as tagged inserts). No event is ever silently dropped — an unknown `event` value logs and is
    surfaced, never ignored (the ADR-0006 "never silently lose" rule).
 
-2. **Persist each synced row's tag-set in a dedicated side table, not a column on every synced table.**
-   `pgxsinkit.<syncedTable>_tags(pk_json TEXT, tag TEXT, PRIMARY KEY (pk_json, tag))` (created only for
-   subquery shapes — a registry property already knows which entries carry a `customWhere` subquery).
+2. **Persist each synced row's tag-set in a side table, not a column on every synced table.** **Built as a
+   single metadata table** `pgxsinkit.shape_row_tags(shape_table, pk_json, tag, PRIMARY KEY (shape_table,
+   pk_json, tag))`, created once in `migrateSubscriptionMetadataTables`. *(The plan said one
+   `<syncedTable>_tags` table per subquery shape; one shared table is simpler and avoids per-table DDL — and
+   it must be created for **all** synced tables, not "only subquery shapes", because the **client** config
+   does not carry the `customWhere` (the server proxy owns filtering), so the client cannot know which
+   shapes are subquery shapes. A non-subquery shape simply never writes a row — its changes carry no
+   `tags`.)*
    - *Why a side table over a `__tags text[]` column:* set semantics (add/remove/​count-remaining) are
-     natural as rows; it keeps the move-out GC a clean `DELETE … WHERE NOT EXISTS (… _tags …)`; and it
-     avoids touching every synced table's DDL, the COPY/JSON/INSERT bulk appliers, the reconcile trigger,
-     and the overlay read-model view (which would all have to learn to carry/​hide the column). The cost is
-     one extra write per change and a join on move-out — acceptable, and isolated to subquery shapes.
+     natural as rows; it keeps the move-out GC a clean delete of rows left with no tag; and it avoids
+     touching every synced table's DDL, the COPY/JSON/INSERT bulk appliers, the reconcile trigger, and the
+     overlay read-model view (which would all have to learn to carry/​hide the column). The cost is one
+     extra write per *tagged* change and a tag lookup on move-out.
 
 3. **Apply move-out at the shape's `up-to-date` boundary, inside the existing commit transaction.** Because
    the event has no LSN, it cannot key the LSN-ordered inbox. Instead, buffered move-out patterns for a
@@ -97,19 +102,21 @@ From the wire evidence and `@electric-sql/client`'s type doc-comments:
    rows with no remaining tag — both inside the txn, both firing the existing reconcile trigger so the
    overlay/read-model stays consistent.
 
-4. **Matching is per-tag-component, eviction is per-empty-tag-set.** For each pattern `{pos, value}`:
-   delete from `_tags` every tag whose `pos`-th component (split on unescaped `|`) equals `value`; then
-   `DELETE FROM <syncedTable> WHERE NOT EXISTS (SELECT 1 FROM <syncedTable>_tags WHERE pk_json = …)`. The
-   board's tags are single-component (`pos 0`), so this reduces to `tag = value` — but the general
-   composite/multi-grant path is implemented, not deferred (see Alternatives).
+4. **Matching is per-tag-component, eviction is per-empty-tag-set.** A tag is withdrawn if it carries the
+   revoked value at **any** of the event's pattern positions — its `pos`-th component (split on unescaped
+   `/`, the wire separator — see the protocol note) equals `value`. Then any row left with no tag in
+   `shape_row_tags` is deleted from the synced table. The composite / multi-grant / any-position path is
+   implemented (the board's two-condition shape exercises it), not deferred (see Alternatives).
 
-5. **Maintain the tag-set on every change.** Insert/update: upsert `headers.tags` into `_tags`; honour
-   `removed_tags` by deleting them. Delete: drop the row's `_tags`. This is additive to the fold/apply path
-   (the appliers already receive the change messages; they gain a tag-sync step).
+5. **Maintain the tag-set on every change.** Insert/update: `tags` is the authoritative current reason-set,
+   so replace the row's entry; `removed_tags` (without `tags`) deletes just those. Delete: drop the row's
+   tags. Done as a tag-sync pass over the raw drained batch in `commitUpToLsn`, before the data apply and
+   the move-out eviction (so an add-then-remove within one commit resolves correctly).
 
-6. **`must-refetch` and resync rebuild tags from scratch.** The existing `truncate` on `must-refetch`
-   (and the ADR-0006 read-cache rebuild) must also clear the shape's `_tags`, so a fresh snapshot
-   repopulates them. A resumed subscription keeps its `_tags` (consistent with its kept synced rows).
+6. **`must-refetch` / desync rebuild tags from scratch.** The `truncate` on `must-refetch` (and the ADR-0006
+   read-cache rebuild) also clears the shape's tags, so a fresh snapshot repopulates them; `desync`
+   (ADR-0021) clears them too. A *resumed* subscription keeps its tags (consistent with its kept synced
+   rows) and replays the move-out on catch-up (Slice 2).
 
 7. **Scope: subquery shapes only; everything else is untouched.** A non-subquery shape emits no tags and
    no move-out events, so it gets no `_tags` table and no new code path — zero behaviour change for the
@@ -144,11 +151,14 @@ The design above (decisions 1–7). Steps:
 1. **Debug spike (confirm the lib-surfaced shape):** temporarily log the exact `EventMessage` object our
    loop receives via `MultiShapeStream` running the failing integration test against Electric 1.7.4 — confirm
    `headers.event`, `patterns`, absence of `lsn`, and `.shape`. Revert the logging. *(De-risks decision 3.)*
-2. **Registry/schema:** mark subquery-shape entries; emit the `_tags` side table in `generateLocalSchemaSql`
-   for them; teach truncate/rebuild to clear it.
+2. **Metadata store:** emit the single `shape_row_tags` table in `migrateSubscriptionMetadataTables`
+   (`subscription-state.ts`); teach the `must-refetch` truncate **and** `desync` (`buildDesyncTableSql`) to
+   clear it.
 3. **Inbox:** add a per-shape move-out-pattern buffer + drain (`shape-inbox.ts`).
-4. **Engine loop:** the `EventMessage` branch (`sync/index.ts`); apply buffered move-out in `commitUpToLsn`.
-5. **Appliers:** tag-set upsert/remove on insert/update/delete (`apply.ts`); the move-out eviction SQL.
+4. **Engine loop:** the `EventMessage` branch (`sync/index.ts`); tag-sync + buffered move-out eviction in
+   `commitUpToLsn`; the commit loop fires on a pending move-out.
+5. **Tag module (`sync/tags.ts`):** the matcher + pk serializer + tag-sync / eviction / clear helpers,
+   evicting via the existing bulk-delete path.
 
 **Acceptance:** the existing `membership-fanout.integration.test.ts` → *"revokes a member's rows from their
 LIVE shape …"* goes green, plus unit tests for composite-tag matching and the multi-grant
@@ -180,6 +190,23 @@ Three sub-cases, each to be **proven by test**, and any gap closed in this slice
 resume sub-case), plus assertions for the must-refetch and lazy-dormant sub-cases. If any sub-case proves
 Electric does **not** converge a resumed client on its own, Slice 2 adds the boot/activation reconcile that
 makes it converge — this slice is not done until an offline revocation is provably evicted.
+
+**Outcome (built + tested against Electric 1.7.4):**
+
+- **Resume replays the move-out — proven, no new code needed.** The integration test
+  *"revokes a member's rows across an OFFLINE gap … evicted on resume"* (`membership-fanout`) syncs,
+  `unsubscribe`s (offline), deletes the membership server-side, then re-subscribes on the **same** store:
+  the resume from the persisted offset replays the `move-out`, and Slice 1's handling evicts it. So the
+  needed "reconcile point" *is* the existing resume/activation path — no boot reconcile was required.
+- **Lazy-dormant is the same mechanism.** A lazy *persistent* relation re-activates by resuming from its
+  persisted offset (identical to the test above → replays the move-out). A lazy *ephemeral* relation, and a
+  `desync`, drop the subscription and re-stream a **fresh snapshot** that already reflects current
+  membership. So a dormant group cannot retain revoked rows — by resume-replay or by fresh snapshot.
+- **`must-refetch` and `desync` clear the tag store.** The engine clears a shape's tags on the
+  `must-refetch`/rebuild truncate (decision 6); `buildDesyncTableSql` clears them too (guarded by
+  `to_regclass`, so a standalone schema build is unaffected) — so a re-snapshot rebuilds tags with no
+  orphans. Unit-tested (`clearShapeTags`, the guarded desync SQL) alongside the composite-tag matcher and
+  the multi-grant survival case.
 
 ## Consequences
 
