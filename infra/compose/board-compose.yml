@@ -176,7 +176,7 @@ services:
       EDGE_WORKER_TIMEOUT_MS: "600000"
 
   electric:
-    image: docker.io/electricsql/electric:1.7.3
+    image: docker.io/electricsql/electric:1.7.4
     container_name: board-electric
     depends_on:
       db:

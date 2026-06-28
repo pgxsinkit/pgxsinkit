@@ -19,7 +19,7 @@ services:
       retries: 20
 
   electric:
-    image: docker.io/electricsql/electric:1.7.3
+    image: docker.io/electricsql/electric:1.7.4
     environment:
       DATABASE_URL: postgresql://supabase_admin:your-super-secret-and-long-postgres-password@postgres:5432/postgres?sslmode=disable
       ELECTRIC_INSECURE: "true"
