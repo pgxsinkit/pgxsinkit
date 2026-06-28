@@ -37,6 +37,15 @@ export {
   createIntervalConvergenceTrigger,
 } from "./convergence";
 export { syncDebug, timeAsync } from "./debug";
+export {
+  assertLazyRefsActivated,
+  buildLazyGuardIndex,
+  createRecordingClient,
+  detectKeysFromBuilder,
+  findReferencedLazyKeysInSql,
+  type LazyGuardIndex,
+  LazyRelationNotActivatedError,
+} from "./lazy-guard";
 export type { LocalStoreVersionEvent };
 
 export type ClientPGlite = PGliteWithLive &
