@@ -3,6 +3,7 @@ import type { PGlite, PGliteInterfaceExtensions } from "@electric-sql/pglite";
 
 import {
   type ApplyStrategy,
+  type SubscriptionTiming,
   type SyncColumnType,
   type SyncConfigInput,
   type TableSpecInput,
@@ -27,6 +28,12 @@ export interface ShapeSyncSpec {
    * and commit atomically. Absent → the table is its own singleton group keyed by its `shapeKey`.
    */
   consistencyGroup?: string;
+  /**
+   * Subscription timing (ADR-0021). Absent → `eager`. A `lazy` spec's group is held out of the eager
+   * boot set and started on demand via {@link StartConfiguredSyncResult.ensureGroupStarted}. A group's
+   * members all agree (registry-validated), so the group's timing is any member's.
+   */
+  subscription?: SubscriptionTiming;
 }
 
 export interface ConfiguredShapeSyncSpec extends ShapeSyncSpec {
@@ -73,6 +80,16 @@ export interface ShapeSyncResult {
 export interface StartConfiguredSyncResult {
   unsubscribe: () => void;
   tables: Record<string, ShapeSyncResult>;
+  /**
+   * Start a `lazy` consistency group (ADR-0021) held out of the eager boot set. Idempotent and
+   * single-flight: concurrent calls share one start; a started, unknown, or eager group resolves
+   * immediately. Resolves once the group's initial sync completes — the seam the live-query layer
+   * calls on first reference to a lazy table. After it resolves, the group's member `tables` entries
+   * report `isUpToDate` live.
+   */
+  ensureGroupStarted: (groupKey: string) => Promise<void>;
+  /** The consistency-group key a table belongs to — maps a queried table to its {@link ensureGroupStarted}. */
+  groupKeyForTable: (tableKey: string) => string | undefined;
 }
 
 export function buildShapeUrl(electricUrl: string, table: string) {
@@ -103,6 +120,19 @@ export function createElectricExtension() {
   return electricSync({ debug: false });
 }
 
+/**
+ * One consistency group's runtime: its specs, the subscription timing its members agree on, and its
+ * live stream once started (`null` while a `lazy` group is still held). `startPromise` makes start
+ * single-flight so concurrent on-demand triggers share one subscription.
+ */
+interface GroupRuntime {
+  groupKey: string;
+  specs: ConfiguredShapeSyncSpec[];
+  subscription: SubscriptionTiming;
+  result: ShapeSyncResult | null;
+  startPromise: Promise<void> | null;
+}
+
 export async function startConfiguredSync(
   pg: SyncEnginePGlite,
   input: StartConfiguredSyncOptions,
@@ -110,70 +140,106 @@ export async function startConfiguredSync(
   const specs = buildConfiguredShapeSpecs(input.syncConfig);
 
   // Bucket specs into consistency groups (ADR-0009 decision 2). Each group is one MultiShapeStream
-  // committed atomically; an ungrouped table is its own singleton group keyed by its shapeKey.
-  const groups = new Map<string, ConfiguredShapeSyncSpec[]>();
+  // committed atomically; an ungrouped table is its own singleton group keyed by its shapeKey. A group
+  // carries the subscription timing its members agree on (ADR-0021; registry validation guarantees
+  // agreement, so the first member's value is the group's): `eager` groups start at boot, `lazy` groups
+  // are held until ensureGroupStarted (the on-demand / live-query interception seam).
+  const groups = new Map<string, GroupRuntime>();
+  const groupKeyByTable = new Map<string, string>();
   for (const spec of specs) {
     const groupKey = groupSubscriptionKey(spec);
-    const bucket = groups.get(groupKey);
-    if (bucket) {
-      bucket.push(spec);
+    groupKeyByTable.set(spec.key, groupKey);
+    const existing = groups.get(groupKey);
+    if (existing) {
+      existing.specs.push(spec);
     } else {
-      groups.set(groupKey, [spec]);
-    }
-  }
-
-  let pendingInitialSyncs = groups.size;
-  let initialSyncSignalled = pendingInitialSyncs === 0;
-
-  const groupResults = await Promise.all(
-    [...groups.entries()].map(async ([groupKey, groupSpecs]) => {
-      const result = await startGroupSync(pg, {
+      groups.set(groupKey, {
         groupKey,
-        specs: groupSpecs,
-        ...(input.shapeHeaders ? { headers: input.shapeHeaders } : {}),
-        ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
-        ...(input.onAuthError ? { onAuthError: input.onAuthError } : {}),
-        ...(input.onReadStreamError ? { onReadStreamError: input.onReadStreamError } : {}),
-        ...(input.onSyncActivity ? { onSyncActivity: input.onSyncActivity } : {}),
-        onGroupInitialSync: () => {
-          // The group is up-to-date as a unit; signal each member table, then advance the global
-          // initial-sync gate once every group is caught up.
-          for (const spec of groupSpecs) {
-            input.onTableInitialSync?.(spec.key);
-          }
-          pendingInitialSyncs -= 1;
-          if (!initialSyncSignalled && pendingInitialSyncs === 0) {
-            initialSyncSignalled = true;
-            input.onInitialSync?.();
-          }
-        },
+        specs: [spec],
+        subscription: spec.subscription ?? "eager",
+        result: null,
+        startPromise: null,
       });
-      return { groupSpecs, result };
-    }),
-  );
-
-  // Each member table exposes a per-table view backed by its group's single stream: the table is
-  // up-to-date exactly when its group is, and unsubscribing it tears down the whole group.
-  const tables: Record<string, ShapeSyncResult> = {};
-  for (const { groupSpecs, result } of groupResults) {
-    for (const spec of groupSpecs) {
-      tables[spec.key] = {
-        unsubscribe: result.unsubscribe,
-        get isUpToDate() {
-          return result.isUpToDate;
-        },
-      };
     }
   }
+
+  // Boot readiness (`onInitialSync`) waits only for the EAGER groups to catch up; a lazy group started
+  // later via ensureGroupStarted signals its members' `onTableInitialSync` but never the boot gate.
+  const eagerGroups = [...groups.values()].filter((group) => group.subscription !== "lazy");
+  let pendingBootGroups = eagerGroups.length;
+  let bootSignalled = false;
+  const signalBootIfReady = () => {
+    if (!bootSignalled && pendingBootGroups <= 0) {
+      bootSignalled = true;
+      input.onInitialSync?.();
+    }
+  };
+
+  // Start one group's stream, single-flight: a started group resolves immediately; an in-flight start
+  // is shared. `countsTowardBoot` is true only for the eager boot starts.
+  const startGroup = (group: GroupRuntime, countsTowardBoot: boolean): Promise<void> => {
+    if (group.result) {
+      return Promise.resolve();
+    }
+    if (group.startPromise) {
+      return group.startPromise;
+    }
+    group.startPromise = startGroupSync(pg, {
+      groupKey: group.groupKey,
+      specs: group.specs,
+      ...(input.shapeHeaders ? { headers: input.shapeHeaders } : {}),
+      ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
+      ...(input.onAuthError ? { onAuthError: input.onAuthError } : {}),
+      ...(input.onReadStreamError ? { onReadStreamError: input.onReadStreamError } : {}),
+      ...(input.onSyncActivity ? { onSyncActivity: input.onSyncActivity } : {}),
+      onGroupInitialSync: () => {
+        // The group is up-to-date as a unit; signal each member table, then (for an eager group only)
+        // advance the boot gate once every eager group is caught up.
+        for (const spec of group.specs) {
+          input.onTableInitialSync?.(spec.key);
+        }
+        if (countsTowardBoot) {
+          pendingBootGroups -= 1;
+          signalBootIfReady();
+        }
+      },
+    }).then((result) => {
+      group.result = result;
+    });
+    return group.startPromise;
+  };
+
+  // Each member table exposes a per-table view backed by its group's runtime: up-to-date exactly when
+  // the group is (false until a lazy group is started), and unsubscribing it tears down the group.
+  const tables: Record<string, ShapeSyncResult> = {};
+  for (const [tableKey, groupKey] of groupKeyByTable) {
+    const group = groups.get(groupKey)!;
+    tables[tableKey] = {
+      unsubscribe: () => group.result?.unsubscribe(),
+      get isUpToDate() {
+        return group.result?.isUpToDate ?? false;
+      },
+    };
+  }
+
+  // Start the eager groups at boot; lazy groups wait for ensureGroupStarted. `signalBootIfReady` after
+  // the await covers a config with no eager groups (boot is trivially complete).
+  await Promise.all(eagerGroups.map((group) => startGroup(group, true)));
+  signalBootIfReady();
 
   return {
     unsubscribe: () => {
       // Unsubscribe per group (not per table) so a multi-table group's stream is torn down once.
-      for (const { result } of groupResults) {
-        result.unsubscribe();
+      for (const group of groups.values()) {
+        group.result?.unsubscribe();
       }
     },
     tables,
+    ensureGroupStarted: (groupKey) => {
+      const group = groups.get(groupKey);
+      return group ? startGroup(group, false) : Promise.resolve();
+    },
+    groupKeyForTable: (tableKey) => groupKeyByTable.get(tableKey),
   };
 }
 
@@ -256,6 +322,7 @@ function buildConfiguredShapeSpec(
     ...(table.applyStrategy ? { applyStrategy: table.applyStrategy } : {}),
     ...(table.columnTypes ? { columnTypes: table.columnTypes } : {}),
     ...(table.consistencyGroup ? { consistencyGroup: table.consistencyGroup } : {}),
+    ...(table.subscription ? { subscription: table.subscription } : {}),
   };
 }
 

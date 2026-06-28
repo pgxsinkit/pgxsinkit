@@ -171,4 +171,62 @@ describe("shape sync", () => {
     // recovers the read path instead of permanently stopping it.
     expect(typeof capturedShapes["projects"]?.shape.onError).toBe("function");
   });
+
+  it("holds a lazy group out of the eager boot set, and starts it on demand (ADR-0021)", async () => {
+    const calls: Array<string | null> = [];
+    const namespace = {
+      initMetadataTables: async () => {},
+      syncShapesToTables: async (opts: { key: string | null; onInitialSync?: () => void }) => {
+        calls.push(opts.key);
+        opts.onInitialSync?.();
+        return { unsubscribe: () => {}, isUpToDate: true, streams: {} };
+      },
+    };
+    const pg = { electric: namespace } as unknown as Parameters<typeof startConfiguredSync>[0];
+
+    let initialSyncCount = 0;
+    const result = await startConfiguredSync(pg, {
+      onInitialSync: () => (initialSyncCount += 1),
+      syncConfig: {
+        electricUrl: "http://localhost:3000/v1/shape",
+        localSchema: "app_local",
+        tables: {
+          profile: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "profile", shapeKey: "profile-shape" },
+          },
+          archive: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "archive", shapeKey: "archive-shape" },
+            subscription: "lazy",
+          },
+        },
+      },
+    });
+
+    // Boot starts ONLY the eager group; the lazy group is held (not subscribed), and boot readiness
+    // fires off the eager group alone.
+    expect(calls).toEqual(["profile-shape"]);
+    expect(initialSyncCount).toBe(1);
+
+    // Both tables are exposed; the lazy one reports not-up-to-date until it is started.
+    expect(Object.keys(result.tables).sort()).toEqual(["archive", "profile"]);
+    expect(result.tables["profile"]?.isUpToDate).toBe(true);
+    expect(result.tables["archive"]?.isUpToDate).toBe(false);
+
+    // The lazy table's group is discoverable and starts on demand, after which it reports up-to-date —
+    // without re-firing the boot gate.
+    expect(result.groupKeyForTable("archive")).toBe("archive-shape");
+    await result.ensureGroupStarted("archive-shape");
+    expect(calls).toHaveLength(2);
+    expect(calls).toContain("archive-shape");
+    expect(result.tables["archive"]?.isUpToDate).toBe(true);
+    expect(initialSyncCount).toBe(1);
+
+    // Single-flight / idempotent: starting it again does not re-subscribe.
+    await result.ensureGroupStarted("archive-shape");
+    expect(calls.filter((key) => key === "archive-shape")).toHaveLength(1);
+  });
 });
