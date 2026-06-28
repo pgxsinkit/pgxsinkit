@@ -172,6 +172,23 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     expect(none).toBeNull();
   });
 
+  it("prepareQuery (the live-hook seam) activates declared relations and tripwires raw SQL", async () => {
+    const client = await makeClient("memory:/lazy-facade-prepare");
+
+    // The raw-SQL path: no builder, no accessor recording — only `use` activates and only the tripwire
+    // guards. A declared lazy relation activates and passes.
+    await client.prepareQuery({ sql: `select * from "archive"`, use: ["archive"] });
+    expect(ensureGroupStartedCalls).toEqual(["archive-shape"]);
+
+    // An undeclared lazy relation in raw SQL trips (the raw-SQL blindspot → throw). Reset activation so
+    // `archive` is dormant again for this assertion.
+    started.clear();
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(client.prepareQuery({ sql: `select * from "archive"` })).rejects.toBeInstanceOf(
+      LazyRelationNotActivatedError,
+    );
+  });
+
   it("ensureSynced activates a lazy group and isSynced reflects it; both are idempotent", async () => {
     const client = await makeClient("memory:/lazy-facade-ensure");
     expect(client.isSynced("archive")).toBe(false);

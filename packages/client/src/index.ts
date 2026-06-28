@@ -133,6 +133,22 @@ export interface GuardedQuerySpec<TRegistry extends SyncTableRegistry, TRows ext
   build: (client: SyncClient<TRegistry>) => DrizzleQueryBuilder<TRows>;
 }
 
+/**
+ * Inputs to the read-path safety seam {@link SyncClient.prepareQuery}. The lazy relations a query reads
+ * are the union of `use`, the (A) `accessed` set, and (C) keys structurally detected from `builder`;
+ * the tripwire then scans `sql`. Shared by the live React hooks and the non-live facade.
+ */
+export interface PrepareQueryInput<TRegistry extends SyncTableRegistry> {
+  /** The compiled SQL the query will run — the tripwire's ground-truth scan target. */
+  sql: string;
+  /** The Drizzle builder, for (C) structural FROM/JOIN detection. Omit for raw SQL. */
+  builder?: unknown;
+  /** Registry keys recorded by (A) accessor instrumentation during build. */
+  accessed?: Iterable<string>;
+  /** Lazy relations the caller explicitly declares the query reads (the safe-facade `use`). */
+  use?: readonly SyncTableName<TRegistry>[];
+}
+
 export interface SyncClient<TRegistry extends SyncTableRegistry> {
   drizzle: PgliteDatabase<RegistryRelations<TRegistry>>;
   pglite: ClientPGlite;
@@ -208,6 +224,14 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * relation; true for eager relations once boot completes (and always when sync is disabled).
    */
   isSynced: (key: SyncTableName<TRegistry>) => boolean;
+  /**
+   * The read-path safety seam (ADR-0021): activate the lazy relations a query reads — the union of the
+   * `use` declaration, (A) accessor-recorded keys, and (C) keys structurally detected from `builder` —
+   * then run the SQL tripwire, throwing {@link LazyRelationNotActivatedError} if the compiled `sql` still
+   * references a dormant lazy relation. Resolves once it is safe to run the query. Exposed for the React
+   * live hooks (which own their query build); `query`/`queryRow` are the higher-level non-live wrappers.
+   */
+  prepareQuery: (input: PrepareQueryInput<TRegistry>) => Promise<void>;
 }
 
 export type { MutationBatchItem, MutationDetail, MutationDiagnostics, MutationKind };
@@ -430,22 +454,33 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     return activeSync.isTableStarted(key);
   };
 
-  const runGuardedQuery = async <TRows extends readonly unknown[]>(
-    spec: GuardedQuerySpec<TRegistry, TRows>,
-  ): Promise<TRows> => {
-    // (A) record relations reached through the client during build, ∪ (C) structural detection of the
-    // builder's FROM/JOIN, ∪ the explicit `use` declaration — the precise auto-activation set.
-    const recording = createRecordingClient(client);
-    const builder = spec.build(recording.client);
-    const detected = detectKeysFromBuilder(builder, lazyGuardIndex);
-    const toActivate = new Set<string>([...(spec.use ?? []), ...recording.accessed, ...detected]);
+  const prepareQuery: SyncClient<TRegistry>["prepareQuery"] = async ({ sql, builder, accessed, use }) => {
+    // The precise auto-activation set: the explicit `use` declaration ∪ (A) accessor-recorded keys ∪
+    // (C) keys structurally detected from the builder's FROM/JOIN.
+    const toActivate = new Set<string>(use ?? []);
+    if (accessed) for (const key of accessed) toActivate.add(key);
+    if (builder !== undefined) for (const key of detectKeysFromBuilder(builder, lazyGuardIndex)) toActivate.add(key);
     await ensureSynced([...toActivate] as SyncTableName<TRegistry>[]);
     // The tripwire (the guaranteed floor): any lazy relation the COMPILED SQL still references that is
     // not active → throw, rather than silently read empty/stale rows. Runs before the query executes.
     assertLazyRefsActivated({
-      sql: builder.toSQL().sql,
+      sql,
       index: lazyGuardIndex,
       isActive: (key) => isSynced(key as SyncTableName<TRegistry>),
+    });
+  };
+
+  const runGuardedQuery = async <TRows extends readonly unknown[]>(
+    spec: GuardedQuerySpec<TRegistry, TRows>,
+  ): Promise<TRows> => {
+    // (A) record relations reached through the client during build; (C) + tripwire run inside prepareQuery.
+    const recording = createRecordingClient(client);
+    const builder = spec.build(recording.client);
+    await prepareQuery({
+      sql: builder.toSQL().sql,
+      builder,
+      accessed: recording.accessed,
+      ...(spec.use ? { use: spec.use } : {}),
     });
     return builder;
   };
@@ -528,6 +563,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     },
     ensureSynced,
     isSynced,
+    prepareQuery,
   };
 
   return client;
