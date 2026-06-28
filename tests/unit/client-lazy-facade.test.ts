@@ -75,6 +75,9 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => undefined,
+      readActivatedLazyGroups: async () => new Set<string>(),
+      writeLazyGroupActivation: async () => undefined,
+      clearLazyGroupActivation: async () => undefined,
     }));
     await mock.module("../../packages/client/src/mutation", () => ({
       createMutationRuntime: () => ({

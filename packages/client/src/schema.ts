@@ -66,12 +66,20 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
   }
 
   for (const [tableKey, entry] of Object.entries(registry)) {
-    const projection = getClientProjection(entry, tableKey, localSchema);
+    // ADR-0021 §3: an `ephemeral` table's whole cluster is emitted as `TEMP` — bare (unqualified) object
+    // names that resolve via `pg_temp` / search_path, so read- and write-ephemerality fall out together
+    // (no durable trace). Object NAMES go bare+TEMP; column *types* (enums) stay in the persistent schema.
+    // For a persistent table `temp` is "" and `objectSchema` is the registry schema → byte-identical output.
+    const ephemeral = entry.retention === "ephemeral";
+    const objectSchema = ephemeral ? "public" : localSchema;
+    const temp = ephemeral ? "TEMP " : "";
+
+    const projection = getClientProjection(entry, tableKey, objectSchema);
     const columns = getProjectedColumns(entry).map(({ column }) => column);
     const syncedTablePrimaryKeyColumns = getLocalSyncPrimaryKeyColumns(entry);
     const baseColumnsSql = buildTableColumnSql(columns, syncedTablePrimaryKeyColumns, localSchema);
 
-    statements.push(`CREATE TABLE IF NOT EXISTS ${projection.syncedTable} (\n  ${baseColumnsSql}\n);`);
+    statements.push(`CREATE ${temp}TABLE IF NOT EXISTS ${projection.syncedTable} (\n  ${baseColumnsSql}\n);`);
 
     if (entry.mode === "readonly") {
       continue;
@@ -98,10 +106,10 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     });
     const primaryKeyColumnNames = primaryKeyColumns.map((column) => column.name);
     const journalSequenceName = buildJournalSequenceName(journalTableName);
-    const qualifiedJournalSequenceName = qualifyIdentifier(localSchema, journalSequenceName);
+    const qualifiedJournalSequenceName = qualifyIdentifier(objectSchema, journalSequenceName);
 
     statements.push(
-      `CREATE TABLE IF NOT EXISTS ${projection.overlayTable} (\n  ${[
+      `CREATE ${temp}TABLE IF NOT EXISTS ${projection.overlayTable} (\n  ${[
         ...columns.map((column) => buildColumnDefinition(column, primaryKeyColumnNames, localSchema)),
         "overlay_kind VARCHAR(24) NOT NULL",
         "local_updated_at_us BIGINT NOT NULL",
@@ -110,11 +118,11 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     );
 
     statements.push(
-      `CREATE SEQUENCE IF NOT EXISTS ${qualifiedJournalSequenceName} AS integer START WITH 1 INCREMENT BY 1;`,
+      `CREATE ${temp}SEQUENCE IF NOT EXISTS ${qualifiedJournalSequenceName} AS integer START WITH 1 INCREMENT BY 1;`,
     );
 
     statements.push(
-      `CREATE TABLE IF NOT EXISTS ${projection.journalTable} (\n  ${[
+      `CREATE ${temp}TABLE IF NOT EXISTS ${projection.journalTable} (\n  ${[
         "mutation_id UUID PRIMARY KEY",
         ...primaryKeyColumns.map((column) => `${column.name} ${mapColumnType(column, localSchema)} NOT NULL`),
         "entity_key_json TEXT NOT NULL",
@@ -177,8 +185,12 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     // reconcileTable (mutation.ts), so the two sites cannot drift.
     const resolutionBarrier = buildOverlayResolutionBarrier(entry, { syncedAlias: "NEW" });
 
+    // ADR-0021 §3: an ephemeral cluster's reconcile function lives in `pg_temp` alongside its temp table
+    // (a permanent function cannot be a temp trigger's handler cleanly); a persistent one is unchanged.
+    const reconcileFunctionRef = ephemeral ? `pg_temp.${projection.reconcileFunction}` : projection.reconcileFunction;
+
     statements.push(
-      `CREATE OR REPLACE FUNCTION ${projection.reconcileFunction}() RETURNS TRIGGER AS $$\n` +
+      `CREATE OR REPLACE FUNCTION ${reconcileFunctionRef}() RETURNS TRIGGER AS $$\n` +
         `BEGIN\n` +
         `  -- ADR-0015: retire a terminal 'conflicted' row once a LATER write on the same entity has\n` +
         `  -- been acked — that later write IS the resolution. The acked resolver is cleared by the\n` +
@@ -213,11 +225,11 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     statements.push(
       `CREATE OR REPLACE TRIGGER ${projection.reconcileTrigger}\n` +
         `AFTER INSERT OR UPDATE OR DELETE ON ${projection.syncedTable}\n` +
-        `FOR EACH ROW EXECUTE FUNCTION ${projection.reconcileFunction}();`,
+        `FOR EACH ROW EXECUTE FUNCTION ${reconcileFunctionRef}();`,
     );
 
     statements.push(
-      `CREATE OR REPLACE VIEW ${projection.readModel} AS\n${buildReadModelViewSql(
+      `CREATE OR REPLACE ${temp}VIEW ${projection.readModel} AS\n${buildReadModelViewSql(
         entry,
         projection,
         columns.map((column) => column.name),
@@ -228,7 +240,7 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
     // journal, distinct from the (lean) read model, whose acked-unobserved status derives from the
     // same barrier predicate the reconcile trigger above uses (decision 4, anti-drift).
     statements.push(
-      `CREATE OR REPLACE VIEW ${projection.syncState} AS\n${buildSyncStateView(entry, {
+      `CREATE OR REPLACE ${temp}VIEW ${projection.syncState} AS\n${buildSyncStateView(entry, {
         syncedTable: projection.syncedTable,
         overlayTable: projection.overlayTable,
         journalTable: projection.journalTable,

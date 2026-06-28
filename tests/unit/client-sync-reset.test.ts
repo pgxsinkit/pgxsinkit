@@ -78,6 +78,9 @@ describe("createSyncClient subscription reset", () => {
       reconcileLocalStoreVersion: async () => undefined,
       readStoredRegistryFingerprint: async () => null,
       writeStoredRegistryFingerprint: async () => undefined,
+      readActivatedLazyGroups: async () => new Set<string>(),
+      writeLazyGroupActivation: async () => undefined,
+      clearLazyGroupActivation: async () => undefined,
     }));
 
     await mock.module("../../packages/client/src/mutation", () => ({

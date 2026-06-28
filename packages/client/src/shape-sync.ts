@@ -359,7 +359,9 @@ function buildConfiguredShapeSpec(
     key,
     electricUrl,
     tableName: table.clientProjection?.syncedTable ?? table.shape.tableName,
-    ...(localSchema ? { schema: localSchema } : {}),
+    // ADR-0021 §3: an ephemeral table's cluster is `TEMP` (bare names in `pg_temp`), so the row-applier
+    // must target the unqualified name (resolved via search_path) — omit the schema for it.
+    ...(localSchema && table.retention !== "ephemeral" ? { schema: localSchema } : {}),
     shapeKey: table.shape.shapeKey,
     primaryKey: [...(table.clientProjection?.localPrimaryKey?.columns ?? table.primaryKey.columns)],
     electricTable: table.shape.electricTable ?? table.shape.tableName,
