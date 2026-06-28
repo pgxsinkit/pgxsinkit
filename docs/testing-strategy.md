@@ -78,7 +78,7 @@ Use:
 
 These runs may take 10-30 minutes, seed large datasets, and write result artifacts under `tmp/perf-results/` or a custom `PGXSINKIT_PERF_RESULTS_DIR`.
 
-The automated performance suites enforce coarse default p95 budgets for client mutation latency, client optimistic-read latency, and artifact batch latency. Override those defaults with:
+The automated performance suites enforce coarse default p95 budgets for client mutation latency, client optimistic-read latency, and server write-batch latency. Override those defaults with:
 
 - `PGXSINKIT_PERF_CLIENT_MUTATION_P95_MAX_MS`
 - `PGXSINKIT_PERF_CLIENT_READ_P95_MAX_MS`

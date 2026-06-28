@@ -1,6 +1,7 @@
 import { and, eq, getTableName, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
 
+import type { JwtClaims } from "./config";
 import { escapeSqlLiteral } from "./sql-identifier";
 
 type SupabaseOwnerOrAdminPolicyKind = "select" | "insert" | "update" | "delete";
@@ -358,4 +359,235 @@ export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershi
       ...(shape.withCheck ? { withCheck: predicate } : {}),
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Grant-scope policies (generic). Authorization is carried IN THE JWT, not a DB
+// table: `app_metadata.authorization.grants` is an array of
+// `{ role, scope: { kind, <kind>Id } }` minted into the token. A row is visible
+// when its scope column (e.g. `offering_id`) appears among the caller's grants for
+// one of the accepting roles. Because the grant set lives in the token, the
+// predicate needs NO join — it parses the claims jsonb and tests set membership.
+//
+// Two forms, deliberately:
+//   - default (InitPlan-correct): an **uncorrelated** `scope_col IN (SELECT …
+//     jsonb_array_elements(claims) …)`. The subquery never references the outer row,
+//     so the planner hoists it to an InitPlan and the JWT is parsed **once per
+//     statement**.
+//   - `naive: true` (the cliff): a **correlated** `EXISTS (… WHERE (g->…->>id) =
+//     scope_col)`. Referencing the outer row forces per-row re-evaluation — the JWT
+//     is re-parsed for **every row scanned**. It exists only to demonstrate and
+//     regression-guard the InitPlan discipline (see the `rls-read-load` perf track);
+//     never ship it.
+//
+// The same grant set is mirrored on the Electric read path by {@link resolveGrantScopeIds}
+// + {@link buildGrantScopeShapeWhere}: the proxy resolves the ids from the claims in JS
+// and injects a literal `scope_col IN ('a','b')` — Electric cannot read RLS, so the two
+// surfaces are generated from one declaration and must agree.
+// ---------------------------------------------------------------------------
+
+type GrantScopePolicyKind = "select" | "insert" | "update" | "delete";
+
+const defaultGrantsClaimPath = ["app_metadata", "authorization", "grants"] as const;
+const defaultGrantScopeCastType = "uuid";
+
+export type GrantScopeClaimOptions = {
+  /** Value matched against each grant's `scope.kind` (e.g. "offering"). */
+  scopeKind: string;
+  /** Grant `role` values that confer access (e.g. ["teacher", "assistant"]). */
+  roleValues: string[];
+  /** Field within `scope` holding the id (e.g. "offeringId"). Defaults to `${scopeKind}Id`. */
+  scopeIdField?: string;
+  /** Path to the grants array in the claims. Defaults to `app_metadata.authorization.grants`. */
+  grantsClaimPath?: string[];
+};
+
+export type SupabaseGrantScopePredicateColumns = GrantScopeClaimOptions & {
+  /** Column on the governed row naming its scope (e.g. `offerings.id` reference column). Table name is derived from it. */
+  scopeColumn: AnyColumn;
+  /** SQL type the extracted grant id is cast to before comparison (default "uuid"). */
+  scopeCastType?: string;
+  /**
+   * Optional unconditional bypass: any grant whose `role` ∈ `bypass.roleValues` and whose
+   * `scope.kind` = `bypass.scopeKind` (default "platform") grants all rows — e.g. a
+   * platform-scoped `platform_admin`. The bypass is an **uncorrelated** EXISTS, so it stays
+   * InitPlan-hoisted in both the correct and naive forms.
+   */
+  bypass?: { roleValues: string[]; scopeKind?: string };
+};
+
+export type SupabaseGrantScopeNativePoliciesOptions = SupabaseGrantScopePredicateColumns & {
+  role: PgRole;
+  /** Emit the deliberately-naive per-row correlated form (cliff demo / regression guard only). */
+  naive?: boolean;
+};
+
+const grantScopePolicyShapes: { command: GrantScopePolicyKind; using: boolean; withCheck: boolean }[] = [
+  { command: "select", using: true, withCheck: false },
+  { command: "insert", using: false, withCheck: true },
+  { command: "update", using: true, withCheck: true },
+  { command: "delete", using: true, withCheck: false },
+];
+
+function resolveGrantsClaimPath(path: readonly string[] | undefined): string[] {
+  const segments = path && path.length > 0 ? [...path] : [...defaultGrantsClaimPath];
+  for (const segment of segments) {
+    assertIdentifier(segment, "grantsClaimPath segment");
+  }
+  return segments;
+}
+
+// The grants array as a Postgres jsonb expression, defaulting to `[]` when absent so
+// `jsonb_array_elements` never errors. `#>` takes a text[] path; the segments are validated
+// identifiers, so the `'{…}'` path literal is injection-safe.
+function buildGrantsArraySqlText(path: string[]): string {
+  return `coalesce(
+    (
+      coalesce(
+        nullif(current_setting('request.jwt.claim', true), ''),
+        nullif(current_setting('request.jwt.claims', true), '')
+      )::jsonb #> '{${path.join(",")}}'
+    ),
+    '[]'::jsonb
+  )`;
+}
+
+function buildRoleInListSqlText(roleValues: string[]): string {
+  if (roleValues.length === 0) {
+    throw new Error("grant-scope policy requires at least one role value");
+  }
+  return roleValues.map((role) => `'${escapeSqlLiteral(role)}'`).join(", ");
+}
+
+function resolveGrantScopeIdField(options: GrantScopeClaimOptions): string {
+  const field = options.scopeIdField ?? `${options.scopeKind}Id`;
+  assertIdentifier(field, "scopeIdField");
+  return field;
+}
+
+// Uncorrelated bypass test (never references the governed row), so it is InitPlan-hoisted in both forms.
+function buildBypassExistsSqlText(bypass: { roleValues: string[]; scopeKind?: string }, grantsText: string): string {
+  const scopeKind = bypass.scopeKind ?? "platform";
+  return `exists (
+    select 1
+    from jsonb_array_elements(${grantsText}) as bypass_grant
+    where bypass_grant -> 'scope' ->> 'kind' = '${escapeSqlLiteral(scopeKind)}'
+      and bypass_grant ->> 'role' in (${buildRoleInListSqlText(bypass.roleValues)})
+  )`;
+}
+
+function buildGrantScopePredicate(options: SupabaseGrantScopeNativePoliciesOptions): SQL {
+  const scopeKind = options.scopeKind;
+  assertIdentifier(scopeKind, "scopeKind");
+  const scopeIdField = resolveGrantScopeIdField(options);
+  const castType = options.scopeCastType ?? defaultGrantScopeCastType;
+  assertTypeName(castType, "scopeCastType");
+  const grantsText = buildGrantsArraySqlText(resolveGrantsClaimPath(options.grantsClaimPath));
+  const roleIn = buildRoleInListSqlText(options.roleValues);
+  const kindMatch = `grant_elem -> 'scope' ->> 'kind' = '${escapeSqlLiteral(scopeKind)}' and grant_elem ->> 'role' in (${roleIn})`;
+  const idExpr = `(grant_elem -> 'scope' ->> '${escapeSqlLiteral(scopeIdField)}')::${castType}`;
+
+  // Correct: uncorrelated `IN (select …)` → InitPlan (JWT parsed once). Naive: correlated `EXISTS`
+  // referencing the governed scope column → re-evaluated per row (JWT parsed per row). The column
+  // object is spliced last so it serializes qualified — valid CREATE POLICY DDL on the write path.
+  const base = options.naive
+    ? sql`exists (select 1 from jsonb_array_elements(${sql.raw(grantsText)}) as grant_elem where ${sql.raw(kindMatch)} and ${sql.raw(idExpr)} = ${options.scopeColumn})`
+    : sql`${options.scopeColumn} in (select ${sql.raw(idExpr)} from jsonb_array_elements(${sql.raw(grantsText)}) as grant_elem where ${sql.raw(kindMatch)})`;
+
+  if (!options.bypass) {
+    return base;
+  }
+  return or(base, sql.raw(buildBypassExistsSqlText(options.bypass, grantsText)))!;
+}
+
+/**
+ * Native Drizzle RLS policies for a JWT-resident grant set (see the section comment). Pass the real
+ * scope column; the governed table name is derived from it. By default the predicate is the
+ * InitPlan-correct uncorrelated `IN (subquery)`; pass `naive: true` for the correlated cliff variant.
+ */
+export function buildSupabaseGrantScopeNativePolicies(options: SupabaseGrantScopeNativePoliciesOptions) {
+  const predicate = buildGrantScopePredicate(options);
+  const tableName = tableNameForColumn(options.scopeColumn, "scopeColumn");
+  const suffix = options.naive ? "grant_scope_naive" : "grant_scope";
+
+  return grantScopePolicyShapes.map((shape) =>
+    pgPolicy(`${tableName}_${shape.command}_${suffix}`, {
+      as: "permissive",
+      for: shape.command,
+      to: options.role,
+      ...(shape.using ? { using: predicate } : {}),
+      ...(shape.withCheck ? { withCheck: predicate } : {}),
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Electric read-path mirror of the grant-scope policy. Electric cannot read RLS, so the proxy must
+// resolve the same visible scope-id set from the claims in JS and inject a literal `IN (…)` shape
+// `where`. These two helpers are the read-path counterpart to the policy above — one declaration,
+// two enforcement surfaces, derived from the same grant data so they cannot drift.
+// ---------------------------------------------------------------------------
+
+function readClaimsPath(claims: JwtClaims | null, path: string[]): unknown {
+  let current: unknown = claims;
+  for (const segment of path) {
+    if (typeof current !== "object" || current === null || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+/**
+ * The set of scope ids the caller can see, resolved from the JWT grants — the JS mirror of the
+ * grant-scope RLS subquery. Returns a de-duplicated list (empty → no rows visible).
+ */
+export function resolveGrantScopeIds(claims: JwtClaims | null, options: GrantScopeClaimOptions): string[] {
+  const grants = readClaimsPath(claims, resolveGrantsClaimPath(options.grantsClaimPath));
+  if (!Array.isArray(grants)) {
+    return [];
+  }
+
+  const scopeIdField = resolveGrantScopeIdField(options);
+  const roleValues = new Set(options.roleValues);
+  const ids = new Set<string>();
+
+  for (const grant of grants) {
+    if (typeof grant !== "object" || grant === null) {
+      continue;
+    }
+    const record = grant as Record<string, unknown>;
+    if (!roleValues.has(String(record["role"]))) {
+      continue;
+    }
+    const scope = record["scope"];
+    if (typeof scope !== "object" || scope === null) {
+      continue;
+    }
+    const scopeRecord = scope as Record<string, unknown>;
+    if (scopeRecord["kind"] !== options.scopeKind) {
+      continue;
+    }
+    const id = scopeRecord[scopeIdField];
+    if (typeof id === "string" && id.length > 0) {
+      ids.add(id);
+    }
+  }
+
+  return [...ids];
+}
+
+/**
+ * The Electric shape `where` for a grant-scope table: a literal `IN (…)` over the resolved ids (what
+ * the proxy injects). `scopeSqlColumn` is the bare column name (Electric's grammar requires bare
+ * columns). An empty id set denies all rows (`1 = 0`), mirroring the policy returning no rows.
+ */
+export function buildGrantScopeShapeWhere(scopeSqlColumn: string, ids: string[]): string {
+  assertIdentifier(scopeSqlColumn, "scopeSqlColumn");
+  if (ids.length === 0) {
+    return "1 = 0";
+  }
+  const list = ids.map((id) => `'${escapeSqlLiteral(id)}'`).join(", ");
+  return `"${scopeSqlColumn}" in (${list})`;
 }

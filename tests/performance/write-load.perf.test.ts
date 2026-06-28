@@ -29,7 +29,7 @@ import {
 
 const env = readIntegrationEnv();
 
-describe("performance: artifact write load", () => {
+describe("performance: write load", () => {
   it(
     "handles concurrent same-user and different-user mutation pressure",
     async () => {
@@ -111,7 +111,7 @@ describe("performance: artifact write load", () => {
               });
 
               if (response.status !== 200) {
-                console.error("[perf] artifact-write-load failed response", await response.text());
+                console.error("[perf] write-load failed response", await response.text());
               }
 
               expect(response.status).toBe(200);
@@ -122,11 +122,11 @@ describe("performance: artifact write load", () => {
 
         const batchLatencyMs = computePercentiles(timings);
         const budgetResults = [
-          evaluatePerfBudget("artifact batch p95", batchLatencyMs.p95, config.budgets.serverBatchP95MaxMs),
+          evaluatePerfBudget("write batch p95", batchLatencyMs.p95, config.budgets.serverBatchP95MaxMs),
         ];
 
         const reportPath = await writePerfReport({
-          name: "artifact-write-load",
+          name: "write-load",
           startedAt,
           finishedAt: new Date().toISOString(),
           config,
@@ -140,7 +140,7 @@ describe("performance: artifact write load", () => {
           },
         });
 
-        console.log("[perf] artifact-write-load report", { reportPath });
+        console.log("[perf] write-load report", { reportPath });
         assertPerfBudgets(budgetResults);
       } finally {
         await server.stop();

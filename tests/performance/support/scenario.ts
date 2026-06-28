@@ -176,7 +176,7 @@ export interface PerfReport {
   name: string;
   startedAt: string;
   finishedAt: string;
-  config: PerfScenarioConfig;
+  config: PerfScenarioConfig | Record<string, unknown>;
   metrics: Record<string, unknown>;
 }
 
