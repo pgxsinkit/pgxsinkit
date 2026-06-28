@@ -152,6 +152,57 @@ DDL-variant policy layer over existing primitives**, with no sync-engine work.
   `generateLocalSchemaSql`, not an engine change. This is the cheaper of the two lanes; sequence it before
   the write lane (ADR-0022).
 
+## Known limitations / TO FIX
+
+The read-path safety net keeps a query from silently reading an un-hydrated `lazy` relation. It has
+three stacking layers: **(A)** build-time recording of relations reached through the client's
+`views`/`tables` accessors; **(C)** structural detection of a Drizzle builder's FROM/JOIN; and the
+**tripwire**, which scans the *compiled* SQL for every lazy relation's physical name and throws
+`LazyRelationNotActivatedError` for any referenced-but-dormant one. Auto-activation is the union of
+(A) ∪ (C) ∪ the declared `use`; the tripwire is the guaranteed floor under all of it. The detection
+layers are deliberately *precise* (no false positives → no spurious subscriptions); the tripwire is
+deliberately *conservative* (it cannot miss a real reference, and over-matches rather than under-matches).
+
+The residual gaps — each fails **loud** (throws), never silently, unless explicitly noted:
+
+1. **Directly-imported lazy table referenced only in a subquery/WHERE → throws (no auto-activation).**
+   (A) is blind (the relation never passes through the client accessor) and (C) is blind (it is not in
+   the top-level FROM/JOIN); the tripwire catches it from the compiled SQL and throws. *Workaround:*
+   declare it — `useLiveQuery({ use: [...] })` / `client.query({ use: [...] })` — or `ensureSynced`
+   first. *TO FIX (upstream):* deep-walk the builder's WHERE/subquery AST in (C), and/or ship the
+   compile-time `use`-scoped client (the "Q" facade) so an un-declared lazy reference is unrepresentable.
+
+2. **Raw SQL (`useLiveRows`) referencing a lazy relation → throws.** A raw string has no structural
+   detection, so the tripwire is the only layer and cannot auto-activate. *Workaround:* `ensureSynced`
+   the relation first, or use the Drizzle/declared hooks. By design — raw SQL is the escape hatch.
+
+3. **Tripwire over-match (spurious throw).** The scan matches a lazy relation's physical name as a whole
+   identifier anywhere in the compiled SQL — including inside a string literal, a column alias, or a
+   comment. This errs toward throwing (the safe direction) but can reject a query that does not actually
+   read the relation. *Workaround:* `ensureSynced` the named relation, or avoid colliding identifiers.
+   Residual risk is low because read-model views are `_read_model`-suffixed. *TO FIX:* tokenise the SQL
+   (strip string/comment spans) before matching.
+
+4. **`client.drizzle` direct reads bypass the guard entirely — the one genuinely-silent path.** A bare
+   `await client.drizzle.select()…` (not through `client.query`/`queryRow` or the hooks) has no
+   interception point, so a lazy relation read there returns empty/stale silently. *Workaround:* use the
+   guarded equivalents (`client.query` / `useLiveQuery`) or `ensureSynced` first. Documented as the
+   unguarded escape hatch; `client.drizzle` stays available for power users who own activation.
+
+5. **(C) depends on Drizzle's internal builder shape (`config.table` / `config.joins`).** It reads
+   non-public internals, so a Drizzle major could change them. Mitigated two ways: detection **degrades
+   safely** (an unrecognised node is skipped → falls through to the tripwire, never crashes), and the
+   shape is **pinned by `lazy-guard` tests** so a break surfaces as a test failure, not silent
+   under-detection. Re-verify on every Drizzle upgrade.
+
+6. **The guard means "never read a *never-hydrated* relation", not "always read the freshest".** A lazy
+   relation that started and completed initial sync stays "active" even if its stream later flips
+   `isUpToDate:false` during a resync. Intentional — staleness is the convergence layer's concern, not
+   the lazy guard's.
+
+7. **Sync-disabled (local-only) mode skips the guard.** `isSynced` returns `true` when sync is disabled,
+   so the tripwire never fires — `lazy` has no meaning without Electric.
+
 ## To confirm at build time
 
 - That a PGlite `TEMP` cluster leaves **no OPFS / IndexedDB trace after the tab closes** (expected: temp
@@ -164,13 +215,27 @@ DDL-variant policy layer over existing primitives**, with no sync-engine work.
 
 ## Implementation status
 
-Not yet implemented — design record. The enabling primitives exist: `startGroupSync` (per-group
-`unsubscribe` / `isUpToDate`), the per-table cluster generator `generateLocalSchemaSql`, and the
-`buildDropReadCacheSql` / `buildWipeLocalStoreSql` teardown. The missing pieces are: the two lifecycle axes
-in the registry; exclusion of `lazy` groups from the eager boot pass; start-on-first-reference in the
-live-query layer; the persisted activation flag + permanent promotion for `lazy + persistent`; the `TEMP`
-(`pg_temp`, unqualified, temp views) DDL variant for `ephemeral`; and subscriber-refcount + idle-TTL eviction
-for `lazy + ephemeral`.
+**Partially implemented — the `lazy` read lane (subscription-timing axis) is built; the `ephemeral`
+retention axis and `lazy + persistent` promotion are not.**
+
+Built:
+
+- **The two lifecycle axes in the registry** (`subscription: eager|lazy`, `retention:
+  persistent|ephemeral`), validated, with a per-consistency-group uniformity check (a group may not mix
+  either axis). `packages/contracts` (`config.ts`, `registry.ts`).
+- **Exclusion of `lazy` groups from the eager boot pass** + a single-flight `ensureGroupStarted` /
+  `groupKeyForTable` / `isTableStarted` on the sync result. `packages/client/src/shape-sync.ts`.
+- **Start-on-first-reference, made safe.** The read-path safety net (`packages/client/src/lazy-guard.ts`)
+  — (A) accessor recording, (C) builder config-walk, the compiled-SQL tripwire — surfaced through
+  `client.ensureSynced` / `isSynced` / `prepareQuery`, the non-live `client.query` / `queryRow` facade,
+  and the live `useLiveQuery` / `useLiveQueryRow` hooks (with `useLiveDrizzleRows` / `useLiveRows` now
+  auto-detecting + tripwiring). See **Known limitations** above for the residual blindspots.
+
+Not yet built: the persisted activation flag + permanent promotion for `lazy + persistent` (today a lazy
+group activates per session, not once-permanently); the `TEMP` (`pg_temp`, unqualified, temp views) DDL
+variant for `ephemeral`; subscriber-refcount + idle-TTL eviction for `lazy + ephemeral`; and adding
+`retention` to the registry fingerprint once `TEMP`-cluster provisioning lands. The enabling teardown
+primitives (`buildDropReadCacheSql` / `buildWipeLocalStoreSql`) already exist.
 
 References: [ADR-0009](0009-internalize-read-path-sync.md) (read-path sync; consistency groups = decision 2 —
 the per-group `MultiShapeStream` and the group grain this builds on);
