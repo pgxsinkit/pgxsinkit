@@ -21,7 +21,12 @@ import { classifyTableApplyStrategy, deriveSyncColumnTypes, getSyncRegistrySchem
 
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { assertLazyRefsActivated, buildLazyGuardIndex, findReferencedLazyKeysInSql } from "./lazy-guard";
-import { type LocalStoreVersionEvent, reconcileLocalStoreVersion } from "./local-store";
+import {
+  type LocalStoreVersionEvent,
+  readActivatedLazyGroups,
+  reconcileLocalStoreVersion,
+  writeLazyGroupActivation,
+} from "./local-store";
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
 import { buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
 import { createElectricExtension, startConfiguredSync } from "./shape-sync";
@@ -320,8 +325,17 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     status.phase = "syncing";
     options.onStatusChange?.(status);
 
+    // Promote any `lazy + persistent` group activated on a previous boot back into the eager set
+    // (ADR-0021 §2); the sync engine does no DB read of its own.
+    const promotedGroups = await readActivatedLazyGroups(pglite, options.registry);
+
     sync = await startConfiguredSync(pglite as unknown as Parameters<typeof startConfiguredSync>[0], {
       syncConfig: buildSyncConfigFromRegistry(options.registry, options.electricUrl),
+      promotedGroups,
+      // Persist a durable lazy group's activation on first on-demand start, so the next boot promotes it.
+      onLazyActivated: (groupKey) => {
+        void writeLazyGroupActivation(pglite, options.registry, groupKey);
+      },
       // The read path resolves the token per request (ADR-0013), not frozen at boot — so a
       // long-lived session never wedges on JWT expiry. Read and write share one token lifecycle.
       ...(options.getAuthToken ? { shapeHeaders: buildAuthShapeHeaders(options.getAuthToken) } : {}),

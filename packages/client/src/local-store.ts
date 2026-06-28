@@ -49,6 +49,47 @@ export async function readStoredRegistryFingerprint(
   return result.rows[0]?.value ?? null;
 }
 
+/** Meta-key prefix for a persisted `lazy + persistent` group activation (ADR-0021 §2). */
+const LAZY_ACTIVATION_PREFIX = "lazy_active:";
+
+/**
+ * The consistency-group keys of `lazy + persistent` groups that were activated on a previous boot
+ * (ADR-0021 §2). On boot these are promoted into the eager subscription set, so a once-activated durable
+ * lazy group resumes permanently with no per-session re-evaluation. (`ephemeral` activation is never
+ * persisted, so it never appears here.)
+ */
+export async function readActivatedLazyGroups(db: MutationDb, registry: SyncTableRegistry): Promise<Set<string>> {
+  const meta = metaTableRef(getSyncRegistrySchema(registry));
+  const result = await db.query<{ key: string }>(`SELECT key FROM ${meta} WHERE key LIKE $1`, [
+    `${LAZY_ACTIVATION_PREFIX}%`,
+  ]);
+  return new Set(result.rows.map((row) => row.key.slice(LAZY_ACTIVATION_PREFIX.length)));
+}
+
+/** Persist a `lazy + persistent` group's activation, so the next boot promotes it to eager (ADR-0021 §2). */
+export async function writeLazyGroupActivation(
+  db: MutationDb,
+  registry: SyncTableRegistry,
+  groupKey: string,
+): Promise<void> {
+  const meta = metaTableRef(getSyncRegistrySchema(registry));
+  await db.query(
+    `INSERT INTO ${meta} (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [`${LAZY_ACTIVATION_PREFIX}${groupKey}`, "1"],
+  );
+}
+
+/** Clear a persisted lazy activation — an explicit `desync` reverts the group to dormant next boot (ADR-0021 §2). */
+export async function clearLazyGroupActivation(
+  db: MutationDb,
+  registry: SyncTableRegistry,
+  groupKey: string,
+): Promise<void> {
+  const meta = metaTableRef(getSyncRegistrySchema(registry));
+  await db.query(`DELETE FROM ${meta} WHERE key = $1`, [`${LAZY_ACTIVATION_PREFIX}${groupKey}`]);
+}
+
 /** Stamp the local store with the fingerprint it is now provisioned under. */
 export async function writeStoredRegistryFingerprint(
   db: MutationDb,

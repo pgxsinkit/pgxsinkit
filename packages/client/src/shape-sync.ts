@@ -3,6 +3,7 @@ import type { PGlite, PGliteInterfaceExtensions } from "@electric-sql/pglite";
 
 import {
   type ApplyStrategy,
+  type Retention,
   type SubscriptionTiming,
   type SyncColumnType,
   type SyncConfigInput,
@@ -34,6 +35,12 @@ export interface ShapeSyncSpec {
    * members all agree (registry-validated), so the group's timing is any member's.
    */
   subscription?: SubscriptionTiming;
+  /**
+   * Retention (ADR-0021). Absent → `persistent`. Only a `persistent` `lazy` group is promoted to the
+   * eager set on activation (its activation is permanent across boots); an `ephemeral` group's activation
+   * is session-scoped by construction, so it is never promoted/persisted.
+   */
+  retention?: Retention;
 }
 
 export interface ConfiguredShapeSyncSpec extends ShapeSyncSpec {
@@ -67,6 +74,19 @@ export interface StartConfiguredSyncOptions {
    * Phase 3). The runtime uses this to clear an `auth-needed`/`degraded` status once sync resumes.
    */
   onSyncActivity?: () => void;
+  /**
+   * Consistency-group keys of `lazy` groups that were activated on a previous boot and persisted their
+   * activation flag (ADR-0021 §2 — `lazy + persistent` promotion). These join the eager boot set as if
+   * they were declared `eager`, so a once-activated durable lazy group resumes without re-evaluation.
+   * Computed by the caller from the local meta table (the sync engine does no DB read of its own).
+   */
+  promotedGroups?: ReadonlySet<string>;
+  /**
+   * Invoked when a `persistent` `lazy` group is activated on demand (not promoted at boot), so the
+   * caller can persist its activation flag for the next boot (ADR-0021 §2). Never fired for an
+   * `ephemeral` group (its activation is session-scoped and leaves no durable trace).
+   */
+  onLazyActivated?: (groupKey: string) => void;
 }
 
 type ElectricNamespace = ReturnType<typeof electricSync>;
@@ -135,6 +155,7 @@ interface GroupRuntime {
   groupKey: string;
   specs: ConfiguredShapeSyncSpec[];
   subscription: SubscriptionTiming;
+  retention: Retention;
   result: ShapeSyncResult | null;
   startPromise: Promise<void> | null;
 }
@@ -163,15 +184,22 @@ export async function startConfiguredSync(
         groupKey,
         specs: [spec],
         subscription: spec.subscription ?? "eager",
+        retention: spec.retention ?? "persistent",
         result: null,
         startPromise: null,
       });
     }
   }
 
-  // Boot readiness (`onInitialSync`) waits only for the EAGER groups to catch up; a lazy group started
-  // later via ensureGroupStarted signals its members' `onTableInitialSync` but never the boot gate.
-  const eagerGroups = [...groups.values()].filter((group) => group.subscription !== "lazy");
+  // A `lazy` group activated on a previous boot (ADR-0021 §2 `lazy + persistent` promotion) is treated
+  // as eager this boot: its activation is permanent, so it joins the boot set and resumes like any durable
+  // table — no per-session re-evaluation, no half-lazy.
+  const promotedGroups = input.promotedGroups ?? new Set<string>();
+  const isEagerAtBoot = (group: GroupRuntime) => group.subscription !== "lazy" || promotedGroups.has(group.groupKey);
+
+  // Boot readiness (`onInitialSync`) waits only for the boot (eager + promoted) groups to catch up; a lazy
+  // group started later via ensureGroupStarted signals its members' `onTableInitialSync` but never the gate.
+  const eagerGroups = [...groups.values()].filter(isEagerAtBoot);
   let pendingBootGroups = eagerGroups.length;
   let bootSignalled = false;
   const signalBootIfReady = () => {
@@ -211,6 +239,11 @@ export async function startConfiguredSync(
       },
     }).then((result) => {
       group.result = result;
+      // A `persistent` `lazy` group activated on demand (not a boot start) persists its activation, so the
+      // next boot promotes it to eager (ADR-0021 §2). `ephemeral` activation is session-scoped — never persisted.
+      if (!countsTowardBoot && group.subscription === "lazy" && group.retention === "persistent") {
+        input.onLazyActivated?.(group.groupKey);
+      }
     });
     return group.startPromise;
   };
@@ -334,6 +367,7 @@ function buildConfiguredShapeSpec(
     ...(table.columnTypes ? { columnTypes: table.columnTypes } : {}),
     ...(table.consistencyGroup ? { consistencyGroup: table.consistencyGroup } : {}),
     ...(table.subscription ? { subscription: table.subscription } : {}),
+    ...(table.retention ? { retention: table.retention } : {}),
   };
 }
 

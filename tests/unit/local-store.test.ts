@@ -3,8 +3,11 @@ import { describe, expect, it } from "bun:test";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import {
+  clearLazyGroupActivation,
+  readActivatedLazyGroups,
   readStoredRegistryFingerprint,
   reconcileLocalStoreVersion,
+  writeLazyGroupActivation,
   writeStoredRegistryFingerprint,
 } from "../../packages/client/src/local-store";
 import { createMutationRuntime } from "../../packages/client/src/mutation";
@@ -51,6 +54,25 @@ describe("local-meta fingerprint store (ADR-0006)", () => {
 
     await writeStoredRegistryFingerprint(db, demoSyncRegistry, "fp-2");
     expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe("fp-2");
+  });
+});
+
+describe("lazy activation flags (ADR-0021 §2 lazy+persistent promotion)", () => {
+  it("round-trips group activations, is idempotent, and clears one on desync without touching the fingerprint", async () => {
+    const { db } = await provisioned();
+    expect([...(await readActivatedLazyGroups(db, demoSyncRegistry))]).toEqual([]);
+
+    await writeLazyGroupActivation(db, demoSyncRegistry, "forum");
+    await writeLazyGroupActivation(db, demoSyncRegistry, "archive-shape");
+    await writeLazyGroupActivation(db, demoSyncRegistry, "forum"); // idempotent
+    expect([...(await readActivatedLazyGroups(db, demoSyncRegistry))].sort()).toEqual(["archive-shape", "forum"]);
+
+    // The activation scan is prefix-scoped — it must not pick up the fingerprint key, and desync
+    // clears only its own group.
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, "fp-keep");
+    await clearLazyGroupActivation(db, demoSyncRegistry, "forum");
+    expect([...(await readActivatedLazyGroups(db, demoSyncRegistry))]).toEqual(["archive-shape"]);
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe("fp-keep");
   });
 });
 

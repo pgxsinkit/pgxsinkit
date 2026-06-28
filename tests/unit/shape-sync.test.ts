@@ -232,4 +232,89 @@ describe("shape sync", () => {
     await result.ensureGroupStarted("archive-shape");
     expect(calls.filter((key) => key === "archive-shape")).toHaveLength(1);
   });
+
+  it("promotes a previously-activated lazy+persistent group into the eager boot set (ADR-0021 §2)", async () => {
+    const calls: Array<string | null> = [];
+    const namespace = {
+      initMetadataTables: async () => {},
+      syncShapesToTables: async (opts: { key: string | null; onInitialSync?: () => void }) => {
+        calls.push(opts.key);
+        opts.onInitialSync?.();
+        return { unsubscribe: () => {}, isUpToDate: true, streams: {} };
+      },
+    };
+    const pg = { electric: namespace } as unknown as Parameters<typeof startConfiguredSync>[0];
+
+    let initialSyncCount = 0;
+    const result = await startConfiguredSync(pg, {
+      onInitialSync: () => (initialSyncCount += 1),
+      // archive was activated on a prior boot → promoted back to eager this boot.
+      promotedGroups: new Set(["archive-shape"]),
+      syncConfig: {
+        electricUrl: "http://localhost:3000/v1/shape",
+        localSchema: "app_local",
+        tables: {
+          profile: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "profile", shapeKey: "profile-shape" },
+          },
+          archive: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "archive", shapeKey: "archive-shape" },
+            subscription: "lazy",
+          },
+        },
+      },
+    });
+
+    // Both the eager profile AND the promoted-lazy archive start at boot, and both count toward the gate.
+    expect(calls).toHaveLength(2);
+    expect(calls).toContain("archive-shape");
+    expect(calls).toContain("profile-shape");
+    expect(result.isTableStarted("archive")).toBe(true);
+    expect(initialSyncCount).toBe(1);
+  });
+
+  it("persists a lazy+persistent activation on first on-demand start, but never a lazy+ephemeral one (ADR-0021 §2)", async () => {
+    const namespace = {
+      initMetadataTables: async () => {},
+      syncShapesToTables: async (opts: { onInitialSync?: () => void }) => {
+        opts.onInitialSync?.();
+        return { unsubscribe: () => {}, isUpToDate: true, streams: {} };
+      },
+    };
+    const pg = { electric: namespace } as unknown as Parameters<typeof startConfiguredSync>[0];
+
+    const activated: string[] = [];
+    const result = await startConfiguredSync(pg, {
+      onLazyActivated: (groupKey) => activated.push(groupKey),
+      syncConfig: {
+        electricUrl: "http://localhost:3000/v1/shape",
+        localSchema: "app_local",
+        tables: {
+          durable: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "durable", shapeKey: "durable-shape" },
+            subscription: "lazy",
+            retention: "persistent",
+          },
+          scratch: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "scratch", shapeKey: "scratch-shape" },
+            subscription: "lazy",
+            retention: "ephemeral",
+          },
+        },
+      },
+    });
+
+    // The durable lazy group persists its activation; the ephemeral one is session-scoped and never does.
+    await result.ensureGroupStarted("durable-shape");
+    await result.ensureGroupStarted("scratch-shape");
+    expect(activated).toEqual(["durable-shape"]);
+  });
 });
