@@ -36,6 +36,7 @@ function lazyFacadeRegistry(): SyncTableRegistry {
 // but never marks the group started — simulating a start that didn't take (backstop path). Reset per test.
 const started = new Set<string>();
 const ensureGroupStartedCalls: string[] = [];
+const stopGroupCalls: string[] = [];
 let failActivation = false;
 const startConfiguredSyncMock = mock(async () => ({
   unsubscribe: () => undefined,
@@ -43,6 +44,10 @@ const startConfiguredSyncMock = mock(async () => ({
   ensureGroupStarted: async (groupKey: string) => {
     ensureGroupStartedCalls.push(groupKey);
     if (!failActivation) started.add(groupKey);
+  },
+  stopGroup: (groupKey: string) => {
+    stopGroupCalls.push(groupKey);
+    started.delete(groupKey);
   },
   groupKeyForTable: (tableKey: string) => `${tableKey}-shape`,
   isTableStarted: (tableKey: string) => started.has(`${tableKey}-shape`),
@@ -105,6 +110,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
       generateLocalSchemaSql: () => "SELECT 1;",
       buildDropReadCacheSql: () => "SELECT 1;",
       buildWipeLocalStoreSql: () => "SELECT 1;",
+      buildDesyncTableSql: () => "SELECT 1;",
       LOCAL_META_TABLE: "pgxsinkit_local_meta",
     }));
   });
@@ -114,6 +120,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
   beforeEach(() => {
     started.clear();
     ensureGroupStartedCalls.length = 0;
+    stopGroupCalls.length = 0;
     startConfiguredSyncMock.mockClear();
   });
 
@@ -194,6 +201,28 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     await client.prepareQuery({ sql: `select * from "archive"` });
     expect(ensureGroupStartedCalls).toEqual(["archive-shape"]);
     expect(client.isSynced("archive")).toBe(true);
+  });
+
+  it("desync stops a lazy relation's group and returns it to dormant (ADR-0021 §2)", async () => {
+    const client = await makeClient("memory:/lazy-facade-desync");
+    await client.ensureSynced(["archive"]);
+    expect(client.isSynced("archive")).toBe(true);
+
+    await client.desync("archive");
+    // It stopped the group (so the stream can't re-fill the truncated cache) and the relation is dormant.
+    expect(stopGroupCalls).toEqual(["archive-shape"]);
+    expect(client.isSynced("archive")).toBe(false);
+
+    // A later reference re-activates it from scratch — desync is the inverse of activation, not destroy.
+    await client.ensureSynced(["archive"]);
+    expect(client.isSynced("archive")).toBe(true);
+  });
+
+  it("desync refuses an eager relation (always-on, would immediately re-sync)", async () => {
+    const client = await makeClient("memory:/lazy-facade-desync-eager");
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(client.desync("profile")).rejects.toThrow(/only a lazy relation/);
+    expect(stopGroupCalls).toEqual([]);
   });
 
   it("ensureSynced activates a lazy group and isSynced reflects it; both are idempotent", async () => {

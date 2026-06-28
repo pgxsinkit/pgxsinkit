@@ -23,12 +23,13 @@ import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDrive
 import { assertLazyRefsActivated, buildLazyGuardIndex, findReferencedLazyKeysInSql } from "./lazy-guard";
 import {
   type LocalStoreVersionEvent,
+  clearLazyGroupActivation,
   readActivatedLazyGroups,
   reconcileLocalStoreVersion,
   writeLazyGroupActivation,
 } from "./local-store";
 import { createMutationRuntime, type MutationBatchItem, type MutationDetail, type MutationKind } from "./mutation";
-import { buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
+import { buildDesyncTableSql, buildDropReadCacheSql, buildWipeLocalStoreSql, generateLocalSchemaSql } from "./schema";
 import { createElectricExtension, startConfiguredSync } from "./shape-sync";
 import { buildAuthShapeHeaders } from "./sync-auth";
 
@@ -218,6 +219,16 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * relation; true for eager relations once boot completes (and always when sync is disabled).
    */
   isSynced: (key: SyncTableName<TRegistry>) => boolean;
+  /**
+   * Revert a `lazy` relation to dormant (ADR-0021 §2) — the inverse of on-demand activation: stop its
+   * consistency group's stream, clear any persisted `lazy + persistent` activation (so the next boot
+   * holds it dormant again), and clean-truncate its local read cache. A later reference re-activates it
+   * from scratch. Refuses when the relation is `eager` (always-on, would immediately re-sync) or owes
+   * the server unsettled writes (the truncate would drop them — flush or discard first). The reclaim
+   * primitive a host wires to navigation/idle for a rarely-opened lazy view; for an `ephemeral`
+   * relation, idle-eviction is otherwise automatic at session end.
+   */
+  desync: (key: SyncTableName<TRegistry>) => Promise<void>;
   /**
    * The read-path safety seam (ADR-0021): scan the compiled `sql` for the lazy relations it reads
    * (∪ the optional `use`), activate them, and await their initial sync — so a lazy relation
@@ -459,6 +470,36 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     return activeSync.isTableStarted(key);
   };
 
+  const desync: SyncClient<TRegistry>["desync"] = async (key) => {
+    const entry = options.registry[key];
+    if (entry == null) throw new Error(`desync: unknown table ${String(key)}`);
+    if (entry.subscription !== "lazy") {
+      throw new Error(
+        `desync('${String(key)}') refused: only a lazy relation can be desynced — an eager relation is always-on and would immediately re-sync.`,
+      );
+    }
+
+    // Refuse if the table owes the server unsent/unsettled writes: the truncate clears the journal, so
+    // dropping un-acked local intent would be silent data loss. Flush (or discard) those first.
+    const stats = await mutationRuntime.readMutationStats(key);
+    const owed =
+      stats.pendingCount + stats.sendingCount + stats.failedCount + stats.quarantinedCount + stats.conflictedCount;
+    if (owed > 0) {
+      throw new Error(
+        `desync('${String(key)}') refused: ${owed} unsettled mutation(s) in the local journal. Flush or discard them first.`,
+      );
+    }
+
+    const activeSync = sync;
+    const groupKey = activeSync?.groupKeyForTable(key);
+    // Stop the stream BEFORE truncating so a live shape can't re-populate the rows we just cleared, then
+    // revert the durable promotion (a no-op for ephemeral, which never persisted a flag) so the next boot
+    // holds the relation dormant, and finally empty the read cache.
+    if (activeSync != null && groupKey != null) activeSync.stopGroup(groupKey);
+    if (groupKey != null) await clearLazyGroupActivation(pglite, options.registry, groupKey);
+    await pglite.exec(buildDesyncTableSql(options.registry, key as string));
+  };
+
   const prepareQuery: SyncClient<TRegistry>["prepareQuery"] = async ({ sql, use }) => {
     // Scan the compiled SQL for the lazy relations it reads (∪ the explicit `use`) and activate them.
     // The compiled SQL is ground truth and Drizzle quotes every relation, so any reference — FROM, JOIN,
@@ -563,6 +604,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     },
     ensureSynced,
     isSynced,
+    desync,
     prepareQuery,
   };
 

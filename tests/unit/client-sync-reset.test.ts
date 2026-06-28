@@ -108,6 +108,7 @@ describe("createSyncClient subscription reset", () => {
       generateLocalSchemaSql: () => "SELECT 1;",
       buildDropReadCacheSql: () => "SELECT 1;",
       buildWipeLocalStoreSql: () => "SELECT 1;",
+      buildDesyncTableSql: () => "SELECT 1;",
       LOCAL_META_TABLE: "pgxsinkit_local_meta",
       REGISTRY_FINGERPRINT_KEY: "registry_fingerprint",
     }));

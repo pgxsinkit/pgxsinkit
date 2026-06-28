@@ -1,6 +1,6 @@
 # Sync lifecycle: subscription-timing and retention as orthogonal axes
 
-Status: proposed (2026-06-28)
+Status: accepted (2026-06-28)
 
 The original framing was a second "non-electric" / "direct" data flow — reads from a live API, writes
 synchronously — motivated by data that should not sit durably on the client (proctored exams;
@@ -218,8 +218,9 @@ Residual edges:
 
 ## Implementation status
 
-**Partially implemented — the `lazy` read lane (subscription-timing axis) is built; the `ephemeral`
-retention axis and `lazy + persistent` promotion are not.**
+**Implemented — both axes are built end to end (read lane, promotion, ephemeral `TEMP` DDL, fingerprint,
+explicit desync). The only deferred piece is *automatic* idle-eviction for `lazy + ephemeral`, a memory
+optimisation whose correctness guarantee is already met without it (see below).**
 
 Built:
 
@@ -227,19 +228,42 @@ Built:
   persistent|ephemeral`), validated, with a per-consistency-group uniformity check (a group may not mix
   either axis). `packages/contracts` (`config.ts`, `registry.ts`).
 - **Exclusion of `lazy` groups from the eager boot pass** + a single-flight `ensureGroupStarted` /
-  `groupKeyForTable` / `isTableStarted` on the sync result. `packages/client/src/shape-sync.ts`.
+  `stopGroup` / `groupKeyForTable` / `isTableStarted` on the sync result. `packages/client/src/shape-sync.ts`.
 - **Start-on-first-reference, made safe by one compiled-SQL scan** (`packages/client/src/lazy-guard.ts`):
   a query's parameterised SQL is scanned for the schema-aware quoted tokens of its lazy relations, which
   are then activated + hydrated before it runs. Surfaced through `client.ensureSynced` / `isSynced` /
   `prepareQuery`, the non-live `client.query` / `queryRow` facade, and the live `useLiveQuery` /
   `useLiveQueryRow` + `useLiveDrizzleRows` hooks (`useLiveRows` raw SQL is the unguarded escape hatch).
   See **Known limitations** above for why the scan is sufficient and its residual edges.
+- **`lazy + persistent` permanent promotion** via a persisted activation flag (`lazy_active:<group>`) in
+  the local meta table: an on-demand start of a persistent lazy group records the flag
+  (`writeLazyGroupActivation`); the next boot reads it (`readActivatedLazyGroups`) and treats the group as
+  eager — a one-time ignition, never a per-session re-evaluation. `local-store.ts`, `shape-sync.ts`, `index.ts`.
+- **`ephemeral` = the whole per-table cluster as `TEMP` / `pg_temp`**: the synced/overlay/journal tables +
+  sequence are `TEMP`, both views `TEMP`, the reconcile function lives in `pg_temp`, and the row-applier
+  targets the temp cluster — so read- and write-ephemerality fall out together with no durable trace.
+  `packages/client/src/schema.ts`.
+- **`retention` folded into the registry fingerprint** — a `TEMP`-vs-durable DDL change forces a cache
+  rebuild + subscription reset; `subscription` is deliberately excluded (pure runtime orchestration over
+  identical tables, no DDL change). `packages/contracts/src/fingerprint.ts`.
+- **Explicit `desync(table)`** — the manual revert to dormant: stop the group's stream (`stopGroup`, so a
+  live shape can't re-fill the cache mid-truncate), clear the persisted `lazy + persistent` activation flag
+  (`clearLazyGroupActivation`, a no-op for ephemeral), and clean-truncate the read cache
+  (`buildDesyncTableSql`, ephemeral-aware: bare/`pg_temp` for a temp cluster, schema-qualified for a durable
+  one — the cluster is emptied, not dropped, so a later reference re-streams into it). Refuses an `eager`
+  relation (always-on) or one that owes unsettled writes (the truncate would drop them). `index.ts`,
+  `schema.ts`.
 
-Not yet built: the persisted activation flag + permanent promotion for `lazy + persistent` (today a lazy
-group activates per session, not once-permanently); the `TEMP` (`pg_temp`, unqualified, temp views) DDL
-variant for `ephemeral`; subscriber-refcount + idle-TTL eviction for `lazy + ephemeral`; and adding
-`retention` to the registry fingerprint once `TEMP`-cluster provisioning lands. The enabling teardown
-primitives (`buildDropReadCacheSql` / `buildWipeLocalStoreSql`) already exist.
+Deferred — a memory optimisation, not correctness:
+
+- **Automatic idle-eviction for `lazy + ephemeral`** (subscriber-refcount + idle-TTL → `unsubscribe` + drop
+  the temp cluster, recreating it on the next reference). The ephemerality *guarantee* is already met
+  without it: an ephemeral cluster is `TEMP`, so it vanishes at session end regardless. Auto-eviction would
+  only reclaim memory *within* a long-lived session for an ephemeral relation the user navigated away from.
+  The primitives it would build on are done (`stopGroup`, `desync`, the ephemeral-aware truncate); the
+  unbuilt part is the refcount+TTL driver plus on-re-reference cluster *recreate* and the hook-level
+  retain/release plumbing to feed it — sized out of proportion to the win, so it waits for a measured need.
+  Until then, `desync` is the explicit reclaim primitive a host can wire to navigation/idle by hand.
 
 References: [ADR-0009](0009-internalize-read-path-sync.md) (read-path sync; consistency groups = decision 2 —
 the per-group `MultiShapeStream` and the group grain this builds on);

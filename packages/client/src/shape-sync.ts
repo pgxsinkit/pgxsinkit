@@ -108,6 +108,15 @@ export interface StartConfiguredSyncResult {
    * report `isUpToDate` live.
    */
   ensureGroupStarted: (groupKey: string) => Promise<void>;
+  /**
+   * Stop a group's stream and return it to dormant (ADR-0021 §2): tear down its live subscription and
+   * clear the runtime so {@link isTableStarted} reports false again and a later {@link ensureGroupStarted}
+   * re-subscribes from scratch — the inverse of an on-demand activation. Used by the client's `desync`
+   * to halt a lazy group before truncating its read cache. A no-op for an unknown or never-started group.
+   * The temp cluster of an `ephemeral` group is NOT dropped here (that is the deferred idle-eviction); the
+   * cluster simply stops being fed.
+   */
+  stopGroup: (groupKey: string) => void;
   /** The consistency-group key a table belongs to — maps a queried table to its {@link ensureGroupStarted}. */
   groupKeyForTable: (tableKey: string) => string | undefined;
   /**
@@ -277,6 +286,16 @@ export async function startConfiguredSync(
     ensureGroupStarted: (groupKey) => {
       const group = groups.get(groupKey);
       return group ? startGroup(group, false) : Promise.resolve();
+    },
+    stopGroup: (groupKey) => {
+      const group = groups.get(groupKey);
+      if (!group) return;
+      // Tear down the live stream and clear the runtime so the group is dormant again: `isTableStarted`
+      // reports false and `ensureGroupStarted` re-runs `startGroupSync` (its `group.result`/`startPromise`
+      // short-circuits no longer apply) on the next reference.
+      group.result?.unsubscribe();
+      group.result = null;
+      group.startPromise = null;
     },
     groupKeyForTable: (tableKey) => groupKeyByTable.get(tableKey),
     isTableStarted: (tableKey) => {

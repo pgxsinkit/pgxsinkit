@@ -544,3 +544,45 @@ export function buildWipeLocalStoreSql<TRegistry extends SyncTableRegistry>(regi
 
   return `${statements.join("\n")}\n`;
 }
+
+/**
+ * Clean-truncate a single table's local read cache so a desynced `lazy` relation (ADR-0021 §2) returns
+ * to an empty, dormant state: the synced table and — for a writable table — its optimistic overlay and
+ * the journal, plus a sequence restart. It does NOT drop the cluster (the table/views/trigger persist),
+ * so a later re-reference re-streams into it without a schema rebuild. Ephemeral-aware: bare/`pg_temp`
+ * names for an ephemeral cluster, schema-qualified for a persistent one — mirroring
+ * {@link generateLocalSchemaSql}. The caller (`desync`) first stops the group's stream (so nothing
+ * re-populates mid-truncate) and refuses when the journal owes unsettled writes (so this never drops
+ * un-acked local intent).
+ */
+export function buildDesyncTableSql<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+  tableKey: string,
+): string {
+  const entry = registry[tableKey];
+
+  if (!entry) {
+    throw new Error(`buildDesyncTableSql: unknown table ${tableKey}`);
+  }
+
+  const localSchema = getSyncRegistrySchema(registry);
+  const ephemeral = entry.retention === "ephemeral";
+  const objectSchema = ephemeral ? "public" : localSchema;
+  const projection = getClientProjection(entry, tableKey, objectSchema);
+  const statements: string[] = [`TRUNCATE TABLE ${projection.syncedTable};`];
+
+  if (entry.mode !== "readonly") {
+    if (projection.overlayTable) {
+      statements.push(`TRUNCATE TABLE ${projection.overlayTable};`);
+    }
+
+    if (projection.journalTable && entry.clientProjection?.journalTable) {
+      statements.push(`TRUNCATE TABLE ${projection.journalTable};`);
+      statements.push(
+        `ALTER SEQUENCE ${qualifyIdentifier(objectSchema, buildJournalSequenceName(entry.clientProjection.journalTable))} RESTART WITH 1;`,
+      );
+    }
+  }
+
+  return `${statements.join("\n")}\n`;
+}

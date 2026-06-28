@@ -233,6 +233,52 @@ describe("shape sync", () => {
     expect(calls.filter((key) => key === "archive-shape")).toHaveLength(1);
   });
 
+  it("stopGroup tears a lazy group back down to dormant, and a later start re-subscribes (ADR-0021 §2 desync)", async () => {
+    const calls: Array<string | null> = [];
+    let unsubscribes = 0;
+    const namespace = {
+      initMetadataTables: async () => {},
+      syncShapesToTables: async (opts: { key: string | null; onInitialSync?: () => void }) => {
+        calls.push(opts.key);
+        opts.onInitialSync?.();
+        return { unsubscribe: () => (unsubscribes += 1), isUpToDate: true, streams: {} };
+      },
+    };
+    const pg = { electric: namespace } as unknown as Parameters<typeof startConfiguredSync>[0];
+
+    const result = await startConfiguredSync(pg, {
+      syncConfig: {
+        electricUrl: "http://localhost:3000/v1/shape",
+        localSchema: "app_local",
+        tables: {
+          archive: {
+            mode: "readonly",
+            primaryKey: { columns: ["id"] },
+            shape: { tableName: "archive", shapeKey: "archive-shape" },
+            subscription: "lazy",
+          },
+        },
+      },
+    });
+
+    // Activate, then stop: the group unsubscribes and reports dormant again.
+    await result.ensureGroupStarted("archive-shape");
+    expect(result.isTableStarted("archive")).toBe(true);
+    result.stopGroup("archive-shape");
+    expect(unsubscribes).toBe(1);
+    expect(result.isTableStarted("archive")).toBe(false);
+    expect(result.tables["archive"]?.isUpToDate).toBe(false);
+
+    // A later reference re-subscribes from scratch (the single-flight short-circuit was cleared).
+    await result.ensureGroupStarted("archive-shape");
+    expect(calls.filter((key) => key === "archive-shape")).toHaveLength(2);
+    expect(result.isTableStarted("archive")).toBe(true);
+
+    // Stopping an unknown group is a no-op.
+    result.stopGroup("nope-shape");
+    expect(unsubscribes).toBe(1);
+  });
+
   it("promotes a previously-activated lazy+persistent group into the eager boot set (ADR-0021 §2)", async () => {
     const calls: Array<string | null> = [];
     const namespace = {

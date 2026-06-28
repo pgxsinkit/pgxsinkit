@@ -6,7 +6,7 @@ import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { authorsSyncEntry } from "@pgxsinkit/schema";
 
-import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { buildDesyncTableSql, generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // ADR-0021 §3: an `ephemeral` table's whole local cluster is emitted as TEMP / pg_temp.
@@ -79,5 +79,45 @@ describe("ephemeral cluster DDL (ADR-0021 §3)", () => {
     const model = await db.query<{ answer: string }>(`SELECT answer FROM exam_answer_read_model`);
     expect(overlay.rows[0]?.c).toBe(0); // trigger fired → overlay cleared
     expect(model.rows[0]?.answer).toBe("synced");
+  });
+
+  it("buildDesyncTableSql clean-truncates a cluster's read cache for both retentions (ADR-0021 §2 desync)", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(ddl);
+
+    // Seed a synced row + an optimistic overlay row in each cluster (persistent authors, ephemeral exam).
+    await db.exec(
+      `INSERT INTO authors (id, name, created_at_us, updated_at_us)
+       VALUES ('00000000-0000-0000-0000-0000000000a1', 'synced', 1, 1);`,
+    );
+    await db.exec(
+      `INSERT INTO authors_overlay (id, name, created_at_us, updated_at_us, overlay_kind, local_updated_at_us)
+       VALUES ('00000000-0000-0000-0000-0000000000a2', 'optimistic', 1, 1, 'create', 1);`,
+    );
+    await db.exec(
+      `INSERT INTO exam_answer (id, answer, updated_at_us) VALUES ('00000000-0000-0000-0000-0000000000b1', 'synced', 1);`,
+    );
+    await db.exec(
+      `INSERT INTO exam_answer_overlay (id, answer, updated_at_us, overlay_kind, local_updated_at_us)
+       VALUES ('00000000-0000-0000-0000-0000000000b2', 'optimistic', 1, 'update', 1);`,
+    );
+
+    // Desync each: the synced table AND its overlay are emptied; the cluster itself stays usable.
+    await db.exec(buildDesyncTableSql(registry, "authors"));
+    await db.exec(buildDesyncTableSql(registry, "exam"));
+
+    const count = async (relation: string) =>
+      (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM ${relation}`)).rows[0]?.c;
+
+    expect(await count("authors")).toBe(0);
+    expect(await count("authors_overlay")).toBe(0);
+    expect(await count("exam_answer")).toBe(0); // bare name resolved to the pg_temp cluster
+    expect(await count("exam_answer_overlay")).toBe(0);
+
+    // The cluster is intact (not dropped): a fresh insert still lands and reads back.
+    await db.exec(
+      `INSERT INTO exam_answer (id, answer, updated_at_us) VALUES ('00000000-0000-0000-0000-0000000000b3', 'again', 2);`,
+    );
+    expect(await count("exam_answer")).toBe(1);
   });
 });
