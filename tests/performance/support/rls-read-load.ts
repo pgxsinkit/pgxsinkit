@@ -226,6 +226,8 @@ export interface RlsReadModeMetric {
   indexed: boolean;
   latencyMs: ReturnType<typeof computePercentiles>;
   rowsReturned: number;
+  /** A single query hit STATEMENT_TIMEOUT_MS (this cell is bounded, not precisely measured). */
+  timedOut: boolean;
 }
 
 export interface RlsReadScenarioMetric {
@@ -379,55 +381,97 @@ async function dropPolicies(db: RlsReadDb, tableName: string): Promise<void> {
   }
 }
 
-async function timePrivileged(db: RlsReadDb, query: string, samples: number): Promise<{ ms: number[]; rows: number }> {
-  const ms: number[] = [];
-  let rows = 0;
-  for (let i = 0; i < samples; i += 1) {
-    const started = performance.now();
-    const result = (await db.execute(sql.raw(query))) as unknown[];
-    ms.push(performance.now() - started);
-    rows = Array.isArray(result) ? result.length : 0;
-  }
-  return { ms, rows };
+// Per-cell sampling bounds, so a deliberately-pathological cell (naive policy, no index, heavy scale)
+// can't run away: take up to `samples`, but stop once MIN_SAMPLES are in AND the cell has spent
+// CELL_TIME_BUDGET_MS; and cap any single query at STATEMENT_TIMEOUT_MS (a timeout is a recorded data
+// point — "doesn't complete in N s" — not a crash). The fast cells (correct policy) still get the full
+// sample count well within the budget, so their p95 stays precise.
+const MIN_SAMPLES = 5;
+const CELL_TIME_BUDGET_MS = 3_000;
+const STATEMENT_TIMEOUT_MS = 8_000;
+
+interface CellResult {
+  ms: number[];
+  rows: number;
+  timedOut: boolean;
 }
 
-async function timeUnderRls(
-  db: RlsReadDb,
-  query: string,
-  claims: JwtClaims,
-  samples: number,
-): Promise<{ ms: number[]; rows: number }> {
-  const claimsJson = JSON.stringify(claims).replace(/'/g, "''");
-  return db.transaction(async (tx) => {
-    await tx.execute(sql.raw(`SET LOCAL ROLE authenticated`));
-    await tx.execute(sql.raw(`SELECT set_config('request.jwt.claims', '${claimsJson}', true)`));
-    const ms: number[] = [];
-    let rows = 0;
-    for (let i = 0; i < samples; i += 1) {
-      const started = performance.now();
-      const result = (await tx.execute(sql.raw(query))) as unknown[];
+// Sentinel thrown to force drizzle to ROLLBACK the read-only measurement tx — also the clean exit when
+// a statement_timeout has already aborted it (COMMIT on an aborted tx would error).
+const ROLLBACK_SENTINEL = Symbol("rls-read-load-rollback");
+
+async function sampleCell(exec: () => Promise<unknown>, maxSamples: number): Promise<CellResult> {
+  const ms: number[] = [];
+  let rows = 0;
+  let timedOut = false;
+  const cellStart = performance.now();
+  for (let i = 0; i < maxSamples; i += 1) {
+    const started = performance.now();
+    try {
+      const result = await exec();
       ms.push(performance.now() - started);
-      rows = Array.isArray(result) ? result.length : 0;
+      rows = Array.isArray(result) ? result.length : rows;
+    } catch {
+      // statement_timeout (or another abort) — record the capped sample and stop this cell.
+      ms.push(performance.now() - started);
+      timedOut = true;
+      break;
     }
-    return { ms, rows };
-  });
+    if (i + 1 >= MIN_SAMPLES && performance.now() - cellStart >= CELL_TIME_BUDGET_MS) {
+      break;
+    }
+  }
+  return { ms, rows, timedOut };
+}
+
+async function timePrivileged(db: RlsReadDb, query: string, samples: number): Promise<CellResult> {
+  return sampleCell(() => db.execute(sql.raw(query)), samples);
+}
+
+async function timeUnderRls(db: RlsReadDb, query: string, claims: JwtClaims, samples: number): Promise<CellResult> {
+  const claimsJson = JSON.stringify(claims).replace(/'/g, "''");
+  let captured: CellResult | undefined;
+  try {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL ROLE authenticated`));
+      await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`));
+      await tx.execute(sql.raw(`SELECT set_config('request.jwt.claims', '${claimsJson}', true)`));
+      captured = await sampleCell(() => tx.execute(sql.raw(query)), samples);
+      throw ROLLBACK_SENTINEL;
+    });
+  } catch (error) {
+    if (error !== ROLLBACK_SENTINEL) {
+      throw error;
+    }
+  }
+  return captured ?? { ms: [], rows: 0, timedOut: true };
 }
 
 async function explainUnderRls(db: RlsReadDb, query: string, claims: JwtClaims): Promise<string> {
   const claimsJson = JSON.stringify(claims).replace(/'/g, "''");
-  return db.transaction(async (tx) => {
-    await tx.execute(sql.raw(`SET LOCAL ROLE authenticated`));
-    await tx.execute(sql.raw(`SELECT set_config('request.jwt.claims', '${claimsJson}', true)`));
-    const result = await tx.execute(sql.raw(`EXPLAIN (ANALYZE, BUFFERS) ${query}`));
-    const rows = Array.isArray(result) ? (result as Array<Record<string, unknown>>) : [];
-    // Each EXPLAIN row is a single "QUERY PLAN" text column; keep only string values.
-    return rows
-      .map((row) => {
-        const value = Object.values(row)[0];
-        return typeof value === "string" ? value : "";
-      })
-      .join("\n");
-  });
+  let plan = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL ROLE authenticated`));
+      await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`));
+      await tx.execute(sql.raw(`SELECT set_config('request.jwt.claims', '${claimsJson}', true)`));
+      const result = await tx.execute(sql.raw(`EXPLAIN (ANALYZE, BUFFERS) ${query}`));
+      const rows = Array.isArray(result) ? (result as Array<Record<string, unknown>>) : [];
+      // Each EXPLAIN row is a single "QUERY PLAN" text column; keep only string values.
+      plan = rows
+        .map((row) => {
+          const value = Object.values(row)[0];
+          return typeof value === "string" ? value : "";
+        })
+        .join("\n");
+      throw ROLLBACK_SENTINEL;
+    });
+  } catch (error) {
+    if (error !== ROLLBACK_SENTINEL) {
+      return `EXPLAIN did not complete within ${STATEMENT_TIMEOUT_MS}ms (likely the naive plan at scale): ${String(error)}`;
+    }
+  }
+  return plan;
 }
 
 async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadConfig): Promise<RlsReadScenarioMetric> {
@@ -442,13 +486,25 @@ async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadCon
       await db.execute(sql.raw(`ANALYZE`));
     }
     const base = await timePrivileged(db, spec.readQuery, config.samples);
-    modes.push({ mode: "baseline", indexed, latencyMs: computePercentiles(base.ms), rowsReturned: base.rows });
+    modes.push({
+      mode: "baseline",
+      indexed,
+      latencyMs: computePercentiles(base.ms),
+      rowsReturned: base.rows,
+      timedOut: base.timedOut,
+    });
     const shaped = await timePrivileged(
       db,
       `SELECT id FROM ${spec.tableName} WHERE ${spec.shapeWhere} ORDER BY created_at_us DESC LIMIT ${READ_LIMIT}`,
       config.samples,
     );
-    modes.push({ mode: "shape-query", indexed, latencyMs: computePercentiles(shaped.ms), rowsReturned: shaped.rows });
+    modes.push({
+      mode: "shape-query",
+      indexed,
+      latencyMs: computePercentiles(shaped.ms),
+      rowsReturned: shaped.rows,
+      timedOut: shaped.timedOut,
+    });
 
     for (const [variant, policies] of [
       ["rls-correct", spec.correctPolicies],
@@ -456,7 +512,13 @@ async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadCon
     ] as const) {
       await installPolicies(db, spec.tableName, policies);
       const measured = await timeUnderRls(db, spec.readQuery, spec.claims, config.samples);
-      modes.push({ mode: variant, indexed, latencyMs: computePercentiles(measured.ms), rowsReturned: measured.rows });
+      modes.push({
+        mode: variant,
+        indexed,
+        latencyMs: computePercentiles(measured.ms),
+        rowsReturned: measured.rows,
+        timedOut: measured.timedOut,
+      });
     }
   }
 

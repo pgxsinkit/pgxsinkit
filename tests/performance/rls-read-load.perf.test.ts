@@ -56,6 +56,7 @@ describe("performance: RLS read load", () => {
               indexed: mode.indexed,
               p95: round(mode.latencyMs.p95),
               rows: mode.rowsReturned,
+              ...(mode.timedOut ? { timedOut: true } : {}),
             })),
           });
         }
