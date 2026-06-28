@@ -5,7 +5,9 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createIntervalConvergenceTrigger, createSyncClient } from "@pgxsinkit/client";
+import { eq } from "drizzle-orm";
+
+import { createIntervalConvergenceTrigger, createSyncClient, type MutationDetail } from "@pgxsinkit/client";
 import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
 import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
@@ -537,6 +539,119 @@ describe("client facade contract", () => {
 
       // force wipes regardless and closes the handle.
       await client.destroy({ force: true });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  // The genuine end-to-end of the pessimistic write path (ADR-0022): a REAL public
+  // `client.transaction({ mode: "pessimistic" })` against the REAL `createSyncServer` over HTTP. The
+  // client routing (`flushUnit` → `/mutations/unit`) and the server's authoritative route are otherwise
+  // tested in SEPARATE halves (the `pessimistic-flush` unit test mocks the server; `write-api`
+  // integration posts hand-built bodies). Neither half can see the *contract* between them — the URL
+  // path, the request body shape (`{ writeUnit, mutations }`), the ack shape. This closes that gap:
+  // the two halves only stay in agreement because this test exercises them as one.
+  it("a pessimistic transaction routes through the real authoritative endpoint and applies it (ADR-0022 e2e)", async () => {
+    const dataDir = await createPersistentDataDir();
+
+    try {
+      // syncEnabled:false isolates the WRITE contract from the read stream — the pessimistic flush is a
+      // foreground server round-trip, so no Electric timing is involved and the assertions are exact.
+      const client = await createSyncClient({
+        registry: projectsSyncRegistry,
+        electricUrl: env.electricUrl,
+        writeUrl: `http://127.0.0.1:${writeApiPort}`,
+        dataDir,
+        syncEnabled: false,
+      });
+
+      try {
+        const projectId = "01965156-5884-7a0b-a24e-31b5c9be00b1";
+        // The whole public surface: a real transaction block. Its unit flush-routes to the authoritative
+        // endpoint and the call resolves only once the server has decided.
+        const result = await client.transaction({ mode: "pessimistic" }, (tx) => {
+          tx.tables.projects.create({ id: projectId, name: "Pessimistic e2e" });
+        });
+
+        // The contract no half-test can prove: the client built `/mutations/unit`, the server's
+        // authoritative route accepted that body, applied it, and returned an ack the client parsed.
+        expect(result.acks).toHaveLength(1);
+        expect(result.acks[0]?.status).toBe("acked");
+        expect(result.acks[0]?.serverUpdatedAtUs).toMatch(/^[0-9]+$/);
+
+        // The write really landed in the authoritative (server) database.
+        const remoteRows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, projectId));
+        expect(remoteRows).toHaveLength(1);
+        expect(remoteRows[0]?.name).toBe("Pessimistic e2e");
+
+        // The client journal settled with nothing left owed (the `acked` row is retained until the read
+        // echo, which is disabled here — so we assert the owed counters, not `ackedCount`).
+        const diagnostics = await client.diagnostics();
+        expect(diagnostics.mutation.pendingCount).toBe(0);
+        expect(diagnostics.mutation.sendingCount).toBe(0);
+        expect(diagnostics.mutation.failedCount).toBe(0);
+      } finally {
+        await client.destroy({ force: true });
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("a pessimistic transaction surfaces a SANITISED server rejection and auto-discards the overlay (ADR-0022 §4 e2e)", async () => {
+    const dataDir = await createPersistentDataDir();
+
+    try {
+      const projectId = "01965156-5884-7a0b-a24e-31b5c9be00b2";
+      // Pre-seed the row on the AUTHORITATIVE server so the client's create collides on the primary key —
+      // a DB-enforced invariant the offline client cannot evaluate locally. With the read stream disabled
+      // the client never learns of this row, so it issues an honest optimistic create that the server alone
+      // can decline.
+      await server.drizzle.insert(projectsTable).values({ id: projectId, name: "Already there" });
+
+      const rejected: MutationDetail[] = [];
+      const client = await createSyncClient({
+        registry: projectsSyncRegistry,
+        electricUrl: env.electricUrl,
+        writeUrl: `http://127.0.0.1:${writeApiPort}`,
+        dataDir,
+        syncEnabled: false,
+        onReject: (details) => {
+          rejected.push(...details);
+        },
+      });
+
+      try {
+        const result = await client.transaction({ mode: "pessimistic" }, (tx) => {
+          tx.tables.projects.create({ id: projectId, name: "Colliding create" });
+        });
+
+        expect(result.acks).toHaveLength(1);
+        expect(result.acks[0]?.status).toBe("rejected");
+        // The contract: the rejection reason is sanitised at the SERVER before it crosses the wire, so no
+        // raw DB internals (constraint name, the offending key value/PII) ever reach the client.
+        const reason = result.acks[0]?.rejectionReason ?? "";
+        expect(reason.length).toBeGreaterThan(0);
+        expect(reason).not.toContain("constraint");
+        expect(reason).not.toContain("duplicate key");
+        expect(reason).not.toContain(projectId);
+
+        // ADR-0022 §4: the optimistic overlay was auto-discarded for the whole unit, and `onReject` fired.
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0]?.status).toBe("rejected");
+        const overlay = await client.pglite.query<{ c: number }>(
+          `SELECT count(*)::int AS c FROM projects_overlay WHERE id = $1`,
+          [projectId],
+        );
+        expect(overlay.rows[0]?.c).toBe(0);
+
+        // The unit rolled back: the authoritative row is untouched.
+        const remoteRows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, projectId));
+        expect(remoteRows).toHaveLength(1);
+        expect(remoteRows[0]?.name).toBe("Already there");
+      } finally {
+        await client.destroy({ force: true });
+      }
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }
