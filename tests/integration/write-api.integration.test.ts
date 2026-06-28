@@ -574,6 +574,11 @@ describe("write api implementation integration", () => {
     const ack = await readFirstAck(dupResponse);
     expect(ack.status).toBe("rejected");
     expect(ack.rejectionReason).toBeDefined();
+    // ADR-0022 §4: the client-facing reason is SANITISED — it must not leak the raw DB error internals
+    // (constraint name, the offending key value/PII). Full detail stays in the operations log.
+    expect(ack.rejectionReason).not.toContain("constraint");
+    expect(ack.rejectionReason).not.toContain("duplicate key");
+    expect(ack.rejectionReason).not.toContain(authorId);
 
     // The unit rolled back: the original row is untouched and there is no second row.
     const rows = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId));

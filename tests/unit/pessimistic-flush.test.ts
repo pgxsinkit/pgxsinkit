@@ -1,5 +1,9 @@
 import { describe, expect, it, mock } from "bun:test";
 
+import { sql } from "drizzle-orm";
+import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+
+import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { projectsSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
@@ -169,6 +173,76 @@ describe("pessimistic write-unit flush (ADR-0022 C2/D)", () => {
 
       const row = await readJournalRow(db);
       expect(row?.status).toBe("pending"); // still pending — owned by the authoritative path
+    } finally {
+      await db.close();
+    }
+  });
+});
+
+// A statically-`pessimistic` table: a plain `client.tables.x.create(...)` must STILL be server-authoritative,
+// i.e. it foreground-routes to the authoritative endpoint. Regression guard for the review's High finding —
+// before the fix such a write was tagged pessimistic but no path flushed it (the optimistic batch skips it),
+// so it sat pending forever with an optimistic overlay and no server answer.
+const seatsRegistry = defineSyncRegistry({
+  seats: defineSyncTable({
+    tableName: "seats",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 80 }),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" })
+        .notNull()
+        .default(sql`0`),
+    }),
+    mode: "readwrite",
+    writeMode: "pessimistic",
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+const seatsSchemaSql = generateLocalSchemaSql(seatsRegistry);
+
+describe("statically-pessimistic table foreground-routes its plain writes (ADR-0022 §2)", () => {
+  it("create() on a static-pessimistic table posts the write to the authoritative endpoint", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(seatsSchemaSql);
+    const runtime = createMutationRuntime({ db, registry: seatsRegistry, writeUrl });
+    const fetchMock = unitFetch("acked");
+    const SEAT_ID = "01963227-d4c7-72db-b858-00000000d001";
+    try {
+      // A plain create — NOT inside a transaction block — must still reach the server.
+      await withFetch(fetchMock, () => runtime.create("seats", { id: SEAT_ID, label: "A1" }));
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]![0])).toBe("http://localhost:3001/mutations/unit");
+
+      const row = await db.query<{ status: string; writeMode: string | null }>(
+        `SELECT status, write_mode AS "writeMode" FROM seats_mutations WHERE id = $1`,
+        [SEAT_ID],
+      );
+      expect(row.rows[0]?.status).toBe("acked");
+      expect(row.rows[0]?.writeMode).toBe("pessimistic");
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("a rejected static-pessimistic create auto-discards its overlay (no stuck optimistic state)", async () => {
+    const db = await createFreshTestPGlite();
+    await db.exec(seatsSchemaSql);
+    const runtime = createMutationRuntime({ db, registry: seatsRegistry, writeUrl });
+    const fetchMock = unitFetch("rejected");
+    const SEAT_ID = "01963227-d4c7-72db-b858-00000000d002";
+    try {
+      await withFetch(fetchMock, () => runtime.create("seats", { id: SEAT_ID, label: "B2" }));
+
+      const journal = await db.query<{ status: string }>(`SELECT status FROM seats_mutations WHERE id = $1`, [SEAT_ID]);
+      expect(journal.rows[0]?.status).toBe("rejected");
+      const overlay = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM seats_overlay WHERE id = $1`, [
+        SEAT_ID,
+      ]);
+      expect(overlay.rows[0]?.c).toBe(0); // overlay auto-discarded — the optimistic row is gone
     } finally {
       await db.close();
     }

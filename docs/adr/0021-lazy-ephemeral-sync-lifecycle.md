@@ -246,13 +246,16 @@ Built:
 - **`retention` folded into the registry fingerprint** — a `TEMP`-vs-durable DDL change forces a cache
   rebuild + subscription reset; `subscription` is deliberately excluded (pure runtime orchestration over
   identical tables, no DDL change). `packages/contracts/src/fingerprint.ts`.
-- **Explicit `desync(table)`** — the manual revert to dormant: stop the group's stream (`stopGroup`, so a
-  live shape can't re-fill the cache mid-truncate), clear the persisted `lazy + persistent` activation flag
-  (`clearLazyGroupActivation`, a no-op for ephemeral), and clean-truncate the read cache
-  (`buildDesyncTableSql`, ephemeral-aware: bare/`pg_temp` for a temp cluster, schema-qualified for a durable
-  one — the cluster is emptied, not dropped, so a later reference re-streams into it). Refuses an `eager`
-  relation (always-on) or one that owes unsettled writes (the truncate would drop them). `index.ts`,
-  `schema.ts`.
+- **Explicit `desync(table)`** — the manual revert to dormant, operating on the whole consistency **group**
+  (a group is one subscription / one frontier, so reverting one member reverts them all): stop the group's
+  stream (`stopGroup`, so a live shape can't re-fill the cache mid-truncate), clear the persisted
+  `lazy + persistent` activation flag (`clearLazyGroupActivation`, a no-op for ephemeral), **delete the
+  group's persisted Electric subscription** (`deleteSubscription`, so re-activation re-streams from scratch
+  rather than resuming the old cursor and never re-sending the truncated rows), and clean-truncate **every
+  member's** read cache (`buildDesyncTableSql`, ephemeral-aware: bare/`pg_temp` for a temp cluster,
+  schema-qualified for a durable one — the cluster is emptied, not dropped, so a later reference re-streams
+  into it). Refuses an `eager` relation (always-on) or any group member that owes unsettled writes (the
+  truncate would drop them). `index.ts`, `schema.ts`.
 
 Deferred — a memory optimisation, not correctness:
 

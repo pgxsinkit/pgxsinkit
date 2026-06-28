@@ -143,6 +143,10 @@ Built:
   unit in its **own isolated transaction** — so a constraint/trigger exception becomes a clean per-mutation
   `rejected` ack (the whole unit rolls back, never a whole-batch 500), a stale member rolls the atomic unit
   back as `conflicted` (overlays kept, ADR-0015), and a clean unit acks every member with its Server version.
+  The `rejected` ack's `rejectionReason` is **sanitised** (`toPublicRejectionReason`) — an app-authored
+  `RAISE` message passes through (the friendly capacity/quota channel) but a built-in constraint violation
+  becomes a stable generic message, so the raw DB error (constraint names, the offending values/PII, schema,
+  hints) never reaches the client; the full detail stays in the operations log.
   `packages/contracts/src/mutation.ts`, `packages/server/src/mutations/route.ts`, `index.ts`. Behaviour
   proven in the container integration lane (`write-api.integration.test.ts`: acked / rejected-on-constraint /
   conflicted-on-stale).
@@ -155,7 +159,10 @@ Built:
   - *Authoring.* `client.transaction({ mode }, run)` collects the callback's mutations into one unit and
     enqueues them atomically (`batch(items, unit)`); a `pessimistic` block then inline-flushes the unit and
     awaits the per-mutation result (foreground — the server's answer before the UI shows success), an
-    `optimistic` block enqueues + background-flushes.
+    `optimistic` block enqueues + background-flushes. A **plain** write to a statically-`pessimistic` table
+    (`client.tables.x.create(...)`, outside a block) is foreground-routed the same way — the per-table
+    `create`/`update`/`delete` flush the unit `enqueueBatch` tagged for it, so a static-pessimistic write is
+    never left tagged-but-unflushed.
   - *Routing + disposition.* `runtime.flushUnit(unitId)` POSTs the unit to the authoritative endpoint and
     applies each ack: `acked` converges via the synced echo; `conflicted` keeps the overlay (ADR-0015);
     `rejected` is terminal and **auto-discards** the unit's optimistic overlay (`discardOverlayForSettledEntity`)

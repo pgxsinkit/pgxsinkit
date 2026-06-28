@@ -536,25 +536,50 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       );
     }
 
-    // Refuse if the table owes the server unsent/unsettled writes: the truncate clears the journal, so
-    // dropping un-acked local intent would be silent data loss. Flush (or discard) those first.
-    const stats = await mutationRuntime.readMutationStats(key);
-    const owed =
-      stats.pendingCount + stats.sendingCount + stats.failedCount + stats.quarantinedCount + stats.conflictedCount;
+    // ADR-0021 §2/§4: desync operates on the whole consistency GROUP — a group is one subscription / one
+    // transaction frontier, so reverting one member to dormant reverts them all. Gather the group's tables
+    // (a table with no `consistencyGroup` is its own singleton group).
+    const targetGroup = entry.consistencyGroup;
+    const groupTableKeys = (
+      targetGroup == null
+        ? [key]
+        : (Object.keys(options.registry) as SyncTableName<TRegistry>[]).filter(
+            (candidate) => options.registry[candidate]!.consistencyGroup === targetGroup,
+          )
+    ) as SyncTableName<TRegistry>[];
+
+    // Refuse if ANY writable member owes the server unsent/unsettled writes: the truncate clears the
+    // journal, so dropping un-acked local intent would be silent data loss. Flush (or discard) those first.
+    let owed = 0;
+    for (const member of groupTableKeys) {
+      if (options.registry[member]!.mode === "readonly") continue;
+      const stats = await mutationRuntime.readMutationStats(member);
+      owed +=
+        stats.pendingCount + stats.sendingCount + stats.failedCount + stats.quarantinedCount + stats.conflictedCount;
+    }
     if (owed > 0) {
       throw new Error(
-        `desync('${String(key)}') refused: ${owed} unsettled mutation(s) in the local journal. Flush or discard them first.`,
+        `desync('${String(key)}') refused: ${owed} unsettled mutation(s) in the group's local journal. Flush or discard them first.`,
       );
     }
 
     const activeSync = sync;
-    const groupKey = activeSync?.groupKeyForTable(key);
-    // Stop the stream BEFORE truncating so a live shape can't re-populate the rows we just cleared, then
+    // The group key IS the Electric subscription key (`consistencyGroup ?? shapeKey`); fall back to the
+    // registry derivation when sync is disabled.
+    const groupKey = activeSync?.groupKeyForTable(key) ?? entry.consistencyGroup ?? entry.shape?.shapeKey;
+    // Stop the stream BEFORE truncating so a live shape can't re-populate the rows we just cleared, and
     // revert the durable promotion (a no-op for ephemeral, which never persisted a flag) so the next boot
-    // holds the relation dormant, and finally empty the read cache.
+    // holds the relation dormant again.
     if (activeSync != null && groupKey != null) activeSync.stopGroup(groupKey);
     if (groupKey != null) await clearLazyGroupActivation(pglite, options.registry, groupKey);
-    await pglite.exec(buildDesyncTableSql(options.registry, key as string));
+    // CRITICAL: delete the group's persisted Electric subscription so a later re-activation re-streams the
+    // shape from scratch. Without this it would resume from the old cursor and never re-send the rows we
+    // truncate below — leaving the relation permanently missing its pre-desync data.
+    if (groupKey != null) await resetSubscriptionsIfRequested(pglite, [groupKey]);
+    // Clean-truncate every member's local cluster.
+    for (const member of groupTableKeys) {
+      await pglite.exec(buildDesyncTableSql(options.registry, member as string));
+    }
   };
 
   const transaction: SyncClient<TRegistry>["transaction"] = async ({ mode }, run) => {

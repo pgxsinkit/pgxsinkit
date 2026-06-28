@@ -37,6 +37,8 @@ function lazyFacadeRegistry(): SyncTableRegistry {
 const started = new Set<string>();
 const ensureGroupStartedCalls: string[] = [];
 const stopGroupCalls: string[] = [];
+const deleteSubscriptionCalls: string[] = [];
+const desyncTableCalls: string[] = [];
 let failActivation = false;
 const startConfiguredSyncMock = mock(async () => ({
   unsubscribe: () => undefined,
@@ -68,7 +70,12 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
         create: async () => ({
           exec: async () => undefined,
           close: async () => undefined,
-          electric: { initMetadataTables: async () => undefined, deleteSubscription: async () => undefined },
+          electric: {
+            initMetadataTables: async () => undefined,
+            deleteSubscription: async (key: string) => {
+              deleteSubscriptionCalls.push(key);
+            },
+          },
         }),
       },
     }));
@@ -110,7 +117,10 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
       generateLocalSchemaSql: () => "SELECT 1;",
       buildDropReadCacheSql: () => "SELECT 1;",
       buildWipeLocalStoreSql: () => "SELECT 1;",
-      buildDesyncTableSql: () => "SELECT 1;",
+      buildDesyncTableSql: (_registry: unknown, tableKey: string) => {
+        desyncTableCalls.push(tableKey);
+        return "SELECT 1;";
+      },
       LOCAL_META_TABLE: "pgxsinkit_local_meta",
     }));
   });
@@ -121,6 +131,8 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     started.clear();
     ensureGroupStartedCalls.length = 0;
     stopGroupCalls.length = 0;
+    deleteSubscriptionCalls.length = 0;
+    desyncTableCalls.length = 0;
     startConfiguredSyncMock.mockClear();
   });
 
@@ -203,7 +215,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     expect(client.isSynced("archive")).toBe(true);
   });
 
-  it("desync stops a lazy relation's group and returns it to dormant (ADR-0021 §2)", async () => {
+  it("desync stops a lazy relation's group, clears the persisted subscription, and truncates it (ADR-0021 §2)", async () => {
     const client = await makeClient("memory:/lazy-facade-desync");
     await client.ensureSynced(["archive"]);
     expect(client.isSynced("archive")).toBe(true);
@@ -212,10 +224,53 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     // It stopped the group (so the stream can't re-fill the truncated cache) and the relation is dormant.
     expect(stopGroupCalls).toEqual(["archive-shape"]);
     expect(client.isSynced("archive")).toBe(false);
+    // CRITICAL (review fix): it deleted the group's persisted Electric subscription, so re-activation
+    // re-streams from scratch rather than resuming the old cursor and never re-sending the truncated rows.
+    expect(deleteSubscriptionCalls).toEqual(["archive-shape"]);
+    // And it truncated the (singleton) group's local cluster.
+    expect(desyncTableCalls).toEqual(["archive"]);
 
     // A later reference re-activates it from scratch — desync is the inverse of activation, not destroy.
     await client.ensureSynced(["archive"]);
     expect(client.isSynced("archive")).toBe(true);
+  });
+
+  it("desync is group-wide: it truncates EVERY member of a multi-table lazy consistency group (ADR-0021 §4)", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+    const docsTable = pgTable("docs", { id: uuid("id").primaryKey(), body: text("body") });
+    const notesTable = pgTable("notes", { id: uuid("id").primaryKey(), body: text("body") });
+    const groupRegistry = {
+      docs: {
+        table: docsTable,
+        mode: "readonly",
+        subscription: "lazy",
+        consistencyGroup: "library",
+        primaryKey: { columns: ["id"] },
+        shape: { tableName: "docs", shapeKey: "schema.docs" },
+        clientProjection: { syncedTable: "docs" },
+      },
+      notes: {
+        table: notesTable,
+        mode: "readonly",
+        subscription: "lazy",
+        consistencyGroup: "library",
+        primaryKey: { columns: ["id"] },
+        shape: { tableName: "notes", shapeKey: "schema.notes" },
+        clientProjection: { syncedTable: "notes" },
+      },
+    } as unknown as SyncTableRegistry;
+
+    const client = await createSyncClient({
+      registry: groupRegistry,
+      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      writeUrl: "http://127.0.0.1:3101",
+      dataDir: "memory:/lazy-facade-desync-group",
+    });
+
+    // Desyncing one member reverts the whole group: both tables' clusters are truncated, not just `docs`.
+    await client.desync("docs");
+    expect(desyncTableCalls.sort()).toEqual(["docs", "notes"]);
+    expect(deleteSubscriptionCalls).toEqual(["docs-shape"]); // one subscription for the whole group
   });
 
   it("desync refuses an eager relation (always-on, would immediately re-sync)", async () => {

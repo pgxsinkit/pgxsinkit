@@ -423,10 +423,17 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     }
   };
 
-  const enqueueBatch = async (items: ReadonlyArray<MutationBatchItem<TRegistry>>, unit?: WriteUnit) => {
+  const enqueueBatch = async (
+    items: ReadonlyArray<MutationBatchItem<TRegistry>>,
+    unit?: WriteUnit,
+  ): Promise<string[]> => {
     if (items.length === 0) {
-      return;
+      return [];
     }
+
+    // The distinct pessimistic write-unit ids this enqueue tagged — returned so the caller can
+    // foreground-route them to the authoritative endpoint (ADR-0022). Empty for a purely optimistic batch.
+    const pessimisticUnitIds = new Set<string>();
 
     // Resolve the auth subject once per batch, but only if a create actually needs it (a target table
     // with an `authUid` create-managed field). Avoids a token lookup for every other write.
@@ -626,9 +633,14 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         (context.entry.writeMode === "pessimistic"
           ? { id: globalThis.crypto.randomUUID(), mode: "pessimistic" }
           : undefined);
+      if (effectiveUnit?.mode === "pessimistic") {
+        pessimisticUnitIds.add(effectiveUnit.id);
+      }
       await insertMutationsBulk(options.db, context, plannedMutations, registryVersion, effectiveUnit);
       await upsertOverlayRecordsBulk(options.db, context, [...plannedOverlays.values()]);
     }
+
+    return [...pessimisticUnitIds];
   };
 
   const runFlush = async (table?: SyncTableName<TRegistry>) => {
@@ -696,46 +708,50 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     }
   };
 
-  return {
+  const runtime: MutationRuntime<TRegistry> = {
     registryVersion,
     create: async (table, input) => {
+      let unitIds: string[] = [];
       await runInTransaction(async () => {
-        await enqueueBatch([
-          {
-            table,
-            kind: "create",
-            input,
-          },
-        ]);
+        unitIds = await enqueueBatch([{ table, kind: "create", input }]);
       });
+      // A statically-`pessimistic` table foreground-routes its write to the authoritative endpoint
+      // (ADR-0022) — the write is server-authoritative, so it is sent immediately, not left for the
+      // optimistic convergence loop (which skips pessimistic rows).
+      for (const unitId of unitIds) {
+        await runtime.flushUnit(unitId);
+      }
     },
     update: async (table, entityKeyInput, patch) => {
+      let unitIds: string[] = [];
       await runInTransaction(async () => {
-        await enqueueBatch([
-          {
-            table,
-            kind: "update",
-            entityKey: entityKeyInput,
-            patch,
-          },
-        ]);
+        unitIds = await enqueueBatch([{ table, kind: "update", entityKey: entityKeyInput, patch }]);
       });
+      for (const unitId of unitIds) {
+        await runtime.flushUnit(unitId);
+      }
     },
     delete: async (table, entityKeyInput) => {
+      let unitIds: string[] = [];
       await runInTransaction(async () => {
-        await enqueueBatch([
-          {
-            table,
-            kind: "delete",
-            entityKey: entityKeyInput,
-          },
-        ]);
+        unitIds = await enqueueBatch([{ table, kind: "delete", entityKey: entityKeyInput }]);
       });
+      for (const unitId of unitIds) {
+        await runtime.flushUnit(unitId);
+      }
     },
     batch: async (items, unit) => {
+      let unitIds: string[] = [];
       await runInTransaction(async () => {
-        await enqueueBatch(items, unit);
+        unitIds = await enqueueBatch(items, unit);
       });
+      // An explicit unit (from a `transaction` block) is flushed by the caller; only foreground-route the
+      // units a plain `batch()` generated for statically-pessimistic tables.
+      if (!unit) {
+        for (const unitId of unitIds) {
+          await runtime.flushUnit(unitId);
+        }
+      }
     },
     discardConflict: async (table, entityKeyInput) => {
       const context = getTableContext(table);
@@ -1097,6 +1113,8 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       return createOptimisticRecordFromContext(context, input);
     },
   };
+
+  return runtime;
 }
 
 /**

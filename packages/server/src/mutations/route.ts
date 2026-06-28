@@ -511,9 +511,11 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
 
       if (!(error instanceof UnitNotCommittedError)) {
         // A DB-enforced invariant (capacity/quota/uniqueness constraint or trigger) declined the unit. The
-        // whole unit rolled back; surface a per-mutation `rejected` ack with the typed reason so the client
-        // auto-discards the unit's optimistic overlay (ADR-0022 §4).
-        const rejectionReason = formatBatchExecutionError(error);
+        // whole unit rolled back; surface a per-mutation `rejected` ack so the client auto-discards the
+        // unit's optimistic overlay (ADR-0022 §4). The ack carries a SANITISED reason — the raw DB error
+        // (constraint names, offending values/PII, schema, hints) stays in the operations log only.
+        const internalDetail = formatBatchExecutionError(error);
+        const publicReason = toPublicRejectionReason(error);
         const rejectedAcks: MutationAck[] = [];
         for (const mutation of body.mutations) {
           await logOperationSafely(db, operationsLogConfig, {
@@ -522,7 +524,7 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
             entityKey: mutation.entityKey,
             payload: mutation.payload,
             status: "execution_failed",
-            errorMessage: rejectionReason,
+            errorMessage: internalDetail,
             httpStatus: 409,
             mutationId: mutation.mutationId,
             mutationSeq: mutation.mutationSeq,
@@ -536,7 +538,7 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
             mutationId: mutation.mutationId,
             mutationSeq: mutation.mutationSeq,
             status: "rejected",
-            rejectionReason,
+            rejectionReason: publicReason,
             httpStatus: 409,
           });
         }
@@ -658,6 +660,53 @@ function formatBatchExecutionError(error: unknown): string {
   }
 
   return details.join(" | ");
+}
+
+/**
+ * Map a DB exception to a **client-safe** rejection reason for an authoritative `rejected` ack (ADR-0022 §4).
+ * The raw error text (`formatBatchExecutionError`) leaks constraint names, schema/table, the offending
+ * VALUES (potential PII), and trigger hints — and a `rejected` ack is success-path copy the app surfaces to
+ * users, so it must not echo that. Two cases:
+ *
+ * - **App-authored `RAISE`** (PL/pgSQL `RAISE EXCEPTION 'cohort is full'`, SQLSTATE `P0001` / a custom `P0…`
+ *   class): the message IS the consumer's own user-facing copy — pass it through. This is the intended way
+ *   to give a friendly capacity/quota message.
+ * - **Built-in integrity violations** (SQLSTATE class `23`) and everything else: return a stable generic
+ *   message keyed by SQLSTATE — never the raw message/detail/hint. Full detail stays in the operations log.
+ */
+export function toPublicRejectionReason(error: unknown): string {
+  const fallback = "The write was rejected by a server rule.";
+  const rootCause = getRootCauseError(error);
+
+  if (!rootCause) {
+    return fallback;
+  }
+
+  const code = getErrorStringProperty(rootCause, "code");
+
+  // App-authored RAISE — the message is the consumer's own copy, safe to surface.
+  if (code && (code === "P0001" || code.startsWith("P0"))) {
+    return rootCause.message.trim() || fallback;
+  }
+
+  // Built-in integrity violations: generic, code-keyed messages only (no raw constraint names / values).
+  const genericByCode: Record<string, string> = {
+    "23505": "This conflicts with an existing record (a uniqueness rule was violated).",
+    "23514": "A validation rule rejected this write.",
+    "23503": "A referenced record is missing (a relationship rule was violated).",
+    "23502": "A required value was missing.",
+    "23P01": "An exclusion rule rejected this write.",
+  };
+
+  if (code && genericByCode[code]) {
+    return genericByCode[code]!;
+  }
+
+  if (code && code.startsWith("23")) {
+    return "A data-integrity rule rejected this write.";
+  }
+
+  return fallback;
 }
 
 function getRootCauseError(error: unknown): Error | null {
