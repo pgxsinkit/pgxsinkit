@@ -512,6 +512,147 @@ describe("write api implementation integration", () => {
     expect(row?.title).toBe("external write");
   });
 
+  it("authoritative endpoint: applies a clean unit and acks every member with its Server version (ADR-0022)", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8d001";
+
+    const response = await postAuthoritativeUnit(
+      server,
+      [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "b1000000-0000-4000-8000-000000000001",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "Authoritative author" },
+        }),
+      ],
+      "unit-ok",
+    );
+
+    expect(response.status).toBe(200);
+    const ack = await readFirstAck(response);
+    expect(ack.status).toBe("acked");
+    expect(ack.serverUpdatedAtUs).toBeDefined();
+
+    const rows = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.name).toBe("Authoritative author");
+  });
+
+  it("authoritative endpoint: a constraint violation rejects the whole unit (not a 500) and rolls it back", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8d002";
+
+    await expectResponseStatus(
+      await postAuthoritativeUnit(server, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "b1000000-0000-4000-8000-000000000010",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "First" },
+        }),
+      ]),
+      200,
+    );
+
+    // A second create with the SAME id violates the PK — a DB-enforced invariant. The authoritative path
+    // turns the raised exception into a clean per-mutation `rejected` ack; the batch path would 500.
+    const dupResponse = await postAuthoritativeUnit(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000011",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: authorId, name: "Second" },
+      }),
+    ]);
+
+    expect(dupResponse.status).toBe(200);
+    const ack = await readFirstAck(dupResponse);
+    expect(ack.status).toBe("rejected");
+    expect(ack.rejectionReason).toBeDefined();
+
+    // The unit rolled back: the original row is untouched and there is no second row.
+    const rows = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.name).toBe("First");
+  });
+
+  it("authoritative endpoint: a stale member conflicts the atomic unit (overlay kept, nothing applied)", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8d003";
+    const todoId = "01963227-d4c7-72db-b858-f89f6af8d004";
+
+    await expectResponseStatus(
+      await postBatchMutations(server, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "b1000000-0000-4000-8000-000000000020",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "Author" },
+        }),
+      ]),
+      200,
+    );
+
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "b1000000-0000-4000-8000-000000000021",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: todoId, title: "original", author_id: authorId },
+      }),
+    ]);
+    const baseVersion = (await readFirstAck(createResponse)).serverUpdatedAtUs;
+    if (baseVersion === undefined) {
+      throw new Error("create ack did not carry a Server version");
+    }
+
+    // An external writer advances the row, so the next write authored against `baseVersion` is stale.
+    await expectResponseStatus(
+      await postBatchMutations(server, [
+        buildBatchMutation({
+          tableName: "todos",
+          entityKey: { id: todoId },
+          mutationId: "b1000000-0000-4000-8000-000000000022",
+          mutationSeq: 2,
+          kind: "update",
+          payload: { title: "external write" },
+          baseServerVersion: baseVersion,
+        }),
+      ]),
+      200,
+    );
+
+    // The stale update goes through the AUTHORITATIVE endpoint: the atomic unit conflicts (overlay kept),
+    // and — being atomic — applies nothing.
+    const staleResponse = await postAuthoritativeUnit(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "b1000000-0000-4000-8000-000000000023",
+        mutationSeq: 3,
+        kind: "update",
+        payload: { title: "stale write" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+
+    expect(staleResponse.status).toBe(200);
+    const staleAck = await readFirstAck(staleResponse);
+    expect(staleAck.status).toBe("conflicted");
+    expect(staleAck.conflictReason).toContain("reject-if-stale");
+
+    const row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId)))[0];
+    expect(row?.title).toBe("external write");
+  });
+
   it("last-write-wins: a stale write is applied anyway — today's behaviour, now a named choice", async () => {
     const authorId = "01963227-d4c7-72db-b858-f89f6af8c003";
 
@@ -1227,6 +1368,7 @@ interface AckShape {
   status: string;
   serverUpdatedAtUs?: string;
   conflictReason?: string;
+  rejectionReason?: string;
 }
 
 /** Read the first ack of a /api/mutations response with a typed shape (ADR-0015 proofs). */
@@ -1252,6 +1394,19 @@ async function postBatchMutations(
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify({ mutations }),
+  });
+}
+
+/** POST one pessimistic write-unit to the authoritative endpoint (ADR-0022 §3). */
+async function postAuthoritativeUnit(
+  server: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>,
+  mutations: Array<ReturnType<typeof buildBatchMutation>>,
+  writeUnit?: string,
+) {
+  return server.request("/api/mutations/unit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...(writeUnit ? { writeUnit } : {}), mutations }),
   });
 }
 

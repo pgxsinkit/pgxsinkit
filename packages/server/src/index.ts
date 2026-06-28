@@ -11,7 +11,7 @@ import type {
 
 import { proxyElectricShapeRequest } from "./electric-proxy";
 import type { ApplyFunctionDriftCheck } from "./mutations/plpgsql-apply";
-import { batchMutationPaths, createMutationHandler } from "./mutations/route";
+import { authoritativeMutationPaths, batchMutationPaths, createMutationHandler } from "./mutations/route";
 import { ensureOperationsLogSchema } from "./operations-log/ddl";
 import type { OperationsLogConfig } from "./operations-log/types";
 import { FetchRouter, type CorsScope } from "./router";
@@ -156,7 +156,7 @@ export function createSyncServer<
   }
 
   // The single mutation ingress point — all writes go through POST /api/mutations (and the /mutations alias).
-  const mutationHandler = createMutationHandler(
+  const mutationHandlers = createMutationHandler(
     db,
     options.registry,
     operationsLogConfig,
@@ -165,7 +165,10 @@ export function createSyncServer<
     options.applyFunctionDriftCheck,
   );
   for (const path of batchMutationPaths) {
-    router.post(path, mutationHandler);
+    router.post(path, mutationHandlers.batch);
+  }
+  for (const path of authoritativeMutationPaths) {
+    router.post(path, mutationHandlers.authoritative);
   }
 
   // The read-path shape proxy shares the same resolveAuthClaims adapter, so read and
@@ -277,7 +280,7 @@ function resolveOperationsLogConfig(options?: { enabled?: boolean }): Operations
   };
 }
 
-export { batchMutationPaths, createMutationHandler } from "./mutations/route";
+export { authoritativeMutationPaths, batchMutationPaths, createMutationHandler } from "./mutations/route";
 export type { CorsConfig, CorsScope, FetchHandler, RouterErrorHandler } from "./router";
 export { FetchRouter } from "./router";
 export { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "./mutations/plpgsql-apply";

@@ -5,6 +5,7 @@ import { getColumns } from "drizzle-orm/utils";
 import { createSchemaFactory } from "drizzle-orm/zod";
 
 import type {
+  AuthoritativeWriteRequest,
   BatchMutationRequest,
   JwtClaims,
   MutationAck,
@@ -13,6 +14,7 @@ import type {
   SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 import {
+  authoritativeWriteRequestSchema,
   batchMutationRequestSchema,
   getOmittedProjectedColumns as getOmittedProjectionColumns,
   resolveServerVersionColumnName,
@@ -23,6 +25,7 @@ import { logOperation, logOperationSafely } from "../operations-log/writer";
 import type { FetchHandler } from "../router";
 import {
   executePlpgsqlBatch,
+  type MutationConflict,
   verifyPlpgsqlBatchFunction,
   verifyRlsAuthHelpers,
   type ApplyFunctionDriftCheck,
@@ -36,6 +39,8 @@ const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
 type RouteReadQueryClient = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations>, "select">;
 
 export const batchMutationPaths = ["/api/mutations", "/mutations"] as const;
+/** The authoritative (pessimistic) write endpoint (ADR-0022 §3): one atomic write-unit per POST. */
+export const authoritativeMutationPaths = ["/api/mutations/unit", "/mutations/unit"] as const;
 
 export function createMutationHandler<TRegistry extends SyncTableRegistry>(
   db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
@@ -44,7 +49,7 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
   operationsLogReady: Promise<void>,
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null,
   applyFunctionDriftCheck?: ApplyFunctionDriftCheck,
-): FetchHandler {
+): { batch: FetchHandler; authoritative: FetchHandler } {
   let startupReadyPromise: Promise<void> | undefined;
 
   const startupReady = () => {
@@ -55,67 +60,20 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
     return startupReadyPromise;
   };
 
-  const handleBatchMutation = async (request: Request): Promise<Response> => {
-    await Promise.all([startupReady(), operationsLogReady]);
-
-    const requestPath = new URL(request.url).pathname;
-    let rawBody: unknown;
-
-    try {
-      rawBody = await request.json();
-    } catch (error) {
-      await logOperationSafely(db, operationsLogConfig, {
-        tableName: null,
-        operationKind: null,
-        entityKey: null,
-        payload: null,
-        status: "validation_failed",
-        errorMessage: error instanceof Error ? error.message : "Invalid JSON request body",
-        httpStatus: 400,
-        requestPath: requestPath,
-      });
-
-      return Response.json(
-        {
-          message: "Invalid batch mutation request",
-          issues: [],
-        },
-        { status: 400 },
-      );
-    }
-
-    let body: BatchMutationRequest;
-
-    try {
-      body = batchMutationRequestSchema.parse(rawBody);
-    } catch (error) {
-      await logOperationSafely(db, operationsLogConfig, {
-        tableName: null,
-        operationKind: null,
-        entityKey: null,
-        payload: rawBody,
-        status: "validation_failed",
-        errorMessage: error instanceof Error ? error.message : "Invalid batch mutation request",
-        httpStatus: 400,
-        requestPath: requestPath,
-      });
-
-      return Response.json(
-        {
-          message: "Invalid batch mutation request",
-          issues: isValidationError(error) ? error.issues : [],
-        },
-        { status: 400 },
-      );
-    }
-
+  // Per-mutation payload validation shared by the batch and authoritative endpoints (security: both must
+  // reject client-omitted projection fields, server-managed fields, and malformed payloads before apply).
+  // Logs each offender and returns the attributable 400 Response, or null when every mutation is valid.
+  const validateMutationsOrRespond = async (
+    mutations: BatchMutationRequest["mutations"],
+    requestPath: string,
+  ): Promise<Response | null> => {
     const validationErrors: string[] = [];
     const invalidMutations: Array<{
       mutation: BatchMutationRequest["mutations"][number];
       message: string;
     }> = [];
 
-    for (const mutation of body.mutations) {
+    for (const mutation of mutations) {
       if (!(mutation.tableName in registry)) {
         const message = `Unknown table: ${mutation.tableName}`;
         validationErrors.push(message);
@@ -200,6 +158,68 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
         },
         { status: 400 },
       );
+    }
+
+    return null;
+  };
+
+  const handleBatchMutation = async (request: Request): Promise<Response> => {
+    await Promise.all([startupReady(), operationsLogReady]);
+
+    const requestPath = new URL(request.url).pathname;
+    let rawBody: unknown;
+
+    try {
+      rawBody = await request.json();
+    } catch (error) {
+      await logOperationSafely(db, operationsLogConfig, {
+        tableName: null,
+        operationKind: null,
+        entityKey: null,
+        payload: null,
+        status: "validation_failed",
+        errorMessage: error instanceof Error ? error.message : "Invalid JSON request body",
+        httpStatus: 400,
+        requestPath: requestPath,
+      });
+
+      return Response.json(
+        {
+          message: "Invalid batch mutation request",
+          issues: [],
+        },
+        { status: 400 },
+      );
+    }
+
+    let body: BatchMutationRequest;
+
+    try {
+      body = batchMutationRequestSchema.parse(rawBody);
+    } catch (error) {
+      await logOperationSafely(db, operationsLogConfig, {
+        tableName: null,
+        operationKind: null,
+        entityKey: null,
+        payload: rawBody,
+        status: "validation_failed",
+        errorMessage: error instanceof Error ? error.message : "Invalid batch mutation request",
+        httpStatus: 400,
+        requestPath: requestPath,
+      });
+
+      return Response.json(
+        {
+          message: "Invalid batch mutation request",
+          issues: isValidationError(error) ? error.issues : [],
+        },
+        { status: 400 },
+      );
+    }
+
+    const invalidResponse = await validateMutationsOrRespond(body.mutations, requestPath);
+    if (invalidResponse) {
+      return invalidResponse;
     }
 
     const acks: MutationAck[] = [];
@@ -358,7 +378,251 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
     return Response.json({ acks });
   };
 
-  return handleBatchMutation;
+  // ADR-0022 §3 (mechanism c): the authoritative (pessimistic) write endpoint. One write-**unit** per POST,
+  // applied in its OWN isolated transaction, atomically — so a constraint/trigger exception becomes a clean
+  // per-mutation `rejected` ack (the whole unit rolls back, overlays auto-discard) instead of the batch
+  // path's whole-batch 500, and a stale member surfaces `conflicted` (overlays kept) without partial apply.
+  const handleAuthoritativeWrite = async (request: Request): Promise<Response> => {
+    await Promise.all([startupReady(), operationsLogReady]);
+
+    const requestPath = new URL(request.url).pathname;
+    let rawBody: unknown;
+
+    try {
+      rawBody = await request.json();
+    } catch (error) {
+      await logOperationSafely(db, operationsLogConfig, {
+        tableName: null,
+        operationKind: null,
+        entityKey: null,
+        payload: null,
+        status: "validation_failed",
+        errorMessage: error instanceof Error ? error.message : "Invalid JSON request body",
+        httpStatus: 400,
+        requestPath: requestPath,
+      });
+      return Response.json({ message: "Invalid authoritative write request", issues: [] }, { status: 400 });
+    }
+
+    let body: AuthoritativeWriteRequest;
+
+    try {
+      body = authoritativeWriteRequestSchema.parse(rawBody);
+    } catch (error) {
+      await logOperationSafely(db, operationsLogConfig, {
+        tableName: null,
+        operationKind: null,
+        entityKey: null,
+        payload: rawBody,
+        status: "validation_failed",
+        errorMessage: error instanceof Error ? error.message : "Invalid authoritative write request",
+        httpStatus: 400,
+        requestPath: requestPath,
+      });
+      return Response.json(
+        {
+          message: "Invalid authoritative write request",
+          issues: isValidationError(error) ? error.issues : [],
+        },
+        { status: 400 },
+      );
+    }
+
+    const invalidResponse = await validateMutationsOrRespond(body.mutations, requestPath);
+    if (invalidResponse) {
+      return invalidResponse;
+    }
+
+    const rlsAuthContextRequired = isRlsAuthContextRequired(registry);
+    let actorUserId: string | null = null;
+    // The unit's outcome, decided inside its OWN transaction: applied (Server versions per member) or
+    // conflicted (a stale member → rolled back, overlays kept). An execution exception is handled in catch.
+    let appliedServerVersions: Map<string, string | null> | null = null;
+    let unitConflicts: MutationConflict[] | null = null;
+
+    try {
+      await db.transaction(async (tx) => {
+        const shouldApplyRlsContext = rlsAuthContextRequired;
+        let userClaims: Record<string, unknown> = {};
+
+        if (shouldApplyRlsContext) {
+          const resolvedClaims = await resolveAuthClaims?.(request);
+
+          if (!isPlainObject(resolvedClaims)) {
+            await logOperationSafely(db, operationsLogConfig, {
+              tableName: null,
+              operationKind: null,
+              entityKey: null,
+              payload: rawBody,
+              status: "validation_failed",
+              errorMessage: "Missing validated JWT claims for RLS-enabled tables",
+              httpStatus: 401,
+              requestPath: requestPath,
+            });
+
+            throw new UnauthorizedBatchMutationError(
+              "RLS-enabled tables require validated JWT claims in request context",
+            );
+          }
+
+          userClaims = resolvedClaims;
+          actorUserId = getUuidClaim(userClaims, "sub");
+        }
+
+        const unitRequest = sanitizeRestrictedFields(body, registry);
+        await tx.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
+
+        const conflicts = await executePlpgsqlBatch(
+          tx as unknown as TransactionClient,
+          unitRequest,
+          requestPath,
+          false,
+          shouldApplyRlsContext,
+          userClaims,
+        );
+
+        if (shouldApplyRlsContext) {
+          await tx.execute(sql`RESET ROLE`);
+        }
+
+        if (conflicts.length > 0) {
+          // The unit is atomic — a stale member means none of it applies. Roll back; report all members as
+          // conflicted (overlays kept, re-resolve the unit) below.
+          unitConflicts = conflicts;
+          throw new UnitNotCommittedError();
+        }
+
+        // Applied cleanly. Read each member's resulting Server version INSIDE the txn, before it commits.
+        const versions = new Map<string, string | null>();
+        for (const mutation of unitRequest.mutations) {
+          const version = await readServerUpdatedAtUs(
+            tx,
+            registry[mutation.tableName as keyof TRegistry] as SyncTableEntry,
+            mutation.entityKey,
+          );
+          versions.set(mutation.mutationId, version ?? null);
+        }
+        appliedServerVersions = versions;
+      });
+    } catch (error) {
+      if (error instanceof UnauthorizedBatchMutationError) {
+        return Response.json({ message: error.message }, { status: 401 });
+      }
+
+      if (!(error instanceof UnitNotCommittedError)) {
+        // A DB-enforced invariant (capacity/quota/uniqueness constraint or trigger) declined the unit. The
+        // whole unit rolled back; surface a per-mutation `rejected` ack with the typed reason so the client
+        // auto-discards the unit's optimistic overlay (ADR-0022 §4).
+        const rejectionReason = formatBatchExecutionError(error);
+        const rejectedAcks: MutationAck[] = [];
+        for (const mutation of body.mutations) {
+          await logOperationSafely(db, operationsLogConfig, {
+            tableName: mutation.tableName,
+            operationKind: mutation.kind,
+            entityKey: mutation.entityKey,
+            payload: mutation.payload,
+            status: "execution_failed",
+            errorMessage: rejectionReason,
+            httpStatus: 409,
+            mutationId: mutation.mutationId,
+            mutationSeq: mutation.mutationSeq,
+            clientTimestampUs: mutation.clientTimestampUs,
+            requestPath: requestPath,
+            userId: actorUserId,
+          });
+          rejectedAcks.push({
+            tableName: mutation.tableName,
+            entityKey: mutation.entityKey,
+            mutationId: mutation.mutationId,
+            mutationSeq: mutation.mutationSeq,
+            status: "rejected",
+            rejectionReason,
+            httpStatus: 409,
+          });
+        }
+        return Response.json({ acks: rejectedAcks });
+      }
+      // UnitNotCommittedError — `unitConflicts` is set; fall through to conflicted-ack building.
+    }
+
+    const acks: MutationAck[] = [];
+
+    if (unitConflicts) {
+      const conflictByMutationId = new Map(
+        (unitConflicts as MutationConflict[]).map((conflict) => [conflict.mutationId, conflict]),
+      );
+      for (const mutation of body.mutations) {
+        const conflict = conflictByMutationId.get(mutation.mutationId);
+        const conflictReason = conflict
+          ? conflict.currentServerVersion == null
+            ? `Update rejected by the reject-if-stale conflict policy (ADR-0015): the target row no longer ` +
+              `exists on the server (deleted by another writer after this write was authored).`
+            : `Stale write rejected by the reject-if-stale conflict policy (ADR-0015): the row's current ` +
+              `server version ${conflict.currentServerVersion} is ahead of the base ` +
+              `${mutation.baseServerVersion ?? "(unknown)"} this write was authored against.`
+          : `Atomic write-unit not committed (ADR-0022): a sibling write in the same unit was rejected as ` +
+            `stale, so this write rolled back too. Re-resolve the unit.`;
+
+        await logOperationSafely(db, operationsLogConfig, {
+          tableName: mutation.tableName,
+          operationKind: mutation.kind,
+          entityKey: mutation.entityKey,
+          payload: mutation.payload,
+          status: "conflicted",
+          errorMessage: conflictReason,
+          httpStatus: 409,
+          mutationId: mutation.mutationId,
+          mutationSeq: mutation.mutationSeq,
+          clientTimestampUs: mutation.clientTimestampUs,
+          requestPath: requestPath,
+          userId: actorUserId,
+        });
+
+        acks.push({
+          tableName: mutation.tableName,
+          entityKey: mutation.entityKey,
+          mutationId: mutation.mutationId,
+          mutationSeq: mutation.mutationSeq,
+          status: "conflicted",
+          ...(conflict?.currentServerVersion ? { serverUpdatedAtUs: conflict.currentServerVersion } : {}),
+          conflictReason,
+          httpStatus: 409,
+        });
+      }
+      return Response.json({ acks });
+    }
+
+    // Applied: ack every member, carrying the Server version each converged to.
+    const serverVersions = appliedServerVersions ?? new Map<string, string | null>();
+    for (const mutation of body.mutations) {
+      await logOperationSafely(db, operationsLogConfig, {
+        tableName: mutation.tableName,
+        operationKind: mutation.kind,
+        entityKey: mutation.entityKey,
+        payload: mutation.payload,
+        status: "succeeded",
+        httpStatus: 200,
+        mutationId: mutation.mutationId,
+        mutationSeq: mutation.mutationSeq,
+        clientTimestampUs: mutation.clientTimestampUs,
+        requestPath: requestPath,
+        userId: actorUserId,
+      });
+      const serverUpdatedAtUs = serverVersions.get(mutation.mutationId) ?? undefined;
+      acks.push({
+        tableName: mutation.tableName,
+        entityKey: mutation.entityKey,
+        mutationId: mutation.mutationId,
+        mutationSeq: mutation.mutationSeq,
+        status: "acked",
+        ...(serverUpdatedAtUs ? { serverUpdatedAtUs } : {}),
+      });
+    }
+
+    return Response.json({ acks });
+  };
+
+  return { batch: handleBatchMutation, authoritative: handleAuthoritativeWrite };
 }
 
 function isValidationError(error: unknown): error is { issues: unknown[] } {
@@ -428,6 +692,13 @@ function isRlsAuthContextRequired(registry: SyncTableRegistry): boolean {
 }
 
 class UnauthorizedBatchMutationError extends Error {}
+
+/**
+ * Thrown inside the authoritative write's transaction to roll the whole unit back when a member is a stale
+ * write (ADR-0015) — distinct from an execution exception (a capacity/constraint rejection). The handler
+ * catches it and reports every member `conflicted` (overlays kept), having committed nothing.
+ */
+class UnitNotCommittedError extends Error {}
 
 function getUuidClaim(claims: JwtClaims, key: string): string | null {
   const value = claims[key];

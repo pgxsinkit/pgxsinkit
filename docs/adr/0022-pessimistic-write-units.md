@@ -136,11 +136,21 @@ Built:
   `packages/client/src/schema.ts` (journal DDL), `packages/client/src/mutation.ts` (`insertMutationsBulk`,
   `enqueueBatch`, `batch`).
 
+- **The authoritative write endpoint + protocol** (decision 3, mechanism **c1**): a new `rejected` ack
+  transport status + `rejectionReason` + the `authoritativeWriteRequestSchema` (one write-unit per POST), and
+  a sibling server route (`/api/mutations/unit`) that **reuses the registry-driven applier** but runs each
+  unit in its **own isolated transaction** — so a constraint/trigger exception becomes a clean per-mutation
+  `rejected` ack (the whole unit rolls back, never a whole-batch 500), a stale member rolls the atomic unit
+  back as `conflicted` (overlays kept, ADR-0015), and a clean unit acks every member with its Server version.
+  `packages/contracts/src/mutation.ts`, `packages/server/src/mutations/route.ts`, `index.ts`. Behaviour
+  proven in the container integration lane (`write-api.integration.test.ts`: acked / rejected-on-constraint /
+  conflicted-on-stale).
+
 Not yet built: the public `transaction({ mode })` block that generates a unit and tags the mutations
-authored within it (decision 2 — the authoring half over the substrate above); the flush-routing of a
-pessimistic unit to the authoritative endpoint applying it in its own serialised transaction with a
-per-mutation result (decision 3, mechanism **c/c1**); and the **auto-discard-on-reject** overlay disposition
-+ typed-rejection ack (decision 4).
+authored within it (decision 2 — the authoring half over the substrate above); the client flush-**routing**
+of a pessimistic unit to the authoritative endpoint (group by `write_unit ?? staticGroup`); and the
+**auto-discard-on-reject** overlay disposition + the `rejected` journal terminal + typed-rejection ack on the
+client (decision 4).
 
 Grounded in `packages/server/src/mutations/plpgsql-apply.ts` (the batch is one transaction;
 `reject-if-stale` via pre-check + `RETURNS TABLE`), `packages/client/src/mutation-state.ts` (the state

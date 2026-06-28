@@ -5,6 +5,7 @@ import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 
 import {
+  authoritativeWriteRequestSchema,
   buildRowFilterWhere,
   defineSyncRegistry,
   defineSyncTable,
@@ -392,5 +393,40 @@ describe("ADR-0021 sync lifecycle axes (subscription, retention)", () => {
         b: writableWriteModeTable("wm_grp2_b", { consistencyGroup: "wg2", writeMode: "pessimistic" }),
       }),
     ).not.toThrow();
+  });
+});
+
+describe("authoritative write protocol (ADR-0022)", () => {
+  const envelope = {
+    tableName: "seats",
+    entityKey: { id: "01963227-d4c7-72db-b858-f89f6af8fc01" },
+    mutationId: "01963227-d4c7-72db-b858-f89f6af8fc02",
+    mutationSeq: 1,
+    kind: "create" as const,
+    payload: { label: "x" },
+    clientTimestampUs: "1700000000000000",
+  };
+
+  it("validates an authoritative write request — one unit of mutations, optional unit id", () => {
+    expect(() => authoritativeWriteRequestSchema.parse({ writeUnit: "u-1", mutations: [envelope] })).not.toThrow();
+    // writeUnit is optional: a statically-pessimistic group derives its unit from the group key.
+    expect(() => authoritativeWriteRequestSchema.parse({ mutations: [envelope] })).not.toThrow();
+    // at least one mutation is required.
+    expect(() => authoritativeWriteRequestSchema.parse({ mutations: [] })).toThrow();
+  });
+
+  it("accepts a `rejected` ack carrying a typed rejectionReason (ADR-0022 §4)", () => {
+    const ack = {
+      tableName: "seats",
+      entityKey: { id: "01963227-d4c7-72db-b858-f89f6af8fc01" },
+      mutationId: "01963227-d4c7-72db-b858-f89f6af8fc02",
+      mutationSeq: 1,
+      status: "rejected" as const,
+      rejectionReason: "full: the cohort has no remaining seats",
+      httpStatus: 409,
+    };
+    expect(mutationAckSchema.parse(ack).status).toBe("rejected");
+    // The old transport statuses still validate.
+    expect(mutationAckSchema.parse({ ...ack, status: "acked", rejectionReason: undefined }).status).toBe("acked");
   });
 });
