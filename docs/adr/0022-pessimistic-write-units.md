@@ -129,12 +129,18 @@ Built:
   alongside the ADR-0021 subscription/retention uniformity). `packages/contracts` (`config.ts`,
   `registry.ts`). Deliberately **excluded from the registry fingerprint** (like `subscription`): static
   write-mode is runtime flush-routing over identical local DDL, so flipping it needs no cache rebuild.
+- **The durable write-unit tag substrate** (decision 2, dynamic site — storage half): two nullable journal
+  columns `write_unit` (the shared unit id grouping co-committed mutations) + `write_mode`, stamped by a new
+  optional `WriteUnit` arg on the runtime's `batch(items, unit)`; the per-table create/update/delete helpers
+  pass no unit (their mode comes from the static group at flush). NULL on both = the default path.
+  `packages/client/src/schema.ts` (journal DDL), `packages/client/src/mutation.ts` (`insertMutationsBulk`,
+  `enqueueBatch`, `batch`).
 
-Not yet built: the dynamic `transaction({ mode })` block + the per-mutation unit tag it stamps (decision 2,
-dynamic site — this *will* touch the journal DDL + fingerprint); the flush-routing of a pessimistic unit to
-the authoritative endpoint applying it in its own serialised transaction with a per-mutation result
-(decision 3, mechanism **c/c1**); and the **auto-discard-on-reject** overlay disposition + typed-rejection
-ack (decision 4).
+Not yet built: the public `transaction({ mode })` block that generates a unit and tags the mutations
+authored within it (decision 2 — the authoring half over the substrate above); the flush-routing of a
+pessimistic unit to the authoritative endpoint applying it in its own serialised transaction with a
+per-mutation result (decision 3, mechanism **c/c1**); and the **auto-discard-on-reject** overlay disposition
++ typed-rejection ack (decision 4).
 
 Grounded in `packages/server/src/mutations/plpgsql-apply.ts` (the batch is one transaction;
 `reject-if-stale` via pre-check + `RETURNS TABLE`), `packages/client/src/mutation-state.ts` (the state

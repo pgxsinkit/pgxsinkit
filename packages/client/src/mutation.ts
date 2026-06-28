@@ -40,6 +40,7 @@ import type {
   SyncTableRecord,
   SyncTableRegistry,
   SyncTableUpdateInput,
+  WriteMode,
 } from "@pgxsinkit/contracts";
 import {
   batchMutationErrorSchema,
@@ -63,6 +64,17 @@ import {
 
 export type { MutationStatus } from "./mutation-state";
 export type MutationKind = "create" | "update" | "delete";
+
+/**
+ * The dynamic write-unit tag (ADR-0022 §2) a `transaction({ mode })` block stamps onto the mutations
+ * authored within it: a shared `id` grouping the co-committed mutations, and the unit's `mode`. Persisted
+ * on each journal row (`write_unit` / `write_mode`); absent for the default path, where the flusher derives
+ * mode + unit from the table's static consistency group.
+ */
+export interface WriteUnit {
+  id: string;
+  mode: WriteMode;
+}
 
 export type MutationBatchItem<TRegistry extends SyncTableRegistry> = {
   [TKey in SyncTableName<TRegistry>]:
@@ -212,7 +224,12 @@ export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
     patch: SyncTableUpdateInput<TRegistry, TKey>,
   ) => Promise<void>;
   delete: <TKey extends SyncTableName<TRegistry>>(table: TKey, entityKey: Record<string, string>) => Promise<void>;
-  batch: (items: ReadonlyArray<MutationBatchItem<TRegistry>>) => Promise<void>;
+  /**
+   * Enqueue an atomic batch of mutations. An optional {@link WriteUnit} tags every row of the batch as one
+   * dynamic write-unit (ADR-0022 §2) — the `transaction({ mode })` block passes it; the per-table
+   * `create`/`update`/`delete` helpers do not (their write-mode comes from the static group at flush).
+   */
+  batch: (items: ReadonlyArray<MutationBatchItem<TRegistry>>, unit?: WriteUnit) => Promise<void>;
   /**
    * Discard a `conflicted` entity (ADR-0015): clear its conflicted journal entries and the kept
    * optimistic Overlay, so the Read model falls back to the synced (server) value. Use when the user
@@ -390,7 +407,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     }
   };
 
-  const enqueueBatch = async (items: ReadonlyArray<MutationBatchItem<TRegistry>>) => {
+  const enqueueBatch = async (items: ReadonlyArray<MutationBatchItem<TRegistry>>, unit?: WriteUnit) => {
     if (items.length === 0) {
       return;
     }
@@ -585,7 +602,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         }
       }
 
-      await insertMutationsBulk(options.db, context, plannedMutations, registryVersion);
+      await insertMutationsBulk(options.db, context, plannedMutations, registryVersion, unit);
       await upsertOverlayRecordsBulk(options.db, context, [...plannedOverlays.values()]);
     }
   };
@@ -691,9 +708,9 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         ]);
       });
     },
-    batch: async (items) => {
+    batch: async (items, unit) => {
       await runInTransaction(async () => {
-        await enqueueBatch(items);
+        await enqueueBatch(items, unit);
       });
     },
     discardConflict: async (table, entityKeyInput) => {
@@ -1377,11 +1394,17 @@ async function insertMutationsBulk(
   context: TableContext,
   rows: ReadonlyArray<PlannedMutationInsert>,
   registryVersion: string | null,
+  unit?: WriteUnit,
 ) {
   if (rows.length === 0) {
     return;
   }
 
+  // ADR-0022: a dynamic write-unit tags every row of the batch with one shared unit id + mode; the
+  // default path leaves both NULL (the flusher derives mode/unit from the static group). Appended after
+  // the existing columns so the per-row placeholder indices above stay put.
+  const writeUnit = unit?.id ?? null;
+  const writeMode = unit?.mode ?? null;
   const insertColumnNames = [
     "mutation_id",
     ...context.pkColumnNames,
@@ -1395,6 +1418,8 @@ async function insertMutationsBulk(
     "enqueued_at_us",
     "next_retry_at_us",
     "updated_at_us",
+    "write_unit",
+    "write_mode",
   ];
   const params: unknown[] = [];
   const tuples = rows.map((row) => {
@@ -1411,23 +1436,28 @@ async function insertMutationsBulk(
       row.nowUs,
       row.nowUs,
       row.nowUs,
+      writeUnit,
+      writeMode,
     ];
 
     params.push(...values);
 
+    const pk = context.pkColumnNames.length;
     const valuePlaceholders = [
       formatSqlValuePlaceholder(start + 1, "mutation_id"),
       ...context.pkColumnNames.map((columnName, index) => formatSqlValuePlaceholder(start + index + 2, columnName)),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 2, "entity_key_json"),
+      formatSqlValuePlaceholder(start + pk + 2, "entity_key_json"),
       `nextval('${escapeSqlString(context.journalSequence)}')::integer`,
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 3, "mutation_kind"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 4, "status"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 5, "registry_version"),
-      `$${start + context.pkColumnNames.length + 6}::bigint`,
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 7, "payload_json"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 8, "enqueued_at_us"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 9, "next_retry_at_us"),
-      formatSqlValuePlaceholder(start + context.pkColumnNames.length + 10, "updated_at_us"),
+      formatSqlValuePlaceholder(start + pk + 3, "mutation_kind"),
+      formatSqlValuePlaceholder(start + pk + 4, "status"),
+      formatSqlValuePlaceholder(start + pk + 5, "registry_version"),
+      `$${start + pk + 6}::bigint`,
+      formatSqlValuePlaceholder(start + pk + 7, "payload_json"),
+      formatSqlValuePlaceholder(start + pk + 8, "enqueued_at_us"),
+      formatSqlValuePlaceholder(start + pk + 9, "next_retry_at_us"),
+      formatSqlValuePlaceholder(start + pk + 10, "updated_at_us"),
+      formatSqlValuePlaceholder(start + pk + 11, "write_unit"),
+      formatSqlValuePlaceholder(start + pk + 12, "write_mode"),
     ];
 
     return `(${valuePlaceholders.join(", ")})`;

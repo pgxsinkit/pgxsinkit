@@ -136,6 +136,11 @@ export function generateLocalSchemaSql<TRegistry extends SyncTableRegistry>(regi
         // was authored. The slot lives on the journal (per-mutation, like registry_version above);
         // the stale-write conflict policy (ADR-0015) decides its exact semantics and stamps it.
         "base_server_version BIGINT",
+        // ADR-0022: the dynamic write-unit tag stamped by a `transaction({ mode })` block — the shared
+        // unit id grouping co-committed mutations, and the unit's write-mode. NULL for the default path
+        // (an untagged mutation), where the flusher derives mode + unit from the table's static group.
+        "write_unit TEXT",
+        "write_mode VARCHAR(24)",
         "payload_json TEXT NOT NULL",
         "attempt_count INTEGER NOT NULL DEFAULT 0",
         "last_error TEXT",
