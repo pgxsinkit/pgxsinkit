@@ -282,11 +282,17 @@ function normalizeMembershipColumns(options: SupabaseMembershipPredicateColumns)
   };
 }
 
-// Containment form (not a correlated EXISTS): the governed row's container column must be IN the
-// set of containers the subject belongs to. The IN keeps the outer container reference in the
-// policy table's scope — a correlated `EXISTS (… WHERE m.container = container …)` would let the
-// membership table's same-named column shadow the outer one, collapsing the correlation. `inArray`
-// can't wrap a raw subquery, so the `IN (…)` stays `sql`; its leaves are Drizzle `eq`/`and`.
+// Containment form (not a correlated EXISTS): the governed row's container column must be in the set
+// of containers the subject belongs to. Two reasons it is `= ANY(ARRAY(subquery))` and not
+// `IN (subquery)`, both load-bearing:
+//   1. Correctness — the subquery stays uncorrelated (its `WHERE` references only the subject), so the
+//      membership table's same-named column can't shadow the outer container column. A correlated
+//      `EXISTS (… WHERE m.container = container …)` would collapse the correlation.
+//   2. Performance — for a runtime-resolved set (the subject comes from `current_setting`, opaque to
+//      the planner) `IN (subquery)` is costed as a hashed semi-join → **sequential scan** of the
+//      governed table; `= ANY(ARRAY(subquery))` materializes the set once (InitPlan) and the
+//      ScalarArrayOp drives a **bitmap index scan**. At scale that is ~25-45× faster (the rls-read
+//      perf track proves it). `inArray` can't wrap a raw subquery, so this stays `sql`.
 function membershipMatch(cols: NormalizedMembershipColumns, subject: SQL, requireManager: boolean): SQL {
   const subjectIsMember = eq(cols.membershipSubjectColumn, subject);
   const where =
@@ -294,7 +300,7 @@ function membershipMatch(cols: NormalizedMembershipColumns, subject: SQL, requir
       ? and(subjectIsMember, eq(cols.managerRoleColumn, cols.managerRoleValue).inlineParams())!
       : subjectIsMember;
 
-  return sql`${cols.containerColumn} in (select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${where})`;
+  return sql`${cols.containerColumn} = any(array(select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${where}))`;
 }
 
 /** owner-or-manager predicate (edit / moderate). */
@@ -304,15 +310,16 @@ function ownerOrManager(cols: NormalizedMembershipColumns, subject: SQL): SQL {
 }
 
 // write-state gate: ((container not locked) OR caller is a manager) AND caller's membership not muted.
-// Same IN-containment discipline as membershipMatch, so the container/membership tables can reuse
-// their own column names without shadowing the governed row's container column.
+// Same `= ANY(ARRAY(subquery))` containment discipline as membershipMatch (uncorrelated set, index-scan
+// friendly), so the container/membership tables can reuse their own column names without shadowing the
+// governed row's container column.
 function membershipWriteGate(
   cols: NormalizedMembershipColumns,
   gate: SupabaseMembershipWriteGateColumns,
   subject: SQL,
 ): SQL {
-  const unlocked = sql`${cols.containerColumn} in (select ${gate.containerPkColumn} from ${gate.containerTable} where ${eq(gate.containerLockColumn, false).inlineParams()})`;
-  const notMuted = sql`${cols.containerColumn} in (select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${and(eq(cols.membershipSubjectColumn, subject), eq(gate.membershipMutedColumn, false).inlineParams())})`;
+  const unlocked = sql`${cols.containerColumn} = any(array(select ${gate.containerPkColumn} from ${gate.containerTable} where ${eq(gate.containerLockColumn, false).inlineParams()}))`;
+  const notMuted = sql`${cols.containerColumn} = any(array(select ${cols.membershipContainerColumn} from ${cols.membershipTable} where ${and(eq(cols.membershipSubjectColumn, subject), eq(gate.membershipMutedColumn, false).inlineParams())}))`;
   return and(or(unlocked, membershipMatch(cols, subject, true))!, notMuted)!;
 }
 
@@ -487,12 +494,15 @@ function buildGrantScopePredicate(options: SupabaseGrantScopeNativePoliciesOptio
   const kindMatch = `grant_elem -> 'scope' ->> 'kind' = '${escapeSqlLiteral(scopeKind)}' and grant_elem ->> 'role' in (${roleIn})`;
   const idExpr = `(grant_elem -> 'scope' ->> '${escapeSqlLiteral(scopeIdField)}')::${castType}`;
 
-  // Correct: uncorrelated `IN (select …)` → InitPlan (JWT parsed once). Naive: correlated `EXISTS`
-  // referencing the governed scope column → re-evaluated per row (JWT parsed per row). The column
-  // object is spliced last so it serializes qualified — valid CREATE POLICY DDL on the write path.
+  // Correct: uncorrelated `= ANY(ARRAY(select …))` → the grant set materializes once (InitPlan, JWT
+  // parsed once) and the ScalarArrayOp drives a bitmap index scan on the scope column — ~25-45× faster
+  // at scale than `IN (select …)`, which the planner costs as a hashed semi-join → sequential scan (the
+  // rls-read perf track proves both). Naive: correlated `EXISTS` referencing the governed scope column →
+  // re-evaluated per row (JWT parsed per row). The column object is spliced so it serializes qualified —
+  // valid CREATE POLICY DDL on the write path.
   const base = options.naive
     ? sql`exists (select 1 from jsonb_array_elements(${sql.raw(grantsText)}) as grant_elem where ${sql.raw(kindMatch)} and ${sql.raw(idExpr)} = ${options.scopeColumn})`
-    : sql`${options.scopeColumn} in (select ${sql.raw(idExpr)} from jsonb_array_elements(${sql.raw(grantsText)}) as grant_elem where ${sql.raw(kindMatch)})`;
+    : sql`${options.scopeColumn} = any(array(select ${sql.raw(idExpr)} from jsonb_array_elements(${sql.raw(grantsText)}) as grant_elem where ${sql.raw(kindMatch)}))`;
 
   if (!options.bypass) {
     return base;

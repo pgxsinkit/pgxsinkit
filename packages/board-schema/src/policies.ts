@@ -48,12 +48,15 @@ const AUTH_UID = authUid;
 
 type Command = "select" | "insert" | "update" | "delete";
 
-// `<teamColumn> IN (the teams the caller belongs to)`. Membership DOES need a table read
+// `<teamColumn> = ANY(ARRAY(the teams the caller belongs to))`. Membership DOES need a table read
 // (`team_member`), and inlining it recurses (see board_member_team_ids' migration), so unlike ADMIN
 // this one routes through the SECURITY DEFINER helper — a Postgres function, so irreducibly `sql`.
-// The column is the real Drizzle column.
+// `= ANY(ARRAY(select fn()))`, not `IN (select fn())`: the array materializes the team set once and
+// the ScalarArrayOp drives an index scan on the governed column — the latter is costed as a hashed
+// semi-join → sequential scan on a runtime-resolved set (proven in the rls-read perf track). The
+// column is the real Drizzle column.
 function memberOfTeam(teamColumn: AnyColumn): SQL {
-  return sql`${teamColumn} in (select board_member_team_ids())`;
+  return sql`${teamColumn} = any(array(select board_member_team_ids()))`;
 }
 
 function policy(
@@ -137,7 +140,7 @@ export function buildMessagePolicies(
   authorId: AnyColumn,
   channel: AnyPgTable & { id: AnyColumn; kind: AnyColumn; teamId: AnyColumn },
 ) {
-  const channelVisible = sql`${channelId} in (select ${channel.id} from ${channel} where ${or(eq(channel.kind, "global").inlineParams(), memberOfTeam(channel.teamId))})`;
+  const channelVisible = sql`${channelId} = any(array(select ${channel.id} from ${channel} where ${or(eq(channel.kind, "global").inlineParams(), memberOfTeam(channel.teamId))}))`;
   const visibleOrAdmin = or(channelVisible, ADMIN)!;
   const authorOrAdmin = or(eq(authorId, AUTH_UID), ADMIN)!;
   return [

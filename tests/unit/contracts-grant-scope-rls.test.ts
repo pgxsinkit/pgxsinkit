@@ -69,8 +69,10 @@ describe("contracts grant-scope RLS helpers", () => {
     const select = policies["select"];
 
     expect(select?.name).toBe("enrolments_select_grant_scope");
-    // Governed scope column is qualified; the subquery is uncorrelated (IN), so the planner hoists it.
-    expect(select?.using).toContain('"enrolments"."offering_id" in (select');
+    // Governed scope column is qualified; the set is `= ANY(ARRAY(uncorrelated subquery))` so it
+    // materializes once (InitPlan) and ScalarArrayOp drives a bitmap index scan (the rls-read perf
+    // finding), NOT a hashed `IN (subquery)` semi-join that seq-scans.
+    expect(select?.using).toContain('"enrolments"."offering_id" = any(array(select');
     expect(select?.using).toContain("jsonb_array_elements(");
     expect(select?.using).toContain("#> '{app_metadata,authorization,grants}'");
     expect(select?.using).toContain("grant_elem -> 'scope' ->> 'kind' = 'offering'");
@@ -83,7 +85,7 @@ describe("contracts grant-scope RLS helpers", () => {
 
     // insert checks WITH CHECK only, delete USING only, update both — same command semantics as siblings.
     expect(policies["insert"]?.using).toBeNull();
-    expect(policies["insert"]?.withCheck).toContain('"enrolments"."offering_id" in (select');
+    expect(policies["insert"]?.withCheck).toContain('"enrolments"."offering_id" = any(array(select');
     expect(policies["delete"]?.withCheck).toBeNull();
   });
 

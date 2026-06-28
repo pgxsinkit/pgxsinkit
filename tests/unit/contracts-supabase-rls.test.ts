@@ -216,6 +216,11 @@ describe("contracts supabase RLS helpers", () => {
     // Governed table name is derived from the container column's table.
     expect(byCommand["select"]?.name).toBe("work_items_select_membership");
 
+    // Containment is `= ANY(ARRAY(uncorrelated subquery))`, not `IN (subquery)` — the form that
+    // index-scans instead of seq-scanning on a runtime-resolved set (the rls-read perf finding).
+    expect(byCommand["select"]?.using).toContain('"work_items"."workspace_id" = any(array(select');
+    expect(byCommand["select"]?.using).not.toContain('"workspace_id" in (select');
+
     // Columns serialize qualified (write path = Postgres RLS, unlike Electric's bare-column rule).
     expect(byCommand["insert"]?.withCheck).toContain('"work_items"."owner_id" =');
     expect(byCommand["insert"]?.withCheck).toContain('from "workspaces" where "workspaces"."locked" = false');
