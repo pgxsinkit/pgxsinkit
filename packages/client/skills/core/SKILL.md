@@ -7,7 +7,8 @@ description: >-
   are separate and asymmetric, there is exactly one write path (an in-database apply function, not
   per-table CRUD), the Electric subquery flag is mandatory and fails closed, local PGlite schema is not
   full DDL parity, and writable tables must declare a conflict policy plus managed fields. Load this
-  before wiring sync, defining a registry, or debugging "writes don't appear" / "no rows stream".
+  before wiring sync, defining a registry, or debugging "writes don't appear" / "no rows stream" / "a
+  removed member still sees rows".
 metadata:
   type: core
   library: "@pgxsinkit/client"
@@ -75,6 +76,15 @@ callback; compose your own from `pgPolicy` + Drizzle operators for anything beyo
 any-member writes). Build the read filter and the RLS policy from the same Drizzle columns so they cannot
 drift.
 
+## Membership changes converge the local store — both ways, even offline
+
+A subquery (membership) read filter is reactive in **both** directions, against a running client with no
+re-subscribe: granting a membership **materialises** the container's rows in the member's local PGlite;
+revoking one **evicts** them (a row reachable through a second membership survives until its last grant is
+gone). This holds **live and across an offline gap** — a client disconnected when the membership changed
+converges on reconnect (the resume replays it), so a revoked member's read access never lingers offline.
+Observe it on the live subscription or a normal resume, not by re-probing a shape at `offset=-1`.
+
 ## Local PGlite schema is not full DDL parity
 
 The local store generates enums, tables, the overlay, the journal, and convergence triggers — **not**
@@ -90,6 +100,8 @@ constraint that holds server-side also holds in PGlite.
 - Comparing an enum without `::text` in a shape filter.
 - Writing directly to Postgres tables / building per-table CRUD instead of using the one write path.
 - Assuming PGlite enforces every Postgres constraint.
+- Assuming a revoked member keeps their synced rows offline — membership changes converge both ways,
+  live and on resume.
 
 ## Where to look
 

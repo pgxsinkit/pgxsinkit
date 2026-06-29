@@ -39,21 +39,30 @@ Without the flag, Electric rejects any subquery `where` with HTTP 400:
 The sync then fails **closed** — no rows stream. It never silently falls back to streaming unfiltered
 data. A blank client is the symptom of a missing flag; a data leak is not a failure mode here.
 
-## Fan-out when the membership changes
+## Membership changes converge the local store — both ways, even offline
 
-The subquery is what makes membership fan-out _live_. When a row is added to the subquery's **source**
-table — a new `memberships` row granting a subject access to a container — Electric re-evaluates the
-dependent shapes and streams every newly-matched container row to that subject's **live** shape
-subscription. Removing the membership streams the deletes. This is the mechanism behind an
-"add-member → the whole container appears" moment: the new member's open client receives the
-container's rows without re-subscribing.
+The subquery is what makes a membership change _reactive_, in **both** directions, against the
+subject's already-running shape — no re-subscribe:
 
-The important qualifier is **live**. The delta arrives on an actively-followed shape (the long-poll a
-running client holds). A fresh `offset=-1` snapshot request that resumes an existing shape handle is
-served from the handle's materialised log and will not show a source-table change that post-dates it —
-so don't probe fan-out by re-fetching `offset=-1`; observe it on the live subscription (or force a
-brand-new shape). A toolkit consistency group ties the container's tables to a shared LSN frontier so
-the rows that fan out this way commit together, with no broken-join flicker.
+- **Grant** — a new `memberships` row gives a subject access to a container. Electric re-evaluates the
+  dependent shapes (a tagged _move-in_) and the toolkit **materialises** every newly-matched container
+  row into that subject's local store. This is the "add-member → the whole container appears" moment.
+- **Revoke** — deleting the `memberships` row. Electric signals that the rows have left the shape (a
+  tagged _move-out_) and the toolkit **evicts** them. A row reachable through a second, independent
+  membership survives — it leaves only once its **last** grant is gone.
+
+This convergence holds **live and across an offline gap**. A client following the shape applies the
+change at once; a client that was disconnected when the membership changed converges on **reconnect** —
+the resume from its persisted offset replays the change. So a revoked member's container does not linger
+in their local store while they are offline (a security property, not only a UX one), and a newly-added
+member's container appears the moment they are back.
+
+The one thing that does **not** observe the delta is a fresh `offset=-1` snapshot of an existing handle:
+it is served from the handle's materialised log and won't reflect a source-table change that post-dates
+it. That is a probing artifact, not the running client's path — observe convergence on the live
+subscription or a normal resume, never by re-fetching `offset=-1`. A toolkit consistency group ties the
+container's tables to a shared LSN frontier, so the rows that move in or out this way commit together,
+with no broken-join flicker.
 
 ## The enum→text rule
 
