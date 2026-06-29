@@ -1,6 +1,7 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
 import { AllRoute } from "./routes/all";
+import { DatabaseRoute } from "./routes/database";
 import { HomeRoute } from "./routes/home";
 import { LoginRoute } from "./routes/login";
 import { MembersRoute } from "./routes/members";
@@ -46,7 +47,21 @@ const membersRoute = createRoute({
   component: MembersRoute,
 });
 
-const routeTree = rootRoute.addChildren([homeRoute, loginRoute, teamBoardRoute, teamChatRoute, allRoute, membersRoute]);
+const databaseRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/database",
+  component: DatabaseRoute,
+});
+
+const routeTree = rootRoute.addChildren([
+  homeRoute,
+  loginRoute,
+  teamBoardRoute,
+  teamChatRoute,
+  allRoute,
+  membersRoute,
+  databaseRoute,
+]);
 
 export const router = createRouter({ routeTree });
 

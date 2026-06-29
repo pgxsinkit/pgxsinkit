@@ -30,6 +30,13 @@ export function TeamNav() {
           No teams synced.
         </Text>
       )}
+      <NavLink
+        mt="xs"
+        label="Local database"
+        description="SQL REPL over your synced store"
+        active={pathname === "/database"}
+        onClick={() => void navigate({ to: "/database" })}
+      />
       {isAdmin && (
         <NavLink
           mt="xs"

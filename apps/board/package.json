@@ -7,6 +7,7 @@
     "dev": "vite"
   },
   "dependencies": {
+    "@electric-sql/pglite-repl": "0.4.3",
     "@mantine/core": "9.4.0",
     "@mantine/hooks": "9.4.0",
     "@pgxsinkit/board-schema": "workspace:*",
