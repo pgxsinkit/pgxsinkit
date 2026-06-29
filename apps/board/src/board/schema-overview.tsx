@@ -45,11 +45,20 @@ const ENTITIES: Entity[] = (Object.entries(boardSyncRegistry) as unknown as [str
   },
 );
 
+type ObjectKind = "table" | "view" | "sequence" | "trigger";
+
 interface AssocObject {
   name: string;
-  kind: "table" | "view";
+  kind: ObjectKind;
   purpose: string;
 }
+
+const KIND_COLOR: Record<ObjectKind, string> = {
+  table: "teal",
+  view: "cyan",
+  sequence: "grape",
+  trigger: "orange",
+};
 
 function associatedObjects(entity: Entity): AssocObject[] {
   const base: AssocObject = {
@@ -64,8 +73,18 @@ function associatedObjects(entity: Entity): AssocObject[] {
     base,
     { name: entity.overlay, kind: "table", purpose: "Optimistic local writes, awaiting the server echo." },
     { name: entity.journal, kind: "table", purpose: "The mutation journal (outbox): pending → sending → acked." },
+    {
+      name: `${entity.journal}_mutation_seq`,
+      kind: "sequence",
+      purpose: "Issues the monotonic mutation_seq that orders the journal.",
+    },
     { name: entity.readModel, kind: "view", purpose: "What the app reads: synced rows ⊕ the overlay." },
     { name: entity.syncState, kind: "view", purpose: "Per-row convergence state (synced / pending / conflicted)." },
+    {
+      name: `${entity.table}_reconcile_on_sync`,
+      kind: "trigger",
+      purpose: "On the synced echo, clears the overlay + journal rows that have now converged.",
+    },
   ];
 }
 
@@ -73,10 +92,10 @@ const DEFAULT_KEY = ENTITIES.find((entity) => entity.key === "issue")?.key ?? EN
 
 /**
  * A schema map of the local store, shown under the REPL on the Database tab. It lists the "main" synced
- * tables and, for whichever one is selected, the utility tables + views pgxsinkit keeps alongside it —
- * the optimistic overlay, the mutation journal, and the read-model / sync-state views. Table names and
- * row counts come from the live PGlite catalog so it reflects what is actually provisioned for this
- * identity, not a hard-coded list.
+ * tables and, for whichever one is selected, the utility objects pgxsinkit keeps alongside it — the
+ * optimistic overlay, the mutation journal + its sequence, the read-model / sync-state views, and the
+ * reconcile trigger. Names and row counts come from the live PGlite catalog so it reflects what is
+ * actually provisioned for this identity, not a hard-coded list.
  */
 export function SchemaOverview() {
   const client = useSyncClient();
@@ -88,14 +107,19 @@ export function SchemaOverview() {
     let active = true;
     void (async () => {
       try {
-        // `information_schema.tables` lists both base tables and views — introspection over the live
-        // catalog (and the per-table counts below over dynamic identifiers) is exactly the case the
-        // "prefer Drizzle" rule carves out for a raw query: Drizzle can't express either. Identifiers
-        // are registry-derived (trusted), and quoted.
-        const catalog = await client.pglite.query<{ table_name: string }>(
-          "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+        // Introspection over the live catalog — tables + views (`information_schema.tables`), the journal
+        // sequences (`…sequences`) and the reconcile triggers (`…triggers`, one row per event → DISTINCT) —
+        // so every object the panel lists is verified to actually exist. This (and the per-table counts
+        // below over dynamic identifiers) is exactly the case the "prefer Drizzle" rule carves out for a
+        // raw query: Drizzle can't express either. Identifiers are registry-derived (trusted), and quoted.
+        const catalog = await client.pglite.query<{ name: string }>(
+          `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public'
+           UNION
+           SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public'
+           UNION
+           SELECT DISTINCT trigger_name FROM information_schema.triggers WHERE trigger_schema = 'public'`,
         );
-        const names = new Set(catalog.rows.map((row) => row.table_name));
+        const names = new Set(catalog.rows.map((row) => row.name));
         const countPairs = await Promise.all(
           ENTITIES.map(async (entity): Promise<[string, number | null]> => {
             if (!names.has(entity.table)) return [entity.table, null];
@@ -138,8 +162,8 @@ export function SchemaOverview() {
         <div>
           <Title order={3}>Tables in your local store</Title>
           <Text size="sm" c="dimmed">
-            The main synced tables (counts are the rows synced to you). Pick one to see the utility tables and views
-            pgxsinkit maintains alongside it.
+            The main synced tables (counts are the rows synced to you). Pick one to see every object pgxsinkit maintains
+            alongside it — tables, views, the journal sequence, and the reconcile trigger.
           </Text>
         </div>
 
@@ -187,7 +211,7 @@ export function SchemaOverview() {
                       </Text>
                     </Table.Td>
                     <Table.Td>
-                      <Badge size="sm" variant="light" color={object.kind === "view" ? "cyan" : "teal"}>
+                      <Badge size="sm" variant="light" color={KIND_COLOR[object.kind]}>
                         {object.kind}
                       </Badge>
                     </Table.Td>
@@ -201,21 +225,9 @@ export function SchemaOverview() {
               </Table.Tbody>
             </Table>
 
-            {selected.mode === "readwrite" ? (
+            {selected.mode !== "readwrite" && (
               <Text size="xs" c="dimmed">
-                Plus the glue (not a table or view): a{" "}
-                <Text span ff="monospace" size="xs">
-                  {selected.journal}_mutation_seq
-                </Text>{" "}
-                sequence and a{" "}
-                <Text span ff="monospace" size="xs">
-                  {selected.table}_reconcile_on_sync
-                </Text>{" "}
-                trigger that clears the overlay + journal once the server echo lands.
-              </Text>
-            ) : (
-              <Text size="xs" c="dimmed">
-                Read-only — synced straight from the server, so it has no overlay, journal, or views.
+                Read-only — synced straight from the server, so it has no overlay, journal, sequence, views, or trigger.
               </Text>
             )}
           </Stack>
