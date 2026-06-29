@@ -6,9 +6,15 @@ import { quoteIdentifier, type SyncColumnType } from "@pgxsinkit/contracts";
 import { generateCopyData } from "./copy";
 import type { MapColumns, InsertChangeMessage } from "./types";
 
-/** Schema-qualified, quoted table reference via the ADR-0004 shared identifier resolver. */
-function qualifiedTable(schema: string, table: string): string {
-  return `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+/**
+ * Quoted table reference via the ADR-0004 shared identifier resolver. Schema-qualified when a schema
+ * is given; **bare** (unqualified) when it is omitted — an `ephemeral` table's cluster lives in
+ * `pg_temp` (ADR-0021 §3), and the engine signals that by passing no schema, so the applier must emit
+ * the unqualified name and let `search_path` resolve it to the temp namespace. Defaulting a missing
+ * schema to `"public"` would target a non-existent `public.<table>` and the synced rows would never land.
+ */
+function qualifiedTable(schema: string | undefined, table: string): string {
+  return schema ? `${quoteIdentifier(schema)}.${quoteIdentifier(table)}` : quoteIdentifier(table);
 }
 
 export interface ApplyMessageToTableOptions {
@@ -24,7 +30,7 @@ export interface ApplyMessageToTableOptions {
 export async function applyMessageToTable({
   pg,
   table,
-  schema = "public",
+  schema,
   message,
   mapColumns,
   primaryKey,
@@ -95,7 +101,7 @@ export interface BulkApplyMessagesToTableOptions {
 export async function applyInsertsToTable({
   pg,
   table,
-  schema = "public",
+  schema,
   messages,
   mapColumns,
   debug,
@@ -235,7 +241,7 @@ export async function applyInsertsToTable({
 export async function applyUpsertsToTable({
   pg,
   table,
-  schema = "public",
+  schema,
   messages,
   mapColumns,
   primaryKey,
@@ -294,7 +300,7 @@ interface JsonRecordsetColumn {
 async function resolveJsonRecordsetColumns(
   pg: PGliteInterface | Transaction,
   table: string,
-  schema: string,
+  schema: string | undefined,
   firstRow: Row<unknown>,
   columnTypes: SyncColumnType[] | undefined,
 ): Promise<JsonRecordsetColumn[]> {
@@ -313,7 +319,7 @@ async function resolveJsonRecordsetColumns(
         FROM information_schema.columns
         WHERE table_name = $1 AND table_schema = $2
       `,
-      [table, schema],
+      [table, schema ?? "public"],
     )
   ).rows.filter((column) => present(column.column_name));
 
@@ -326,7 +332,7 @@ async function resolveJsonRecordsetColumns(
 export async function applyMessagesToTableWithJson({
   pg,
   table,
-  schema = "public",
+  schema,
   messages,
   mapColumns,
   columnTypes,
@@ -371,7 +377,7 @@ export async function applyMessagesToTableWithJson({
 async function resolveCopyColumnUdts(
   pg: PGliteInterface | Transaction,
   table: string,
-  schema: string,
+  schema: string | undefined,
   columnTypes: SyncColumnType[] | undefined,
 ): Promise<Record<string, string>> {
   if (columnTypes) {
@@ -395,7 +401,7 @@ async function resolveCopyColumnUdts(
         FROM information_schema.columns
         WHERE table_name = $1 AND table_schema = $2
       `,
-      [table, schema],
+      [table, schema ?? "public"],
     )
   ).rows;
   return Object.fromEntries(rows.map((column) => [column.column_name, column.udt_name]));
@@ -404,7 +410,7 @@ async function resolveCopyColumnUdts(
 export async function applyMessagesToTableWithCopy({
   pg,
   table,
-  schema = "public",
+  schema,
   messages,
   mapColumns,
   columnTypes,
@@ -469,7 +475,7 @@ const JSON_RECORDSET_BATCH = 10_000;
 async function recordsetColumnCasts(
   pg: PGliteInterface | Transaction,
   table: string,
-  schema: string,
+  schema: string | undefined,
   columnNames: string[],
   columnTypes: SyncColumnType[] | undefined,
 ): Promise<JsonRecordsetColumn[]> {
@@ -491,7 +497,7 @@ async function recordsetColumnCasts(
         FROM information_schema.columns
         WHERE table_name = $1 AND table_schema = $2
       `,
-      [table, schema],
+      [table, schema ?? "public"],
     )
   ).rows;
   const byName = new Map(rows.map((column) => [column.column_name, column]));
@@ -523,7 +529,7 @@ export interface BulkKeyedApplyOptions {
 export async function applyBulkDeletesToTable({
   pg,
   table,
-  schema = "public",
+  schema,
   messages,
   mapColumns,
   primaryKey,
@@ -565,7 +571,7 @@ export async function applyBulkDeletesToTable({
 export async function applyBulkUpdatesToTable({
   pg,
   table,
-  schema = "public",
+  schema,
   messages,
   mapColumns,
   primaryKey,
@@ -584,7 +590,7 @@ export async function applyBulkUpdatesToTable({
       .sort();
     // A PK-only update sets nothing — the per-row applyMessageToTable returns early on this too.
     if (setColumns.length === 0) continue;
-    const groupKey = setColumns.join(" ");
+    const groupKey = setColumns.join(" ");
     let group = groups.get(groupKey);
     if (!group) {
       group = { setColumns, rows: [] };

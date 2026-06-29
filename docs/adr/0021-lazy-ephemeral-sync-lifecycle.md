@@ -68,7 +68,12 @@ read path — it degrades to an optional escape hatch for a genuine streamed rea
    - the reconcile **function** lives in `pg_temp` (session-temp) alongside the temp table it references;
    - temp objects resolve via `pg_temp` / search_path (unqualified), so the generator emits an ephemeral,
      unqualified variant of the cluster DDL;
-   - the Electric row-applier must target the `pg_temp`-resolved name (a build-time confirmation).
+   - the Electric row-applier (and the must-refetch truncate) must target the **unqualified** name so it
+     resolves via `search_path` to `pg_temp` — the engine signals this by passing **no schema**, and the
+     applier must NOT default a missing schema to `"public"` (that would write to a non-existent
+     `public.<table>` and the synced rows would silently never land). Confirmed end-to-end by the
+     `lazy-activation` integration test (a `lazy + ephemeral` group's on-demand activation streams its rows
+     into the temp cluster); it is not merely a build-time check.
 
 4. **Grouping constraints (the consistency group is the grain).** Subscription timing is a property of a
    **consistency group**: a `lazy` table must be a singleton group, or its whole group is lazy together,

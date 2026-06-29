@@ -304,8 +304,12 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               if (shape.onMustRefetch) {
                 await shape.onMustRefetch(tx);
               } else {
-                const schema = shape.schema || "public";
-                await tx.exec(`DELETE FROM ${quoteIdentifier(schema)}.${quoteIdentifier(shape.table)};`);
+                // Bare (unqualified) name when no schema is given, so an `ephemeral` table's TEMP cluster
+                // (ADR-0021 §3) resolves via search_path to `pg_temp` — `public.<table>` would not exist.
+                const qualified = shape.schema
+                  ? `${quoteIdentifier(shape.schema)}.${quoteIdentifier(shape.table)}`
+                  : quoteIdentifier(shape.table);
+                await tx.exec(`DELETE FROM ${qualified};`);
               }
               // The re-snapshot rebuilds tags from scratch, so drop this shape's stale tag-set too
               // (ADR-0023 Slice 2: a must-refetch/​rebuild must not leave orphan tags).
