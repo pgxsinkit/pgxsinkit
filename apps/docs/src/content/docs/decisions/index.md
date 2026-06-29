@@ -35,5 +35,7 @@ complete as ADRs are added.
 - [ADR-0020 — Index-friendly RLS: `= ANY(ARRAY(subquery))` for runtime-resolved id-sets](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0020-index-friendly-rls-any-array.md)
 - [ADR-0021 — Sync lifecycle: subscription-timing and retention as orthogonal axes](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0021-lazy-ephemeral-sync-lifecycle.md)
 - [ADR-0022 — Pessimistic write-units: server-authoritative writes via flush-routing](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0022-pessimistic-write-units.md)
+- [ADR-0023 — Subquery move-out: applying Electric's tagged-subquery eviction in the local store](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0023-subquery-move-out-tagged-reconciliation.md)
+- [ADR-0024 — Subquery move-in: applying Electric's live snapshot rows in the local store](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0024-subquery-move-in-snapshot-rows.md)
 
 <!-- adr:list:end -->

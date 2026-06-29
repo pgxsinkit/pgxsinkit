@@ -9,7 +9,7 @@
   "type": "module",
   "scripts": {
     "build:public-packages": "bun scripts/build-public-packages.ts",
-    "check": "bun run typecheck && bun run lint && bun run test",
+    "check": "bun run typecheck && bun run lint && bun run docs:adr:check && bun run test",
     "check:fast": "bun run typecheck && bun run lint && bun run test:unit:fast",
     "db:board:generate": "drizzle-kit generate --config=infra/board-drizzle.config.ts",
     "db:board:migrate": "bun --bun drizzle-kit migrate --config=infra/board-drizzle.config.ts",
