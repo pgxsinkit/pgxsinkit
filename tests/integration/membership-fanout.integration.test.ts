@@ -250,6 +250,50 @@ describe("membership fan-out (readwrite) integration", () => {
     }
   }, 30_000);
 
+  // ADR-0024 Slice 1 — the MOVE-IN twin of the revocation test: ADDING a membership while the member's
+  // shape is live must stream the now-visible rows IN (Electric delivers them as `is_move_in` snapshot
+  // inserts), so the rows appear with no reload. This is the exact mechanism the board demo relies on
+  // when an admin adds someone to a team (the team's board + tickets should appear). The regression it
+  // guards: those snapshot inserts carry no LSN, so the engine's change dedup dropped them and the rows
+  // only showed after a full re-snapshot (tab reload).
+  it("fans a newly-added member's rows into their LIVE shape (move-in, ADR-0024)", async () => {
+    const MVI_WS = "2c4e1e3b-0000-4000-8000-0000000007ff";
+    const MVI_MEMBER = "1b3f0d2a-0000-4000-8000-0000000007ff";
+    const MVI_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000007ff";
+    const MVI_ITEM = "3d5f2f4c-0000-4000-8000-0000000007ff";
+
+    // The workspace + item exist, but the member has NO membership yet → their shape must be empty.
+    await server.drizzle.insert(workspacesTable).values({ id: MVI_WS, ownerId: MVI_MEMBER });
+    await server.drizzle
+      .insert(workItemsTable)
+      .values({ id: MVI_ITEM, workspaceId: MVI_WS, ownerId: MVI_MEMBER, body: "appear on join" });
+
+    const memberPg = await createLocalWorkItemStore();
+    const member = await startMemberSync(memberPg, proxyUrl, MVI_MEMBER);
+
+    try {
+      await member.initialSyncDone;
+
+      // Precondition: not a member yet → sees nothing.
+      const before = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
+      expect(before.rows[0]?.count).toBe(0);
+
+      // Admin adds the member to the workspace — the SOURCE row of their subquery filter now matches.
+      await server.drizzle
+        .insert(workspaceMembersTable)
+        .values({ id: MVI_MEMBERSHIP, workspaceId: MVI_WS, memberId: MVI_MEMBER, role: "member" });
+
+      // Electric re-evaluates the dependent shape and streams the move-in; the row materialises live.
+      await waitFor(async () => {
+        const rows = await memberPg.query<{ body: string }>("SELECT body FROM work_items WHERE id = $1;", [MVI_ITEM]);
+        expect(rows.rows[0]?.body).toBe("appear on join");
+      });
+    } finally {
+      member.sync.unsubscribe();
+      await memberPg.close();
+    }
+  }, 30_000);
+
   it("lets a member write into their workspace but rejects a non-member (RLS WITH CHECK)", async () => {
     const memberWrite = await server.request("/api/mutations", {
       method: "POST",

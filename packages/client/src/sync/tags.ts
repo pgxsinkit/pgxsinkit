@@ -191,6 +191,40 @@ export async function applyShapeTagSync({
   }
 }
 
+/**
+ * Record (union) a **move-in** row's tags without clearing the tags the row already carries (ADR-0024).
+ * A move-in ADDS a reason a row is in the shape, so — unlike a regular change, whose `tags` is the
+ * authoritative full reason-set and therefore REPLACES (see {@link applyShapeTagSync}) — a move-in must
+ * not drop tags from an independent grant. Inserting with `ON CONFLICT DO NOTHING` is correct whether
+ * Electric sends the row's full reason-set or only the newly-added grant on a move-in, so move-out
+ * eviction afterwards stays correct under multi-grant without depending on the move-in's tag cardinality.
+ * A row with no `tags` (a non-subquery shape) is a no-op.
+ */
+export async function addShapeRowTags({
+  pg,
+  metadataSchema,
+  shapeTable,
+  messages,
+  mapColumns,
+  primaryKey,
+}: TagSyncOptions): Promise<void> {
+  const tagsTable = shapeRowTagsTableName(metadataSchema);
+
+  for (const message of messages) {
+    const tags = message.headers.tags;
+    if (!tags || tags.length === 0) continue;
+
+    const data = mapColumns ? doMapColumns(mapColumns, message) : message.value;
+    const pkJson = serializeRowPk(data, primaryKey);
+    const valuesSql = tags.map((_tag, index) => `($1, $2, $${index + 3})`).join(", ");
+    await pg.query(`INSERT INTO ${tagsTable} (shape_table, pk_json, tag) VALUES ${valuesSql} ON CONFLICT DO NOTHING`, [
+      shapeTable,
+      pkJson,
+      ...tags,
+    ]);
+  }
+}
+
 interface MoveOutOptions {
   pg: PGliteInterface | Transaction;
   metadataSchema: string;

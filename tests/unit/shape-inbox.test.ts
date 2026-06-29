@@ -87,4 +87,36 @@ describe("ShapeInbox (ADR-0014 / ISS-06)", () => {
     expect(drained.get("a")).toHaveLength(1);
     expect(drained.get("b")).toHaveLength(0);
   });
+
+  // ADR-0024 — the move-in channel: a snapshot row entering the shape (no LSN) buffered separately from
+  // the LSN-keyed changes, so the change dedup can never drop it.
+  describe("move-in channel (ADR-0024)", () => {
+    it("buffers and drains move-in rows per shape, independent of the LSN frontier", () => {
+      const inbox = new ShapeInbox(["a", "b"]);
+      // Advance the frontier well past 0 — exactly the state in which a live move-in (lsn floored to 0)
+      // would be dropped by ingestChange. The move-in channel must be immune.
+      inbox.ingestUpToDate("a", 99n);
+      expect(inbox.hasPendingMoveIns()).toBe(false);
+
+      inbox.ingestMoveIn("a", changeMessage("a", 0n, false, "insert", "in1"));
+      expect(inbox.hasPendingMoveIns()).toBe(true);
+
+      const drainedA = inbox.drainMoveIns("a");
+      expect(drainedA).toHaveLength(1);
+      expect(drainedA[0]?.key).toBe("a/in1");
+      // A sibling shape is unaffected, and a drain empties the buffer.
+      expect(inbox.drainMoveIns("b")).toHaveLength(0);
+      expect(inbox.hasPendingMoveIns()).toBe(false);
+    });
+
+    it("resetShape clears buffered move-ins on must-refetch", () => {
+      const inbox = new ShapeInbox(["a"]);
+      inbox.ingestMoveIn("a", changeMessage("a", 0n, false, "insert", "in1"));
+      expect(inbox.hasPendingMoveIns()).toBe(true);
+
+      inbox.resetShape("a");
+      expect(inbox.hasPendingMoveIns()).toBe(false);
+      expect(inbox.drainMoveIns("a")).toHaveLength(0);
+    });
+  });
 });

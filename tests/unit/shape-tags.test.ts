@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import {
+  addShapeRowTags,
   applyShapeMoveOut,
   applyShapeTagSync,
   buildClearShapeTagsSql,
@@ -217,5 +218,63 @@ describe("move-out eviction (ADR-0023, PGlite)", () => {
     // Absent store (engine never booted): the guarded statement must not error.
     const bare = await createFreshTestPGlite();
     await bare.exec(buildClearShapeTagsSql(SHAPE_TABLE, META));
+  });
+});
+
+async function tagList(pg: Awaited<ReturnType<typeof freshStore>>, id: string) {
+  const result = await pg.query<{ tag: string }>(
+    `SELECT tag FROM ${META}.shape_row_tags WHERE shape_table = $1 AND pk_json = $2 ORDER BY tag`,
+    [SHAPE_TABLE, serializeRowPk({ id }, ["id"])],
+  );
+  return result.rows.map((row) => row.tag);
+}
+
+// ADR-0024 — a move-in ADDS a reason the row is in the shape, so its tags are UNIONED, never replaced.
+// This is what keeps move-out eviction correct under multi-grant after a move-in, regardless of whether
+// Electric sends the row's full reason-set or just the new grant on a move-in.
+describe("move-in tag union (ADR-0024, PGlite)", () => {
+  it("adds a move-in's tags without clearing an independent grant the row already holds", async () => {
+    const pg = await freshStore();
+    // Row already in the shape via grant A (e.g. a prior membership).
+    await applyShapeTagSync({
+      pg,
+      metadataSchema: META,
+      shapeTable: SHAPE_TABLE,
+      messages: [insertMessage("row1", ["grantA"])],
+      primaryKey: ["id"],
+    });
+    expect(await tagList(pg, "row1")).toEqual(["grantA"]);
+
+    // A move-in via grant B must UNION — the row now has both reasons.
+    await addShapeRowTags({
+      pg,
+      metadataSchema: META,
+      shapeTable: SHAPE_TABLE,
+      messages: [insertMessage("row1", ["grantB"])],
+      primaryKey: ["id"],
+    });
+    expect(await tagList(pg, "row1")).toEqual(["grantA", "grantB"]);
+  });
+
+  it("is idempotent — re-applying the same move-in tags does not duplicate or error", async () => {
+    const pg = await freshStore();
+    const moveIn = [insertMessage("row1", ["grantA", "grantB"])];
+
+    await addShapeRowTags({ pg, metadataSchema: META, shapeTable: SHAPE_TABLE, messages: moveIn, primaryKey: ["id"] });
+    await addShapeRowTags({ pg, metadataSchema: META, shapeTable: SHAPE_TABLE, messages: moveIn, primaryKey: ["id"] });
+
+    expect(await tagList(pg, "row1")).toEqual(["grantA", "grantB"]);
+  });
+
+  it("records nothing for a row carrying no tags (a non-subquery shape)", async () => {
+    const pg = await freshStore();
+    await addShapeRowTags({
+      pg,
+      metadataSchema: META,
+      shapeTable: SHAPE_TABLE,
+      messages: [insertMessage("row1", [])],
+      primaryKey: ["id"],
+    });
+    expect(await tagCount(pg, "row1")).toBe(0);
   });
 });

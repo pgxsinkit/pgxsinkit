@@ -14,6 +14,7 @@ import {
   applyInsertsToTable,
   applyMessagesToTableWithCopy,
   applyMessagesToTableWithJson,
+  applyUpsertsToTable,
   doMapColumns,
 } from "./apply";
 import { foldChangeBatch, ShapeInbox } from "./shape-inbox";
@@ -24,7 +25,14 @@ import {
   type SubscriptionState,
   updateSubscriptionState,
 } from "./subscription-state";
-import { applyShapeMoveOut, applyShapeTagSync, clearShapeTags, DEFAULT_METADATA_SCHEMA, shapeTableId } from "./tags";
+import {
+  addShapeRowTags,
+  applyShapeMoveOut,
+  applyShapeTagSync,
+  clearShapeTags,
+  DEFAULT_METADATA_SCHEMA,
+  shapeTableId,
+} from "./tags";
 import {
   DEFAULT_MAX_COMMIT_RETRIES,
   type ElectricSyncOptions,
@@ -258,10 +266,18 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
       // retried commit still evicts, and (like the change drain) a degraded commit re-streams them on
       // resume because the persisted offset is not advanced.
       const moveOutsToCommit = new Map<string, MovePattern[][]>();
+      // Snapshot the buffered tagged-subquery move-ins (ADR-0024) identically: a move-in snapshot row
+      // carries no LSN, so it is drained here and applied idempotently in the commit transaction; a
+      // degraded/rolled-back commit re-streams it on resume (the persisted offset is not advanced).
+      const moveInsToCommit = new Map<string, ChangeMessage<Row<unknown>>[]>();
       for (const shapeName of Object.keys(shapes)) {
-        const pending = inbox.drainMoveOuts(shapeName);
-        if (pending.length > 0) {
-          moveOutsToCommit.set(shapeName, pending);
+        const pendingOut = inbox.drainMoveOuts(shapeName);
+        if (pendingOut.length > 0) {
+          moveOutsToCommit.set(shapeName, pendingOut);
+        }
+        const pendingIn = inbox.drainMoveIns(shapeName);
+        if (pendingIn.length > 0) {
+          moveInsToCommit.set(shapeName, pendingIn);
         }
       }
 
@@ -296,6 +312,22 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               await clearShapeTags({ pg: tx, metadataSchema, shapeTable });
             }
 
+            // ADR-0024: this shape's buffered move-in snapshot rows (a row ENTERING the shape). Their
+            // tags are UNIONED first (a move-in adds a reason, it must not clear an independent grant's
+            // tag) — and a regular change for the same row in this batch then authoritatively replaces
+            // below, so union-then-replace converges either way.
+            const moveInMessages = moveInsToCommit.get(shapeName) ?? [];
+            if (moveInMessages.length > 0) {
+              await addShapeRowTags({
+                pg: tx,
+                metadataSchema,
+                shapeTable,
+                messages: moveInMessages,
+                mapColumns: shape.mapColumns,
+                primaryKey: shape.primaryKey,
+              });
+            }
+
             // Maintain the tag-set from the RAW drained batch (ADR-0023) — before the data apply and
             // the move-out eviction, so an add-then-remove within one commit resolves correctly. Uses
             // `initialMessages` (the full batch) since the insert/​fold split below reduces `messages`.
@@ -307,6 +339,22 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
               mapColumns: shape.mapColumns,
               primaryKey: shape.primaryKey,
             });
+
+            // ADR-0024: apply the move-in rows idempotently BEFORE the change fold, so a same-commit
+            // update to a just-moved-in row lands on a present row. Upsert (not plain INSERT) because the
+            // row may already be present via another grant or be re-delivered on a resume.
+            if (moveInMessages.length > 0) {
+              await applyUpsertsToTable({
+                pg: tx,
+                table: shape.table,
+                schema: shape.schema,
+                messages: moveInMessages,
+                mapColumns: shape.mapColumns,
+                primaryKey: shape.primaryKey,
+                columnTypes: shape.columnTypes,
+                debug,
+              });
+            }
 
             if (!useInsert.get(shapeName)) {
               const initialInserts: InsertChangeMessage[] = [];
@@ -491,10 +539,11 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
         const target = lowestCompleteLsn();
         const isCommitNeeded = target > committedLsn;
         const isMustRefetchAndCatchingUp = target >= committedLsn && truncateNeeded.size > 0;
-        // A buffered move-out (ADR-0023) must be committed even if no change advanced the frontier — the
-        // revocation has to land. Its `up-to-date` normally advances `target`, but don't rely on that.
-        const hasPendingMoveOuts = target >= committedLsn && inbox.hasPendingMoveOuts();
-        if (isCommitNeeded || isMustRefetchAndCatchingUp || hasPendingMoveOuts) {
+        // A buffered move-out (ADR-0023) or move-in (ADR-0024) must be committed even if no change
+        // advanced the frontier — the revocation/grant has to land. Their `up-to-date` normally advances
+        // `target`, but don't rely on that (move/event messages carry no LSN).
+        const hasPendingMoves = target >= committedLsn && (inbox.hasPendingMoveOuts() || inbox.hasPendingMoveIns());
+        if (isCommitNeeded || isMustRefetchAndCatchingUp || hasPendingMoves) {
           const applied = await commitUpToLsn(target);
           if (!applied) {
             return;
@@ -545,8 +594,17 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
 
       messages.forEach((message) => {
         if (isChangeMessage(message)) {
-          const { lsn, isLastOfLsn } = readReplicationHeaders(message.headers);
-          inbox.ingestChange(message.shape, message, lsn, isLastOfLsn);
+          // A tagged-subquery MOVE-IN row (ADR-0024): an existing row ENTERING the shape because a grant
+          // was added. Electric delivers it as a snapshot insert flagged `is_move_in` with NO `lsn`/`last`
+          // (it is not a replication-stream change), so the `ingestChange` dedup — which floors a missing
+          // lsn to 0 — would treat it as already-seen and drop it once the frontier passed 0. Route it to
+          // its own buffer, applied idempotently at the next commit (the trailing `up-to-date`).
+          if (message.headers["is_move_in"] === true) {
+            inbox.ingestMoveIn(message.shape, message);
+          } else {
+            const { lsn, isLastOfLsn } = readReplicationHeaders(message.headers);
+            inbox.ingestChange(message.shape, message, lsn, isLastOfLsn);
+          }
         } else if (isControlMessage(message)) {
           switch (message.headers.control) {
             case "up-to-date": {
@@ -570,8 +628,7 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
           }
         } else if (isEventMessage(message)) {
           // ADR-0023: a tagged-subquery move-out — a grant was revoked, so the rows it kept in the shape
-          // must be evicted. Buffer the patterns; the eviction runs in the next commit (decision 3). A
-          // `move-in` needs no action here — its newly-matched rows arrive as ordinary tagged inserts.
+          // must be evicted. Buffer the patterns; the eviction runs in the next commit (decision 3).
           // `MultiShapeStream`'s callback type does not declare `EventMessage` (the prior guards narrow
           // `message` to `never` here), so reach the runtime-present event through an explicit cast.
           const eventMessage = message as unknown as ShapeEventMessage;
@@ -581,6 +638,9 @@ async function createPlugin(pg: PGliteInterface, options?: ElectricSyncOptions) 
             }
             inbox.ingestMoveOut(eventMessage.shape, eventMessage.headers.patterns);
           }
+          // A `move-in` EventMessage (ADR-0024) needs no action here: its newly-matched rows arrive in the
+          // same batch as snapshot inserts flagged `is_move_in`, which the change branch routes to the
+          // move-in buffer. The event's `patterns` are redundant with those inserts' `tags`.
         }
       });
 

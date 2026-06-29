@@ -223,6 +223,61 @@ export async function applyInsertsToTable({
   if (debug) console.log(`Inserted ${messages.length} rows using INSERT`);
 }
 
+/**
+ * Bulk **upsert** for tagged-subquery move-in rows (ADR-0024). A move-in is an existing row ENTERING the
+ * shape — unlike a CDC `insert` (a brand-new row) it may already be present locally via an independent
+ * grant, or be re-delivered on a resume from before the move-in's offset. So it is applied idempotently:
+ * `INSERT … ON CONFLICT (pk) DO UPDATE` refreshes to the move-in's authoritative value (or `DO NOTHING`
+ * for a pk-only table). The plain-`INSERT` invariant of the CDC path — a genuine PK collision must
+ * surface ({@link applyInsertsToTable}) — is intentionally NOT used here, because for a move-in a present
+ * row is expected, not a bug. Batched by parameter count (move-in volume is incremental, not a backfill).
+ */
+export async function applyUpsertsToTable({
+  pg,
+  table,
+  schema = "public",
+  messages,
+  mapColumns,
+  primaryKey,
+  debug,
+}: BulkKeyedApplyOptions) {
+  if (primaryKey.length === 0) throw new Error("applyUpsertsToTable requires a primary key");
+
+  const data: Row<unknown>[] = messages.map((message) =>
+    mapColumns ? doMapColumns(mapColumns, message) : message.value,
+  );
+  const firstRow = data[0];
+  if (!firstRow) return;
+
+  const columns = Object.keys(firstRow);
+  const pkSet = new Set(primaryKey);
+  const nonPkColumns = columns.filter((column) => !pkSet.has(column));
+  const conflictTarget = primaryKey.map((column) => quoteIdentifier(column)).join(", ");
+  const conflictAction =
+    nonPkColumns.length > 0
+      ? `DO UPDATE SET ${nonPkColumns.map((column) => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`).join(", ")}`
+      : "DO NOTHING";
+
+  const maxParams = 32_000;
+  const perRow = columns.length;
+  const rowsPerBatch = Math.max(1, Math.floor(maxParams / perRow));
+
+  for (let i = 0; i < data.length; i += rowsPerBatch) {
+    const batch = data.slice(i, i + rowsPerBatch);
+    const sql = `
+      INSERT INTO ${qualifiedTable(schema, table)}
+      (${columns.map((column) => quoteIdentifier(column)).join(", ")})
+      VALUES
+      ${batch.map((_row, j) => `(${columns.map((_v, k) => "$" + (j * perRow + k + 1)).join(", ")})`).join(", ")}
+      ON CONFLICT (${conflictTarget}) ${conflictAction}
+    `;
+    const values = batch.flatMap((row) => columns.map((column) => row[column]));
+    await pg.query(sql, values);
+  }
+
+  if (debug) console.log(`Upserted ${messages.length} move-in rows`);
+}
+
 /** A column's name plus the SQL type to cast it to inside a `json_to_recordset` record definition. */
 interface JsonRecordsetColumn {
   name: string;

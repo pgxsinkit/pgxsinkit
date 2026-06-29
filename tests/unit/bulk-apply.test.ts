@@ -7,6 +7,7 @@ import {
   applyBulkUpdatesToTable,
   applyInsertsToTable,
   applyMessageToTable,
+  applyUpsertsToTable,
 } from "../../packages/client/src/sync/apply";
 import { foldChangeBatch } from "../../packages/client/src/sync/shape-inbox";
 import { createFreshTestPGlite } from "../support/pglite";
@@ -176,5 +177,46 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       { id: "new", name: "n2", score: 5 },
       { id: "repl", name: "fresh", score: 7 },
     ]);
+  });
+
+  // ADR-0024 — the move-in apply path. A move-in is an existing row ENTERING the shape, so it must be
+  // idempotent: applying it when the row is already present (another grant, or a resume re-delivery)
+  // must not raise the PK collision the plain-INSERT CDC path deliberately surfaces.
+  describe("applyUpsertsToTable (move-in)", () => {
+    it("inserts a fresh move-in row, then upserts an already-present row without colliding", async () => {
+      await pg.exec(`CREATE TABLE public.mi (id text PRIMARY KEY, name text, score int);`);
+
+      // First delivery — a plain insert of the entering row.
+      await applyUpsertsToTable({
+        pg,
+        table: "mi",
+        messages: [msg("a1", "insert", { id: "a1", name: "A", score: 1 })],
+        primaryKey: ["id"],
+        debug: false,
+      });
+      // Re-delivery / second grant for the SAME pk with a refreshed value — must upsert, not throw.
+      await applyUpsertsToTable({
+        pg,
+        table: "mi",
+        messages: [msg("a1", "insert", { id: "a1", name: "A-refreshed", score: 2 })],
+        primaryKey: ["id"],
+        debug: false,
+      });
+
+      const rows = (await pg.query(`SELECT id, name, score FROM public.mi ORDER BY id`)).rows;
+      expect(rows).toEqual([{ id: "a1", name: "A-refreshed", score: 2 }]);
+    });
+
+    it("is a DO NOTHING no-op for a primary-key-only table", async () => {
+      await pg.exec(`CREATE TABLE public.mi_pk (org text, sku text, PRIMARY KEY (org, sku));`);
+
+      const moveIn = [msg("o/x", "insert", { org: "o", sku: "x" })];
+      await applyUpsertsToTable({ pg, table: "mi_pk", messages: moveIn, primaryKey: ["org", "sku"], debug: false });
+      // Idempotent: a pk-only conflict has no columns to update, so DO NOTHING — applying twice is fine.
+      await applyUpsertsToTable({ pg, table: "mi_pk", messages: moveIn, primaryKey: ["org", "sku"], debug: false });
+
+      const rows = (await pg.query(`SELECT org, sku FROM public.mi_pk`)).rows;
+      expect(rows).toEqual([{ org: "o", sku: "x" }]);
+    });
   });
 });
