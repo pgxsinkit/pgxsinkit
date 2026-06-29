@@ -2,6 +2,7 @@ import { Center, Loader, Stack, Text, Title } from "@mantine/core";
 import { lazy, Suspense } from "react";
 
 import { useSyncClient } from "../board-client";
+import { SchemaOverview } from "../board/schema-overview";
 
 // `@electric-sql/pglite-repl` pulls in CodeMirror + psql-describe, so load it only when this tab is
 // opened — the board's initial bundle stays lean and the REPL's heavy editor deps are deferred.
@@ -39,6 +40,7 @@ export function DatabaseRoute() {
       >
         <Repl pg={client.pglite} theme="auto" border showTime />
       </Suspense>
+      <SchemaOverview />
     </Stack>
   );
 }
