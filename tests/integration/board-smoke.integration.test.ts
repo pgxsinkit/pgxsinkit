@@ -1,5 +1,5 @@
 // Board demo smoke — the ONE lane that drives the demo's real deployment topology end-to-end:
-// GoTrue (password login) → Kong → the two Deno edge functions (board-write, board-sync) → Electric,
+// GoTrue (password login) → Envoy → the two Deno edge functions (board-write, board-sync) → Electric,
 // with RLS + the registry read filter governing every row. The toolkit integration suites
 // (tests/integration/*.integration.test.ts) exercise the client/server primitives in-process against
 // the minimal postgres+electric harness with synthetic claims; none of them exercises GoTrue, the
@@ -16,10 +16,10 @@ import postgres from "postgres";
 
 const GATEWAY_URL = process.env["BOARD_GATEWAY_URL"] ?? "http://localhost:54331";
 const SEED_PASSWORD = process.env["BOARD_SEED_PASSWORD"] ?? "board-demo-password";
-// Demo defaults mirror infra/compose/board.env (public Supabase self-hosted values, not secrets).
-const ANON_KEY =
-  process.env["ANON_KEY"] ??
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE";
+// Demo defaults mirror infra/compose/board.env (throwaway local values, not secrets). The new opaque
+// publishable key (board ADR-0007): the gateway validates it and leaves the session JWT in
+// Authorization untouched, so it rides alongside the bearer on every request.
+const PUBLISHABLE_KEY = process.env["BOARD_PUBLISHABLE_KEY"] ?? "sb_publishable_boarddemoLOCALxxxxxxxxx_demo0000";
 const DATABASE_URL =
   process.env["BOARD_DATABASE_URL"] ??
   "postgresql://postgres:your-super-secret-and-long-postgres-password@localhost:54322/postgres?sslmode=disable";
@@ -53,7 +53,7 @@ interface TeamRow {
 async function login(email: string): Promise<string> {
   const response = await fetch(`${GATEWAY_URL}/auth/v1/token?grant_type=password`, {
     method: "POST",
-    headers: { apikey: ANON_KEY, "Content-Type": "application/json" },
+    headers: { apikey: PUBLISHABLE_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ email, password: SEED_PASSWORD }),
   });
   if (!response.ok) {
@@ -84,7 +84,7 @@ async function fetchShapeRows(table: string, token: string): Promise<Record<stri
     url.searchParams.set("offset", offset);
     if (handle) url.searchParams.set("handle", handle);
 
-    const headers = { apikey: ANON_KEY, Authorization: `Bearer ${token}` };
+    const headers = { apikey: PUBLISHABLE_KEY, Authorization: `Bearer ${token}` };
     let response = await fetch(url, { headers });
     // Cold-start tolerance: the edge worker can return a transient 502/503/504 from the gateway while
     // board-sync's bundle is (re)importing (~6s; see the header note). That is a local-compose artifact
@@ -134,7 +134,7 @@ interface MutationInput {
 async function applyMutation(token: string, mutation: MutationInput): Promise<MutationAck> {
   const response = await fetch(`${GATEWAY_URL}/functions/v1/board-write/mutations`, {
     method: "POST",
-    headers: { apikey: ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    headers: { apikey: PUBLISHABLE_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       mutations: [
         {
@@ -168,7 +168,7 @@ function boardWriteStatus(token: string, issue: IssueRow, next: string): Promise
 
 const otherStatus = (status: string): string => (status === "done" ? "todo" : "done");
 
-describe("board demo smoke (real edge stack: GoTrue → Kong → edge functions → Electric)", () => {
+describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions → Electric)", () => {
   let aliceToken: string;
   let adminToken: string;
 

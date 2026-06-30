@@ -49,6 +49,10 @@ export async function createBoardSyncClient(
     registry,
     electricUrl: boardConfig.electricUrl,
     writeUrl: boardConfig.writeUrl,
+    // The publishable key rides as `apikey` on every read shape + write request (toolkit ADR: generic
+    // requestHeaders). The gateway validates it; a signed-in user's session token in Authorization is
+    // left untouched, so identity still reaches board-sync/board-write (board ADR-0007/0008).
+    requestHeaders: { apikey: boardConfig.publishableKey },
     getAuthToken: async () => {
       const { data } = await supabase.auth.getSession();
       return data.session?.access_token;

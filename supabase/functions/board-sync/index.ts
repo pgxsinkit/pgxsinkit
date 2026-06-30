@@ -26,11 +26,22 @@ import { resolveBoardClaims } from "../_shared/auth.ts";
 
 const electricUrl = Deno.env.get("ELECTRIC_SHAPE_URL") ?? "http://electric:3000/v1/shape";
 
+// The read path owns its CORS so it is portable to a gateway-less deployment (a Supabase Cloud edge
+// function, which the platform routes to directly). Locally the Envoy gateway also handles CORS — it
+// short-circuits the preflight and overwrites the response headers, so this is a harmless no-op there.
+// Set BOARD_ALLOWED_ORIGINS (a function secret on Cloud) to your hosted SPA origin + localhost dev;
+// it matches what board-write uses. board-write self-serves CORS via `createSyncServer`.
+const allowedOrigins = (Deno.env.get("BOARD_ALLOWED_ORIGINS") ?? "http://localhost:5173,http://localhost:5174")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 Deno.serve(async (request) => {
   const claims = await resolveBoardClaims(request);
   const response = await proxyElectricShapeRequest(request, claims, {
     registry: boardSyncRegistry,
     electricUrl,
+    cors: { origins: allowedOrigins },
   });
   const headers = new Headers(response.headers);
   headers.set("cache-control", "no-store");

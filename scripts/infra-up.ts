@@ -30,7 +30,7 @@ const CERT_DIR = "infra/compose/certs";
 // locally trusted CA, so the browser, and HTTP/3's QUIC (which refuses an untrusted cert), accept it
 // with no extra steps. Returns whether the cert is available so the readiness wait can skip 54343 when
 // it is not. mkcert is needed only for the interactive browser demo: the container lanes (integration
-// smoke) reach kong directly on 54331, so a missing mkcert must never fail them — warn and continue.
+// smoke) reach envoy directly on 54331, so a missing mkcert must never fail them — warn and continue.
 function ensureBoardCert(): boolean {
   const certFile = path.join(CERT_DIR, "localhost.pem");
   const keyFile = path.join(CERT_DIR, "localhost-key.pem");
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
 
   const readiness = [
     waitForTcpService("127.0.0.1", 54322, "board Postgres"),
-    waitForTcpService("127.0.0.1", 54331, "board Kong gateway"),
+    waitForTcpService("127.0.0.1", 54331, "board Envoy gateway"),
     waitForTcpService("127.0.0.1", 54330, "board Electric"),
   ];
   // Only gate on the caddy front when its cert exists; otherwise it never comes up (and the container
@@ -87,7 +87,7 @@ async function main(): Promise<void> {
   // its own auth-schema migrations on first boot; the board only owns its public schema (Drizzle).
   run("bun", ["run", "db:board:migrate"], env);
 
-  // GoTrue boots its own auth-schema migrations after the DB is healthy, so an open Kong port does not
+  // GoTrue boots its own auth-schema migrations after the DB is healthy, so an open Envoy port does not
   // mean the auth API answers yet. Wait for it through the gateway so an immediately-following
   // `seed:board` (which provisions identities via the GoTrue admin API) does not race the boot.
   await waitForHttpOk("http://localhost:54331/auth/v1/health", "board GoTrue");

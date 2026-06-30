@@ -8,6 +8,9 @@ const allowedRootEntries = new Set([
   ".codex",
   ".env",
   ".env.example",
+  // Cloud board demo credentials (board ADR-0008): the committed template + the gitignored real env.
+  "board.cloud.env.example",
+  "board.cloud.env",
   ".git",
   ".githooks",
   ".github",

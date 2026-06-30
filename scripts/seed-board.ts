@@ -26,9 +26,10 @@ import {
 
 // ── config (demo defaults mirror infra/compose/board.env) ────────────────────────────────────────
 const GATEWAY_URL = process.env["BOARD_GATEWAY_URL"] ?? "http://localhost:54331";
-const SERVICE_ROLE_KEY =
-  process.env["SERVICE_ROLE_KEY"] ??
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q";
+// The new opaque SECRET key (board ADR-0007). Sent as `apikey` + bearer to the GoTrue admin API; the
+// gateway (Envoy locally, the platform on Cloud) translates it into the internal service_role JWT the
+// admin endpoint accepts. On Cloud, set BOARD_SECRET_KEY to the project's `sb_secret_…` key.
+const SECRET_KEY = process.env["BOARD_SECRET_KEY"] ?? "sb_secret_boarddemoLOCALxxxxxxxxxxxxxxx_demo0000";
 const DATABASE_URL =
   process.env["BOARD_DATABASE_URL"] ??
   "postgresql://postgres:your-super-secret-and-long-postgres-password@localhost:54322/postgres?sslmode=disable";
@@ -171,8 +172,8 @@ interface GoTrueUser {
 
 function adminHeaders(): Record<string, string> {
   return {
-    apikey: SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+    apikey: SECRET_KEY,
+    Authorization: `Bearer ${SECRET_KEY}`,
     "Content-Type": "application/json",
   };
 }

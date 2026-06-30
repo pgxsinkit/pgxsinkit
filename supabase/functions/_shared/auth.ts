@@ -1,37 +1,29 @@
-// Verifies a GoTrue-issued JWT and projects it onto the toolkit's `JwtClaims` shape.
+// Verifies a GoTrue-issued session token and projects it onto the toolkit's `JwtClaims` shape.
 //
-// In a hosted Supabase deployment the platform enforces `verify_jwt = true` at the gateway and the
-// function can trust the already-verified token. This self-hosted demo has no such gateway step for
-// the Edge functions, so each function re-verifies the HS256 signature here with the shared project
-// JWT secret (`JWT_SECRET`). That is strictly stronger than a gateway check and keeps the function
-// portable — the same code runs verbatim on Supabase, Deno Deploy, or a plain Deno server.
+// The board demo runs Supabase's NEW asymmetric auth (board ADR-0007): GoTrue signs sessions with an
+// ES256 key and serves the matching public key at `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`. We
+// verify every token against that JWKS — no shared secret, no HS256 path. This is the single,
+// runtime-portable auth point: the same code runs verbatim on self-hosted Supabase, Supabase Cloud,
+// Deno Deploy, or a plain Deno server (any platform gateway check, when present, is strictly
+// additive). The board functions deploy with VERIFY_JWT=false, so this is the only verification step.
 //
-// The returned object is already `@pgxsinkit/contracts`'s `JwtClaims`: a real GoTrue access token
-// carries `sub`, a top-level `role` (the Postgres role, "authenticated"), and `app_metadata` — into
-// which the seed step writes `roles: ["admin"]` for the single Admin identity (board ADR-0002). The
-// write path's apply function reads `role` to switch the RLS actor and `app_metadata.roles` for the
-// Admin predicate; the read proxy reads `sub` + `app_metadata.roles` for the membership filter.
+// The returned object is already `@pgxsinkit/contracts`'s `JwtClaims`: a GoTrue access token carries
+// `sub`, a top-level `role`, and `app_metadata` — into which the seed writes `roles: ["admin"]` for
+// the single Admin identity (board ADR-0002). The write path's apply function reads `role` to switch
+// the RLS actor and `app_metadata.roles` for the Admin predicate; the read proxy reads `sub` +
+// `app_metadata.roles` for the membership filter. Both functions fail closed on `null` (the read
+// proxy blocks all rows; the write route rejects), so an unauthenticated caller can do nothing.
+
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import type { JwtClaims } from "@pgxsinkit/contracts";
 
 const bearerPrefix = /^Bearer\s+/i;
 
-function base64UrlToBytes(value: string): Uint8Array {
-  const padded = value
-    .replace(/-/g, "+")
-    .replace(/_/g, "/")
-    .padEnd(Math.ceil(value.length / 4) * 4, "=");
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function base64UrlToString(value: string): string {
-  return new TextDecoder().decode(base64UrlToBytes(value));
-}
+// Build the JWKS resolver once per worker. jose caches the fetched key set and re-fetches only on a
+// `kid` miss / rotation, so this costs one request per cold worker, not one per verification.
+const supabaseUrl = Deno.env.get("SUPABASE_URL");
+const jwks = supabaseUrl ? createRemoteJWKSet(new URL("/auth/v1/.well-known/jwks.json", supabaseUrl)) : null;
 
 function bearerToken(request: Request): string | null {
   const authorization = request.headers.get("authorization");
@@ -41,26 +33,15 @@ function bearerToken(request: Request): string | null {
   return authorization.replace(bearerPrefix, "").trim() || null;
 }
 
-async function verifyHs256(message: string, signature: Uint8Array, secret: string): Promise<boolean> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  return crypto.subtle.verify("HMAC", key, signature, new TextEncoder().encode(message));
-}
-
 /**
- * Verifies the request's bearer JWT against `JWT_SECRET` and returns its claims, or `null` when there
- * is no token or the signature/shape is invalid. Both board functions fail closed on `null` (the
- * read proxy blocks all rows; the write route rejects), so an unauthenticated caller can do nothing.
+ * Verify the request's bearer token against the GoTrue JWKS and return its claims, or `null` when
+ * there is no token or it fails verification (bad signature, wrong alg, expired). The accepted
+ * algorithms are pinned to the asymmetric set (ES256/RS256) so a token cannot be downgraded to a
+ * symmetric `alg` the JWKS does not contain. `jwtVerify` enforces `exp`/`nbf` itself.
  */
 export async function resolveBoardClaims(request: Request): Promise<JwtClaims | null> {
-  const secret = Deno.env.get("JWT_SECRET");
-  if (!secret) {
-    throw new Error("JWT_SECRET is not set — the board functions cannot verify GoTrue tokens.");
+  if (!jwks) {
+    throw new Error("SUPABASE_URL is not set — the board functions cannot resolve the GoTrue JWKS.");
   }
 
   const token = bearerToken(request);
@@ -68,31 +49,9 @@ export async function resolveBoardClaims(request: Request): Promise<JwtClaims | 
     return null;
   }
 
-  const parts = token.split(".");
-  if (parts.length !== 3) {
-    return null;
-  }
-  const [headerPart, payloadPart, signaturePart] = parts;
-  if (!headerPart || !payloadPart || !signaturePart) {
-    return null;
-  }
-
   try {
-    const header = JSON.parse(base64UrlToString(headerPart)) as { alg?: string };
-    if (header.alg !== "HS256") {
-      return null;
-    }
-
-    const verified = await verifyHs256(`${headerPart}.${payloadPart}`, base64UrlToBytes(signaturePart), secret);
-    if (!verified) {
-      return null;
-    }
-
-    const payload = JSON.parse(base64UrlToString(payloadPart)) as JwtClaims & { exp?: number };
-    if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) {
-      return null;
-    }
-    return payload;
+    const { payload } = await jwtVerify(token, jwks, { algorithms: ["ES256", "RS256"] });
+    return payload as unknown as JwtClaims;
   } catch {
     return null;
   }

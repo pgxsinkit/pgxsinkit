@@ -9,14 +9,14 @@
 	auto_https off
 }
 
-# Front the kong gateway. Everything the board's browser uses — GoTrue (/auth/v1), board-sync, and
+# Front the envoy gateway. Everything the board's browser uses — GoTrue (/auth/v1), board-sync, and
 # board-write — flows through here, so all of it multiplexes over one h2/h3 connection instead of
 # competing for HTTP/1.1 connection slots.
 :54343 {
 	tls /certs/localhost.pem /certs/localhost-key.pem
 	# -1 disables proxy response buffering so Electric's long-poll responses are forwarded the instant
 	# the gateway returns them, with no added latency from the proxy layer.
-	reverse_proxy kong:8000 {
+	reverse_proxy envoy:8000 {
 		flush_interval -1
 	}
 }

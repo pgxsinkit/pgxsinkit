@@ -7,7 +7,7 @@
 # the platform; here we just stand up a faithful local mirror.
 #
 # Trimmed vs. full self-hosted: dropped realtime, storage, imgproxy, analytics, vector, supavisor
-# (Storage/attachments are a board v2). Kept: db / auth / rest / meta + studio / kong / functions
+# (Storage/attachments are a board v2). Kept: db / auth / rest / meta + studio / envoy / functions
 # (edge-runtime) + electric. Board-only ports so it coexists with the harness. Every service connects
 # as `postgres`/`authenticator`/`supabase_auth_admin` (passwords set to ${POSTGRES_PASSWORD} by the
 # image + the official roles.sql). Bring up with `bun run infra:up`.
@@ -33,7 +33,6 @@ services:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      JWT_SECRET: ${JWT_SECRET}
       JWT_EXP: ${JWT_EXPIRY}
     ports:
       - "54322:5432"
@@ -44,7 +43,7 @@ services:
       retries: 20
 
   auth:
-    image: docker.io/supabase/gotrue:v2.189.0
+    image: docker.io/supabase/gotrue:v2.192.0
     container_name: board-auth
     depends_on:
       db:
@@ -62,7 +61,12 @@ services:
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_EXP: ${JWT_EXPIRY}
+      # New asymmetric auth (board ADR-0007): with GOTRUE_JWT_KEYS set, GoTrue SIGNS sessions ES256 and
+      # exposes the public key at /auth/v1/.well-known/jwks.json; the board functions verify ES256-only.
+      # GOTRUE_JWT_SECRET is still a REQUIRED boot key (GoTrue refuses to start without it) — it is the
+      # legacy symmetric key, never used in the board's auth path.
       GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_KEYS: ${GOTRUE_JWT_KEYS}
       GOTRUE_JWT_ISSUER: ${BOARD_API_EXTERNAL_URL}/auth/v1
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
       # No mail server in the demo: confirm signups automatically so admin-API-seeded users log in.
@@ -74,7 +78,7 @@ services:
   # data API — reads go through board-sync (Electric, registry-filtered) and writes through
   # board-write (the governed mutation ingress) — and exposing it would let an authenticated user
   # bypass board-write to reach tables directly. RLS governs every table regardless, but dropping the
-  # service + its Kong route removes the surface entirely. (Studio's table editor needs PostgREST, so
+  # service + its gateway route removes the surface entirely. (Studio's table editor needs PostgREST, so
   # it is non-functional here; schema introspection via postgres-meta still works.)
 
   meta:
@@ -101,29 +105,25 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       DEFAULT_ORGANIZATION_NAME: pgxsinkit-board
       DEFAULT_PROJECT_NAME: board
-      SUPABASE_URL: http://kong:8000
+      SUPABASE_URL: http://envoy:8000
       SUPABASE_PUBLIC_URL: ${BOARD_API_EXTERNAL_URL}
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
-      AUTH_JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_ANON_KEY: ${BOARD_PUBLISHABLE_KEY}
+      SUPABASE_SERVICE_KEY: ${BOARD_SECRET_KEY}
     ports:
       - "54333:3000"
 
-  kong:
-    image: docker.io/kong/kong:3.9.1
-    container_name: board-kong
+  # Envoy API gateway (board ADR-0007/0008). Supabase's self-hosted stack is moving to an Envoy-based
+  # gateway; the board mirrors it (board/envoy.yaml). It terminates the board's single origin (:54331),
+  # routes /auth/v1 + /functions/v1, and runs the new-API-key → role-JWT translation Lua filter (the
+  # same job the Cloud gateway does) while leaving a signed-in user's session JWT untouched.
+  envoy:
+    image: docker.io/envoyproxy/envoy:v1.37.2
+    container_name: board-envoy
     depends_on:
       - auth
       - functions
-    environment:
-      KONG_DATABASE: "off"
-      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
-      KONG_DNS_ORDER: LAST,A,CNAME
-      KONG_PLUGINS: request-transformer,cors
-      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
-      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
     volumes:
-      - ./board/kong.yml:/home/kong/kong.yml:ro
+      - ./board/envoy.yaml:/etc/envoy/envoy.yaml:ro
     ports:
       - "54331:8000"
 
@@ -136,12 +136,12 @@ services:
   # connection, so the cap never binds. A real deployment already serves h2 over TLS at its gateway
   # (istio); this gives the local demo the same property. The cert is a mkcert-issued localhost cert
   # (infra:up generates it into ./certs; the local mkcert CA is already trusted, which h3/QUIC needs).
-  # The browser talks https://localhost:54343; tests + seed scripts still use kong directly on 54331.
+  # The browser talks https://localhost:54343; tests + seed scripts still use envoy directly on 54331.
   caddy:
     image: docker.io/caddy:2.11.4-alpine
     container_name: board-caddy
     depends_on:
-      - kong
+      - envoy
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./certs:/certs:ro
@@ -162,11 +162,12 @@ services:
     volumes:
       - ../../supabase/functions-dist:/home/deno/functions:ro
     environment:
-      JWT_SECRET: ${JWT_SECRET}
       VERIFY_JWT: "false"
-      SUPABASE_URL: http://kong:8000
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      # The board functions verify each GoTrue session token against the project JWKS, fetched from
+      # `${SUPABASE_URL}/auth/v1/.well-known/jwks.json` (board ADR-0007). No JWT_SECRET (no HS256).
+      SUPABASE_URL: http://envoy:8000
+      SUPABASE_ANON_KEY: ${BOARD_PUBLISHABLE_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${BOARD_SECRET_KEY}
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       ELECTRIC_SHAPE_URL: http://electric:3000/v1/shape
       BOARD_ALLOWED_ORIGINS: ${BOARD_SITE_URL},http://localhost:5174
@@ -204,18 +205,18 @@ services:
     image: docker.io/curlimages/curl:8.11.1
     container_name: board-warmer
     depends_on:
-      - kong
+      - envoy
     environment:
-      ANON_KEY: ${ANON_KEY}
+      BOARD_PUBLISHABLE_KEY: ${BOARD_PUBLISHABLE_KEY}
     entrypoint:
       - sh
       - -c
       - |
         while true; do
-          curl -fsS -o /dev/null -X POST "http://kong:8000/functions/v1/board-write/mutations" \
-            -H "apikey: $$ANON_KEY" -H "Authorization: Bearer $$ANON_KEY" \
+          curl -fsS -o /dev/null -X POST "http://envoy:8000/functions/v1/board-write/mutations" \
+            -H "apikey: $$BOARD_PUBLISHABLE_KEY" -H "Authorization: Bearer $$BOARD_PUBLISHABLE_KEY" \
             -H "Content-Type: application/json" -d '{"mutations":[]}' 2>/dev/null || true
-          curl -fsS -o /dev/null "http://kong:8000/functions/v1/board-sync?table=team&offset=-1" \
-            -H "apikey: $$ANON_KEY" -H "Authorization: Bearer $$ANON_KEY" 2>/dev/null || true
+          curl -fsS -o /dev/null "http://envoy:8000/functions/v1/board-sync?table=team&offset=-1" \
+            -H "apikey: $$BOARD_PUBLISHABLE_KEY" -H "Authorization: Bearer $$BOARD_PUBLISHABLE_KEY" 2>/dev/null || true
           sleep 8
         done

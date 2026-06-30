@@ -40,6 +40,8 @@ const NPM_EXTERNALS: Record<string, string> = {
   hono: "npm:hono@4.12.27",
   "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.2",
   postgres: "npm:postgres@3.4.9",
+  // JWKS verification of GoTrue session tokens in board-sync/board-write (_shared/auth.ts, ADR-0007).
+  jose: "npm:jose@6.2.3",
 };
 
 const externalsPlugin: BunPlugin = {
