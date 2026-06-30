@@ -8,9 +8,15 @@
   ],
   "type": "module",
   "scripts": {
+    "board:cloud:deploy": "bun scripts/board-cloud-deploy.ts deploy",
+    "board:cloud:dev": "bun scripts/board-cloud-deploy.ts dev",
+    "board:cloud:functions": "bun scripts/board-cloud-deploy.ts functions",
+    "board:cloud:migrate": "bun scripts/board-cloud-deploy.ts migrate",
+    "board:cloud:secrets": "bun scripts/board-cloud-deploy.ts secrets",
+    "board:cloud:seed": "bun scripts/board-cloud-deploy.ts seed",
     "build:public-packages": "bun scripts/build-public-packages.ts",
-    "check": "bun run typecheck && bun run lint && bun run docs:adr:check && bun run test",
-    "check:fast": "bun run typecheck && bun run lint && bun run test:unit:fast",
+    "check": "bun run typecheck && bun run lint && bun run docs:adr:check && bun run skills:validate && bun run test",
+    "check:fast": "bun run typecheck && bun run lint && bun run skills:validate && bun run test:unit:fast",
     "db:board:generate": "drizzle-kit generate --config=infra/board-drizzle.config.ts",
     "db:board:migrate": "bun --bun drizzle-kit migrate --config=infra/board-drizzle.config.ts",
     "db:board:sync-fn": "bun packages/server/src/cli/generate.ts --registry packages/board-schema/src/registry.ts --export boardSyncRegistry --project-dir . --config infra/board-drizzle.config.ts --name board_sync_artifact",
@@ -61,6 +67,9 @@
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p apps/board/tsconfig.json && tsgo --noEmit -p apps/perf-lab/tsconfig.json",
     "validate": "bun run guard:tmp-files && bun run format && bun run check:fast",
     "validate:full": "bun run guard:tmp-files && bun run format && bun run check"
+  },
+  "dependencies": {
+    "jose": "6.2.3"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.3",
