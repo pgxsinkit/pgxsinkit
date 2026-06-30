@@ -24,6 +24,7 @@
     "db:generate:governance": "bun scripts/generate-governance-migration.ts",
     "db:migrate": "bun --bun drizzle-kit migrate --config=infra/drizzle.config.ts",
     "db:push": "bun --bun drizzle-kit push --config=infra/drizzle.config.ts",
+    "demo:build": "cd apps/board && BOARD_DEMO_BASE=/demo/ BOARD_DEMO_OUTDIR=../docs/dist/demo VITE_BOARD_HASH_ROUTING=1 bun run build",
     "dev:api": "cd apps/write-api && bun run dev",
     "dev:board": "cd apps/board && bun run dev",
     "docs:adr": "bun scripts/generate-adr-index.ts",

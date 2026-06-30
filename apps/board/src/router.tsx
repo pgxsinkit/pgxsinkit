@@ -1,4 +1,4 @@
-import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { createHashHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
 import { AllRoute } from "./routes/all";
 import { DatabaseRoute } from "./routes/database";
@@ -63,7 +63,19 @@ const routeTree = rootRoute.addChildren([
   databaseRoute,
 ]);
 
-export const router = createRouter({ routeTree });
+// The hosted GitHub Pages /demo build sets VITE_BOARD_HASH_ROUTING=1 (board ADR-0009): GitHub Pages
+// serves the *root* /404.html for any unknown path site-wide, and that root 404 belongs to the docs
+// site this demo is published alongside — so a path-based deep-link/refresh into /demo/login would hit
+// the docs 404, not the board. Hash history keeps every route under /demo/index.html, so deep-links and
+// refreshes always boot the SPA. Local dev and `board:cloud:dev` keep clean path URLs (browser history).
+// `history` is spread in only when hash routing is on — `exactOptionalPropertyTypes` forbids passing
+// `history: undefined`, and an absent key is what selects the default browser history.
+const hashRouting = import.meta.env["VITE_BOARD_HASH_ROUTING"] === "1";
+
+export const router = createRouter({
+  routeTree,
+  ...(hashRouting ? { history: createHashHistory() } : {}),
+});
 
 declare module "@tanstack/react-router" {
   interface Register {
