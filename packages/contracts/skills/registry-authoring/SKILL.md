@@ -231,6 +231,39 @@ assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "le
 - The full registry fingerprint differs between the writable and readonly variants — expected and fine:
   it is client-local (guards each client's own store rebuild) and the server never sees it.
 
+## A second shape over one table: read projections (ADR-0027)
+
+`asReadonly` reuses the **same** table+columns for another client. When you instead need a **different,
+narrower shape over an existing physical table** — a light column subset and/or a different row filter,
+under a distinct local identity — use `defineReadProjection(owner, …)`. The first use: a learner reads the
+full `assessment_definition` (heavy QTI jsonb) while an admin reads only titles, admin-scoped.
+
+```ts
+import { defineReadProjection } from "@pgxsinkit/contracts";
+
+export const assessmentDefinition = defineSyncTable({ tableName: "assessment_definition", makeColumns /* … */ });
+
+export const assessmentDefinitionAdminSummary = defineReadProjection(assessmentDefinition, {
+  as: "assessment_definition_admin_summary", // distinct local table + shapeKey
+  columns: ["offeringId", "assessmentType", "title", "state"], // typed subset of owner keys; PK always kept
+  rowFilter: (c) => ({ customWhere: adminOrgFilter(c.offeringId), revision: "admin-summary-1" }),
+});
+```
+
+- It **owns no table**: its `table` IS the owner's, so nothing new is migrated and there is nothing to
+  leak into a drizzle-kit schema barrel. Only its `localTable` (named `as`) and shape are its own.
+- `columns` is a typed subset of the owner's keys (the PK is always kept); the owner's column definitions
+  are reused (never restated), and the subset becomes the Electric `columns` allow-list so an omitted
+  (heavy) column is **never fetched**, not merely stripped.
+- The physical Electric table is **derived** from the owner — you never name a source string (the old
+  `shape.electricTable` is internal-only and not a consumer input). The `rowFilter` callback receives the
+  OWNER's full columns (the `customWhere` runs in Electric on the physical table, so it may reference a
+  column the subset omits).
+- It is **readonly**; put it in the authoritative registry under its own key and in the reading client's
+  registry. RLS for its reads lives on the **owner** (a projection adds no DDL to a table it doesn't own);
+  its `customWhere` must be a subset of what that RLS allows. The proxy resolves each shape by its unique
+  `shapeKey`, so the owner and the projection coexist over one physical table.
+
 ## Common mistakes
 
 - Omitting `conflictPolicy` or the server-version field on a `readwrite` table (throws).
@@ -238,6 +271,8 @@ assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "le
 - In a `customWhere`: comparing an enum without `::text`, qualifying a column (use `c()` for a bare ref),
   or hand-escaping a value into a string instead of binding it via a Drizzle `sql` fragment.
 - Letting the read filter and RLS policy diverge instead of building both from the same Drizzle columns.
+- Declaring a _second_ owning `defineSyncTable` to read an existing physical table (a phantom table, and
+  the registry rejects the duplicate local identity) — use `defineReadProjection` for a second shape.
 - Calling the native policy builders in the `policies:` array (they need `extras: (t) => …` to derive the
   table from the columns), or referencing a custom SQL function in `CREATE POLICY` before it exists.
 - In a hand-written policy: bare `auth.uid()` instead of `authUid` (per-row vs per-statement), or a bound

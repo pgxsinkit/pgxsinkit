@@ -2,17 +2,22 @@ import { describe, expect, it } from "bun:test";
 
 import { sql } from "drizzle-orm";
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+import { getTableConfig } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 
 import {
   authoritativeWriteRequestSchema,
   buildRowFilterWhere,
+  defineReadProjection,
   defineSyncRegistry,
   defineSyncTable,
+  deriveSyncColumnTypes,
+  getProjectedColumnNames,
   getSyncRegistrySchema,
   type JwtClaims,
   mutationAckSchema,
   mutationEnvelopeSchema,
+  type SyncTableEntry,
 } from "@pgxsinkit/contracts";
 import { buildDemoSyncConfig, buildSyntheticRegistry, buildSyntheticRegistrySchemaName } from "@pgxsinkit/schema";
 
@@ -263,6 +268,85 @@ describe("sync config contracts", () => {
         claimPath: ["app_metadata", "person_id"],
       }),
     ).not.toThrow();
+  });
+
+  it("rejects declaring the same local table twice, but allows a read projection over a shared physical table", () => {
+    const makeRefColumns = () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 80 }).notNull(),
+    });
+
+    // Two entries resolving to the SAME local identity collide locally → rejected at module-eval.
+    expect(() =>
+      defineSyncRegistry({
+        canonical: defineSyncTable({ tableName: "thing", makeColumns: makeRefColumns }),
+        duplicate: defineSyncTable({ tableName: "thing", makeColumns: makeRefColumns }),
+      }),
+    ).toThrow(/declared by two registry entries/);
+
+    // An owner + a read projection over it carry DISTINCT local identities (the projection's `as`), so
+    // both can read one physical table — accepted.
+    const owner = defineSyncTable({ tableName: "thing", makeColumns: makeRefColumns });
+    expect(() =>
+      defineSyncRegistry({
+        owner,
+        summary: defineReadProjection(owner, { as: "thing_summary", columns: ["label"] }),
+      }),
+    ).not.toThrow();
+  });
+
+  it("defineReadProjection derives a light readonly shape over the owner's physical table", () => {
+    const makeColumns = () => ({
+      id: uuid("id").primaryKey(),
+      ownerId: uuid("owner_id").notNull(),
+      title: varchar("title", { length: 120 }).notNull(),
+      heavyBlob: varchar("heavy_blob", { length: 9000 }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+    });
+    const owner = defineSyncTable({ tableName: "assessment_definition", makeColumns, mode: "readonly" });
+
+    let callbackKeys: string[] = [];
+    const projection = defineReadProjection(owner, {
+      as: "assessment_definition_admin_summary",
+      columns: ["title", "updatedAtUs"], // PK ("id") is always kept; ownerId/heavyBlob dropped locally
+      rowFilter: (cols) => {
+        callbackKeys = Object.keys(cols);
+        return { customWhere: () => null, revision: "admin-summary-1" };
+      },
+    });
+
+    // Owns NO new table — its `table` IS the owner's object (nothing new to migrate).
+    expect(projection.table).toBe(owner.table);
+    expect(projection.readProjection).toBe(true);
+    expect(projection.mode).toBe("readonly");
+
+    // Distinct local identity; the shape reads the owner's physical table on egress.
+    expect(getTableConfig(projection.localTable).name).toBe("assessment_definition_admin_summary");
+    expect(projection.shape?.tableName).toBe("assessment_definition_admin_summary");
+    expect(projection.shape?.shapeKey).toBe("assessment_definition_admin_summary");
+    expect(projection.shape?.electricTable).toBe("assessment_definition");
+
+    // The local table + client metadata are the SUBSET (PK + requested), heavy column dropped. The
+    // registry-facing helpers take a loose `SyncTableEntry`, so view the precisely-typed projection as
+    // one (the runtime path in the proxy/config builder uses exactly this loose form).
+    const entry = projection as SyncTableEntry;
+    expect(Object.keys(getColumns(projection.localTable)).sort()).toEqual(["id", "title", "updatedAtUs"].sort());
+    expect(getProjectedColumnNames(entry).sort()).toEqual(["id", "title", "updated_at_us"].sort());
+    expect(
+      deriveSyncColumnTypes(entry)
+        .map((c) => c.name)
+        .sort(),
+    ).toEqual(["id", "title", "updated_at_us"].sort());
+    expect((entry.clientProjection?.omitColumns ?? []).slice().sort()).toEqual(["heavyBlob", "ownerId"].sort());
+
+    // The Electric `columns` allow-list keeps the heavy column off the wire (not merely stripped after).
+    expect(projection.shape?.rowFilter?.columns?.slice().sort()).toEqual(["id", "title", "updated_at_us"].sort());
+    expect(projection.shape?.rowFilter?.revision).toBe("admin-summary-1");
+
+    // The rowFilter callback receives the OWNER's FULL columns (customWhere runs in Electric on the
+    // physical table) — including a column the local subset omits.
+    expect(callbackKeys).toContain("ownerId");
+    expect(callbackKeys).toContain("heavyBlob");
   });
 
   it("parses generic mutation envelopes and acks", () => {

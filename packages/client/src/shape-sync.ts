@@ -136,7 +136,10 @@ export function buildShapeUrl(electricUrl: string, table: string) {
 export function buildShapeConfig(input: ShapeSyncSpec) {
   return {
     shape: {
-      url: buildShapeUrl(input.electricUrl, input.electricTable ?? input.tableName),
+      // The ingress `table` param carries the unique `shapeKey` — the proxy resolves the shape by it and
+      // maps it to the physical Electric table on egress (so a read projection and its owner, which share
+      // a physical table, stay distinguishable). `table` below is the LOCAL PGlite apply target.
+      url: buildShapeUrl(input.electricUrl, input.shapeKey),
     },
     table: input.tableName,
     ...(input.schema !== undefined ? { schema: input.schema } : {}),
@@ -338,7 +341,9 @@ export async function startGroupSync(pg: SyncEnginePGlite, input: StartGroupSync
       spec.key,
       {
         shape: {
-          url: buildShapeUrl(spec.electricUrl, spec.electricTable ?? spec.tableName),
+          // Ingress `table` = the unique `shapeKey` (proxy maps it to the physical table on egress);
+          // `table` below is the LOCAL PGlite apply target.
+          url: buildShapeUrl(spec.electricUrl, spec.shapeKey),
           ...(shapeHeaders ? { headers: shapeHeaders } : {}),
           onError,
         },

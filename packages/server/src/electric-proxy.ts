@@ -86,9 +86,11 @@ async function forwardShapeRequest(
   responseHeaders.delete("content-encoding");
   responseHeaders.delete("content-length");
 
-  const table = new URL(request.url).searchParams.get("table");
-  const omittedColumns = table ? getOmittedProjectedColumnsForTable(options.registry, table) : [];
-  const rowTransform = table ? getRowTransformForTable(options.registry, table) : undefined;
+  // The ingress `table` param carries the shape's unique `shapeKey` (the client identifies the shape;
+  // the proxy maps it to the physical Electric table on egress). Resolve the entry by it.
+  const shapeKey = new URL(request.url).searchParams.get("table");
+  const omittedColumns = shapeKey ? getOmittedProjectedColumnsForTable(options.registry, shapeKey) : [];
+  const rowTransform = shapeKey ? getRowTransformForTable(options.registry, shapeKey) : undefined;
   const contentType = responseHeaders.get("content-type") ?? "";
 
   // Re-serialize the shape log when this table needs any row-level rewriting: column
@@ -123,8 +125,8 @@ type ProxyTargetDecision = { kind: "forward"; targetUrl: string } | { kind: "rej
 /**
  * Decide whether a shape request may be forwarded. The proxy serves only
  * registry-governed shapes (ADR-0003): a request with no `table`, or one whose `table`
- * does not match a declared Electric shape target **exactly**, is rejected and never
- * reaches Electric. A table that is in the registry but declares no `rowFilter` still
+ * (the shape's `shapeKey`) does not match a declared shape **exactly**, is rejected and never
+ * reaches Electric. A shape that is in the registry but declares no `rowFilter` still
  * forwards — the gate is registry membership, not the presence of a filter.
  */
 function decideProxyTarget(
@@ -132,14 +134,14 @@ function decideProxyTarget(
   claims: JwtClaims | null,
   options: ElectricProxyOptions,
 ): ProxyTargetDecision {
-  const requestedTable = new URL(request.url).searchParams.get("table");
+  const requestedShapeKey = new URL(request.url).searchParams.get("table");
 
-  if (!requestedTable) {
+  if (!requestedShapeKey) {
     return { kind: "reject", status: 400, message: "Shape request must specify a table" };
   }
 
-  if (!resolveEntryByElectricTarget(options.registry, requestedTable)) {
-    return { kind: "reject", status: 403, message: `Table is not in the sync registry: ${requestedTable}` };
+  if (!resolveEntryByShapeKey(options.registry, requestedShapeKey)) {
+    return { kind: "reject", status: 403, message: `Shape is not in the sync registry: ${requestedShapeKey}` };
   }
 
   return { kind: "forward", targetUrl: buildProxyTargetUrl(request, claims, options) };
@@ -173,7 +175,7 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(options.electricUrl);
 
-  // The registry entry — keyed by its exact Electric target — is the sole shape authority
+  // The registry entry — resolved by the request's `shapeKey` — is the sole shape authority
   // (ADR-0003). Strip any shape-defining param riding on `electricUrl` and re-derive `table`,
   // `where`, and `columns` from the registry. The client-supplied `where` never reaches here
   // either: authorization must never depend on client-controlled SQL — there is no safe way to
@@ -182,11 +184,13 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
   targetUrl.searchParams.delete("where");
   targetUrl.searchParams.delete("columns");
 
-  const entry = resolveEntryByElectricTarget(options.registry, requestUrl.searchParams.get("table") ?? "");
+  // Resolve by the ingress shapeKey, then set the EGRESS `table` to the entry's physical Electric
+  // target (a read projection's owning table differs from its shapeKey).
+  const entry = resolveEntryByShapeKey(options.registry, requestUrl.searchParams.get("table") ?? "");
   const electricTarget = electricTargetForEntry(entry);
 
   if (!electricTarget) {
-    // Defensive only: decideProxyTarget already validated the table against the registry before we
+    // Defensive only: decideProxyTarget already validated the shapeKey against the registry before we
     // get here. Without a registry-resolved target there is no governed shape to serve.
     return targetUrl.toString();
   }
@@ -232,9 +236,10 @@ function buildProxyTargetUrl(request: Request, claims: JwtClaims | null, options
 }
 
 /**
- * The exact Electric shape target an entry declares — `electricTable` if set, otherwise
- * the Drizzle table name. This is the string a client puts in the `table` param and the
- * one Electric receives, so it is the unit of allowlisting.
+ * The physical Electric table an entry reads — `electricTable` (a read projection's owning table) if
+ * set, otherwise the shape's own table name. This is the value the proxy sends UPSTREAM in the egress
+ * `table` param; several shapes may share it (a projection and its owner), which is exactly why an
+ * incoming request is resolved by `shapeKey` (below), not by this.
  */
 function electricTargetForEntry(entry: SyncTableEntry | undefined): string | null {
   const shape = entry?.shape;
@@ -245,28 +250,29 @@ function electricTargetForEntry(entry: SyncTableEntry | undefined): string | nul
 }
 
 /**
- * Resolve the registry entry whose declared Electric target equals `requestedTable`
- * **exactly**. Schema qualification is significant: an `authors` entry does not authorize
- * `private.authors` (a different table in a different schema). Returns undefined when no
- * entry declares that exact target — the caller fails closed.
+ * Resolve the registry entry a request selects by its **`shapeKey`** — the unique per-shape identity a
+ * client puts in the ingress `table` param. Resolving by shapeKey (not by physical Electric target) is
+ * what lets several shapes read ONE physical table: a read projection and its owner share an Electric
+ * target but carry distinct shapeKeys. Schema qualification is significant (`authors` ≠
+ * `private.authors`). Returns undefined when no entry declares that shapeKey — the caller fails closed.
  */
-function resolveEntryByElectricTarget(registry: SyncTableRegistry, requestedTable: string): SyncTableEntry | undefined {
+function resolveEntryByShapeKey(registry: SyncTableRegistry, requestedShapeKey: string): SyncTableEntry | undefined {
   for (const key of Object.keys(registry)) {
     const entry = registry[key as keyof typeof registry] as SyncTableEntry | undefined;
-    if (electricTargetForEntry(entry) === requestedTable) {
+    if (entry?.shape?.shapeKey === requestedShapeKey) {
       return entry;
     }
   }
   return undefined;
 }
 
-function getOmittedProjectedColumnsForTable(registry: SyncTableRegistry, table: string): readonly string[] {
-  const entry = resolveEntryByElectricTarget(registry, table);
+function getOmittedProjectedColumnsForTable(registry: SyncTableRegistry, shapeKey: string): readonly string[] {
+  const entry = resolveEntryByShapeKey(registry, shapeKey);
   return entry ? getOmittedProjectedColumnNames(entry) : [];
 }
 
-function getRowTransformForTable(registry: SyncTableRegistry, table: string): RowTransform | undefined {
-  return resolveEntryByElectricTarget(registry, table)?.serverProjection?.rowTransform;
+function getRowTransformForTable(registry: SyncTableRegistry, shapeKey: string): RowTransform | undefined {
+  return resolveEntryByShapeKey(registry, shapeKey)?.serverProjection?.rowTransform;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

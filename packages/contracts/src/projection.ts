@@ -51,6 +51,7 @@ export function asReadonly<TTable extends AnyPgTable, TLocalTable extends AnyPgT
     ...(entry.consistencyGroup != null ? { consistencyGroup: entry.consistencyGroup } : {}),
     ...(entry.subscription != null ? { subscription: entry.subscription } : {}),
     ...(entry.retention != null ? { retention: entry.retention } : {}),
+    ...(entry.readProjection ? { readProjection: true } : {}),
   };
 }
 

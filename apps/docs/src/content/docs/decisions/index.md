@@ -39,5 +39,6 @@ complete as ADRs are added.
 - [ADR-0024 — Subquery move-in: applying Electric's live snapshot rows in the local store](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0024-subquery-move-in-snapshot-rows.md)
 - [ADR-0025 — Per-client mode projection: one authoritative registry, readonly projections per client](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0025-per-client-mode-projection.md)
 - [ADR-0026 — One claim-stamping managed-field strategy: `authClaim`](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0026-authclaim-managed-field-strategy.md)
+- [ADR-0027 — Read projections: a derived second client shape over an owned table](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0027-read-projections.md)
 
 <!-- adr:list:end -->

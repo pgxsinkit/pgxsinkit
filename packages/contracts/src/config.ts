@@ -125,13 +125,27 @@ export interface PrimaryKeySpec {
 export interface ShapeSpec {
   tableName: string;
   shapeKey: string;
+  /**
+   * INTERNAL / resolved — the physical Postgres table this shape reads, when it differs from the
+   * shape's own `tableName`. A read PROJECTION (`defineReadProjection`) sets it to the OWNING table's
+   * name so several shapes can read one physical table under distinct `shapeKey`s; the engine resolves
+   * an incoming request by `shapeKey` and consults this only on egress, to build the upstream Electric
+   * `table` param. `attachSyncRegistrySchema` also fills/qualifies it for schema-bound registries.
+   *
+   * Not a consumer input — there is no valid reason to hand-set it (it can only be redundant with, or
+   * wrong about, the table you are reading), so it is omitted from {@link ShapeSpecInput}. The
+   * combinator derives it from the owner; `defineSyncTable` never sets it from input.
+   */
   electricTable?: string;
   rowFilter?: RowFilterSpec;
 }
 
 /** Input variant of {@link ShapeSpec} where `tableName` and `shapeKey` are optional.
- * When omitted, both default to the top-level `tableName` of the `defineSyncTable` call. */
-export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey"> & {
+ * When omitted, both default to the top-level `tableName` of the `defineSyncTable` call.
+ * `electricTable` is deliberately absent — it is a resolved/internal field, never a consumer input
+ * (see {@link ShapeSpec.electricTable}); a read projection over an existing table is authored with
+ * `defineReadProjection`, which derives it from the owner. */
+export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey" | "electricTable"> & {
   tableName?: string;
   shapeKey?: string;
 };

@@ -154,6 +154,20 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
    * (validated). See {@link WriteMode}.
    */
   writeMode?: WriteMode;
+  /**
+   * True when this entry is a read PROJECTION over a table OWNED by another entry (built by
+   * {@link defineReadProjection}). Such an entry owns no physical table — its `table` is the owner's,
+   * and only its `localTable` + `shape` are its own — so migration/apply/RLS generation skips it and a
+   * consumer's schema barrel must never export a fresh table for it. Absent → the entry owns its table.
+   */
+  readProjection?: boolean;
+  /**
+   * The column-builder factory that produced this entry's table (set by {@link defineSyncTable}).
+   * Retained so {@link defineReadProjection} can reuse the owner's column definitions to build a typed
+   * column subset without restating them. Internal: not part of the read/identity contract, not
+   * fingerprinted, and absent from hand-built entries (e.g. {@link asReadonly} results).
+   */
+  makeColumns?: () => Record<string, ColumnBuilderBase>;
 }
 
 /** Column property key names from a `makeColumns` factory function. */
@@ -441,7 +455,9 @@ export function defineSyncTable<
       ? {
           tableName: shape?.tableName ?? tableName,
           shapeKey: shape?.shapeKey ?? shape?.tableName ?? tableName,
-          ...(shape?.electricTable != null ? { electricTable: shape.electricTable } : {}),
+          // `electricTable` is never set from input (it is not in ShapeSpecInput) — an owner reads its
+          // own table. It is filled by `attachSyncRegistrySchema` (schema qualification) or by
+          // `defineReadProjection` (which points a projection at the owning physical table).
           ...(resolvedRowFilter != null ? { rowFilter: resolvedRowFilter } : {}),
         }
       : undefined;
@@ -479,9 +495,128 @@ export function defineSyncTable<
     table,
     localTable,
     ...(view != null ? { view } : {}),
+    // Retained so `defineReadProjection` can reuse these column definitions for a typed subset.
+    makeColumns: makeColumns as () => Record<string, ColumnBuilderBase>,
   };
   validateSyncTableEntry(entry as unknown as SyncTableEntry<AnyPgTable>);
   return entry as typeof entry & SyncTableInputGovernanceMarker<TGovernance>;
+}
+
+/**
+ * Define a **read projection**: a second client shape over a table an `owner` entry already owns. The
+ * projection reads the SAME physical rows under a DISTINCT local identity (`as`) and its own narrower
+ * shape — a typed column subset and/or an admin/role-scoped `rowFilter` — without owning, migrating, or
+ * RLS-guarding any new table. The first use is a light admin view of a heavy authoring table (titles,
+ * not the jsonb), while the learner keeps reading the full table through the owner's shape.
+ *
+ * It is the *obvious, DRY* way to express "another shape over this table", versus the bare
+ * `shape.electricTable` string it replaces (a footgun — config that silently un-asserts table
+ * ownership):
+ *
+ * - **Owns nothing.** The returned entry's `table` IS `owner.table` (the same object), so there is no
+ *   new `pgTable` to migrate or to leak into a drizzle-kit schema barrel. Only `localTable` (named `as`)
+ *   and `shape` are its own. `readProjection` is set so generators skip it.
+ * - **DRY columns.** `columns` is a typed subset of the owner's column keys; the local table is built by
+ *   filtering the owner's own column definitions (never restated), and the same subset becomes the
+ *   Electric `columns` allow-list so an omitted (e.g. heavy jsonb) column never crosses the wire. The
+ *   primary key is always kept. Omit `columns` to sync every column.
+ * - **Source is derived, never named.** The physical Electric target is taken from the owner — there is
+ *   no consumer-facing source field to get wrong (see {@link ShapeSpec.electricTable}).
+ * - **Readonly.** A projection has no write path; the engine resolves an incoming shape request by its
+ *   unique `shapeKey` (= `as`) and consults the derived physical target only on egress.
+ *
+ * The `rowFilter` callback receives the OWNER's full columns — `customWhere` runs in Electric against
+ * the physical table, so it may reference a column the local subset omits. RLS for the projection's
+ * reads lives on the OWNER's table (a projection adds no DDL to a table it does not own); its
+ * `customWhere` must be a subset of what that RLS allows.
+ */
+export function defineReadProjection<const TOwnerTable extends AnyPgTable, const TAs extends string>(
+  owner: SyncTableEntry<TOwnerTable>,
+  opts: {
+    /** The projection's distinct local identity — its PGlite table name AND its `shapeKey`. */
+    as: TAs;
+    /** Column keys (of the owner) to sync locally + fetch from Electric. The PK is always kept. Omit → all. */
+    columns?: readonly TableColumnKey<TOwnerTable>[];
+    /** Row filter for this shape; the callback form receives the owner's full (physical) columns. */
+    rowFilter?: RowFilterSpec | ((columns: TableColumnsShape<TOwnerTable>) => RowFilterSpec);
+    consistencyGroup?: string;
+    subscription?: SubscriptionTiming;
+    retention?: Retention;
+  },
+) {
+  const ownerMakeColumns = owner.makeColumns;
+  if (!ownerMakeColumns) {
+    throw new Error(
+      `defineReadProjection: owner "${getTableConfig(owner.table).name}" has no column factory — pass an ` +
+        `entry built directly by defineSyncTable (not an asReadonly/derived projection).`,
+    );
+  }
+
+  const physicalTable = getTableConfig(owner.table).name;
+  const allKeys = Object.keys(ownerMakeColumns());
+  const pkKeys = owner.primaryKey.columns;
+  const keep = opts.columns ? new Set<string>([...opts.columns, ...pkKeys]) : new Set(allKeys);
+  // The subset is expressed as `omitColumns` over the OWNER's full columns, so every column-derivation
+  // helper (deriveSyncColumnTypes / classifyTableApplyStrategy / getProjectedColumnNames) — which read
+  // `entry.table` minus `omitColumns` — yields the right subset for the client, with `entry.table`
+  // staying the owner's physical table (nothing new to migrate). The primary key is always kept.
+  const omittedKeys = allKeys.filter((key) => !keep.has(key));
+
+  // The local table (subset) + base shape (tableName/shapeKey = `as`) + readonly validation come from the
+  // normal constructor — reusing the OWNER's column definitions, never restating them. Below we override
+  // only what a projection differs in (it owns no table; it reads the owner's physical table).
+  const built = defineSyncTable({
+    tableName: opts.as,
+    makeColumns: ownerMakeColumns,
+    mode: "readonly",
+    primaryKey: [...pkKeys],
+    ...(omittedKeys.length > 0
+      ? { clientProjection: { omitColumns: omittedKeys as unknown as readonly never[] } }
+      : {}),
+    ...(opts.consistencyGroup != null ? { consistencyGroup: opts.consistencyGroup } : {}),
+    ...(opts.subscription != null ? { subscription: opts.subscription } : {}),
+    ...(opts.retention != null ? { retention: opts.retention } : {}),
+  });
+
+  // Resolve the row filter against the OWNER's full columns (the customWhere runs in Electric on the
+  // physical table, so it may reference a column the subset omits).
+  const resolvedRowFilter: RowFilterSpec | undefined =
+    typeof opts.rowFilter === "function"
+      ? opts.rowFilter(getColumns(owner.table) as unknown as TableColumnsShape<TOwnerTable>)
+      : opts.rowFilter;
+
+  // When a subset is requested, set the Electric `columns` allow-list to the KEPT physical column names
+  // so an omitted (e.g. heavy jsonb) column is never fetched over the wire — not merely stripped after.
+  const allowListColumns = omittedKeys.length > 0 ? getProjectedColumnNames(built) : undefined;
+
+  const rowFilter: RowFilterSpec | undefined =
+    resolvedRowFilter != null || allowListColumns != null
+      ? {
+          ...(resolvedRowFilter ?? {}),
+          ...(allowListColumns != null ? { columns: allowListColumns } : {}),
+        }
+      : undefined;
+
+  const shape: ShapeSpec = {
+    tableName: opts.as,
+    shapeKey: opts.as,
+    electricTable: physicalTable,
+    ...(rowFilter != null ? { rowFilter } : {}),
+  };
+
+  // A projection owns no table — drop the stashed column factory (omit, don't set undefined) so it can
+  // never be mistaken for an owner, and point `table` at the owner's physical table. `built` was
+  // validated by defineSyncTable and only its `table` is replaced (with the owner's, structurally
+  // identical role), so the result is a sound SyncTableEntry — cast past the spread's exactOptional
+  // friction to a clean entry type that keeps the projected local-table shape.
+  const { makeColumns: _ownerOnly, ...rest } = built;
+  const projection = {
+    ...rest,
+    table: owner.table,
+    shape,
+    readProjection: true as const,
+  };
+  return projection as unknown as SyncTableEntry<TOwnerTable, typeof built.localTable> & { readProjection: true };
 }
 
 export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TRegistry]: SyncTableEntry }>(
@@ -497,6 +632,7 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
     for (const entry of getRegistryEntries(input.tables)) {
       validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
     }
+    validateRegistryTableUniqueness(input.tables);
     validateRegistryLifecycleGroups(input.tables);
 
     return attachSyncRegistrySchema(input.tables, input.schema);
@@ -505,9 +641,46 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
   for (const entry of getRegistryEntries(input)) {
     validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
   }
+  validateRegistryTableUniqueness(input);
   validateRegistryLifecycleGroups(input);
 
   return input;
+}
+
+/** The local/shape identity an entry resolves to: its `shape.tableName` (the unique shape key a client
+ * requests and the local PGlite table), falling back to the Drizzle table name when an entry has no
+ * shape (a write-only table). A read projection carries a distinct `shape.tableName` (`as`) even though
+ * its `table` is the owner's, so it is identified here by `as`, never by the shared physical table. */
+function localShapeIdentity(entry: SyncTableEntry<AnyPgTable>): string {
+  return entry.shape?.tableName ?? getTableConfig(entry.table).name;
+}
+
+/**
+ * A registry must not declare the same local table twice. Every entry resolves to one local identity
+ * ({@link localShapeIdentity}) — the PGlite table a client reads and the `shapeKey` the proxy resolves a
+ * request by — so two entries sharing it would collide locally (one shadows the other) and make the
+ * shape unresolvable. A read PROJECTION over a shared physical table does NOT trip this: it carries a
+ * DISTINCT local identity (`as`) and points at the owning table via the derived `shape.electricTable`,
+ * so several shapes read one physical table while their local identities stay unique. Fails closed at
+ * module-eval, for every consumer.
+ */
+function validateRegistryTableUniqueness(registry: SyncTableRegistry) {
+  const declaredBy = new Map<string, string>();
+
+  for (const [key, entry] of Object.entries(registry)) {
+    const identity = localShapeIdentity(entry as SyncTableEntry<AnyPgTable>);
+    const firstKey = declaredBy.get(identity);
+
+    if (firstKey !== undefined) {
+      throw new Error(
+        `local table "${identity}" is declared by two registry entries ("${firstKey}" and "${key}"): ` +
+          `each entry must map to a unique local table. A second shape over an existing physical table ` +
+          `must use defineReadProjection (a distinct "as") rather than a second owning entry.`,
+      );
+    }
+
+    declaredBy.set(identity, key);
+  }
 }
 
 /**
@@ -677,10 +850,14 @@ export function attachSyncRegistrySchema<TRegistry extends SyncTableRegistry>(re
       continue;
     }
 
+    const qualify = (name: string) => (name.includes(".") ? name : `${normalizedSchema}.${name}`);
     const qualifiedTableName = `${normalizedSchema}.${entry.shape.tableName}`;
     entry.shape = {
       ...entry.shape,
-      ...(entry.shape.electricTable ? {} : { electricTable: qualifiedTableName }),
+      // A read projection sets electricTable to the owner's (bare) physical name; qualify it the same
+      // way the owner's own target is qualified, so both shapes hit one schema-qualified table on egress.
+      // An owner (no electricTable) qualifies its own tableName. An already-qualified value is left as-is.
+      electricTable: entry.shape.electricTable ? qualify(entry.shape.electricTable) : qualifiedTableName,
       ...(entry.shape.shapeKey === entry.shape.tableName ? { shapeKey: qualifiedTableName } : {}),
     };
   }

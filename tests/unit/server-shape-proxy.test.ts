@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 
+import { uuid, varchar } from "drizzle-orm/pg-core";
+
+import { defineReadProjection, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { demoSyncRegistry, DEMO_USER1_ID } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 
@@ -65,6 +68,57 @@ describe("createSyncServer shape proxy", () => {
     // proxyElectricShapeRequest fetches with a string URL (buildProxyTargetUrl).
     const targetUrl = new URL(target as string);
     expect(targetUrl.searchParams.get("where")).toBe("false");
+  });
+
+  it("resolves two shapes over ONE physical table by shapeKey — a read projection and its owner", async () => {
+    // An owner (full table, learner where) + a defineReadProjection over it (admin where, light column
+    // subset). Both read the physical `papers` table; the proxy must tell them apart by shapeKey, map
+    // each to the physical table on egress, and apply each shape's own where + column allow-list.
+    const owner = defineSyncTable({
+      tableName: "papers",
+      makeColumns: () => ({
+        id: uuid("id").primaryKey(),
+        title: varchar("title", { length: 200 }).notNull(),
+        body: varchar("body", { length: 9000 }).notNull(),
+      }),
+      mode: "readonly",
+      shape: { rowFilter: { customWhere: () => "title = 'owner'" } },
+    });
+    const adminSummary = defineReadProjection(owner, {
+      as: "papers_admin_summary",
+      columns: ["title"],
+      rowFilter: { customWhere: () => "title = 'admin'" },
+    });
+    const registry = defineSyncRegistry({ papers: owner, papersAdminSummary: adminSummary });
+
+    fetchMock.mockResolvedValue(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const server = createSyncServer({
+      registry,
+      db: {} as never,
+      electricUrl: "http://localhost:3000/v1/shape?secret=test-api-token",
+      shapeProxyPath: "/api/shape",
+      operationsLog: { enabled: false },
+      resolveAuthClaims: (() => ({ sub: DEMO_USER1_ID })) as never,
+    });
+
+    // The PROJECTION resolves by its own shapeKey (would 403 under the old electric-target resolution),
+    // egresses to the PHYSICAL table, and carries its admin where + light column allow-list.
+    const adminRes = await server.fetch(new Request("http://localhost/api/shape?table=papers_admin_summary&offset=-1"));
+    expect(adminRes.status).toBe(200);
+    const adminUrl = new URL(fetchMock.mock.calls[0]![0] as string);
+    expect(adminUrl.searchParams.get("table")).toBe("papers");
+    expect(adminUrl.searchParams.get("where")).toBe("title = 'admin'");
+    expect(adminUrl.searchParams.get("columns")?.split(",").sort()).toEqual(["id", "title"]);
+
+    // The OWNER resolves to its own full shape — same physical table, its own where, no allow-list.
+    fetchMock.mockClear();
+    const ownerRes = await server.fetch(new Request("http://localhost/api/shape?table=papers&offset=-1"));
+    expect(ownerRes.status).toBe(200);
+    const ownerUrl = new URL(fetchMock.mock.calls[0]![0] as string);
+    expect(ownerUrl.searchParams.get("table")).toBe("papers");
+    expect(ownerUrl.searchParams.get("where")).toBe("title = 'owner'");
+    expect(ownerUrl.searchParams.get("columns")).toBeNull();
   });
 
   it("does not register a shape proxy when electricUrl is omitted", async () => {
