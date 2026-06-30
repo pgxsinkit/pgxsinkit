@@ -26,7 +26,9 @@ versions pinned above), across both server runtimes: the minimal reference serve
 board demo's two edge functions on the **Supabase Edge (Deno)** runtime. Because every endpoint is
 env-driven, the same code is expected to run unchanged against the **hosted** services — Supabase Cloud
 and Electric Cloud — but those are **not yet validated in CI**. Treat them as supported by design, not
-yet certified.
+yet certified. One Cloud caveat: subquery `where`s (membership fan-out) are a flagged Electric preview
+that **managed Electric Cloud activates per source on request** — see
+[The Electric subquery requirement](/concepts/electric-subqueries/).
 
 ## Releasing
 

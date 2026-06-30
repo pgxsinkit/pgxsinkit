@@ -32,9 +32,16 @@ bun run seed:board    # GoTrue identities + deterministic fixtures
 bun run dev:board     # the Vite client
 ```
 
-The board runs **unchanged against real cloud Supabase + Electric Cloud** — the endpoints are fully
-env-driven (`SUPABASE_URL`/keys/`JWT_SECRET`/DB URL/`ELECTRIC_SHAPE_URL`); the local compose is just a
-dev mirror.
+The same board code runs against **managed BaaS — Supabase Cloud + Electric Cloud** — via a
+documented bring-your-own-credentials path: the endpoints are fully env-driven (`SUPABASE_URL`/keys/
+DB URL/`ELECTRIC_SHAPE_URL`), and the local compose is just a dev mirror. The board uses Supabase's
+**new asymmetric auth** (ES256 session tokens verified via JWKS, `sb_publishable_`/`sb_secret_` keys —
+no legacy HS256). See board
+[ADR-0007 — Supabase asymmetric auth only](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0007-supabase-asymmetric-auth-only.md)
+and
+[ADR-0008 — Run the board on managed BaaS](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0008-board-on-managed-baas.md).
+The live cloud run is supported and documented, not CI-gated (it needs real Supabase + Electric Cloud
+credentials).
 
 The **minimal** reference (the `apps/write-api` Bun server) runs against the toolkit harness stack
 instead — the smallest possible `@pgxsinkit/server` deployment:

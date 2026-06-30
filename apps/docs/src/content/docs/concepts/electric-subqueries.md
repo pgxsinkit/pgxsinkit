@@ -28,6 +28,20 @@ ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries
 Any deployment consuming pgxsinkit must run Electric with this flag. The repo's `infra/compose`
 pins `electricsql/electric:1.7.4` and sets it.
 
+## On managed Electric Cloud
+
+The flag is a **server-side ElectricSQL setting**. On a **self-hosted** Electric (the repo's compose,
+or your own container) you set `ELECTRIC_FEATURE_FLAGS` directly. On **managed Electric Cloud**
+(`api.electric-sql.cloud`) subqueries are a preview **activated per source by Electric staff on
+request** — there is no self-serve toggle yet — so a Cloud source rejects subquery `where`s until you
+ask Electric to enable it for you (e.g. via their Discord / support). ElectricSQL intends to make
+subqueries the **default** on Cloud; until then, request activation for your source.
+
+The tell that you are on an **un-activated** Cloud source: subquery-free shapes sync fine, but any
+membership-filtered shape returns the `{"where":["Subqueries are not supported"]}` 400 below. (In the
+board demo this looks like: an admin — whose filter is all-rows, no subquery — works, while a normal
+member's shapes 400.)
+
 ## It fails closed
 
 Without the flag, Electric rejects any subquery `where` with HTTP 400:

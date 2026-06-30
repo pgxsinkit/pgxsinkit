@@ -35,6 +35,11 @@ preview feature (still flagged as of 1.7.3); without the flag Electric rejects a
 with HTTP 400 (`{"where":["Subqueries are not supported"]}`). The sync then fails **closed** — no rows
 stream — it never silently fans out unfiltered data.
 
+On **managed Electric Cloud** the subquery preview is currently **activated per source by Electric staff
+on request** (no self-serve toggle yet; ElectricSQL intends to make it the default) — so ask Electric to
+enable it for your source, or self-host Electric with the flag set. A self-hosted stack sets the flag
+directly.
+
 A second point follows from the same grammar: **a PostgreSQL `enum` column referenced in a shape
 `where` must be cast to `text`** — `"role"::text = 'manager'`, not `"role" = 'manager'`. The enum
 column itself stays an enum everywhere else — RLS and the write path keep using it natively, so there

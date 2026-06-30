@@ -46,7 +46,9 @@ invent REST endpoints per table; do not write to Postgres tables directly from t
 
 1. **The Electric subquery flag is mandatory.** Run Electric with
    `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`. Without it, sync **fails closed** — no
-   rows stream — which looks like a bug but is a missing flag.
+   rows stream — which looks like a bug but is a missing flag. On **managed Electric Cloud** the flag is
+   activated per source by Electric staff on request (no self-serve toggle yet; default-on intended) —
+   ask Electric to enable subqueries for your source, or self-host Electric with the flag.
 2. **Writable tables have two hard requirements.** `defineSyncRegistry` throws unless every `readwrite`
    table declares **both** a server-version managed field (a `nowMicroseconds`-on-update column,
    conventionally `updated_at_us`, that optimistic convergence keys on) **and** a `conflictPolicy`

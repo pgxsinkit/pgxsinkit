@@ -5,7 +5,7 @@ description: >-
   defineSyncRegistry / defineSyncTable, table sync modes, managed fields, conflict policy, read-path row
   filters, and RLS. Teaches the rules that throw or fail closed if missed: every readwrite table needs a
   server-version managed field plus a conflictPolicy (no default), authClaim/nowMicroseconds managed
-  fields are server-assigned and rejected in client payloads, enum columns in a shape where must be cast to text,
+  fields are server-assigned and rejected in client payloads, enum columns must be cast to text,
   the read filter and the RLS policy must derive from one predicate, and the in-database apply function
   is provisioned by the pgxsinkit-generate CLI as a drizzle-kit migration. Also covers per-client mode
   projection (ADR-0025): one authoritative registry with `asReadonly` projections when a table is
@@ -156,6 +156,8 @@ narrow a fan-out (e.g. a group _within_ an offering): `` sql`${c(post.offeringId
 is its own bound param). Two constraints hold: the subquery must stay **self-contained** (not correlated —
 it gets its own `FROM`, so bare names resolve to it), and the subquery `where` is the **flagged Electric
 preview** — run Electric with `allow_subqueries,tagged_subqueries` or the shape fails closed (no rows).
+On **managed Electric Cloud** that preview is activated per source by Electric staff on request (no
+self-serve toggle yet; default-on intended) — ask Electric to enable it, or self-host Electric.
 Combine with the function form when the table is defined all-in-one: the row's own column comes from
 `(columns) => …`, the foreign table + its columns are imported already-built.
 
