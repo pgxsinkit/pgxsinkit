@@ -190,12 +190,16 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
   Authorization runs in two different engines, so the subject is referenced two ways — derive both
   from one predicate so a row is never readable-but-unwritable (or the reverse) by accident:
 
-- **Write path — RLS in Postgres:** policies use `auth.uid()` /
-  `current_setting('request.jwt.claims')`; the applier sets the claims before applying a batch.
+- **Write path — RLS in Postgres:** the applier sets the auth context (`role`,
+  `current_setting('request.jwt.claims')`) before applying a batch, and RLS policies read it
+  (`auth.uid()` is just `request.jwt.claims ->> 'sub'`). The owner/author column itself is stamped
+  from those same claims by an `authClaim` managed field at a claim path — `["sub"]` is the old
+  `auth.uid()` owner, but it can be any verified claim (e.g. `["app_metadata","person_id"]`).
 - **Read path — the shape `rowFilter`:** the proxy builds the Electric shape `where` and
   **Electric** runs it, not Postgres — so a `customWhere` returns a Drizzle `SQL` fragment built from
   the table's columns: reference each column through `c()` (a bare identifier, as Electric requires)
-  and bind `claims.sub` as a `$n` param rather than hand-escaping it, with any enum cast to `text`.
+  and bind the authorizing claim (`claims.sub` by default) as a `$n` param rather than hand-escaping
+  it, with any enum cast to `text`.
   Return `DENY_ALL` to block all rows, or `null` to bypass filtering — note `null`/`""` means _no
   filter, all rows visible_, so an owner filter must return `DENY_ALL` (not `null`) when the claim is
   absent. When you define the table and its filter **together in one `defineSyncTable`**, write
