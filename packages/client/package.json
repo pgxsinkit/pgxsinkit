@@ -9,7 +9,8 @@
     "dist",
     "src",
     "README.md",
-    "skills"
+    "skills",
+    "oxlint-plugin.js"
   ],
   "type": "module",
   "main": "./dist/index.js",
@@ -18,7 +19,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./oxlint": "./oxlint-plugin.js"
   },
   "publishConfig": {
     "access": "public"

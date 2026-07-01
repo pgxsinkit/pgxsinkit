@@ -59,11 +59,32 @@ through [the write path](/concepts/write-path/)).
 
 ## Reading from the local store
 
-The app reads through the client's guarded query, `client.query({ use, build })` — never hand-written SQL.
-`use` names the registry relations the query touches (they are activated and awaited before it runs);
-`build` receives the client and returns a [Drizzle](https://orm.drizzle.team) select builder. The call
-resolves to the **rows array** directly. Inside `build`, reach a relation through a directly-imported
-synced table/view object, `c.drizzle`, or `c.views`.
+The app reads through the client's guarded query — never hand-written SQL. For a **pure-Drizzle** read,
+pass the builder callback directly to `client.query((c) => …)`: pgxsinkit scans the compiled
+[Drizzle](https://orm.drizzle.team) SQL and activates + awaits every registry relation the query touches
+(FROM, JOIN, subquery, WHERE) before it runs — there is nothing to declare. The call resolves to the
+**rows array** directly. Inside the callback, reach a relation through a directly-imported synced
+table/view object, `c.drizzle`, or `c.views`.
+
+If the builder embeds a raw ``sql`…` `` fragment — which can name a relation as a bare identifier the scan
+cannot see — use `client.queryRaw({ use, build })` instead and list those relations in `use`, so they are
+activated before the query runs. Pure Drizzle never needs `use`. (The reactive equivalents follow the same
+split: `useLiveDrizzleRows` for pure reads, `useLiveQueryRaw({ use, build })` for raw fragments.)
+
+:::tip[Lint the split]
+`@pgxsinkit/client` ships an oxlint rule that enforces this at authoring time. Enable it in your
+`.oxlintrc.jsonc` and it flags a raw ``sql`…` `` fragment on the pure path (use `queryRaw`) and a redundant
+`use` on a pure builder (autofixable) — the two facts the type system can't see:
+
+```jsonc
+{
+  "jsPlugins": ["@pgxsinkit/client/oxlint"],
+  "rules": { "pgxsinkit/guarded-query-purity": "error" },
+}
+```
+
+The rule versions with the `@pgxsinkit/client` you have installed. (oxlint `jsPlugins` is currently alpha.)
+:::
 
 Which relation you select **from** depends on the entry's mode:
 
@@ -75,17 +96,11 @@ Which relation you select **from** depends on the entry's mode:
 
 ```ts
 // readonly entry → base table
-client.query({
-  use: ["catalogResource"],
-  build: (c) => c.drizzle.select({ id: catalogResource.table.id }).from(catalogResource.table),
-});
+client.query((c) => c.drizzle.select({ id: catalogResource.table.id }).from(catalogResource.table));
 
 // readwrite entry → overlay view, so your own optimistic writes are included
 const reportView = registry.report.view!; // `.view` is populated only for readwrite entries
-client.query({
-  use: ["report"],
-  build: (c) => c.drizzle.select({ id: reportView.id }).from(reportView),
-});
+client.query((c) => c.drizzle.select({ id: reportView.id }).from(reportView));
 ```
 
 This is the read-side twin of optimistic writes returning through Electric: the write is visible

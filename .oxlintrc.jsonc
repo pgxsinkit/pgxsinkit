@@ -1,6 +1,12 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["eslint", "typescript", "react", "import", "node", "oxc"],
+  // Custom JS plugin (alpha in oxlint 1.72): enforces the pure/raw split of the client query surface.
+  // Referenced here by PATH to the exact file that ships as `@pgxsinkit/client`'s `./oxlint` subpath
+  // export — because in this source repo the workspace package is not a physical node_modules install, so
+  // oxlint's resolver can't take the specifier. Downstream repos (where it IS installed) enable it via
+  // `"jsPlugins": ["@pgxsinkit/client/oxlint"]`. Same file, both ways.
+  "jsPlugins": ["./packages/client/oxlint-plugin.js"],
   "env": {
     "browser": true,
     "node": true,
@@ -31,5 +37,16 @@
         },
       },
     ],
+    "pgxsinkit/guarded-query-purity": "error",
   },
+  "overrides": [
+    {
+      // The lazy-guard tests intentionally pass a redundant `use` against *fake* builders (no real
+      // `sql` fragment) to exercise the explicit-activation path, which would trip the redundancy check.
+      "files": ["tests/**"],
+      "rules": {
+        "pgxsinkit/guarded-query-purity": "off",
+      },
+    },
+  ],
 }

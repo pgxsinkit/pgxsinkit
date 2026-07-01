@@ -172,13 +172,22 @@ export interface DrizzleQueryBuilder<TRows extends readonly unknown[]> extends P
 }
 
 /**
- * A declared-safe query (ADR-0021). `use` names the lazy relations the query reads — they are
- * activated and awaited before it runs. `build` receives the client; reach relations through
- * `c.views` / `c.drizzle` / a directly-imported synced table as usual.
+ * The builder callback for a guarded read (ADR-0021): it receives the client and returns a Drizzle
+ * select builder. Reach relations through `c.views` / `c.drizzle` / a directly-imported synced table.
  */
-export interface GuardedQuerySpec<TRegistry extends SyncTableRegistry, TRows extends readonly unknown[]> {
+export type GuardedQueryFn<TRegistry extends SyncTableRegistry, TRows extends readonly unknown[]> = (
+  client: SyncClient<TRegistry>,
+) => DrizzleQueryBuilder<TRows>;
+
+/**
+ * A guarded query whose builder MAY embed a raw `sql` template fragment (ADR-0021). A raw fragment can
+ * name a lazy relation as a bare/unquoted identifier the compiled-SQL scan cannot see, so declare those
+ * relations in `use` — they are activated and awaited before the query runs. Pure-Drizzle reads need no
+ * `use` (the scan detects every relation): pass the builder callback directly to `client.query`.
+ */
+export interface GuardedRawQuerySpec<TRegistry extends SyncTableRegistry, TRows extends readonly unknown[]> {
   use?: readonly SyncTableName<TRegistry>[];
-  build: (client: SyncClient<TRegistry>) => DrizzleQueryBuilder<TRows>;
+  build: GuardedQueryFn<TRegistry, TRows>;
 }
 
 /**
@@ -245,16 +254,28 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
   ) => Promise<void>;
   diagnostics: (table?: SyncTableName<TRegistry>) => Promise<{ mutation: MutationDiagnostics }>;
   /**
-   * Run a one-shot (non-live) typed query with the lazy-relation safety net (ADR-0021). The lazy
-   * relations the query reads are activated and awaited before it runs — declare them in `use`, and/or
-   * let pgxsinkit auto-detect them from the builder — and the tripwire rejects any lazy relation the
-   * compiled SQL still references but that is not active, so the result can never be silently
-   * empty/stale. The guaranteed-safe alternative to a bare `client.drizzle` read.
+   * Run a one-shot (non-live) typed **pure-Drizzle** query with the lazy-relation safety net (ADR-0021).
+   * Pass the builder callback directly — pgxsinkit scans the compiled SQL and activates + awaits every
+   * lazy relation it reads (FROM, JOIN, subquery, WHERE) before it runs, and the tripwire rejects any
+   * lazy relation the SQL still references but that is not active, so the result is never silently
+   * empty/stale. The guaranteed-safe alternative to a bare `client.drizzle` read. If the builder embeds
+   * a raw `sql` template fragment, use {@link queryRaw} and declare the lazy relations in `use`.
    */
-  query: <TRows extends readonly unknown[]>(spec: GuardedQuerySpec<TRegistry, TRows>) => Promise<TRows>;
+  query: <TRows extends readonly unknown[]>(build: GuardedQueryFn<TRegistry, TRows>) => Promise<TRows>;
   /** {@link query} returning the first row, or null when empty. */
   queryRow: <TRows extends readonly unknown[]>(
-    spec: GuardedQuerySpec<TRegistry, TRows>,
+    build: GuardedQueryFn<TRegistry, TRows>,
+  ) => Promise<TRows[number] | null>;
+  /**
+   * {@link query} for a builder that embeds a raw `sql` template fragment (ADR-0021). The compiled-SQL
+   * scan can miss a lazy relation named as a bare/unquoted identifier inside raw SQL, so declare those
+   * in `use` — they are activated and awaited before the query runs. Pure-Drizzle reads should use
+   * {@link query} instead (no `use` needed).
+   */
+  queryRaw: <TRows extends readonly unknown[]>(spec: GuardedRawQuerySpec<TRegistry, TRows>) => Promise<TRows>;
+  /** {@link queryRaw} returning the first row, or null when empty. */
+  queryRawRow: <TRows extends readonly unknown[]>(
+    spec: GuardedRawQuerySpec<TRegistry, TRows>,
   ) => Promise<TRows[number] | null>;
   /**
    * Activate one or more lazy relations (ADR-0021): open their consistency-group subscription if held
@@ -655,10 +676,11 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   };
 
   const runGuardedQuery = async <TRows extends readonly unknown[]>(
-    spec: GuardedQuerySpec<TRegistry, TRows>,
+    build: GuardedQueryFn<TRegistry, TRows>,
+    use?: readonly SyncTableName<TRegistry>[],
   ): Promise<TRows> => {
-    const builder = spec.build(client);
-    await prepareQuery({ sql: builder.toSQL().sql, ...(spec.use ? { use: spec.use } : {}) });
+    const builder = build(client);
+    await prepareQuery({ sql: builder.toSQL().sql, ...(use ? { use } : {}) });
     return builder;
   };
 
@@ -733,9 +755,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     diagnostics: async (table) => ({
       mutation: await mutationRuntime.readMutationStats(table),
     }),
-    query: (spec) => runGuardedQuery(spec),
-    queryRow: async (spec) => {
-      const rows = await runGuardedQuery(spec);
+    query: (build) => runGuardedQuery(build),
+    queryRow: async (build) => {
+      const rows = await runGuardedQuery(build);
+      return rows[0] ?? null;
+    },
+    queryRaw: (spec) => runGuardedQuery(spec.build, spec.use),
+    queryRawRow: async (spec) => {
+      const rows = await runGuardedQuery(spec.build, spec.use);
       return rows[0] ?? null;
     },
     ensureSynced,

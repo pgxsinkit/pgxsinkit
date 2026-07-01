@@ -146,9 +146,9 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     });
   }
 
-  it("query({ use }) activates the declared lazy relation, then runs and returns rows", async () => {
+  it("queryRaw({ use }) activates the declared lazy relation, then runs and returns rows", async () => {
     const client = await makeClient("memory:/lazy-facade-use");
-    const rows = await client.query({
+    const rows = await client.queryRaw({
       use: ["archive"],
       build: () => fakeBuilder(`select * from "archive"`, [{ id: "a1" }]),
     });
@@ -161,7 +161,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
   it("AUTO-ACTIVATES an undeclared lazy relation found in the compiled SQL (no `use` needed)", async () => {
     const client = await makeClient("memory:/lazy-facade-undeclared");
     // No `use` — the SQL scan alone finds `"archive"` and activates it before the query runs.
-    const rows = await client.query({ build: () => fakeBuilder(`select * from "archive"`, [{ id: "a1" }]) });
+    const rows = await client.query(() => fakeBuilder(`select * from "archive"`, [{ id: "a1" }]));
     expect(ensureGroupStartedCalls).toEqual(["archive-shape"]);
     expect(client.isSynced("archive")).toBe(true);
     expect(rows).toEqual([{ id: "a1" }]);
@@ -174,7 +174,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
       // archive is scanned and ensureGroupStarted is called, but the start does not take (isTableStarted
       // stays false) — so the backstop refuses to run the query rather than read empty data.
       // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
-      await expect(client.query({ build: () => fakeBuilder(`select * from "archive"`, []) })).rejects.toBeInstanceOf(
+      await expect(client.query(() => fakeBuilder(`select * from "archive"`, []))).rejects.toBeInstanceOf(
         LazyRelationNotActivatedError,
       );
       expect(ensureGroupStartedCalls).toEqual(["archive-shape"]); // it DID try to activate
@@ -185,26 +185,28 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
 
   it("does not trip on a query that touches only eager relations", async () => {
     const client = await makeClient("memory:/lazy-facade-eager");
-    const rows = await client.query({
-      build: () => fakeBuilder(`select * from "profile"`, [{ id: "p1" }]),
-    });
+    const rows = await client.query(() => fakeBuilder(`select * from "profile"`, [{ id: "p1" }]));
     expect(rows).toEqual([{ id: "p1" }]);
     expect(ensureGroupStartedCalls).toEqual([]);
   });
 
   it("queryRow returns the first row, or null when empty", async () => {
     const client = await makeClient("memory:/lazy-facade-row");
-    const row = await client.queryRow({
+    const row = await client.queryRow(() => fakeBuilder(`select * from "archive"`, [{ id: "a1" }, { id: "a2" }]));
+    expect(row).toEqual({ id: "a1" });
+
+    const none = await client.queryRow(() => fakeBuilder<{ id: string }>(`select * from "archive"`, []));
+    expect(none).toBeNull();
+  });
+
+  it("queryRawRow({ use }) activates the declared relation and returns the first row", async () => {
+    const client = await makeClient("memory:/lazy-facade-raw-row");
+    const row = await client.queryRawRow({
       use: ["archive"],
       build: () => fakeBuilder(`select * from "archive"`, [{ id: "a1" }, { id: "a2" }]),
     });
     expect(row).toEqual({ id: "a1" });
-
-    const none = await client.queryRow({
-      use: ["archive"],
-      build: () => fakeBuilder<{ id: string }>(`select * from "archive"`, []),
-    });
-    expect(none).toBeNull();
+    expect(ensureGroupStartedCalls).toEqual(["archive-shape"]);
   });
 
   it("prepareQuery (the live-hook seam) auto-activates lazy relations scanned from the compiled SQL", async () => {

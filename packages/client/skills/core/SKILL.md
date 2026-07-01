@@ -44,11 +44,20 @@ invent REST endpoints per table; do not write to Postgres tables directly from t
 
 ## Reading the local store: base table vs overlay view
 
-Reads run against local PGlite through the client, not hand-written SQL. Use `client.query({ use, build })`
-(the guarded read): `use` names the registry relations the query touches — they are activated and awaited
-before it runs — and `build` receives the client and returns a **Drizzle** select builder. `client.query`
-resolves to the **rows array directly** (not `{ rows }`). Inside `build`, reach relations through a
-directly-imported synced table/view object, `c.drizzle`, or `c.views`.
+Reads run against local PGlite through the client, not hand-written SQL. For a **pure-Drizzle** read, pass
+the builder callback directly to `client.query((c) => …)` (the guarded read): pgxsinkit scans the compiled
+SQL and activates + awaits every `lazy` relation the query touches (FROM, JOIN, subquery, WHERE) before it
+runs — nothing to declare. `client.query` resolves to the **rows array directly** (not `{ rows }`). Inside
+the callback, reach relations through a directly-imported synced table/view object, `c.drizzle`, or
+`c.views`. Only when the builder embeds a raw ``sql`…` `` fragment (which the scan can miss) use
+`client.queryRaw({ use, build })` and name those relations in `use`. `queryRow` / `queryRawRow` are the
+first-row-or-null variants. (Reactive equivalents: `useLiveDrizzleRows` for pure reads,
+`useLiveQueryRaw({ use, build })` for raw fragments.)
+
+**Lint the split.** `@pgxsinkit/client` ships an oxlint rule via its `./oxlint` subpath export. Enable it
+in the consuming repo's `.oxlintrc.jsonc` — `"jsPlugins": ["@pgxsinkit/client/oxlint"]` +
+`"pgxsinkit/guarded-query-purity": "error"` — to catch a raw ``sql`…` `` fragment on the pure path and a
+redundant `use` (autofixable), the two things the types can't. (oxlint `jsPlugins` is alpha.)
 
 **The non-obvious rule — which relation to select FROM:**
 
@@ -62,17 +71,11 @@ directly-imported synced table/view object, `c.drizzle`, or `c.views`.
 
 ```ts
 // readonly entry → base table
-client.query({
-  use: ["catalogResource"],
-  build: (c) => c.drizzle.select({ id: catalogResource.table.id }).from(catalogResource.table),
-});
+client.query((c) => c.drizzle.select({ id: catalogResource.table.id }).from(catalogResource.table));
 
 // readwrite entry → overlay view, so your own optimistic writes are included
 const reportView = registry.report.view!; // `.view` is populated only for readwrite entries
-client.query({
-  use: ["report"],
-  build: (c) => c.drizzle.select({ id: reportView.id, status: reportView.status }).from(reportView),
-});
+client.query((c) => c.drizzle.select({ id: reportView.id, status: reportView.status }).from(reportView));
 ```
 
 This is the read-side twin of "writes return through Electric": your optimistic write is visible

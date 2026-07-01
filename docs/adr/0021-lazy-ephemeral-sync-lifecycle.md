@@ -162,8 +162,17 @@ DDL-variant policy layer over existing primitives**, with no sync-engine work.
 The read-path safety net keeps a query from silently reading an un-hydrated `lazy` relation, and it is
 **one mechanism**: scan the query's *compiled* SQL for the lazy relations it reads, activate them, and
 hydrate before the query runs. A lazy relation therefore auto-activates on **any** reference — FROM,
-JOIN, subquery, WHERE — with no Proxy, no builder-AST walk, and no `use` declaration required (`use`
-remains an optional pre-activation hint).
+JOIN, subquery, WHERE — with no Proxy, no builder-AST walk, and no `use` declaration required.
+
+Because the scan is complete for pure Drizzle, the read API splits accordingly. The pure guarded reads —
+`client.query((c) => …)` / `queryRow`, and `useLiveDrizzleRows` — take the builder callback directly and
+expose **no `use`**: it would be dead weight, since the scan already finds every relation. `use` survives
+only on the raw-fragment surface — `client.queryRaw({ use, build })` / `queryRawRow`, and `useLiveQueryRaw` —
+where a builder may embed a raw ``sql`…` `` fragment naming a relation as a bare identifier the scan cannot
+see. An oxlint rule (`pgxsinkit/guarded-query-purity`) flags the two provenance facts the type system
+cannot: a raw fragment smuggled into the pure path, and a redundant `use` on a pure raw-path builder. It
+ships with `@pgxsinkit/client` via the `./oxlint` subpath export, so downstream repos enable it with
+`"jsPlugins": ["@pgxsinkit/client/oxlint"]` — the rule versions with the installed client.
 
 Why one SQL scan suffices and is safe:
 
@@ -191,9 +200,11 @@ Residual edges:
    spurious **persistent** subscription (never a wrong result, since activating an unread relation cannot
    change a query). Give such a relation a schema to make it collision-proof. *TO FIX (optional):* lex the
    SQL to also exclude CTE/table-alias positions.
-2. **Raw SQL is unsupported, on purpose.** `useLiveRows` (a raw string) is the **unguarded** escape
-   hatch — it does not auto-activate. A raw query touching a lazy relation must `client.ensureSynced([...])`
-   first; otherwise it reads empty/stale. Use the Drizzle hooks / `client.query` for guarded reads.
+2. **Raw SQL is unsupported by the scan, on purpose.** `useLiveRows` (a raw string) is the **unguarded**
+   escape hatch — it does not auto-activate. A raw query touching a lazy relation must
+   `client.ensureSynced([...])` first; otherwise it reads empty/stale. For a Drizzle builder that embeds a
+   raw ``sql`…` `` fragment, use the guarded raw surface — `client.queryRaw({ use, build })` / `useLiveQueryRaw`
+   — and name the lazy relations in `use`. Pure-Drizzle reads (`client.query`) need no `use`.
 3. **`client.drizzle` direct reads bypass the guard.** A bare `await client.drizzle.select()…` (not via
    `client.query`/`queryRow` or the hooks) has no interception point. *Workaround:* use the guarded
    equivalents, or `ensureSynced` first. The documented power-user escape hatch.
@@ -237,8 +248,9 @@ Built:
 - **Start-on-first-reference, made safe by one compiled-SQL scan** (`packages/client/src/lazy-guard.ts`):
   a query's parameterised SQL is scanned for the schema-aware quoted tokens of its lazy relations, which
   are then activated + hydrated before it runs. Surfaced through `client.ensureSynced` / `isSynced` /
-  `prepareQuery`, the non-live `client.query` / `queryRow` facade, and the live `useLiveQuery` /
-  `useLiveQueryRow` + `useLiveDrizzleRows` hooks (`useLiveRows` raw SQL is the unguarded escape hatch).
+  `prepareQuery`, the non-live facade — pure `client.query` / `queryRow` (callback-direct, no `use`) and
+  raw `client.queryRaw` / `queryRawRow` (`{ use, build }`) — and the live `useLiveQueryRaw` / `useLiveQueryRawRow`
+  + `useLiveDrizzleRows` hooks (`useLiveRows` raw SQL is the unguarded escape hatch).
   See **Known limitations** above for why the scan is sufficient and its residual edges.
 - **`lazy + persistent` permanent promotion** via a persisted activation flag (`lazy_active:<group>`) in
   the local meta table: an on-demand start of a persistent lazy group records the flag

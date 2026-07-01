@@ -31,7 +31,7 @@ interface LiveRowsState<TRows> {
  * `SyncTableRegistry` type. Call this once at the module level in your app:
  *
  * ```ts
- * export const { SyncClientProvider, useSyncClient, useLiveRows, useLiveDrizzleRows, useLiveQuery } =
+ * export const { SyncClientProvider, useSyncClient, useLiveRows, useLiveDrizzleRows, useLiveQueryRaw } =
  *   createSyncClientHooks<typeof mySyncRegistry>();
  * ```
  */
@@ -58,7 +58,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
    * Reactive raw-SQL query. This is the **unguarded** escape hatch: it does not participate in the
    * lazy-relation safety net (ADR-0021) — a raw string is not parameterised/quoted predictably, so a
    * `lazy` relation referenced here will read empty/stale unless you `client.ensureSynced([...])` first.
-   * Prefer {@link useLiveDrizzleRows} / {@link useLiveQuery} for anything touching lazy relations.
+   * Prefer {@link useLiveDrizzleRows} / {@link useLiveQueryRaw} for anything touching lazy relations.
    */
   function useLiveRows<TRow extends Record<string, unknown> = Record<string, unknown>>(
     query: string,
@@ -135,7 +135,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
   // ─── Drizzle typed live hooks ─────────────────────────────────────────────
 
   /**
-   * Shared implementation behind {@link useLiveDrizzleRows} and {@link useLiveQuery}. Builds the query,
+   * Shared implementation behind {@link useLiveDrizzleRows} and {@link useLiveQueryRaw}. Builds the query,
    * then `client.prepareQuery` scans the compiled SQL for the lazy relations it reads (∪ the optional
    * `use`), activates + hydrates them, and only then subscribes the live query — so it is never
    * registered against an un-hydrated lazy relation (ADR-0021).
@@ -235,7 +235,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
    * Reactive query using a Drizzle select builder. The builder is re-created
    * whenever `deps` changes (same contract as `useEffect`). pgxsinkit scans the compiled SQL and
    * auto-activates any `lazy` relation the query reads — anywhere it appears (FROM, JOIN, subquery,
-   * WHERE) — before subscribing. `use` (see {@link useLiveQuery}) is an optional pre-activation hint,
+   * WHERE) — before subscribing. `use` (see {@link useLiveQueryRaw}) is an optional pre-activation hint,
    * not a requirement (ADR-0021).
    *
    * ```ts
@@ -264,19 +264,21 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
   }
 
   /**
-   * The declared-safe reactive query (ADR-0021): `use` names the `lazy` relations the query reads, so
-   * they are guaranteed activated before it subscribes regardless of how they are referenced (subquery,
-   * WHERE, directly-imported table). The non-live counterpart of `client.query({ use, build })`.
+   * The reactive query for a builder that embeds a raw `sql` fragment (ADR-0021): `use` names the `lazy`
+   * relations it reads that the compiled-SQL scan can't see (a bare identifier inside raw SQL), so they
+   * are guaranteed activated before it subscribes. The non-live counterpart of
+   * `client.queryRaw({ use, build })`. Pure-Drizzle reads use `useLiveDrizzleRows` / `client.query((c) => …)`,
+   * which auto-detect every relation and need no `use`.
    *
    * ```ts
-   * const { rows, hydrating } = useLiveQuery({
+   * const { rows, hydrating } = useLiveQueryRaw({
    *   use: ["archive"],
    *   build: (c) => c.drizzle.select().from(archiveTable).where(inArray(archiveTable.id, recentIds)),
    *   deps: [recentIds],
    * });
    * ```
    */
-  function useLiveQuery<TRows extends readonly unknown[]>(args: {
+  function useLiveQueryRaw<TRows extends readonly unknown[]>(args: {
     use?: readonly SyncTableName<TRegistry>[];
     build: (client: SyncClient<TRegistry>) => DrizzleSqlBuilder<TRows>;
     deps?: DependencyList;
@@ -288,13 +290,13 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     });
   }
 
-  function useLiveQueryRow<TRows extends readonly unknown[]>(args: {
+  function useLiveQueryRawRow<TRows extends readonly unknown[]>(args: {
     use?: readonly SyncTableName<TRegistry>[];
     build: (client: SyncClient<TRegistry>) => DrizzleSqlBuilder<TRows>;
     deps?: DependencyList;
     ready?: boolean;
   }): { row: TRows[number] | null; loading: boolean; hydrating: boolean; error: Error | null } {
-    const { rows, loading, hydrating, error } = useLiveQuery(args);
+    const { rows, loading, hydrating, error } = useLiveQueryRaw(args);
     return { row: rows[0] ?? null, loading, hydrating, error };
   }
 
@@ -305,7 +307,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     useLiveRow,
     useLiveDrizzleRows,
     useLiveDrizzleRow,
-    useLiveQuery,
-    useLiveQueryRow,
+    useLiveQueryRaw,
+    useLiveQueryRawRow,
   };
 }
