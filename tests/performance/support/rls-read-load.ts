@@ -1,7 +1,20 @@
 import { performance } from "node:perf_hooks";
 
-import { sql, type SQL } from "drizzle-orm";
-import { bigint, boolean, PgDialect, pgPolicy, pgRole, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { and, desc, eq, exists, inArray, sql, type SQL } from "drizzle-orm";
+import type { drizzle as bunSqlDrizzle } from "drizzle-orm/bun-sql";
+import {
+  bigint,
+  boolean,
+  PgDialect,
+  pgPolicy,
+  pgRole,
+  pgTable,
+  QueryBuilder,
+  uuid,
+  varchar,
+  type AnyPgColumn,
+  type AnyPgTable,
+} from "drizzle-orm/pg-core";
 
 import {
   buildGrantScopeShapeWhere,
@@ -11,6 +24,8 @@ import {
   type JwtClaims,
 } from "@pgxsinkit/contracts";
 
+import { pgPolicies } from "../../support/catalog-tables";
+import { createTablesFromSchema } from "../../support/drizzle";
 import { computePercentiles } from "./scenario";
 
 // ---------------------------------------------------------------------------
@@ -37,12 +52,19 @@ import { computePercentiles } from "./scenario";
 
 const PREFIX = "rls_perf_";
 const READ_LIMIT = 50;
-const nowMicrosecondsSql = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)`;
 
 // Fixture tables (prefixed; varchar role to avoid provisioning an enum type). The real contracts
 // policy builders are applied to these columns, so the track exercises the shipped artifact directly.
-// The workspaces/offerings container tables are created via raw DDL in `provision()` — no policy
-// references their columns (no write-gate here), so they need no Drizzle definition.
+// These pgTables ARE the provisioned DDL (rendered offline via `createTablesFromSchema`), so they
+// carry NO pgPolicy extras — the harness installs/swaps policies per measurement cell — and the two
+// governed tables are declared via `pgTable.withRLS` (the only RLS-enabled relations; the
+// lookup/container tables stay plain). `created_at_us` defaults to 0 to match the provisioned shape
+// (seeding always supplies it); the deterministic seeded values are what the ORDER BY exercises.
+const workspacesTable = pgTable(`${PREFIX}workspaces`, {
+  id: uuid("id").primaryKey(),
+  ownerId: uuid("owner_id"),
+  locked: boolean("locked").notNull().default(false),
+});
 const workspaceMembersTable = pgTable(`${PREFIX}workspace_members`, {
   id: uuid("id").primaryKey(),
   workspaceId: uuid("workspace_id").notNull(),
@@ -50,19 +72,39 @@ const workspaceMembersTable = pgTable(`${PREFIX}workspace_members`, {
   role: varchar("role", { length: 32 }).notNull().default("member"),
   muted: boolean("muted").notNull().default(false),
 });
-const workItemsTable = pgTable(`${PREFIX}work_items`, {
+const workItemsTable = pgTable.withRLS(`${PREFIX}work_items`, {
   id: uuid("id").primaryKey(),
   workspaceId: uuid("workspace_id").notNull(),
   ownerId: uuid("owner_id"),
-  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
+  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(0n),
 });
-const enrolmentsTable = pgTable(`${PREFIX}enrolments`, {
+const offeringsTable = pgTable(`${PREFIX}offerings`, {
+  id: uuid("id").primaryKey(),
+});
+const enrolmentsTable = pgTable.withRLS(`${PREFIX}enrolments`, {
   id: uuid("id").primaryKey(),
   offeringId: uuid("offering_id").notNull(),
-  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
+  createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(0n),
 });
 
 const dialect = new PgDialect();
+
+// The governed fixture table a scenario measures — both carry `id` + `createdAtUs`.
+type GovernedFixtureTable = AnyPgTable & { id: AnyPgColumn; createdAtUs: AnyPgColumn };
+
+/**
+ * Author the measured read (optionally shape-filtered) as a tier-① builder over the fixture pgTable
+ * and render it ONCE with inline params — the sampled statement stays a pre-rendered raw string, so
+ * no per-iteration builder work contaminates the timing. The Electric-grammar `shapeWhere` fragment
+ * is a measured artifact and is embedded byte-exact via `sql.raw`.
+ */
+function renderGovernedReadQuery(table: GovernedFixtureTable, shapeWhere?: string): string {
+  let query = new QueryBuilder().select({ id: table.id }).from(table).$dynamic();
+  if (shapeWhere !== undefined) {
+    query = query.where(sql.raw(shapeWhere));
+  }
+  return dialect.sqlToQuery(query.orderBy(desc(table.createdAtUs)).limit(READ_LIMIT).getSQL().inlineParams()).sql;
+}
 
 export interface RlsReadConfig {
   preset: "smoke" | "realistic" | "heavy";
@@ -74,10 +116,9 @@ export interface RlsReadConfig {
   rlsP95MaxMs: number;
 }
 
-interface RlsReadDb {
-  execute: (query: SQL) => Promise<unknown>;
-  transaction: <T>(fn: (tx: { execute: (query: SQL) => Promise<unknown> }) => Promise<T>) => Promise<T>;
-}
+// The perf test hands the harness its real bun-sql Drizzle handle: setup/seeding author tier-①
+// statements directly on it, while the measured cells keep executing pre-rendered raw strings.
+type RlsReadDb = ReturnType<typeof bunSqlDrizzle>;
 
 const presetSizing: Record<RlsReadConfig["preset"], Omit<RlsReadConfig, "preset" | "rlsP95MaxMs">> = {
   smoke: { containers: 200, focalContainers: 5, rowsPerContainer: 20, membersPerContainer: 10, samples: 100 },
@@ -143,6 +184,8 @@ interface RlsVariant {
 interface ScenarioSpec {
   key: ScenarioKey;
   tableName: string;
+  /** The governed fixture pgTable — the typed authoring surface for the measured queries. */
+  table: GovernedFixtureTable;
   readQuery: string;
   indexDdl: string[];
   correctPolicies: ReturnType<typeof pgPolicy>[];
@@ -164,7 +207,20 @@ function buildNaiveMembershipPolicies(): ReturnType<typeof pgPolicy>[] {
   const subject = sql.raw(
     `(select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid)`,
   );
-  const predicate = sql`exists (select 1 from ${workspaceMembersTable} where ${workspaceMembersTable.memberId} = ${subject} and ${workspaceMembersTable.workspaceId} = ${workItemsTable.workspaceId})`;
+  // Tier-① authored: exists() over a QueryBuilder subquery whose predicate references the governed
+  // table's column — the render keeps the per-row correlation (`... = "rls_perf_work_items".
+  // "workspace_id"` inside `exists (select 1 …)`), so the experiment's plan shape is unchanged.
+  const predicate = exists(
+    new QueryBuilder()
+      .select({ one: sql`1` })
+      .from(workspaceMembersTable)
+      .where(
+        and(
+          eq(workspaceMembersTable.memberId, subject),
+          eq(workspaceMembersTable.workspaceId, workItemsTable.workspaceId),
+        ),
+      ),
+  );
   return [
     pgPolicy(`${PREFIX}work_items_select_membership_naive`, {
       as: "permissive",
@@ -230,7 +286,8 @@ function membershipScenario(): ScenarioSpec {
   return {
     key: "membership",
     tableName,
-    readQuery: `SELECT id FROM ${tableName} ORDER BY created_at_us DESC LIMIT ${READ_LIMIT}`,
+    table: workItemsTable,
+    readQuery: renderGovernedReadQuery(workItemsTable),
     indexDdl: [
       `CREATE INDEX IF NOT EXISTS ${PREFIX}wm_member_ws ON ${PREFIX}workspace_members (member_id, workspace_id)`,
       `CREATE INDEX IF NOT EXISTS ${PREFIX}wi_ws ON ${tableName} (workspace_id)`,
@@ -257,7 +314,8 @@ function grantScopeScenario(config: RlsReadConfig): ScenarioSpec {
   return {
     key: "grant-scope",
     tableName,
-    readQuery: `SELECT id FROM ${tableName} ORDER BY created_at_us DESC LIMIT ${READ_LIMIT}`,
+    table: enrolmentsTable,
+    readQuery: renderGovernedReadQuery(enrolmentsTable),
     indexDdl: [`CREATE INDEX IF NOT EXISTS ${PREFIX}en_offering ON ${tableName} (offering_id)`],
     correctPolicies: buildSupabaseGrantScopeNativePolicies({
       role: authenticatedPgRole,
@@ -315,37 +373,25 @@ async function provision(db: RlsReadDb): Promise<void> {
     ),
   );
   await dropAll(db);
-  await db.execute(
-    sql.raw(
-      `CREATE TABLE ${PREFIX}workspaces (id uuid PRIMARY KEY, owner_id uuid, locked boolean NOT NULL DEFAULT false)`,
-    ),
-  );
-  await db.execute(
-    sql.raw(
-      `CREATE TABLE ${PREFIX}workspace_members (id uuid PRIMARY KEY, workspace_id uuid NOT NULL, member_id uuid NOT NULL, role varchar(32) NOT NULL DEFAULT 'member', muted boolean NOT NULL DEFAULT false)`,
-    ),
-  );
-  await db.execute(
-    sql.raw(
-      `CREATE TABLE ${PREFIX}work_items (id uuid PRIMARY KEY, workspace_id uuid NOT NULL, owner_id uuid, created_at_us bigint NOT NULL DEFAULT 0)`,
-    ),
-  );
-  await db.execute(sql.raw(`CREATE TABLE ${PREFIX}offerings (id uuid PRIMARY KEY)`));
-  await db.execute(
-    sql.raw(
-      `CREATE TABLE ${PREFIX}enrolments (id uuid PRIMARY KEY, offering_id uuid NOT NULL, created_at_us bigint NOT NULL DEFAULT 0)`,
-    ),
-  );
+  // The five fixture tables, created from their pgTable definitions via the offline empty→schema DDL
+  // generator. The two governed pgTables are `pgTable.withRLS`, so this emits exactly the two
+  // `ALTER TABLE … ENABLE ROW LEVEL SECURITY` statements the harness needs: RLS is enabled ONLY on
+  // the governed tables being measured — the lookup tables (workspace_members, workspaces, offerings)
+  // stay readable, the standard "lookup secured via the governed table" pattern. (Enabling RLS on the
+  // lookup with no policy would make the work_items subquery return an empty set → the governed read
+  // would see zero rows.) No pgPolicy is attached to the fixture tables, so no CREATE POLICY is
+  // emitted here — policies are installed/swapped per measurement cell.
+  await createTablesFromSchema(db, {
+    workspacesTable,
+    workspaceMembersTable,
+    workItemsTable,
+    offeringsTable,
+    enrolmentsTable,
+  });
   // authenticated needs SELECT on every table the policies read (including the membership lookup the
-  // work_items subquery joins). RLS is enabled ONLY on the governed tables being measured — the lookup
-  // tables (workspace_members, workspaces, offerings) stay readable, the standard "lookup secured via
-  // the governed table" pattern. (Enabling RLS on the lookup with no policy would make the work_items
-  // subquery return an empty set → the governed read would see zero rows.)
+  // work_items subquery joins).
   for (const tableName of allTables()) {
     await db.execute(sql.raw(`GRANT SELECT ON TABLE ${tableName} TO authenticated`));
-  }
-  for (const tableName of [`${PREFIX}work_items`, `${PREFIX}enrolments`]) {
-    await db.execute(sql.raw(`ALTER TABLE ${tableName} ENABLE ROW LEVEL SECURITY`));
   }
 
   // The ROWS-hinted grant-set resolver for the rls-fnrows experiment: a STABLE SETOF function whose
@@ -364,46 +410,64 @@ async function provision(db: RlsReadDb): Promise<void> {
   await db.execute(sql.raw(`GRANT EXECUTE ON FUNCTION ${CALLER_OFFERINGS_FN}() TO authenticated`));
 }
 
+// Seeding runs in setup (before any timing), so it executes live through the drizzle handle:
+// tier-① inserts, with tier-② fragments only for what Drizzle cannot express (`gen_random_uuid()`,
+// `row_number() over ()`, the `generate_series` row source, and `::uuid` on bound params feeding a
+// select list, where Postgres cannot infer the parameter type from the insert target).
 async function seed(db: RlsReadDb, config: RlsReadConfig): Promise<void> {
   const focal = focalIds(config);
-  const focalValues = focal.map((id) => `('${id}')`).join(", ");
+  const qb = new QueryBuilder();
+  // SQL fields in an insert…select must carry an alias (drizzle's typing enforces it); the alias only
+  // names the select's output column and changes nothing about what is inserted.
+  const focalSubjectUuid = (alias: string) => sql`${FOCAL_SUBJECT}::uuid`.as(alias);
+  const rowNumberBigint = () => sql`(row_number() over ())::bigint`.as("created_at_us");
+  const genRandomUuid = (alias: string) => sql`gen_random_uuid()`.as(alias);
 
   // Containers: F deterministic focal + the rest random.
-  await db.execute(sql.raw(`INSERT INTO ${PREFIX}workspaces (id) VALUES ${focalValues}`));
-  await db.execute(sql.raw(`INSERT INTO ${PREFIX}offerings (id) VALUES ${focalValues}`));
+  await db.insert(workspacesTable).values(focal.map((id) => ({ id })));
+  await db.insert(offeringsTable).values(focal.map((id) => ({ id })));
   if (config.containers > config.focalContainers) {
     const extra = config.containers - config.focalContainers;
-    await db.execute(
-      sql.raw(`INSERT INTO ${PREFIX}workspaces (id) SELECT gen_random_uuid() FROM generate_series(1, ${extra})`),
-    );
-    await db.execute(
-      sql.raw(`INSERT INTO ${PREFIX}offerings (id) SELECT gen_random_uuid() FROM generate_series(1, ${extra})`),
-    );
+    await db
+      .insert(workspacesTable)
+      .select(qb.select({ id: genRandomUuid("id") }).from(sql`generate_series(1, ${extra})`));
+    await db
+      .insert(offeringsTable)
+      .select(qb.select({ id: genRandomUuid("id") }).from(sql`generate_series(1, ${extra})`));
   }
 
   // Focal user is a member of the F focal workspaces.
-  await db.execute(
-    sql.raw(
-      `INSERT INTO ${PREFIX}workspace_members (id, workspace_id, member_id) SELECT gen_random_uuid(), w.id, '${FOCAL_SUBJECT}' FROM ${PREFIX}workspaces w WHERE w.id IN (${focal.map((id) => `'${id}'`).join(", ")})`,
-    ),
+  await db.insert(workspaceMembersTable).select(
+    qb
+      .select({ id: genRandomUuid("id"), workspaceId: workspacesTable.id, memberId: focalSubjectUuid("member_id") })
+      .from(workspacesTable)
+      .where(inArray(workspacesTable.id, focal)),
   );
   // Bulk other memberships across all workspaces (volume for the subquery).
-  await db.execute(
-    sql.raw(
-      `INSERT INTO ${PREFIX}workspace_members (id, workspace_id, member_id) SELECT gen_random_uuid(), w.id, gen_random_uuid() FROM ${PREFIX}workspaces w CROSS JOIN generate_series(1, ${config.membersPerContainer})`,
-    ),
+  await db.insert(workspaceMembersTable).select(
+    qb
+      .select({ id: genRandomUuid("id"), workspaceId: workspacesTable.id, memberId: genRandomUuid("member_id") })
+      .from(workspacesTable)
+      .crossJoin(sql`generate_series(1, ${config.membersPerContainer})`),
   );
 
   // Rows: rowsPerContainer per container, monotonic created_at_us for the ORDER BY.
-  await db.execute(
-    sql.raw(
-      `INSERT INTO ${PREFIX}work_items (id, workspace_id, owner_id, created_at_us) SELECT gen_random_uuid(), w.id, '${FOCAL_SUBJECT}', (row_number() OVER ())::bigint FROM ${PREFIX}workspaces w CROSS JOIN generate_series(1, ${config.rowsPerContainer})`,
-    ),
+  await db.insert(workItemsTable).select(
+    qb
+      .select({
+        id: genRandomUuid("id"),
+        workspaceId: workspacesTable.id,
+        ownerId: focalSubjectUuid("owner_id"),
+        createdAtUs: rowNumberBigint(),
+      })
+      .from(workspacesTable)
+      .crossJoin(sql`generate_series(1, ${config.rowsPerContainer})`),
   );
-  await db.execute(
-    sql.raw(
-      `INSERT INTO ${PREFIX}enrolments (id, offering_id, created_at_us) SELECT gen_random_uuid(), o.id, (row_number() OVER ())::bigint FROM ${PREFIX}offerings o CROSS JOIN generate_series(1, ${config.rowsPerContainer})`,
-    ),
+  await db.insert(enrolmentsTable).select(
+    qb
+      .select({ id: genRandomUuid("id"), offeringId: offeringsTable.id, createdAtUs: rowNumberBigint() })
+      .from(offeringsTable)
+      .crossJoin(sql`generate_series(1, ${config.rowsPerContainer})`),
   );
   await db.execute(sql.raw(`ANALYZE`));
 }
@@ -453,10 +517,14 @@ async function installPolicies(
 }
 
 async function dropPolicies(db: RlsReadDb, tableName: string): Promise<void> {
-  const rows = (await db.execute(
-    sql.raw(`SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = '${tableName}'`),
-  )) as Array<{ policyname: string }>;
-  for (const row of rows ?? []) {
+  const rows = await db
+    .select({ policyname: pgPolicies.policyname })
+    .from(pgPolicies)
+    .where(and(eq(pgPolicies.schemaname, "public"), eq(pgPolicies.tablename, tableName)));
+  for (const row of rows) {
+    if (row.policyname === null) {
+      continue;
+    }
     await db.execute(sql.raw(`DROP POLICY IF EXISTS "${row.policyname}" ON ${tableName}`));
   }
 }
@@ -509,13 +577,13 @@ async function timePrivileged(db: RlsReadDb, query: string, samples: number): Pr
 }
 
 async function timeUnderRls(db: RlsReadDb, query: string, claims: JwtClaims, samples: number): Promise<CellResult> {
-  const claimsJson = JSON.stringify(claims).replace(/'/g, "''");
+  const claimsJson = JSON.stringify(claims);
   let captured: CellResult | undefined;
   try {
     await db.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL ROLE authenticated`));
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`));
-      await tx.execute(sql.raw(`SELECT set_config('request.jwt.claims', '${claimsJson}', true)`));
+      await tx.execute(sql`select set_config('request.jwt.claims', ${claimsJson}, true)`);
       captured = await sampleCell(() => tx.execute(sql.raw(query)), samples);
       throw ROLLBACK_SENTINEL;
     });
@@ -528,13 +596,13 @@ async function timeUnderRls(db: RlsReadDb, query: string, claims: JwtClaims, sam
 }
 
 async function explainUnderRls(db: RlsReadDb, query: string, claims: JwtClaims): Promise<string> {
-  const claimsJson = JSON.stringify(claims).replace(/'/g, "''");
+  const claimsJson = JSON.stringify(claims);
   let plan = "";
   try {
     await db.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL ROLE authenticated`));
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`));
-      await tx.execute(sql.raw(`SELECT set_config('request.jwt.claims', '${claimsJson}', true)`));
+      await tx.execute(sql`select set_config('request.jwt.claims', ${claimsJson}, true)`);
       const result = await tx.execute(sql.raw(`EXPLAIN (ANALYZE, BUFFERS) ${query}`));
       const rows = Array.isArray(result) ? (result as Array<Record<string, unknown>>) : [];
       // Each EXPLAIN row is a single "QUERY PLAN" text column; keep only string values.
@@ -561,6 +629,9 @@ async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadCon
     { mode: "rls-naive", policies: spec.naivePolicies },
     ...spec.extraVariants,
   ];
+  // Composed once (tier-① builder + the byte-exact shape `where` fragment), rendered inline once —
+  // every sample below replays the same pre-rendered raw string.
+  const shapeQuery = renderGovernedReadQuery(spec.table, spec.shapeWhere);
 
   // Privileged baselines (no RLS) — independent of policy variant; measured per index state.
   for (const indexed of [false, true]) {
@@ -578,11 +649,7 @@ async function runScenario(db: RlsReadDb, spec: ScenarioSpec, config: RlsReadCon
       rowsReturned: base.rows,
       timedOut: base.timedOut,
     });
-    const shaped = await timePrivileged(
-      db,
-      `SELECT id FROM ${spec.tableName} WHERE ${spec.shapeWhere} ORDER BY created_at_us DESC LIMIT ${READ_LIMIT}`,
-      config.samples,
-    );
+    const shaped = await timePrivileged(db, shapeQuery, config.samples);
     modes.push({
       mode: "shape-query",
       indexed,

@@ -5,11 +5,18 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { sql } from "drizzle-orm";
+import { count, eq, getColumns, inArray, max, sql } from "drizzle-orm";
 import { drizzle as bunDrizzle } from "drizzle-orm/bun-sql";
-import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
+import type { AnyPgTable, PgAsyncDatabase, PgColumn, PgQueryResultHKT, PgView } from "drizzle-orm/pg-core";
 
-import { createSyncClient, type MutationBatchItem } from "@pgxsinkit/client";
+import {
+  createSyncClient,
+  getOverlayTable,
+  getReadModelView,
+  getSyncedLocalTable,
+  type MutationBatchItem,
+} from "@pgxsinkit/client";
+import type { RegistryRelations, SyncTableRegistry } from "@pgxsinkit/contracts";
 import {
   DEMO_JWT_USER1,
   DEMO_JWT_USER10,
@@ -401,14 +408,13 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticGovernanceSql(registry)));
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
       await verifyPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
-      const executeQuery = (query: ReturnType<typeof sql.raw>) => provisioningServer.drizzle.execute(query);
       await seedSyntheticRows(
         registry,
         tableNames,
         config.seedRowsPerTable,
         config.extraColumnCount,
         users,
-        executeQuery,
+        provisioningServer.drizzle,
       );
     } finally {
       await provisioningServer.stop();
@@ -450,7 +456,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
         users.length,
         config.extraColumnCount,
       );
-      await waitForSeedSync(client, expectedSyncedIdsByTable);
+      await waitForSeedSync(registry, client, expectedSyncedIdsByTable);
 
       const sharedRowPoolState = sharedRowPoolsByUser.get(assignment.key) ?? {
         rowPool: createConcurrentRowPool(
@@ -493,6 +499,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
         executeClientWorkload({
           handle,
           config,
+          registry,
           tableNames,
           users,
         }),
@@ -544,14 +551,13 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticGovernanceSql(registry)));
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
       await verifyPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
-      const executeQuery = (query: ReturnType<typeof sql.raw>) => provisioningServer.drizzle.execute(query);
       await seedSyntheticRows(
         registry,
         tableNames,
         config.seedRowsPerTable,
         config.extraColumnCount,
         users,
-        executeQuery,
+        provisioningServer.drizzle,
       );
     } finally {
       await provisioningServer.stop();
@@ -1001,7 +1007,7 @@ export async function runConcurrentMixedLoadWorker(
       resolveDemoUsers(config.distinctUsers).length,
       config.extraColumnCount,
     );
-    await waitForSeedSync(client, expectedSyncedIdsByTable);
+    await waitForSeedSync(registry, client, expectedSyncedIdsByTable);
 
     const random = createDeterministicRandom(hashSeed(`${config.scenarioKey}:${handle.key}:${handle.assignment.key}`));
     const mutationMix = resolveConcurrentMutationMix(config.createProbability, config.deleteProbability);
@@ -1055,6 +1061,7 @@ export async function runConcurrentMixedLoadWorker(
 
       const convergenceStartedAt = performance.now();
       await waitForConvergence(
+        registry,
         handle as ConcurrentClientHandle & {
           client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>;
         },
@@ -1220,10 +1227,11 @@ function buildConcurrentMutationRequests(options: {
 async function executeClientWorkload(options: {
   handle: ConcurrentClientHandle & { client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>> };
   config: PerfScenarioConfig;
+  registry: SyncTableRegistry;
   tableNames: string[];
   users: DemoPerfUser[];
 }) {
-  const { handle, config, tableNames } = options;
+  const { handle, config, registry, tableNames } = options;
   const random = createDeterministicRandom(hashSeed(`${config.scenarioKey}:${handle.key}:${handle.assignment.key}`));
   const mutationMix = resolveConcurrentMutationMix(config.createProbability, config.deleteProbability);
 
@@ -1374,7 +1382,7 @@ async function executeClientWorkload(options: {
     handle.flushTimingsMs.push(performance.now() - flushStartedAt);
 
     const convergenceStartedAt = performance.now();
-    await waitForConvergence(handle, config, selectRowExpectationsForVerification(batchExpectations));
+    await waitForConvergence(registry, handle, config, selectRowExpectationsForVerification(batchExpectations));
     handle.convergenceTimingsMs.push(performance.now() - convergenceStartedAt);
     handle.acknowledgedMutations += batchItems.length;
     handle.nextCreateSequence += batchCounts.create;
@@ -1450,6 +1458,7 @@ function buildRunResult(
 }
 
 async function waitForConvergence(
+  registry: SyncTableRegistry,
   handle: ConcurrentClientHandle & { client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>> },
   config: PerfScenarioConfig,
   expectations: RowPresenceExpectation[] = [],
@@ -1476,7 +1485,7 @@ async function waitForConvergence(
           throw new Error(`${handle.key} still has pending mutation state`);
         }
 
-        await verifyLocalRowExpectations(handle.client, expectations);
+        await verifyLocalRowExpectations(registry, handle.client, expectations);
 
         if (diagnostics.mutation.ackedCount > 0) {
           throw new Error(`${handle.key} still has acknowledged mutations waiting for Electric echo`);
@@ -1504,8 +1513,8 @@ async function waitForConvergence(
       conflictReason: mutation.conflictReason,
       serverUpdatedAtUs: mutation.serverUpdatedAtUs,
     }));
-    const recentEntityState = await readLocalEntityStateDiagnostics(handle.client, recentMutations);
-    const recentServerEntityState = await readServerEntityStateDiagnostics(recentMutations);
+    const recentEntityState = await readLocalEntityStateDiagnostics(registry, handle.client, recentMutations);
+    const recentServerEntityState = await readServerEntityStateDiagnostics(registry, recentMutations);
     const waitReason = isAckOnlyMutationState(diagnostics.mutation)
       ? "waiting for Electric echo to clear acknowledged mutations"
       : "waiting for local mutation state to drain";
@@ -1527,20 +1536,22 @@ async function waitForConvergence(
   }
 }
 
+// Pre-measurement wait loop — a live tier-① builder per poll is fine here (nothing is being timed).
 async function waitForSeedSync(
+  registry: SyncTableRegistry,
   client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>,
   expectedSyncedIdsByTable: Map<string, string[]>,
 ) {
   await waitFor(
     async () => {
       for (const [tableName, expectedIds] of expectedSyncedIdsByTable.entries()) {
-        const placeholders = expectedIds.map((_, index) => `$${index + 1}`).join(", ");
-        const result = await client.pglite.query<{ row_count: number }>(
-          `SELECT COUNT(*)::int AS row_count FROM ${tableName} WHERE id IN (${placeholders})`,
-          expectedIds,
-        );
+        const table = requireRegistryEntry(registry, tableName).table;
+        const rows = await client.drizzle
+          .select({ rowCount: count() })
+          .from(table)
+          .where(inArray(requireColumn(table, "id"), expectedIds));
 
-        if ((result.rows[0]?.row_count ?? 0) !== expectedIds.length) {
+        if ((rows[0]?.rowCount ?? 0) !== expectedIds.length) {
           throw new Error(`expected ${expectedIds.length} synced target rows in ${tableName}`);
         }
       }
@@ -1552,59 +1563,48 @@ async function waitForSeedSync(
   );
 }
 
-async function seedSyntheticRows(
-  registry: ReturnType<typeof buildSyntheticRegistry>["registry"],
+// Setup-phase seeding (unmeasured): tier-① inserts through the provisioning server's drizzle handle,
+// in the same 250-row chunks (mirrors scripts/perf-lab-server.ts `seedRegistryRows`).
+async function seedSyntheticRows<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
   tableNames: string[],
   seedRowsPerTable: number,
   extraColumnCount: number,
   users: DemoPerfUser[],
-  execute: (query: ReturnType<typeof sql.raw>) => Promise<unknown>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
 ) {
   const batchSize = 250;
-  const extraColumns = Array.from(
-    { length: extraColumnCount },
-    (_, index) => `field_${index.toString().padStart(2, "0")}`,
-  );
-  const columnNames = [
-    "id",
-    ...extraColumns,
-    "owner_id",
-    "modified_by",
-    "status",
-    "priority",
-    "created_at_us",
-    "updated_at_us",
-  ];
 
   for (const [tableIndex, tableName] of tableNames.entries()) {
-    const qualifiedTableName = qualifyRegistryTableName(registry, tableName);
+    const entry = requireRegistryEntry(registry, tableName);
 
     for (let start = 0; start < seedRowsPerTable; start += batchSize) {
       const batchEnd = Math.min(seedRowsPerTable, start + batchSize);
-      const tuples: string[] = [];
+      const rows: Array<Record<string, string | bigint>> = [];
 
       for (let rowIndex = start; rowIndex < batchEnd; rowIndex += 1) {
         const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
         const owner = users[rowIndex % users.length]!;
-        const values = [
-          sqlLiteral(String(payload.id)),
-          ...extraColumns.map((_, columnIndex) =>
-            sqlLiteral(String(payload[`field${columnIndex.toString().padStart(2, "0")}`])),
-          ),
-          sqlLiteral(owner.userId),
-          sqlLiteral(owner.userId),
-          sqlLiteral(String(payload.status)),
-          sqlLiteral(String(payload.priority)),
-          String(1_700_000_000_000_000 + tableIndex * seedRowsPerTable + rowIndex),
-          String(1_700_000_000_000_000 + tableIndex * seedRowsPerTable + rowIndex),
-        ];
+        const timestampUs = 1_700_000_000_000_000n + BigInt(tableIndex * seedRowsPerTable + rowIndex);
+        const row: Record<string, string | bigint> = {
+          id: payload.id,
+          ownerId: owner.userId,
+          modifiedBy: owner.userId,
+          status: payload.status,
+          priority: payload.priority,
+          createdAtUs: timestampUs,
+          updatedAtUs: timestampUs,
+        };
 
-        tuples.push(`(${values.join(", ")})`);
+        for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
+          const fieldKey = `field${columnIndex.toString().padStart(2, "0")}`;
+          row[fieldKey] = payload[fieldKey] ?? "";
+        }
+
+        rows.push(row);
       }
 
-      await execute(
-        sql.raw(`INSERT INTO ${qualifiedTableName} (${columnNames.join(", ")}) VALUES ${tuples.join(", ")}`),
-      );
+      await db.insert(entry.table as AnyPgTable).values(rows);
     }
   }
 }
@@ -1760,16 +1760,21 @@ async function withSharedRowPoolPlanningLock<T>(state: SharedConcurrentRowPoolSt
   }
 }
 
+// Poll-dominated convergence window — live tier-① builders over the registry read-model view are
+// acceptable here (the convergence metric is wait-bound, not statement-bound). The view's `id`
+// column rides the entry's own property key (`id` for the synthetic registry).
 async function verifyLocalRowExpectations(
+  registry: SyncTableRegistry,
   client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>,
   expectations: RowPresenceExpectation[],
 ) {
   for (const expectation of expectations) {
-    const result = await client.pglite.query<{ row_count: number }>(
-      `SELECT COUNT(*)::int AS row_count FROM ${expectation.tableName}_read_model WHERE id = $1`,
-      [expectation.entityId],
-    );
-    const rowCount = result.rows[0]?.row_count ?? 0;
+    const view = requireReadModelView(registry, expectation.tableName);
+    const rows = await client.drizzle
+      .select({ rowCount: count() })
+      .from(view)
+      .where(eq(requireColumn(view, "id"), expectation.entityId));
+    const rowCount = rows[0]?.rowCount ?? 0;
 
     if (expectation.shouldExist && rowCount < 1) {
       throw new Error(`expected ${expectation.entityId} to be visible in ${expectation.tableName}_read_model`);
@@ -1781,7 +1786,10 @@ async function verifyLocalRowExpectations(
   }
 }
 
+// Failure-path diagnostics only: tier-① aggregates over the registry's synced/read-model/overlay
+// relations (no `::text` casts — the returned bigint/varchar values are stringified for the report).
 async function readLocalEntityStateDiagnostics(
+  registry: SyncTableRegistry,
   client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>,
   mutations: Array<{
     tableName: string;
@@ -1812,53 +1820,62 @@ async function readLocalEntityStateDiagnostics(
       continue;
     }
 
-    const syncedResult = await client.pglite.query<{
-      row_count: number;
-      updated_at_us: string | null;
-    }>(
-      `SELECT COUNT(*)::int AS row_count, MAX(updated_at_us)::text AS updated_at_us FROM ${mutation.tableName} WHERE id = $1`,
-      [entityId],
-    );
-    const readModelResult = await client.pglite.query<{
-      row_count: number;
-      overlay_kind: string | null;
-      updated_at_us: string | null;
-      local_updated_at_us: string | null;
-    }>(
-      `SELECT COUNT(*)::int AS row_count, MAX(overlay_kind) AS overlay_kind, MAX(updated_at_us)::text AS updated_at_us, MAX(local_updated_at_us)::text AS local_updated_at_us FROM ${mutation.tableName}_read_model WHERE id = $1`,
-      [entityId],
-    );
-    const overlayResult = await client.pglite.query<{
-      row_count: number;
-      overlay_kind: string | null;
-      updated_at_us: string | null;
-      local_updated_at_us: string | null;
-    }>(
-      `SELECT COUNT(*)::int AS row_count, MAX(overlay_kind) AS overlay_kind, MAX(updated_at_us)::text AS updated_at_us, MAX(local_updated_at_us)::text AS local_updated_at_us FROM ${mutation.tableName}_overlay WHERE id = $1`,
-      [entityId],
-    );
+    const syncedTable = getSyncedLocalTable(registry, mutation.tableName);
+    const syncedRows = await client.drizzle
+      .select({
+        rowCount: count(),
+        updatedAtUs: max(requireColumn(syncedTable, "updatedAtUs")),
+      })
+      .from(syncedTable)
+      .where(eq(requireColumn(syncedTable, "id"), entityId));
+
+    const readModelView = requireReadModelView(registry, mutation.tableName);
+    const readModelRows = await client.drizzle
+      .select({
+        rowCount: count(),
+        overlayKind: max(requireColumn(readModelView, "overlay_kind")),
+        updatedAtUs: max(requireColumn(readModelView, "updatedAtUs")),
+        localUpdatedAtUs: max(requireColumn(readModelView, "local_updated_at_us")),
+      })
+      .from(readModelView)
+      .where(eq(requireColumn(readModelView, "id"), entityId));
+
+    const overlayTable = getOverlayTable(registry, mutation.tableName);
+    const overlayRows = await client.drizzle
+      .select({
+        rowCount: count(),
+        overlayKind: max(overlayTable.overlayKind),
+        updatedAtUs: max(requireColumn(overlayTable, "updatedAtUs")),
+        localUpdatedAtUs: max(overlayTable.localUpdatedAtUs),
+      })
+      .from(overlayTable)
+      .where(eq(requireColumn(overlayTable, "id"), entityId));
 
     diagnostics.push({
       tableName: mutation.tableName,
       entityKey: mutation.entityKey,
       serverUpdatedAtUs: mutation.serverUpdatedAtUs ?? null,
-      readModelRowCount: readModelResult.rows[0]?.row_count ?? 0,
-      readModelOverlayKind: readModelResult.rows[0]?.overlay_kind ?? null,
-      readModelUpdatedAtUs: readModelResult.rows[0]?.updated_at_us ?? null,
-      readModelLocalUpdatedAtUs: readModelResult.rows[0]?.local_updated_at_us ?? null,
-      syncedRowCount: syncedResult.rows[0]?.row_count ?? 0,
-      syncedUpdatedAtUs: syncedResult.rows[0]?.updated_at_us ?? null,
-      overlayRowCount: overlayResult.rows[0]?.row_count ?? 0,
-      overlayKind: overlayResult.rows[0]?.overlay_kind ?? null,
-      overlayUpdatedAtUs: overlayResult.rows[0]?.updated_at_us ?? null,
-      overlayLocalUpdatedAtUs: overlayResult.rows[0]?.local_updated_at_us ?? null,
+      readModelRowCount: readModelRows[0]?.rowCount ?? 0,
+      readModelOverlayKind: formatNullableDiagnosticValue(readModelRows[0]?.overlayKind),
+      readModelUpdatedAtUs: formatNullableDiagnosticValue(readModelRows[0]?.updatedAtUs),
+      readModelLocalUpdatedAtUs: formatNullableDiagnosticValue(readModelRows[0]?.localUpdatedAtUs),
+      syncedRowCount: syncedRows[0]?.rowCount ?? 0,
+      syncedUpdatedAtUs: formatNullableDiagnosticValue(syncedRows[0]?.updatedAtUs),
+      overlayRowCount: overlayRows[0]?.rowCount ?? 0,
+      overlayKind: formatNullableDiagnosticValue(overlayRows[0]?.overlayKind),
+      overlayUpdatedAtUs: formatNullableDiagnosticValue(overlayRows[0]?.updatedAtUs),
+      overlayLocalUpdatedAtUs: formatNullableDiagnosticValue(overlayRows[0]?.localUpdatedAtUs),
     });
   }
 
   return diagnostics;
 }
 
+// Failure-path diagnostics against the SERVER database, authored over the registry's server table.
+// Postgres has no max(uuid) aggregate, so the uuid columns keep the raw probe's `::text` cast as a
+// tier-② typed fragment (the bigint columns keep it too, for byte-parity with the original probe).
 async function readServerEntityStateDiagnostics(
+  registry: SyncTableRegistry,
   mutations: Array<{
     tableName: string;
     entityKey: Record<string, string>;
@@ -1890,37 +1907,28 @@ async function readServerEntityStateDiagnostics(
         continue;
       }
 
-      type DiagRow = {
-        row_count: number;
-        owner_id: string | null;
-        modified_by: string | null;
-        created_at_us: string | null;
-        updated_at_us: string | null;
-      };
+      const table = requireRegistryEntry(registry, mutation.tableName).table;
+      const rows = await diagnosticDb
+        .select({
+          rowCount: count(),
+          ownerId: max(sql<string>`${requireColumn(table, "ownerId")}::text`),
+          modifiedBy: max(sql<string>`${requireColumn(table, "modifiedBy")}::text`),
+          createdAtUs: max(sql<string>`${requireColumn(table, "createdAtUs")}::text`),
+          updatedAtUs: max(sql<string>`${requireColumn(table, "updatedAtUs")}::text`),
+        })
+        .from(table)
+        .where(eq(requireColumn(table, "id"), entityId));
 
-      const result = await diagnosticDb.execute<DiagRow>(
-        sql`
-          SELECT
-            COUNT(*)::int AS row_count,
-            MAX(owner_id::text) AS owner_id,
-            MAX(modified_by::text) AS modified_by,
-            MAX(created_at_us::text) AS created_at_us,
-            MAX(updated_at_us::text) AS updated_at_us
-          FROM ${sql.raw(mutation.tableName)}
-          WHERE id = ${entityId}::uuid
-        `,
-      );
-
-      const row = Array.from(result)[0] as DiagRow | undefined;
+      const row = rows[0];
       diagnostics.push({
         tableName: mutation.tableName,
         entityKey: mutation.entityKey,
         serverUpdatedAtUs: mutation.serverUpdatedAtUs ?? null,
-        rowCount: row?.row_count ?? 0,
-        ownerId: row?.owner_id ?? null,
-        modifiedBy: row?.modified_by ?? null,
-        createdAtUs: row?.created_at_us ?? null,
-        updatedAtUs: row?.updated_at_us ?? null,
+        rowCount: row?.rowCount ?? 0,
+        ownerId: formatNullableDiagnosticValue(row?.ownerId),
+        modifiedBy: formatNullableDiagnosticValue(row?.modifiedBy),
+        createdAtUs: formatNullableDiagnosticValue(row?.createdAtUs),
+        updatedAtUs: formatNullableDiagnosticValue(row?.updatedAtUs),
       });
     }
 
@@ -2113,25 +2121,49 @@ async function stopHttpServer(server: Server | undefined) {
   });
 }
 
-function qualifyRegistryTableName(registry: ReturnType<typeof buildSyntheticRegistry>["registry"], tableName: string) {
-  const table = registry[tableName]?.table;
+function requireRegistryEntry(registry: SyncTableRegistry, tableName: string) {
+  const entry = registry[tableName];
 
-  if (!table) {
+  if (!entry) {
     throw new Error(`Missing registry table ${tableName}`);
   }
 
-  const tableConfig = getTableConfig(table as AnyPgTable);
-  return tableConfig.schema
-    ? `${quoteIdent(tableConfig.schema)}.${quoteIdent(tableConfig.name)}`
-    : quoteIdent(tableConfig.name);
+  return entry;
 }
 
-function quoteIdent(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
+// The `<t>_read_model` view carries the entry's projected columns under their own property keys plus
+// `overlay_kind` / `local_updated_at_us`; the returned intersection makes them addressable.
+function requireReadModelView(registry: SyncTableRegistry, tableName: string): PgView & Record<string, PgColumn> {
+  // The schema-qualified read-model factory (mirrors the sibling `getSyncedLocalTable`/`getOverlayTable`
+  // reads); it throws if the entry is missing or not writable, preserving the previous guard behavior.
+  return getReadModelView(registry, tableName) as unknown as PgView & Record<string, PgColumn>;
 }
 
-function sqlLiteral(value: string) {
-  return `'${value.replace(/'/g, "''")}'`;
+function requireColumn(relation: AnyPgTable | PgView, propertyKey: string): PgColumn {
+  const column = (getColumns(relation) as Record<string, PgColumn | undefined>)[propertyKey];
+
+  if (!column) {
+    throw new Error(`Missing column ${propertyKey} on relation`);
+  }
+
+  return column;
+}
+
+// Failure-path diagnostics render whatever drizzle returns (bigint, string, number, …) as text.
+function formatNullableDiagnosticValue(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+    return value.toString();
+  }
+
+  return JSON.stringify(value) ?? null;
 }
 
 function delay(durationMs: number) {
