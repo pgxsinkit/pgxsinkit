@@ -36,8 +36,8 @@ The demo is **public and writable** — anyone can create and move issues and po
 vandalism (offensive issue titles, chat spam) is gone by morning, and a manual run resets it on demand.
 
 It is the same `seed:board` used locally and by `board:cloud:seed`, pointed at the cloud project via env —
-no Postgres/Electric containers, no Pages deploy, just the GoTrue admin API + the project's direct database
-connection.
+no Postgres/Electric containers, no Pages deploy, just the GoTrue admin API + the project's database via the
+Supavisor **session** pooler.
 
 ## Operator setup
 
@@ -45,13 +45,13 @@ The public demo points at a real project provisioned per the
 [board-on-cloud runbook](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/runbooks/board-on-cloud.md).
 On top of that one-time setup, the hosted demo needs:
 
-| GitHub setting               | Kind              | Purpose                                                                 |
-| ---------------------------- | ----------------- | ----------------------------------------------------------------------- |
-| `DEMO_BOARD_SUPABASE_URL`    | variable (public) | Project URL — baked into the build; the reset's GoTrue admin gateway.   |
-| `DEMO_BOARD_PUBLISHABLE_KEY` | variable (public) | `sb_publishable_…` key — baked into the build as the `apikey`.          |
-| `DEMO_BOARD_SECRET_KEY`      | secret            | `sb_secret_…` key — the reset's admin API auth.                         |
-| `DEMO_BOARD_DATABASE_URL`    | secret            | Direct (5432) connection — the reset truncates + inserts as `postgres`. |
-| `PGXSINKIT_PAGES_DEPLOY_KEY` | secret            | Already required by the docs deploy.                                    |
+| GitHub setting               | Kind              | Purpose                                                                                                                                                                                                          |
+| ---------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DEMO_BOARD_SUPABASE_URL`    | variable (public) | Project URL — baked into the build; the reset's GoTrue admin gateway.                                                                                                                                            |
+| `DEMO_BOARD_PUBLISHABLE_KEY` | variable (public) | `sb_publishable_…` key — baked into the build as the `apikey`.                                                                                                                                                   |
+| `DEMO_BOARD_SECRET_KEY`      | secret            | `sb_secret_…` key — the reset's admin API auth.                                                                                                                                                                  |
+| `DEMO_BOARD_DATABASE_URL`    | secret            | **Session pooler** connection (pooler host, port 5432, user `postgres.<ref>`) — the reset truncates + inserts as `postgres`. Not the direct connection: it is IPv6-only, and GitHub-hosted runners have no IPv6. |
+| `PGXSINKIT_PAGES_DEPLOY_KEY` | secret            | Already required by the docs deploy.                                                                                                                                                                             |
 
 The build values are **variables, not secrets** on purpose: the project URL and publishable key are public
 (they ship in client JS), and gating the demo build on a variable lets a fork get a clean docs deploy with the

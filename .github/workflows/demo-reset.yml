@@ -8,11 +8,15 @@ name: Demo reset
 # table and recreates the deterministic identities + fixtures against the cloud project — the exact
 # same script used for local seeding and `board:cloud:seed`, just pointed at the cloud via env.
 #
-# It talks ONLY to the managed services (GoTrue admin API + the project's direct Postgres connection);
-# no Postgres/Electric containers, no Pages deploy. Inputs:
+# It talks ONLY to the managed services (GoTrue admin API + the project's Postgres via the Supavisor
+# SESSION pooler); no Postgres/Electric containers, no Pages deploy. Inputs:
 #   - var    DEMO_BOARD_SUPABASE_URL   the project URL (public; the GoTrue admin gateway)
 #   - secret DEMO_BOARD_SECRET_KEY     the project's sb_secret_… key (admin API auth)
-#   - secret DEMO_BOARD_DATABASE_URL   the DIRECT (5432) connection — truncate + insert as `postgres`
+#   - secret DEMO_BOARD_DATABASE_URL   the SESSION pooler connection (pooler host, port 5432,
+#     user postgres.<ref>) — truncate + insert as `postgres`. NOT the direct connection: that host
+#     is IPv6-only and GitHub-hosted runners have no outbound IPv6, so the first query dies with
+#     "Connection closed" (run 28500294690). Session mode (not the 6543 transaction pooler) keeps
+#     the seed's prepared statements on one backend connection.
 #
 # The fixtures use the in-script shared password (`board-demo-password`) the login screen publishes —
 # a public demo's sign-in password is public by design, so there is nothing to inject here.

@@ -34,7 +34,8 @@ The decision is to make the shared state **disposable**: restore it to the seede
   existing seed script (`reset()` truncate-cascades every board table, then recreates the deterministic
   identities + fixtures) on a `0 3 * * *` cron plus `workflow_dispatch`, pointed at the cloud project via
   env. Its inputs are the public URL variable plus two **secrets** — `DEMO_BOARD_SECRET_KEY` (admin API)
-  and `DEMO_BOARD_DATABASE_URL` (the direct connection for truncate/insert as `postgres`). It is the same
+  and `DEMO_BOARD_DATABASE_URL` (the **session-pooler** connection for truncate/insert as `postgres`; the
+  direct connection is IPv6-only and unreachable from IPv4-only GitHub-hosted runners). It is the same
   script used locally and by `board:cloud:seed`; only the env differs.
 - **CORS allows the github.io origin.** The functions read `BOARD_ALLOWED_ORIGINS`; the operator sets it
   to include `https://pgxsinkit.github.io` (a CORS origin is scheme+host — the `/demo` path is irrelevant)
