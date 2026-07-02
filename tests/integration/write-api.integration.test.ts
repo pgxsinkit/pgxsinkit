@@ -16,11 +16,12 @@ import {
   rlsTodosTable,
   todosTable,
 } from "@pgxsinkit/schema";
-import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
+import { createSyncServer, operationsLogRegclassTarget, operationsLogTable } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../apps/write-api/src/demo-auth";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createTablesFromSchema } from "../support/drizzle";
 
 const env = readIntegrationEnv();
 
@@ -1266,7 +1267,7 @@ describe("write api tolerates a missing operations_log table", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
 
   beforeAll(async () => {
-    await serverDb.db.execute(sql`DROP TABLE IF EXISTS operations_log`);
+    await serverDb.db.execute(sql`DROP TABLE IF EXISTS ${operationsLogTable}`);
     server = createSyncServer({
       registry: demoSyncRegistry,
       db: serverDb.db,
@@ -1277,38 +1278,11 @@ describe("write api tolerates a missing operations_log table", () => {
   });
 
   afterAll(async () => {
-    // Restore the optional table (and its indexes — mirrors operations-log/schema.ts) so the later
-    // integration files that share this database keep logging.
-    await serverDb.db.execute(sql`
-      CREATE TABLE IF NOT EXISTS operations_log (
-        id bigserial PRIMARY KEY,
-        table_name varchar(255),
-        operation_kind varchar(24),
-        user_id uuid,
-        entity_key_json jsonb,
-        payload_json jsonb,
-        status varchar(32) NOT NULL,
-        error_message text,
-        http_status integer,
-        mutation_id uuid,
-        mutation_seq integer,
-        client_timestamp_us bigint,
-        request_path text,
-        server_timestamp_us bigint NOT NULL DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * 1000000::numeric))),
-        created_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-    await serverDb.db.execute(
-      sql`CREATE INDEX IF NOT EXISTS operations_log_created_at_idx ON operations_log (created_at DESC)`,
-    );
-    await serverDb.db.execute(
-      sql`CREATE INDEX IF NOT EXISTS operations_log_table_name_idx ON operations_log (table_name)`,
-    );
-    await serverDb.db.execute(sql`CREATE INDEX IF NOT EXISTS operations_log_user_id_idx ON operations_log (user_id)`);
-    await serverDb.db.execute(sql`CREATE INDEX IF NOT EXISTS operations_log_status_idx ON operations_log (status)`);
-    await serverDb.db.execute(
-      sql`CREATE INDEX IF NOT EXISTS operations_log_mutation_id_idx ON operations_log (mutation_id)`,
-    );
+    // Restore the optional table (with its indexes) so the later integration files that share this
+    // database keep logging — the DDL is generated from `operationsLogTable` itself, so there is no
+    // hand-mirrored copy to drift. The beforeAll DROP in this describe guarantees absence, so the
+    // generated bare `CREATE TABLE` (no IF NOT EXISTS) cannot collide.
+    await createTablesFromSchema(serverDb.db, { operationsLogTable });
     await server.stop();
     await serverDb.close();
   });
@@ -1353,9 +1327,10 @@ describe("write api tolerates a missing operations_log table", () => {
     const rows = await serverDb.db.select().from(todosTable).where(eq(todosTable.id, todoId));
     expect(rows).toHaveLength(1);
 
-    // Degraded, not auto-created: the optional table is still absent.
+    // Degraded, not auto-created: the optional table is still absent. The probe target is derived
+    // from the real pgTable (same identity the server's startup probe uses), bound as a parameter.
     const presence = await serverDb.db.execute<{ tableName: string | null }>(
-      sql`SELECT to_regclass('public.operations_log')::text AS "tableName"`,
+      sql`SELECT to_regclass(${operationsLogRegclassTarget()})::text AS "tableName"`,
     );
     const presenceRow = Array.from(presence as Iterable<unknown>, (e) => e as { tableName: string | null })[0];
     expect(presenceRow?.tableName).toBeNull();

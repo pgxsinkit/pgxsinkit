@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
+import { count, eq } from "drizzle-orm";
+import { jsonb, pgSchema, text } from "drizzle-orm/pg-core";
+
 import { authorsTable, buildDemoSyncConfig, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
@@ -7,10 +10,20 @@ import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-uti
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createElectricExtension, startConfiguredSync } from "../../packages/client/src/shape-sync";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const env = readIntegrationEnv();
 const localSchemaSql = generateLocalSchemaSql(demoSyncRegistry);
+
+// Test-local Drizzle object over the client engine's subscription-state relation, mirroring the DDL
+// in packages/client/src/sync/subscription-state.ts (`migrateSubscriptionMetadataTables`) — an
+// introspection surface only; the engine's own SQL remains the authority for the physical shape.
+const subscriptionsMetadataTable = pgSchema("pgxsinkit").table("subscriptions_metadata", {
+  key: text("key").primaryKey(),
+  shapeMetadata: jsonb("shape_metadata").$type<Record<string, unknown>>().notNull(),
+  lastLsn: text("last_lsn").notNull(),
+});
 
 async function createLocalTodoStore() {
   const pg = await createFreshTestPGlite({
@@ -139,11 +152,12 @@ describe("electric -> pglite sync integration", () => {
     try {
       await initialSyncDone;
 
+      const localDb = drizzleOver(localPg);
       await waitFor(async () => {
-        const authorResult = await localPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors;");
-        const result = await localPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos;");
-        expect(authorResult.rows[0]?.count).toBe(1);
-        expect(result.rows[0]?.count).toBe(1);
+        const authorResult = await localDb.select({ count: count() }).from(authorsTable);
+        const result = await localDb.select({ count: count() }).from(todosTable);
+        expect(authorResult[0]?.count).toBe(1);
+        expect(result[0]?.count).toBe(1);
       });
     } finally {
       sync.unsubscribe();
@@ -210,17 +224,19 @@ describe("electric -> pglite sync integration", () => {
 
       expect(response.status).toBe(200);
 
+      const localDb = drizzleOver(localPg);
       await waitFor(async () => {
-        const authorResult = await localPg.query<{ name: string }>("SELECT name FROM authors WHERE id = $1;", [
-          "01963227-d4c7-72db-b858-f89f6af8f921",
-        ]);
-        const result = await localPg.query<{ title: string; authorId: string }>(
-          'SELECT title, author_id AS "authorId" FROM todos WHERE title = $1;',
-          ["Visible after API write"],
-        );
-        expect(authorResult.rows[0]?.name).toBe("Grace Hopper");
-        expect(result.rows[0]?.title).toBe("Visible after API write");
-        expect(result.rows[0]?.authorId).toBe("01963227-d4c7-72db-b858-f89f6af8f921");
+        const authorResult = await localDb
+          .select({ name: authorsTable.name })
+          .from(authorsTable)
+          .where(eq(authorsTable.id, "01963227-d4c7-72db-b858-f89f6af8f921"));
+        const result = await localDb
+          .select({ title: todosTable.title, authorId: todosTable.authorId })
+          .from(todosTable)
+          .where(eq(todosTable.title, "Visible after API write"));
+        expect(authorResult[0]?.name).toBe("Grace Hopper");
+        expect(result[0]?.title).toBe("Visible after API write");
+        expect(result[0]?.authorId).toBe("01963227-d4c7-72db-b858-f89f6af8f921");
       });
     } finally {
       sync.unsubscribe();
@@ -280,21 +296,23 @@ describe("electric -> pglite sync integration", () => {
     try {
       await initialSyncDone;
 
+      const localDb = drizzleOver(localPg);
       await waitFor(async () => {
-        const authorResult = await localPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors;");
-        const todoResult = await localPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos;");
-        expect(authorResult.rows[0]?.count).toBe(1);
-        expect(todoResult.rows[0]?.count).toBe(1);
+        const authorResult = await localDb.select({ count: count() }).from(authorsTable);
+        const todoResult = await localDb.select({ count: count() }).from(todosTable);
+        expect(authorResult[0]?.count).toBe(1);
+        expect(todoResult[0]?.count).toBe(1);
       });
 
       // The whole group persists ONE subscription-state row, keyed by the group, whose per-shape
       // metadata covers both member tables — i.e. it is a single MultiShapeStream, not two streams.
-      const subs = await localPg.query<{ key: string; shape_metadata: Record<string, unknown> }>(
-        "SELECT key, shape_metadata FROM pgxsinkit.subscriptions_metadata ORDER BY key;",
-      );
-      expect(subs.rows).toHaveLength(1);
-      expect(subs.rows[0]?.key).toBe("demo");
-      expect(Object.keys(subs.rows[0]?.shape_metadata ?? {}).sort()).toEqual(["authors", "todos"]);
+      const subs = await localDb
+        .select({ key: subscriptionsMetadataTable.key, shapeMetadata: subscriptionsMetadataTable.shapeMetadata })
+        .from(subscriptionsMetadataTable)
+        .orderBy(subscriptionsMetadataTable.key);
+      expect(subs).toHaveLength(1);
+      expect(subs[0]?.key).toBe("demo");
+      expect(Object.keys(subs[0]?.shapeMetadata ?? {}).sort()).toEqual(["authors", "todos"]);
     } finally {
       sync.unsubscribe();
       await localPg.close();
@@ -370,20 +388,18 @@ describe("electric -> pglite sync integration", () => {
         });
       }
 
+      const localDb = drizzleOver(localPg);
       await waitFor(async () => {
-        const result = await localPg.query<{ title: string; priority: string }>(
-          "SELECT title, priority FROM todos WHERE id = $1;",
-          [todoId],
-        );
-        expect(result.rows[0]?.title).toBe(`v${updates}`); // converged to the last write
-        expect(result.rows[0]?.priority).toBe("high"); // v8 is even → high
+        const result = await localDb
+          .select({ title: todosTable.title, priority: todosTable.priority })
+          .from(todosTable)
+          .where(eq(todosTable.id, todoId));
+        expect(result[0]?.title).toBe(`v${updates}`); // converged to the last write
+        expect(result[0]?.priority).toBe("high"); // v8 is even → high
 
         // Exactly one row for the PK — the bulk INSERT/UPDATE path never duplicated it.
-        const countResult = await localPg.query<{ count: number }>(
-          "SELECT COUNT(*)::int AS count FROM todos WHERE id = $1;",
-          [todoId],
-        );
-        expect(countResult.rows[0]?.count).toBe(1);
+        const countResult = await localDb.select({ count: count() }).from(todosTable).where(eq(todosTable.id, todoId));
+        expect(countResult[0]?.count).toBe(1);
       });
     } finally {
       sync.unsubscribe();

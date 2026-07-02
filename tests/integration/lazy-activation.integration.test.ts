@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
+import { count, eq } from "drizzle-orm";
+
 import { deriveSyncColumnTypes } from "@pgxsinkit/contracts";
 import { authorsTable, buildDemoSyncConfig, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
@@ -8,6 +10,7 @@ import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-uti
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createElectricExtension, startConfiguredSync } from "../../packages/client/src/shape-sync";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // Lazy on-demand activation, end-to-end against the REAL engine (postgres → Electric → PGlite).
@@ -122,9 +125,10 @@ async function seedAuthorAndTodo(
   });
 }
 
+// `todosTable` carries no schema qualifier, so Drizzle renders the BARE name `"todos"` — in the
+// ephemeral test that resolves via search_path to the pg_temp cluster, exactly as the raw SQL did.
 const countTodo = async (pg: Awaited<ReturnType<typeof createStore>>, todoId: string) =>
-  (await pg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos WHERE id = $1;", [todoId])).rows[0]
-    ?.count;
+  (await drizzleOver(pg).select({ count: count() }).from(todosTable).where(eq(todosTable.id, todoId)))[0]?.count;
 
 describe("lazy on-demand activation streams rows (real engine)", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;

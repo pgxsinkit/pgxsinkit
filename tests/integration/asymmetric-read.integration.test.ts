@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
+import { asc } from "drizzle-orm";
+
 import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
   buildMembershipFanoutSyncConfig,
@@ -14,6 +16,7 @@ import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createElectricExtension, startConfiguredSync } from "../../packages/client/src/shape-sync";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const env = readIntegrationEnv();
@@ -125,15 +128,16 @@ describe("asymmetric read (role-conditional visibility) integration", () => {
       await member.initialSyncDone;
 
       // Manager A (role = manager of W1) receives BOTH the visible and the hidden item.
-      const managerRows = await managerPg.query<{ id: string; hidden: boolean }>(
-        "SELECT id, hidden FROM work_items ORDER BY body;",
-      );
-      expect(managerRows.rows.map((row) => row.id).sort()).toEqual([VISIBLE_ITEM, HIDDEN_ITEM].sort());
-      expect(managerRows.rows.some((row) => row.id === HIDDEN_ITEM && row.hidden)).toBe(true);
+      const managerRows = await drizzleOver(managerPg)
+        .select({ id: workItemsTable.id, hidden: workItemsTable.hidden })
+        .from(workItemsTable)
+        .orderBy(asc(workItemsTable.body));
+      expect(managerRows.map((row) => row.id).sort()).toEqual([VISIBLE_ITEM, HIDDEN_ITEM].sort());
+      expect(managerRows.some((row) => row.id === HIDDEN_ITEM && row.hidden)).toBe(true);
 
       // Member B (role = member of W1) receives ONLY the visible item — same workspace, different role.
-      const memberRows = await memberPg.query<{ id: string }>("SELECT id FROM work_items;");
-      expect(memberRows.rows.map((row) => row.id)).toEqual([VISIBLE_ITEM]);
+      const memberRows = await drizzleOver(memberPg).select({ id: workItemsTable.id }).from(workItemsTable);
+      expect(memberRows.map((row) => row.id)).toEqual([VISIBLE_ITEM]);
     } finally {
       manager.sync.unsubscribe();
       member.sync.unsubscribe();

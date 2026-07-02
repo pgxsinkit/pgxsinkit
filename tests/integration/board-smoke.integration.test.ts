@@ -12,7 +12,10 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import postgres from "postgres";
+import { asc, eq } from "drizzle-orm";
+
+import { boardSyncRegistry, issueTable, teamTable } from "@pgxsinkit/board-schema";
+import { createServerDb } from "@pgxsinkit/test-utils";
 
 const GATEWAY_URL = process.env["BOARD_GATEWAY_URL"] ?? "http://localhost:54331";
 const SEED_PASSWORD = process.env["BOARD_SEED_PASSWORD"] ?? "board-demo-password";
@@ -36,18 +39,18 @@ const PLATFORM_CHANNEL = "00000000-0000-4000-8000-0000000000c1";
 const GROWTH_CHANNEL = "00000000-0000-4000-8000-0000000000c2";
 const DESIGN_CHANNEL = "00000000-0000-4000-8000-0000000000c3";
 
-const sql = postgres(DATABASE_URL, { prepare: false });
+// Direct database access for seeding/verification reads, over the board registry's own Drizzle
+// tables — `updated_at_us` (bigint mode) maps to a JS BigInt, so version comparisons stay numeric.
+const serverDb = createServerDb(boardSyncRegistry, DATABASE_URL);
+const db = serverDb.db;
+
+const issueColumns = { id: issueTable.id, status: issueTable.status, updatedAtUs: issueTable.updatedAtUs };
+const teamColumns = { id: teamTable.id, name: teamTable.name, updatedAtUs: teamTable.updatedAtUs };
 
 interface IssueRow {
   id: string;
   status: string;
-  updated_at_us: string;
-}
-
-interface TeamRow {
-  id: string;
-  name: string;
-  updated_at_us: string;
+  updatedAtUs: bigint;
 }
 
 async function login(email: string): Promise<string> {
@@ -162,11 +165,11 @@ function boardWriteStatus(token: string, issue: IssueRow, next: string): Promise
     entityKey: { id: issue.id },
     kind: "update",
     payload: { status: next },
-    baseServerVersion: issue.updated_at_us,
+    baseServerVersion: String(issue.updatedAtUs),
   });
 }
 
-const otherStatus = (status: string): string => (status === "done" ? "todo" : "done");
+const otherStatus = (status: string): "todo" | "done" => (status === "done" ? "todo" : "done");
 
 describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions → Electric)", () => {
   let aliceToken: string;
@@ -178,7 +181,7 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
   });
 
   afterAll(async () => {
-    await sql.end({ timeout: 5 });
+    await serverDb.close();
   });
 
   it("issues GoTrue tokens for the seeded identities", () => {
@@ -201,23 +204,31 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
   });
 
   it("applies a governed write from a member and advances the server version", async () => {
-    const [issue] = await sql<IssueRow[]>`
-      select id, status, updated_at_us from issue where team_id = ${PLATFORM} order by id limit 1`;
+    const [issue] = await db
+      .select(issueColumns)
+      .from(issueTable)
+      .where(eq(issueTable.teamId, PLATFORM))
+      .orderBy(asc(issueTable.id))
+      .limit(1);
     expect(issue).toBeDefined();
     const next = otherStatus(issue!.status);
 
     const ack = await boardWriteStatus(aliceToken, issue!, next);
     expect(ack.status).toBe("acked");
-    expect(BigInt(ack.serverUpdatedAtUs ?? "0")).toBeGreaterThan(BigInt(issue!.updated_at_us));
+    expect(BigInt(ack.serverUpdatedAtUs ?? "0")).toBeGreaterThan(issue!.updatedAtUs);
 
-    const [after] = await sql<IssueRow[]>`select id, status, updated_at_us from issue where id = ${issue!.id}`;
+    const [after] = await db.select(issueColumns).from(issueTable).where(eq(issueTable.id, issue!.id));
     expect(after!.status).toBe(next);
-    expect(BigInt(after!.updated_at_us)).toBeGreaterThan(BigInt(issue!.updated_at_us));
+    expect(after!.updatedAtUs).toBeGreaterThan(issue!.updatedAtUs);
   });
 
   it("rejects a cross-team write under RLS without mutating the row", async () => {
-    const [issue] = await sql<IssueRow[]>`
-      select id, status, updated_at_us from issue where team_id = ${DESIGN} order by id limit 1`;
+    const [issue] = await db
+      .select(issueColumns)
+      .from(issueTable)
+      .where(eq(issueTable.teamId, DESIGN))
+      .orderBy(asc(issueTable.id))
+      .limit(1);
     expect(issue).toBeDefined();
 
     // Alice cannot even see this row; an attacker who knows its id still cannot write it — the apply
@@ -225,9 +236,9 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
     const ack = await boardWriteStatus(aliceToken, issue!, otherStatus(issue!.status));
     expect(ack.status).toBe("conflicted");
 
-    const [after] = await sql<IssueRow[]>`select id, status, updated_at_us from issue where id = ${issue!.id}`;
+    const [after] = await db.select(issueColumns).from(issueTable).where(eq(issueTable.id, issue!.id));
     expect(after!.status).toBe(issue!.status);
-    expect(after!.updated_at_us).toBe(issue!.updated_at_us);
+    expect(after!.updatedAtUs).toBe(issue!.updatedAtUs);
   });
 
   // pgxsinkit ADR-0025 — per-client mode projection, proven at the write path. `team` is `readwrite` in
@@ -236,7 +247,7 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
   // backstop: an Admin's rename lands and fans out; a Member's forged write cannot touch the data.
   describe("team rename (ADR-0025: Admin writes, Member is read-only)", () => {
     it("lets an Admin rename a Team — the write applies and the Server version advances", async () => {
-      const [team] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${PLATFORM}`;
+      const [team] = await db.select(teamColumns).from(teamTable).where(eq(teamTable.id, PLATFORM));
       expect(team).toBeDefined();
       const renamed = `${team!.name} (renamed)`;
 
@@ -245,14 +256,14 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
         entityKey: { id: PLATFORM },
         kind: "update",
         payload: { name: renamed },
-        baseServerVersion: team!.updated_at_us,
+        baseServerVersion: String(team!.updatedAtUs),
       });
       expect(ack.status).toBe("acked");
-      expect(BigInt(ack.serverUpdatedAtUs ?? "0")).toBeGreaterThan(BigInt(team!.updated_at_us));
+      expect(BigInt(ack.serverUpdatedAtUs ?? "0")).toBeGreaterThan(team!.updatedAtUs);
 
-      const [after] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${PLATFORM}`;
+      const [after] = await db.select(teamColumns).from(teamTable).where(eq(teamTable.id, PLATFORM));
       expect(after!.name).toBe(renamed);
-      expect(BigInt(after!.updated_at_us)).toBeGreaterThan(BigInt(team!.updated_at_us));
+      expect(after!.updatedAtUs).toBeGreaterThan(team!.updatedAtUs);
 
       // The rename fans out on the read path: a Member of Platform syncs the Team with its new name.
       const platform = (await fetchShapeRows("team", aliceToken)).find((row) => row["id"] === PLATFORM);
@@ -265,7 +276,7 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
       // Admin-only, so the UPDATE's USING clause excludes the row, it matches zero rows, and the data is
       // untouched. Alice *can* read Growth (she's a member), so this is the visible-but-not-writable case
       // — distinct from the cross-team issue write above, which she cannot even see.
-      const [before] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${GROWTH}`;
+      const [before] = await db.select(teamColumns).from(teamTable).where(eq(teamTable.id, GROWTH));
       expect(before).toBeDefined();
 
       await applyMutation(aliceToken, {
@@ -273,12 +284,12 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
         entityKey: { id: GROWTH },
         kind: "update",
         payload: { name: "Member Was Here" },
-        baseServerVersion: before!.updated_at_us,
+        baseServerVersion: String(before!.updatedAtUs),
       });
 
-      const [after] = await sql<TeamRow[]>`select id, name, updated_at_us from team where id = ${GROWTH}`;
+      const [after] = await db.select(teamColumns).from(teamTable).where(eq(teamTable.id, GROWTH));
       expect(after!.name).toBe(before!.name);
-      expect(after!.updated_at_us).toBe(before!.updated_at_us);
+      expect(after!.updatedAtUs).toBe(before!.updatedAtUs);
     });
   });
 

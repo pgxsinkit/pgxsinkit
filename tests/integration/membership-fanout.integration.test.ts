@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { eq } from "drizzle-orm";
+import { count, eq } from "drizzle-orm";
 
 import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
@@ -16,6 +16,7 @@ import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-uti
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createElectricExtension, startConfiguredSync } from "../../packages/client/src/shape-sync";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const env = readIntegrationEnv();
@@ -63,6 +64,14 @@ async function startMemberSync(
 
   return { sync, initialSyncDone };
 }
+
+// The two local-store assertion reads every scenario keeps returning to.
+const itemBody = async (pg: Awaited<ReturnType<typeof createLocalWorkItemStore>>, id: string) =>
+  (await drizzleOver(pg).select({ body: workItemsTable.body }).from(workItemsTable).where(eq(workItemsTable.id, id)))[0]
+    ?.body;
+
+const itemCount = async (pg: Awaited<ReturnType<typeof createLocalWorkItemStore>>) =>
+  (await drizzleOver(pg).select({ count: count() }).from(workItemsTable))[0]?.count ?? 0;
 
 describe("membership fan-out (readwrite) integration", () => {
   let server!: ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>;
@@ -134,15 +143,11 @@ describe("membership fan-out (readwrite) integration", () => {
 
       // B (co-member of W1) receives A's item — fan-out to a non-owner.
       await waitFor(async () => {
-        const rows = await coMemberPg.query<{ body: string }>("SELECT body FROM work_items WHERE id = $1;", [
-          ITEM_A_IN_W1,
-        ]);
-        expect(rows.rows[0]?.body).toBe("from A");
+        expect(await itemBody(coMemberPg, ITEM_A_IN_W1)).toBe("from A");
       });
 
       // C (member of a different workspace) never receives it — the filter actually filters.
-      const cRows = await nonMemberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-      expect(cRows.rows[0]?.count).toBe(0);
+      expect(await itemCount(nonMemberPg)).toBe(0);
     } finally {
       coMember.sync.unsubscribe();
       nonMember.sync.unsubscribe();
@@ -183,8 +188,7 @@ describe("membership fan-out (readwrite) integration", () => {
 
       // The member receives their workspace's item on the live shape — the precondition.
       await waitFor(async () => {
-        const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-        expect(rows.rows[0]?.count).toBe(1);
+        expect(await itemCount(memberPg)).toBe(1);
       });
 
       // Admin removes the member from the workspace: delete the SOURCE row of their subquery filter
@@ -193,8 +197,7 @@ describe("membership fan-out (readwrite) integration", () => {
 
       // Electric must re-evaluate the dependent shape and stream the move-out; the item leaves the store.
       await waitFor(async () => {
-        const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-        expect(rows.rows[0]?.count).toBe(0);
+        expect(await itemCount(memberPg)).toBe(0);
       });
     } finally {
       member.sync.unsubscribe();
@@ -228,8 +231,7 @@ describe("membership fan-out (readwrite) integration", () => {
     const first = await startMemberSync(memberPg, proxyUrl, RES_MEMBER);
     await first.initialSyncDone;
     await waitFor(async () => {
-      const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-      expect(rows.rows[0]?.count).toBe(1);
+      expect(await itemCount(memberPg)).toBe(1);
     });
     first.sync.unsubscribe();
 
@@ -241,8 +243,7 @@ describe("membership fan-out (readwrite) integration", () => {
     try {
       await second.initialSyncDone;
       await waitFor(async () => {
-        const rows = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-        expect(rows.rows[0]?.count).toBe(0);
+        expect(await itemCount(memberPg)).toBe(0);
       });
     } finally {
       second.sync.unsubscribe();
@@ -275,8 +276,7 @@ describe("membership fan-out (readwrite) integration", () => {
       await member.initialSyncDone;
 
       // Precondition: not a member yet → sees nothing.
-      const before = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-      expect(before.rows[0]?.count).toBe(0);
+      expect(await itemCount(memberPg)).toBe(0);
 
       // Admin adds the member to the workspace — the SOURCE row of their subquery filter now matches.
       await server.drizzle
@@ -285,8 +285,7 @@ describe("membership fan-out (readwrite) integration", () => {
 
       // Electric re-evaluates the dependent shape and streams the move-in; the row materialises live.
       await waitFor(async () => {
-        const rows = await memberPg.query<{ body: string }>("SELECT body FROM work_items WHERE id = $1;", [MVI_ITEM]);
-        expect(rows.rows[0]?.body).toBe("appear on join");
+        expect(await itemBody(memberPg, MVI_ITEM)).toBe("appear on join");
       });
     } finally {
       member.sync.unsubscribe();
@@ -315,8 +314,7 @@ describe("membership fan-out (readwrite) integration", () => {
     // while keeping the local store.
     const first = await startMemberSync(memberPg, proxyUrl, MIN_MEMBER);
     await first.initialSyncDone;
-    const before = await memberPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-    expect(before.rows[0]?.count).toBe(0);
+    expect(await itemCount(memberPg)).toBe(0);
     first.sync.unsubscribe();
 
     // While offline: the admin adds the membership.
@@ -329,8 +327,7 @@ describe("membership fan-out (readwrite) integration", () => {
     try {
       await second.initialSyncDone;
       await waitFor(async () => {
-        const rows = await memberPg.query<{ body: string }>("SELECT body FROM work_items WHERE id = $1;", [MIN_ITEM]);
-        expect(rows.rows[0]?.body).toBe("offline-join");
+        expect(await itemBody(memberPg, MIN_ITEM)).toBe("offline-join");
       });
     } finally {
       second.sync.unsubscribe();

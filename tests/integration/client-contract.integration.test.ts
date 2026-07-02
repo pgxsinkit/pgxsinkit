@@ -5,14 +5,22 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { eq } from "drizzle-orm";
+import type { PGlite } from "@electric-sql/pglite";
+import { count, eq } from "drizzle-orm";
 
-import { createIntervalConvergenceTrigger, createSyncClient, type MutationDetail } from "@pgxsinkit/client";
+import {
+  createIntervalConvergenceTrigger,
+  createSyncClient,
+  getLocalMetaTable,
+  getOverlayTable,
+  type MutationDetail,
+} from "@pgxsinkit/client";
 import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
 import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
 import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { drizzleOver } from "../support/drizzle";
 
 const env = readIntegrationEnv();
 let writeApiPort!: number;
@@ -359,9 +367,11 @@ describe("client facade contract", () => {
 
         // Simulate a returning user whose store was provisioned under an older registry
         // fingerprint, with nothing owed locally (a clean drain).
-        await firstClient.pglite.exec(
-          "UPDATE pgxsinkit_local_meta SET value = 'older-fingerprint' WHERE key = 'registry_fingerprint';",
-        );
+        const meta = getLocalMetaTable(projectsSyncRegistry);
+        await drizzleOver(firstClient.pglite as unknown as PGlite)
+          .update(meta)
+          .set({ value: "older-fingerprint" })
+          .where(eq(meta.key, "registry_fingerprint"));
       } finally {
         await firstClient.stop();
       }
@@ -639,11 +649,12 @@ describe("client facade contract", () => {
         // ADR-0022 §4: the optimistic overlay was auto-discarded for the whole unit, and `onReject` fired.
         expect(rejected).toHaveLength(1);
         expect(rejected[0]?.status).toBe("rejected");
-        const overlay = await client.pglite.query<{ c: number }>(
-          `SELECT count(*)::int AS c FROM projects_overlay WHERE id = $1`,
-          [projectId],
-        );
-        expect(overlay.rows[0]?.c).toBe(0);
+        const overlayTable = getOverlayTable(projectsSyncRegistry, "projects");
+        const overlay = await drizzleOver(client.pglite as unknown as PGlite)
+          .select({ c: count() })
+          .from(overlayTable)
+          .where(eq(overlayTable["id"]!, projectId));
+        expect(overlay[0]?.c).toBe(0);
 
         // The unit rolled back: the authoritative row is untouched.
         const remoteRows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, projectId));

@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
+import { count } from "drizzle-orm";
+
 import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
   buildDemoMembershipSyncConfig,
@@ -20,6 +22,7 @@ import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-uti
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createElectricExtension, startConfiguredSync } from "../../packages/client/src/shape-sync";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const env = readIntegrationEnv();
@@ -131,32 +134,35 @@ describe("demo membership sync (readonly workspaces + members + work_items) inte
       await manager.initialSyncDone;
       await member.initialSyncDone;
 
+      const managerDb = drizzleOver(managerPg);
+      const memberDb = drizzleOver(memberPg);
+
       // Manager (user1): syncs Aurora only, their own manager membership, and BOTH work items (hidden too).
       await waitFor(async () => {
-        const workspaces = await managerPg.query<{ id: string }>("SELECT id FROM workspaces;");
-        expect(workspaces.rows.map((row) => row.id)).toEqual([DEMO_WORKSPACE_AURORA_ID]);
+        const workspaces = await managerDb.select({ id: workspacesTable.id }).from(workspacesTable);
+        expect(workspaces.map((row) => row.id)).toEqual([DEMO_WORKSPACE_AURORA_ID]);
 
-        const members = await managerPg.query<{ role: string; muted: boolean }>(
-          "SELECT role, muted FROM workspace_members;",
-        );
-        expect(members.rows).toEqual([{ role: "manager", muted: false }]);
+        const members = await managerDb
+          .select({ role: workspaceMembersTable.role, muted: workspaceMembersTable.muted })
+          .from(workspaceMembersTable);
+        expect(members).toEqual([{ role: "manager", muted: false }]);
 
-        const items = await managerPg.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM work_items;");
-        expect(items.rows[0]?.count).toBe(2); // visible + hidden
+        const items = await managerDb.select({ count: count() }).from(workItemsTable);
+        expect(items[0]?.count).toBe(2); // visible + hidden
       });
 
       // Member (user2): same workspace, their own member membership, but only the visible work item.
       await waitFor(async () => {
-        const workspaces = await memberPg.query<{ id: string }>("SELECT id FROM workspaces;");
-        expect(workspaces.rows.map((row) => row.id)).toEqual([DEMO_WORKSPACE_AURORA_ID]);
+        const workspaces = await memberDb.select({ id: workspacesTable.id }).from(workspacesTable);
+        expect(workspaces.map((row) => row.id)).toEqual([DEMO_WORKSPACE_AURORA_ID]);
 
-        const members = await memberPg.query<{ role: string; muted: boolean }>(
-          "SELECT role, muted FROM workspace_members;",
-        );
-        expect(members.rows).toEqual([{ role: "member", muted: false }]);
+        const members = await memberDb
+          .select({ role: workspaceMembersTable.role, muted: workspaceMembersTable.muted })
+          .from(workspaceMembersTable);
+        expect(members).toEqual([{ role: "member", muted: false }]);
 
-        const items = await memberPg.query<{ hidden: boolean }>("SELECT hidden FROM work_items;");
-        expect(items.rows).toEqual([{ hidden: false }]); // no hidden row for a plain member
+        const items = await memberDb.select({ hidden: workItemsTable.hidden }).from(workItemsTable);
+        expect(items).toEqual([{ hidden: false }]); // no hidden row for a plain member
       });
     } finally {
       manager.sync.unsubscribe();
