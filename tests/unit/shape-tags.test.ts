@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { and, count, eq } from "drizzle-orm";
+import { pgSchema, pgTable, text } from "drizzle-orm/pg-core";
+
 import {
   addShapeRowTags,
   applyShapeMoveOut,
@@ -11,6 +14,7 @@ import {
   splitTagComponents,
   tagMatchesPatterns,
 } from "../../packages/client/src/sync/tags";
+import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
 import { closeOpenTestPGlites, createFreshTestPGlite } from "../support/pglite";
 
 // Derive the upstream types from the function signatures so the tests/ scope does not need to resolve
@@ -74,6 +78,20 @@ const COLUMN_TYPES: ColumnTypes = [
   { name: "body", sqlType: "text", isArray: false },
 ];
 
+// The synced fixture table (the appliers under test address it by name string).
+const items = pgTable("items", {
+  id: text("id").primaryKey(),
+  body: text("body"),
+});
+
+// Assertion-side mirror of the engine's tag store: this deliberately duplicates the `shapeRowTagsDdl`
+// DDL (packages/client/src/sync/tags.ts) so any drift in the engine's table shape fails these tests.
+const shapeRowTags = pgSchema(META).table("shape_row_tags", {
+  shapeTable: text("shape_table").notNull(),
+  pkJson: text("pk_json").notNull(),
+  tag: text("tag").notNull(),
+});
+
 function insertMessage(id: string, tags: string[]): TagSyncMessage {
   return {
     key: `"public"."items"/"${id}"`,
@@ -85,27 +103,28 @@ function insertMessage(id: string, tags: string[]): TagSyncMessage {
 async function freshStore() {
   const pg = await createFreshTestPGlite();
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS ${META};`);
+  // The module's own DDL product is the subject under test — exec it verbatim, never re-author it.
   await pg.exec(shapeRowTagsDdl(META));
-  await pg.exec(`CREATE TABLE items (id TEXT PRIMARY KEY, body TEXT);`);
+  await createTablesFromSchema(pg, { items });
   return pg;
 }
 
 async function tagCount(pg: Awaited<ReturnType<typeof freshStore>>, id: string) {
-  const result = await pg.query<{ c: number }>(
-    `SELECT count(*)::int AS c FROM ${META}.shape_row_tags WHERE shape_table = $1 AND pk_json = $2`,
-    [SHAPE_TABLE, serializeRowPk({ id }, ["id"])],
-  );
-  return result.rows[0]?.c ?? 0;
+  const rows = await drizzleOver(pg)
+    .select({ c: count() })
+    .from(shapeRowTags)
+    .where(and(eq(shapeRowTags.shapeTable, SHAPE_TABLE), eq(shapeRowTags.pkJson, serializeRowPk({ id }, ["id"]))));
+  return rows[0]?.c ?? 0;
 }
 async function itemCount(pg: Awaited<ReturnType<typeof freshStore>>, id: string) {
-  const result = await pg.query<{ c: number }>(`SELECT count(*)::int AS c FROM items WHERE id = $1`, [id]);
-  return result.rows[0]?.c ?? 0;
+  const rows = await drizzleOver(pg).select({ c: count() }).from(items).where(eq(items.id, id));
+  return rows[0]?.c ?? 0;
 }
 
 describe("move-out eviction (ADR-0023, PGlite)", () => {
   it("persists a row's tag-set from its tagged insert", async () => {
     const pg = await freshStore();
-    await pg.query(`INSERT INTO items (id, body) VALUES ('row1', 'x')`);
+    await drizzleOver(pg).insert(items).values({ id: "row1", body: "x" });
     await applyShapeTagSync({
       pg,
       metadataSchema: META,
@@ -118,7 +137,7 @@ describe("move-out eviction (ADR-0023, PGlite)", () => {
 
   it("a row held by TWO grants survives losing one, and is evicted only when the last is withdrawn", async () => {
     const pg = await freshStore();
-    await pg.query(`INSERT INTO items (id, body) VALUES ('row1', 'x')`);
+    await drizzleOver(pg).insert(items).values({ id: "row1", body: "x" });
     await applyShapeTagSync({
       pg,
       metadataSchema: META,
@@ -160,7 +179,12 @@ describe("move-out eviction (ADR-0023, PGlite)", () => {
 
   it("evicts only the rows whose grant was revoked, leaving co-tagged rows intact", async () => {
     const pg = await freshStore();
-    await pg.query(`INSERT INTO items (id, body) VALUES ('keep', 'x'), ('drop', 'x')`);
+    await drizzleOver(pg)
+      .insert(items)
+      .values([
+        { id: "keep", body: "x" },
+        { id: "drop", body: "x" },
+      ]);
     await applyShapeTagSync({
       pg,
       metadataSchema: META,
@@ -222,11 +246,12 @@ describe("move-out eviction (ADR-0023, PGlite)", () => {
 });
 
 async function tagList(pg: Awaited<ReturnType<typeof freshStore>>, id: string) {
-  const result = await pg.query<{ tag: string }>(
-    `SELECT tag FROM ${META}.shape_row_tags WHERE shape_table = $1 AND pk_json = $2 ORDER BY tag`,
-    [SHAPE_TABLE, serializeRowPk({ id }, ["id"])],
-  );
-  return result.rows.map((row) => row.tag);
+  const rows = await drizzleOver(pg)
+    .select({ tag: shapeRowTags.tag })
+    .from(shapeRowTags)
+    .where(and(eq(shapeRowTags.shapeTable, SHAPE_TABLE), eq(shapeRowTags.pkJson, serializeRowPk({ id }, ["id"]))))
+    .orderBy(shapeRowTags.tag);
+  return rows.map((row) => row.tag);
 }
 
 // ADR-0024 — a move-in ADDS a reason the row is in the shape, so its tags are UNIONED, never replaced.

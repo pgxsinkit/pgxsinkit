@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 
-import { sql } from "drizzle-orm";
 import { bigint, boolean, jsonb, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { canonicalizeRegistry, defineSyncRegistry, defineSyncTable, fingerprintRegistry } from "@pgxsinkit/contracts";
@@ -98,9 +97,7 @@ describe("registry fingerprint (ADR-0004)", () => {
           tableName: "seats",
           makeColumns: () => ({
             id: uuid("id").primaryKey(),
-            updatedAtUs: bigint("updated_at_us", { mode: "bigint" })
-              .notNull()
-              .default(sql`0`),
+            updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
           }),
           mode: "readwrite",
           conflictPolicy: "last-write-wins",

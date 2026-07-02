@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
 
-import { bigint, integer, uuid, varchar } from "drizzle-orm/pg-core";
+import { asc, count, eq, sql } from "drizzle-orm";
+import { bigint, integer, uuid, varchar, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 const projectedPlpgsqlRegistry = defineSyncRegistry({
@@ -131,7 +133,7 @@ const compositeThingsRegistry = defineSyncRegistry({
       tenantId: uuid("tenant_id").notNull(),
       id: uuid("id").notNull(),
       label: varchar("label", { length: 120 }).notNull(),
-      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
     }),
     mode: "readwrite",
     conflictPolicy: "last-write-wins",
@@ -211,14 +213,9 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
   it("applies update/delete to exactly the addressed row of a composite-PK table", async () => {
     const db = await createFreshTestPGlite();
 
+    const composite = compositeThingsRegistry.compositeThings.table;
     try {
-      await db.exec(`CREATE TABLE composite_things (
-        tenant_id uuid NOT NULL,
-        id uuid NOT NULL,
-        label varchar(120) NOT NULL,
-        updated_at_us bigint NOT NULL DEFAULT 0,
-        PRIMARY KEY (tenant_id, id)
-      )`);
+      await createTablesFromSchema(db, { composite });
       await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry));
 
       const tenant = "10000000-0000-4000-8000-000000000001";
@@ -227,26 +224,28 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
 
       // Two rows share tenant_id and differ only on id — the exact case where a `columns[0]`-only
       // WHERE would match (and clobber) BOTH.
-      await db.query(`INSERT INTO composite_things (tenant_id, id, label) VALUES ($1, $2, 'A'), ($1, $3, 'B')`, [
-        tenant,
-        idA,
-        idB,
-      ]);
+      await drizzleOver(db)
+        .insert(composite)
+        .values([
+          { tenantId: tenant, id: idA, label: "A" },
+          { tenantId: tenant, id: idB, label: "B" },
+        ]);
 
       await applyBatch(db, compositeBatch("update", { tenant_id: tenant, id: idA }, { label: "A2" }));
 
-      const afterUpdate = await db.query<{ id: string; label: string }>(
-        `SELECT id, label FROM composite_things ORDER BY label`,
-      );
-      expect(afterUpdate.rows).toEqual([
+      const afterUpdate = await drizzleOver(db)
+        .select({ id: composite.id, label: composite.label })
+        .from(composite)
+        .orderBy(asc(composite.label));
+      expect(afterUpdate).toEqual([
         { id: idA, label: "A2" },
         { id: idB, label: "B" },
       ]);
 
       await applyBatch(db, compositeBatch("delete", { tenant_id: tenant, id: idA }, { tenant_id: tenant, id: idA }));
 
-      const afterDelete = await db.query<{ id: string }>(`SELECT id FROM composite_things`);
-      expect(afterDelete.rows).toEqual([{ id: idB }]);
+      const afterDelete = await drizzleOver(db).select({ id: composite.id }).from(composite);
+      expect(afterDelete).toEqual([{ id: idB }]);
     } finally {
       await db.close();
     }
@@ -255,14 +254,9 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
   it("keeps the Server version strictly monotonic even when the wall clock is behind (GREATEST)", async () => {
     const db = await createFreshTestPGlite();
 
+    const composite = compositeThingsRegistry.compositeThings.table;
     try {
-      await db.exec(`CREATE TABLE composite_things (
-        tenant_id uuid NOT NULL,
-        id uuid NOT NULL,
-        label varchar(120) NOT NULL,
-        updated_at_us bigint NOT NULL DEFAULT 0,
-        PRIMARY KEY (tenant_id, id)
-      )`);
+      await createTablesFromSchema(db, { composite });
       await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry));
 
       const tenant = "10000000-0000-4000-8000-000000000002";
@@ -271,19 +265,18 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
       // Seed the row's Server version far ahead of the wall clock — the exact inverted-clock case
       // where a bare `clock_timestamp()` stamp would step the version BACKWARDS.
       const future = "9999999999999999";
-      await db.query(
-        `INSERT INTO composite_things (tenant_id, id, label, updated_at_us) VALUES ($1, $2, 'A', $3::bigint)`,
-        [tenant, id, future],
-      );
+      await drizzleOver(db)
+        .insert(composite)
+        .values({ tenantId: tenant, id, label: "A", updatedAtUs: BigInt(future) });
 
       await applyBatch(db, compositeBatch("update", { tenant_id: tenant, id }, { label: "A2" }));
 
       // clock_us << 9999999999999999, so GREATEST picks current + 1 — strictly greater, never lower.
-      const row = await db.query<{ updatedAtUs: string }>(
-        `SELECT updated_at_us::text AS "updatedAtUs" FROM composite_things WHERE id = $1`,
-        [id],
-      );
-      expect(row.rows[0]?.updatedAtUs).toBe("10000000000000000");
+      const row = await drizzleOver(db)
+        .select({ updatedAtUs: sql<string>`${composite.updatedAtUs}::text`.as("updatedAtUs") })
+        .from(composite)
+        .where(eq(composite.id, id));
+      expect(row[0]?.updatedAtUs).toBe("10000000000000000");
     } finally {
       await db.close();
     }
@@ -299,7 +292,7 @@ const groupTodosRegistry = defineSyncRegistry({
       id: uuid("id").primaryKey(),
       title: varchar("title", { length: 120 }).notNull(),
       priority: integer("priority").notNull(),
-      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
     }),
     mode: "readwrite",
     conflictPolicy: "last-write-wins",
@@ -340,12 +333,7 @@ async function applyMutations(db: Awaited<ReturnType<typeof createFreshTestPGlit
 describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase 4)", () => {
   async function freshDb() {
     const db = await createFreshTestPGlite();
-    await db.exec(`CREATE TABLE group_todos (
-      id uuid PRIMARY KEY,
-      title varchar(120) NOT NULL,
-      priority integer NOT NULL,
-      updated_at_us bigint NOT NULL DEFAULT 0
-    )`);
+    await createTablesFromSchema(db, { groupTodos: groupTodosRegistry.todos.table });
     await db.exec(buildPlpgsqlBatchFunctionDdl(groupTodosRegistry));
     return db;
   }
@@ -358,10 +346,17 @@ describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase
         todoMutation("create", 2, { id: ID_B }, { id: ID_B, title: "B", priority: 2 }),
       ]);
 
-      const rows = await db.query<{ id: string; title: string; priority: number; stamped: boolean }>(
-        `SELECT id, title, priority, (updated_at_us > 0) AS stamped FROM group_todos ORDER BY title`,
-      );
-      expect(rows.rows).toEqual([
+      const g = groupTodosRegistry.todos.table;
+      const rows = await drizzleOver(db)
+        .select({
+          id: g.id,
+          title: g.title,
+          priority: g.priority,
+          stamped: sql<boolean>`(${g.updatedAtUs} > 0)`.as("stamped"),
+        })
+        .from(g)
+        .orderBy(asc(g.title));
+      expect(rows).toEqual([
         { id: ID_A, title: "A", priority: 1, stamped: true },
         { id: ID_B, title: "B", priority: 2, stamped: true },
       ]);
@@ -373,10 +368,13 @@ describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase
   it("groups partial updates by column-set so each row's untouched columns survive, and bumps every Server version", async () => {
     const db = await freshDb();
     try {
-      await db.query(`INSERT INTO group_todos (id, title, priority, updated_at_us) VALUES ($1,'A',1,5), ($2,'B',2,5)`, [
-        ID_A,
-        ID_B,
-      ]);
+      const g = groupTodosRegistry.todos.table;
+      await drizzleOver(db)
+        .insert(g)
+        .values([
+          { id: ID_A, title: "A", priority: 1, updatedAtUs: 5n },
+          { id: ID_B, title: "B", priority: 2, updatedAtUs: 5n },
+        ]);
 
       // Row A updates only title (column-set {title}); row B only priority (column-set {priority}) —
       // two distinct groups. A single uniform UPDATE..FROM would null the other column on each row.
@@ -385,10 +383,16 @@ describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase
         todoMutation("update", 2, { id: ID_B }, { priority: 99 }),
       ]);
 
-      const rows = await db.query<{ id: string; title: string; priority: number; bumped: boolean }>(
-        `SELECT id, title, priority, (updated_at_us > 5) AS bumped FROM group_todos ORDER BY id`,
-      );
-      expect(rows.rows).toEqual([
+      const rows = await drizzleOver(db)
+        .select({
+          id: g.id,
+          title: g.title,
+          priority: g.priority,
+          bumped: sql<boolean>`(${g.updatedAtUs} > 5)`.as("bumped"),
+        })
+        .from(g)
+        .orderBy(asc(g.id));
+      expect(rows).toEqual([
         { id: ID_A, title: "A2", priority: 1, bumped: true }, // priority untouched
         { id: ID_B, title: "B", priority: 99, bumped: true }, // title untouched
       ]);
@@ -400,10 +404,13 @@ describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase
   it("applies a mixed create/update/delete batch across groups in one call", async () => {
     const db = await freshDb();
     try {
-      await db.query(
-        `INSERT INTO group_todos (id, title, priority, updated_at_us) VALUES ($1,'old',1,5), ($2,'doomed',2,5)`,
-        [ID_A, ID_B],
-      );
+      const g = groupTodosRegistry.todos.table;
+      await drizzleOver(db)
+        .insert(g)
+        .values([
+          { id: ID_A, title: "old", priority: 1, updatedAtUs: 5n },
+          { id: ID_B, title: "doomed", priority: 2, updatedAtUs: 5n },
+        ]);
 
       await applyMutations(db, [
         todoMutation("create", 1, { id: ID_C }, { id: ID_C, title: "C", priority: 3 }),
@@ -411,8 +418,8 @@ describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase
         todoMutation("delete", 3, { id: ID_B }, { id: ID_B }),
       ]);
 
-      const rows = await db.query<{ id: string; title: string }>(`SELECT id, title FROM group_todos ORDER BY id`);
-      expect(rows.rows).toEqual([
+      const rows = await drizzleOver(db).select({ id: g.id, title: g.title }).from(g).orderBy(asc(g.id));
+      expect(rows).toEqual([
         { id: ID_A, title: "new" }, // updated
         { id: ID_C, title: "C" }, // created (ID_B deleted)
       ]);
@@ -430,7 +437,7 @@ const lwwConflictRegistry = defineSyncRegistry({
     makeColumns: () => ({
       id: uuid("id").primaryKey(),
       label: varchar("label", { length: 120 }).notNull(),
-      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
     }),
     mode: "readwrite",
     primaryKey: ["id"],
@@ -447,7 +454,7 @@ const rejectConflictRegistry = defineSyncRegistry({
     makeColumns: () => ({
       id: uuid("id").primaryKey(),
       label: varchar("label", { length: 120 }).notNull(),
-      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
     }),
     mode: "readwrite",
     primaryKey: ["id"],
@@ -457,6 +464,8 @@ const rejectConflictRegistry = defineSyncRegistry({
     },
   }),
 });
+
+const rejectThings = rejectConflictRegistry.things.table;
 
 const CONFLICT_ID = "40000000-0000-4000-8000-00000000000a";
 
@@ -492,21 +501,18 @@ async function applyForConflicts(
 }
 
 describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
-  async function seedThing(table: string, registry: Parameters<typeof buildPlpgsqlBatchFunctionDdl>[0]) {
+  async function seedThing(table: AnyPgTable, registry: Parameters<typeof buildPlpgsqlBatchFunctionDdl>[0]) {
     const db = await createFreshTestPGlite();
-    await db.exec(`CREATE TABLE ${table} (
-      id uuid PRIMARY KEY,
-      label varchar(120) NOT NULL,
-      updated_at_us bigint NOT NULL DEFAULT 0
-    )`);
+    await createTablesFromSchema(db, { table });
     await db.exec(buildPlpgsqlBatchFunctionDdl(registry));
     // The row sits at version 100; an external writer then advances it to 200 (the interleave).
-    await db.query(`INSERT INTO ${table} (id, label, updated_at_us) VALUES ($1, 'original', 200)`, [CONFLICT_ID]);
+    await drizzleOver(db).insert(table).values({ id: CONFLICT_ID, label: "original", updatedAtUs: 200n });
     return db;
   }
 
   it("last-write-wins applies a stale update anyway and reports no conflict", async () => {
-    const db = await seedThing("lww_things", lwwConflictRegistry);
+    const things = lwwConflictRegistry.things.table;
+    const db = await seedThing(things, lwwConflictRegistry);
     try {
       // base 100 < current 200 → stale. last-write-wins applies it regardless.
       const conflicts = await applyForConflicts(db, [
@@ -514,15 +520,15 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
       ]);
 
       expect(conflicts).toEqual([]);
-      const row = await db.query<{ label: string }>(`SELECT label FROM lww_things WHERE id = $1`, [CONFLICT_ID]);
-      expect(row.rows[0]?.label).toBe("clobbered");
+      const row = await drizzleOver(db).select({ label: things.label }).from(things).where(eq(things.id, CONFLICT_ID));
+      expect(row[0]?.label).toBe("clobbered");
     } finally {
       await db.close();
     }
   });
 
   it("reject-if-stale leaves the row untouched and reports the conflict with the current Server version", async () => {
-    const db = await seedThing("reject_things", rejectConflictRegistry);
+    const db = await seedThing(rejectThings, rejectConflictRegistry);
     try {
       // base 100 < current 200 → stale. reject-if-stale must NOT apply, and must report it.
       const conflicts = await applyForConflicts(db, [
@@ -535,15 +541,18 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
       expect(conflicts[0]?.currentServerVersion).toBe("200");
 
       // The row keeps the external writer's value — the stale write was not applied.
-      const row = await db.query<{ label: string }>(`SELECT label FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
-      expect(row.rows[0]?.label).toBe("original");
+      const row = await drizzleOver(db)
+        .select({ label: rejectThings.label })
+        .from(rejectThings)
+        .where(eq(rejectThings.id, CONFLICT_ID));
+      expect(row[0]?.label).toBe("original");
     } finally {
       await db.close();
     }
   });
 
   it("reject-if-stale applies a non-stale update (base == current) and reports no conflict", async () => {
-    const db = await seedThing("reject_things", rejectConflictRegistry);
+    const db = await seedThing(rejectThings, rejectConflictRegistry);
     try {
       // base 200 == current 200 → not stale. The write applies and bumps the Server version.
       const conflicts = await applyForConflicts(db, [
@@ -551,22 +560,25 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
       ]);
 
       expect(conflicts).toEqual([]);
-      const row = await db.query<{ label: string; bumped: boolean }>(
-        `SELECT label, (updated_at_us > 200) AS bumped FROM reject_things WHERE id = $1`,
-        [CONFLICT_ID],
-      );
-      expect(row.rows[0]?.label).toBe("fresh");
-      expect(row.rows[0]?.bumped).toBe(true);
+      const row = await drizzleOver(db)
+        .select({
+          label: rejectThings.label,
+          bumped: sql<boolean>`(${rejectThings.updatedAtUs} > 200)`.as("bumped"),
+        })
+        .from(rejectThings)
+        .where(eq(rejectThings.id, CONFLICT_ID));
+      expect(row[0]?.label).toBe("fresh");
+      expect(row[0]?.bumped).toBe(true);
     } finally {
       await db.close();
     }
   });
 
   it("reject-if-stale UPDATE of a MISSING row → conflict (target deleted), nothing applied (#6)", async () => {
-    const db = await seedThing("reject_things", rejectConflictRegistry);
+    const db = await seedThing(rejectThings, rejectConflictRegistry);
     try {
       // An external writer DELETED the row after the client authored its update.
-      await db.query(`DELETE FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
+      await drizzleOver(db).delete(rejectThings).where(eq(rejectThings.id, CONFLICT_ID));
 
       const conflicts = await applyForConflicts(db, [
         conflictMutation("reject_things", "update", { label: "edit on a gone row" }, "100"),
@@ -579,19 +591,20 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
       expect(conflicts[0]?.currentServerVersion ?? null).toBeNull();
 
       // The update did NOT resurrect the row.
-      const row = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM reject_things WHERE id = $1`, [
-        CONFLICT_ID,
-      ]);
-      expect(row.rows[0]?.count).toBe(0);
+      const row = await drizzleOver(db)
+        .select({ count: count() })
+        .from(rejectThings)
+        .where(eq(rejectThings.id, CONFLICT_ID));
+      expect(row[0]?.count).toBe(0);
     } finally {
       await db.close();
     }
   });
 
   it("reject-if-stale DELETE of a missing row stays idempotent success — NOT a conflict (#6)", async () => {
-    const db = await seedThing("reject_things", rejectConflictRegistry);
+    const db = await seedThing(rejectThings, rejectConflictRegistry);
     try {
-      await db.query(`DELETE FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
+      await drizzleOver(db).delete(rejectThings).where(eq(rejectThings.id, CONFLICT_ID));
 
       const conflicts = await applyForConflicts(db, [
         conflictMutation("reject_things", "delete", { id: CONFLICT_ID }, "100"),
@@ -605,7 +618,7 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
   });
 
   it("reject-if-stale with no base (a create-like legacy write) skips the stale check and applies", async () => {
-    const db = await seedThing("reject_things", rejectConflictRegistry);
+    const db = await seedThing(rejectThings, rejectConflictRegistry);
     try {
       // No baseServerVersion ⇒ no stale check; the write applies (degrades to last-write-wins).
       const conflicts = await applyForConflicts(db, [
@@ -613,15 +626,18 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
       ]);
 
       expect(conflicts).toEqual([]);
-      const row = await db.query<{ label: string }>(`SELECT label FROM reject_things WHERE id = $1`, [CONFLICT_ID]);
-      expect(row.rows[0]?.label).toBe("no-base");
+      const row = await drizzleOver(db)
+        .select({ label: rejectThings.label })
+        .from(rejectThings)
+        .where(eq(rejectThings.id, CONFLICT_ID));
+      expect(row[0]?.label).toBe("no-base");
     } finally {
       await db.close();
     }
   });
 
   it("reject-if-stale rejects a stale delete and keeps the row", async () => {
-    const db = await seedThing("reject_things", rejectConflictRegistry);
+    const db = await seedThing(rejectThings, rejectConflictRegistry);
     try {
       const conflicts = await applyForConflicts(db, [
         conflictMutation("reject_things", "delete", { id: CONFLICT_ID }, "100"),
@@ -629,10 +645,11 @@ describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
 
       expect(conflicts).toHaveLength(1);
       expect(conflicts[0]?.currentServerVersion).toBe("200");
-      const row = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM reject_things WHERE id = $1`, [
-        CONFLICT_ID,
-      ]);
-      expect(row.rows[0]?.count).toBe(1);
+      const row = await drizzleOver(db)
+        .select({ count: count() })
+        .from(rejectThings)
+        .where(eq(rejectThings.id, CONFLICT_ID));
+      expect(row[0]?.count).toBe(1);
     } finally {
       await db.close();
     }

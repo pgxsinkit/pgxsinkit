@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { mock } from "bun:test";
 
-import { bigint, boolean, text, uuid, varchar } from "drizzle-orm/pg-core";
+import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
+import { bigint, boolean, text, uuid, varchar, type PgColumn } from "drizzle-orm/pg-core";
 
+import { getJournalTable, getOverlayTable } from "@pgxsinkit/client";
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildSyntheticRegistry, demoSyncRegistry } from "@pgxsinkit/schema";
 
@@ -14,6 +16,7 @@ import {
   nowMicroseconds,
 } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite, createSchemaTestPGlite } from "../support/pglite";
 
 const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
@@ -220,16 +223,17 @@ describe("overlay state helpers", () => {
       createdAtUs: 100n,
     });
 
-    const overlayRows = await db.query<{ researchExcluded: boolean; channel: string; overlayKind: string }>(
-      `
-        SELECT research_excluded AS "researchExcluded", channel, overlay_kind AS "overlayKind"
-        FROM defaulted_column_items_overlay
-        WHERE id = $1
-      `,
-      ["01963227-d4c7-72db-b858-f89f6af8fa01"],
-    );
+    const overlay = getOverlayTable(defaultedColumnRegistry, "defaultedColumnItems");
+    const overlayRows = await drizzleOver(db)
+      .select({
+        researchExcluded: sql<boolean>`${overlay["researchExcluded"]!}`.as("researchExcluded"),
+        channel: sql<string>`${overlay["channel"]!}`.as("channel"),
+        overlayKind: overlay.overlayKind,
+      })
+      .from(overlay)
+      .where(eq(overlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8fa01"));
 
-    expect(overlayRows.rows[0]).toEqual({
+    expect(overlayRows[0]).toEqual({
       researchExcluded: false,
       channel: "default-channel",
       overlayKind: "pending_create",
@@ -256,16 +260,16 @@ describe("overlay state helpers", () => {
       createdAtUs: 100n,
     });
 
-    const overlayRows = await db.query<{ researchExcluded: boolean; channel: string }>(
-      `
-        SELECT research_excluded AS "researchExcluded", channel
-        FROM defaulted_column_items_overlay
-        WHERE id = $1
-      `,
-      ["01963227-d4c7-72db-b858-f89f6af8fa02"],
-    );
+    const overlay = getOverlayTable(defaultedColumnRegistry, "defaultedColumnItems");
+    const overlayRows = await drizzleOver(db)
+      .select({
+        researchExcluded: sql<boolean>`${overlay["researchExcluded"]!}`.as("researchExcluded"),
+        channel: sql<string>`${overlay["channel"]!}`.as("channel"),
+      })
+      .from(overlay)
+      .where(eq(overlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8fa02"));
 
-    expect(overlayRows.rows[0]).toEqual({
+    expect(overlayRows[0]).toEqual({
       researchExcluded: true,
       channel: "explicit-channel",
     });
@@ -286,12 +290,13 @@ describe("overlay state helpers", () => {
       title: "Custom version field",
     });
 
-    const rows = await db.query<{ modifiedAtUs: string | null }>(
-      `SELECT modified_at_us::text AS "modifiedAtUs" FROM custom_version_items_overlay WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8fb01"],
-    );
-    expect(rows.rows[0]?.modifiedAtUs).not.toBeNull();
-    expect(Number(rows.rows[0]?.modifiedAtUs)).toBeGreaterThan(0);
+    const overlay = getOverlayTable(customServerVersionRegistry, "customVersionItems");
+    const rows = await drizzleOver(db)
+      .select({ modifiedAtUs: sql<string | null>`${overlay["modifiedAtUs"]!}::text`.as("modifiedAtUs") })
+      .from(overlay)
+      .where(eq(overlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8fb01"));
+    expect(rows[0]?.modifiedAtUs).not.toBeNull();
+    expect(Number(rows[0]?.modifiedAtUs)).toBeGreaterThan(0);
 
     await db.close();
   });
@@ -315,19 +320,21 @@ describe("overlay state helpers", () => {
       body: "optimistic message",
     });
 
-    const rows = await db.query<{ ownerId: string; overlayKind: string }>(
-      `SELECT owner_id AS "ownerId", overlay_kind AS "overlayKind" FROM auth_owned_items_overlay WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8fc01"],
-    );
-    expect(rows.rows[0]).toEqual({ ownerId: subject, overlayKind: "pending_create" });
+    const overlay = getOverlayTable(authOwnedRegistry, "authOwnedItems");
+    const rows = await drizzleOver(db)
+      .select({ ownerId: sql<string>`${overlay["ownerId"]!}`.as("ownerId"), overlayKind: overlay.overlayKind })
+      .from(overlay)
+      .where(eq(overlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8fc01"));
+    expect(rows[0]).toEqual({ ownerId: subject, overlayKind: "pending_create" });
 
     // The server stamps the claim authoritatively, so the flushed payload must NOT carry the
     // authClaim field — the server rejects a payload that includes a server-managed field.
-    const journal = await db.query<{ payloadJson: string }>(
-      `SELECT payload_json AS "payloadJson" FROM auth_owned_items_mutations WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8fc01"],
-    );
-    const payload = JSON.parse(journal.rows[0]!.payloadJson) as { value: Record<string, unknown> };
+    const journalTable = getJournalTable(authOwnedRegistry, "authOwnedItems");
+    const journal = await drizzleOver(db)
+      .select({ payloadJson: journalTable.payloadJson })
+      .from(journalTable)
+      .where(eq(journalTable["id"]!, "01963227-d4c7-72db-b858-f89f6af8fc01"));
+    const payload = JSON.parse(journal[0]!.payloadJson) as { value: Record<string, unknown> };
     expect(payload.value).not.toHaveProperty("ownerId");
 
     await db.close();
@@ -343,18 +350,25 @@ describe("overlay state helpers", () => {
 
     // Force a known-stale managed value so a successful re-stamp is unmistakable (the wall clock is
     // millisecond-grained, so a fresh create+update could otherwise share a value).
-    await db.query(`UPDATE custom_version_items_overlay SET modified_at_us = 1 WHERE id = $1`, [id]);
+    const overlay = getOverlayTable(customServerVersionRegistry, "customVersionItems");
+    await drizzleOver(db)
+      .update(overlay)
+      .set({ modifiedAtUs: 1n } as never)
+      .where(eq(overlay["id"]!, id));
 
     await runtime.update("customVersionItems", { id }, { title: "v2" });
 
-    const rows = await db.query<{ title: string; modifiedAtUs: string | null }>(
-      `SELECT title, modified_at_us::text AS "modifiedAtUs" FROM custom_version_items_overlay WHERE id = $1`,
-      [id],
-    );
-    expect(rows.rows[0]?.title).toBe("v2");
+    const rows = await drizzleOver(db)
+      .select({
+        title: sql<string>`${overlay["title"]!}`.as("title"),
+        modifiedAtUs: sql<string | null>`${overlay["modifiedAtUs"]!}::text`.as("modifiedAtUs"),
+      })
+      .from(overlay)
+      .where(eq(overlay["id"]!, id));
+    expect(rows[0]?.title).toBe("v2");
     // The on-update stamp targeted `modified_at_us` generically (not a hard-coded `updatedAtUs`),
     // overwriting the sentinel with a fresh now-microseconds value.
-    expect(Number(rows.rows[0]?.modifiedAtUs)).toBeGreaterThan(1);
+    expect(Number(rows[0]?.modifiedAtUs)).toBeGreaterThan(1);
 
     await db.close();
   });
@@ -374,32 +388,17 @@ describe("overlay state helpers", () => {
       writeUrl,
     });
 
-    await db.query(
-      `
-        INSERT INTO ${tableName} (
-          id,
-          field_00,
-          field_01,
-          owner_id,
-          modified_by,
-          status,
-          priority,
-          created_at_us,
-          updated_at_us
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::bigint, $9::bigint)
-      `,
-      [
-        rowId,
-        "seed-0",
-        "seed-1",
-        "11111111-1111-4111-8111-111111111111",
-        "11111111-1111-4111-8111-111111111111",
-        "todo",
-        "medium",
-        "100",
-        "100",
-      ],
-    );
+    await drizzleOver(db).insert(registry[tableName]!.localTable).values({
+      id: rowId,
+      field00: "seed-0",
+      field01: "seed-1",
+      ownerId: "11111111-1111-4111-8111-111111111111",
+      modifiedBy: "11111111-1111-4111-8111-111111111111",
+      status: "todo",
+      priority: "medium",
+      createdAtUs: 100n,
+      updatedAtUs: 100n,
+    });
 
     await runtime.update(
       tableName,
@@ -410,32 +409,34 @@ describe("overlay state helpers", () => {
       },
     );
 
-    const overlayRows = await db.query<{ field00: string; status: string; overlayKind: string }>(
-      `
-        SELECT field_00 AS "field00", status, overlay_kind AS "overlayKind"
-        FROM ${tableName}_overlay
-        WHERE id = $1
-      `,
-      [rowId],
-    );
+    const overlay = getOverlayTable(registry, tableName);
+    const overlayRows = await drizzleOver(db)
+      .select({
+        field00: sql<string>`${overlay["field00"]!}`.as("field00"),
+        status: sql<string>`${overlay["status"]!}`.as("status"),
+        overlayKind: overlay.overlayKind,
+      })
+      .from(overlay)
+      .where(eq(overlay["id"]!, rowId));
 
-    expect(overlayRows.rows[0]).toEqual({
+    expect(overlayRows[0]).toEqual({
       field00: "updated-field",
       status: "done",
       overlayKind: "pending_update",
     });
 
-    const visibleRows = await db.query<{ overlayKind: string; localUpdatedAtUs: string }>(
-      `
-        SELECT overlay_kind AS "overlayKind", local_updated_at_us::text AS "localUpdatedAtUs"
-        FROM ${tableName}_read_model
-        WHERE id = $1
-      `,
-      [rowId],
-    );
+    const view = registry[tableName]!.view!;
+    const viewCols = view as unknown as Record<string, PgColumn>;
+    const visibleRows = await drizzleOver(db)
+      .select({
+        overlayKind: viewCols["overlay_kind"]!,
+        localUpdatedAtUs: sql<string>`${viewCols["local_updated_at_us"]!}::text`.as("localUpdatedAtUs"),
+      })
+      .from(view)
+      .where(eq(viewCols["id"]!, rowId));
 
-    expect(visibleRows.rows[0]?.overlayKind).toBe("pending_update");
-    expect(visibleRows.rows[0]?.localUpdatedAtUs).toMatch(/^[0-9]+$/);
+    expect(visibleRows[0]?.overlayKind).toBe("pending_update");
+    expect(visibleRows[0]?.localUpdatedAtUs).toMatch(/^[0-9]+$/);
   });
 
   it("queues authors into the local read model and author journal", async () => {
@@ -446,13 +447,13 @@ describe("overlay state helpers", () => {
       name: "Ada Lovelace",
     });
 
-    const authorRows = await db.query<{ name: string; overlayKind: string }>(`
-      SELECT name, overlay_kind AS "overlayKind"
-      FROM authors_read_model
-      WHERE id = '01963227-d4c7-72db-b858-f89f6af8f931'
-    `);
+    const authorsView = demoSyncRegistry.authors.view!;
+    const authorRows = await drizzleOver(db)
+      .select({ name: authorsView.name, overlayKind: authorsView.overlay_kind })
+      .from(authorsView)
+      .where(eq(authorsView.id, "01963227-d4c7-72db-b858-f89f6af8f931"));
 
-    expect(authorRows.rows[0]).toEqual({
+    expect(authorRows[0]).toEqual({
       name: "Ada Lovelace",
       overlayKind: "pending_create",
     });
@@ -475,32 +476,31 @@ describe("overlay state helpers", () => {
     });
 
     // Step 1: simulate ack — journal entry is acked
-    await db.query(
-      `UPDATE todos_mutations SET status = 'acked', server_updated_at_us = $2::bigint WHERE id = $1 AND mutation_seq = 1`,
-      ["01963227-d4c7-72db-b858-f89f6af8f994", "500"],
-    );
+    const todosJournal = getJournalTable(demoSyncRegistry, "todos");
+    await drizzleOver(db)
+      .update(todosJournal)
+      .set({ status: "acked", serverUpdatedAtUs: "500" })
+      .where(and(eq(todosJournal["id"]!, "01963227-d4c7-72db-b858-f89f6af8f994"), eq(todosJournal.mutationSeq, 1)));
 
     // Step 2: write synced data — the trigger fires and clears overlay + journal
-    await db.query(
-      `INSERT INTO todos (id, title, description, author_id, status, priority, created_at_us, updated_at_us) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)`,
-      [
-        "01963227-d4c7-72db-b858-f89f6af8f994",
-        "Trigger test",
-        null,
-        "01963227-d4c7-72db-b858-f89f6af8f920",
-        "todo",
-        "medium",
-        "400",
-        "600",
-      ],
-    );
+    await drizzleOver(db).insert(demoSyncRegistry.todos.localTable).values({
+      id: "01963227-d4c7-72db-b858-f89f6af8f994",
+      title: "Trigger test",
+      description: null,
+      authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+      status: "todo",
+      priority: "medium",
+      createdAtUs: 400n,
+      updatedAtUs: 600n,
+    });
 
     // Step 3: verify trigger cleared everything — no explicit reconcile() call needed
     const stats = await runtime.readMutationStats("todos");
     expect(stats.ackedCount).toBe(0);
 
-    const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay");
-    expect(overlayRows.rows[0]?.count).toBe(0);
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const overlayRows = await drizzleOver(db).select({ count: count() }).from(todosOverlay);
+    expect(overlayRows[0]?.count).toBe(0);
   });
 
   it("holds the optimistic overlay until the synced echo reaches the acked Server version (ADR-0010 barrier)", async () => {
@@ -517,29 +517,34 @@ describe("overlay state helpers", () => {
     });
 
     // Ack at Server version 500.
-    await db.query(
-      `UPDATE todos_mutations SET status = 'acked', server_updated_at_us = 500 WHERE id = $1 AND mutation_seq = 1`,
-      [id],
-    );
+    const todosJournal = getJournalTable(demoSyncRegistry, "todos");
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const todosTable = demoSyncRegistry.todos.localTable;
+    await drizzleOver(db)
+      .update(todosJournal)
+      .set({ status: "acked", serverUpdatedAtUs: "500" })
+      .where(and(eq(todosJournal["id"]!, id), eq(todosJournal.mutationSeq, 1)));
 
     // A STALE echo (older Server version 400 < 500) must NOT clear the optimistic write — the
     // overlay and the acked journal entry both survive (the regression the barrier exists to catch).
-    await db.query(
-      `INSERT INTO todos (id, title, description, author_id, status, priority, created_at_us, updated_at_us) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)`,
-      [id, "Stale server row", null, "01963227-d4c7-72db-b858-f89f6af8f920", "todo", "medium", "100", "400"],
-    );
+    await drizzleOver(db).insert(todosTable).values({
+      id,
+      title: "Stale server row",
+      description: null,
+      authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+      status: "todo",
+      priority: "medium",
+      createdAtUs: 100n,
+      updatedAtUs: 400n,
+    });
 
-    expect((await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay")).rows[0]?.count).toBe(
-      1,
-    );
+    expect((await drizzleOver(db).select({ count: count() }).from(todosOverlay))[0]?.count).toBe(1);
     expect((await runtime.readMutationStats("todos")).ackedCount).toBe(1);
 
     // The real echo (Server version 600 >= 500) crosses the barrier and clears overlay + journal.
-    await db.query(`UPDATE todos SET updated_at_us = 600 WHERE id = $1`, [id]);
+    await drizzleOver(db).update(todosTable).set({ updatedAtUs: 600n }).where(eq(todosTable.id, id));
 
-    expect((await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay")).rows[0]?.count).toBe(
-      0,
-    );
+    expect((await drizzleOver(db).select({ count: count() }).from(todosOverlay))[0]?.count).toBe(0);
     expect((await runtime.readMutationStats("todos")).ackedCount).toBe(0);
 
     await db.close();
@@ -548,22 +553,20 @@ describe("overlay state helpers", () => {
   it("reconciles multiple acknowledged overlays in one pass", async () => {
     const { db, runtime } = await createOverlayTestContext();
 
-    for (const rowId of ["01963227-d4c7-72db-b858-f89f6af8f980", "01963227-d4c7-72db-b858-f89f6af8f981"]) {
-      await db.query(
-        `
-          INSERT INTO todos (
-            id,
-            title,
-            description,
-            author_id,
-            status,
-            priority,
-            created_at_us,
-            updated_at_us
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)
-        `,
-        [rowId, `Synced ${rowId}`, null, "01963227-d4c7-72db-b858-f89f6af8f920", "todo", "medium", "100", "500"],
-      );
+    const rowIds = ["01963227-d4c7-72db-b858-f89f6af8f980", "01963227-d4c7-72db-b858-f89f6af8f981"];
+    for (const rowId of rowIds) {
+      await drizzleOver(db)
+        .insert(demoSyncRegistry.todos.localTable)
+        .values({
+          id: rowId,
+          title: `Synced ${rowId}`,
+          description: null,
+          authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+          status: "todo",
+          priority: "medium",
+          createdAtUs: 100n,
+          updatedAtUs: 500n,
+        });
 
       await runtime.update(
         "todos",
@@ -574,25 +577,21 @@ describe("overlay state helpers", () => {
       );
     }
 
-    await db.query(`
-      UPDATE todos_mutations
-      SET
-        status = 'acked',
-        server_updated_at_us = 500,
-        updated_at_us = 500
-      WHERE id IN (
-        '01963227-d4c7-72db-b858-f89f6af8f980',
-        '01963227-d4c7-72db-b858-f89f6af8f981'
-      )
-    `);
+    const todosJournal = getJournalTable(demoSyncRegistry, "todos");
+    await drizzleOver(db)
+      .update(todosJournal)
+      .set({ status: "acked", serverUpdatedAtUs: "500", updatedAtUs: "500" })
+      .where(inArray(todosJournal["id"]!, rowIds));
 
     await runtime.reconcile("todos");
 
     const stats = await runtime.readMutationStats("todos");
     expect(stats.ackedCount).toBe(0);
 
-    const overlayRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay");
-    expect(overlayRows.rows[0]?.count).toBe(0);
+    const overlayRows = await drizzleOver(db)
+      .select({ count: count() })
+      .from(getOverlayTable(demoSyncRegistry, "todos"));
+    expect(overlayRows[0]?.count).toBe(0);
   });
 
   it("returns microsecond timestamps as decimal strings", () => {
@@ -618,30 +617,16 @@ describe("overlay state helpers", () => {
   it("queues updates into the overlay and journal", async () => {
     const { db, runtime } = await createOverlayTestContext();
 
-    await db.query(
-      `
-        INSERT INTO todos (
-          id,
-          title,
-          description,
-          author_id,
-          status,
-          priority,
-          created_at_us,
-          updated_at_us
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)
-      `,
-      [
-        "01963227-d4c7-72db-b858-f89f6af8f995",
-        "Original",
-        null,
-        "01963227-d4c7-72db-b858-f89f6af8f920",
-        "todo",
-        "medium",
-        "100",
-        "100",
-      ],
-    );
+    await drizzleOver(db).insert(demoSyncRegistry.todos.localTable).values({
+      id: "01963227-d4c7-72db-b858-f89f6af8f995",
+      title: "Original",
+      description: null,
+      authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+      status: "todo",
+      priority: "medium",
+      createdAtUs: 100n,
+      updatedAtUs: 100n,
+    });
 
     await runtime.update(
       "todos",
@@ -652,13 +637,17 @@ describe("overlay state helpers", () => {
       },
     );
 
-    const overlayRows = await db.query<{ title: string; status: string; overlayKind: string }>(`
-      SELECT title, status, overlay_kind AS "overlayKind"
-      FROM todos_overlay
-      WHERE id = '01963227-d4c7-72db-b858-f89f6af8f995'
-    `);
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const overlayRows = await drizzleOver(db)
+      .select({
+        title: sql<string>`${todosOverlay["title"]!}`.as("title"),
+        status: sql<string>`${todosOverlay["status"]!}`.as("status"),
+        overlayKind: todosOverlay.overlayKind,
+      })
+      .from(todosOverlay)
+      .where(eq(todosOverlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8f995"));
 
-    expect(overlayRows.rows[0]).toEqual({
+    expect(overlayRows[0]).toEqual({
       title: "Updated",
       status: "done",
       overlayKind: "pending_update",
@@ -686,14 +675,15 @@ describe("overlay state helpers", () => {
     const stats = await runtime.readMutationStats("todos");
     expect(stats.pendingCount).toBe(2);
 
-    const visibleRows = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_read_model");
-    expect(visibleRows.rows[0]?.count).toBe(0);
+    const visibleRows = await drizzleOver(db).select({ count: count() }).from(demoSyncRegistry.todos.view!);
+    expect(visibleRows[0]?.count).toBe(0);
 
-    const overlays = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM todos_overlay WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8f996"],
-    );
-    expect(overlays.rows[0]?.overlayKind).toBe("pending_delete");
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const overlays = await drizzleOver(db)
+      .select({ overlayKind: todosOverlay.overlayKind })
+      .from(todosOverlay)
+      .where(eq(todosOverlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8f996"));
+    expect(overlays[0]?.overlayKind).toBe("pending_delete");
 
     const mutations = await runtime.readMutationDetails("todos");
     expect(mutations.map((mutation) => ({ kind: mutation.mutationKind, seq: mutation.mutationSeq }))).toEqual([
@@ -728,17 +718,19 @@ describe("overlay state helpers", () => {
       },
     ]);
 
-    const authorRows = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM authors_read_model WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8f937"],
-    );
-    const todoRows = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM todos_read_model WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8f938"],
-    );
+    const authorsView = demoSyncRegistry.authors.view!;
+    const todosView = demoSyncRegistry.todos.view!;
+    const authorRows = await drizzleOver(db)
+      .select({ overlayKind: authorsView.overlay_kind })
+      .from(authorsView)
+      .where(eq(authorsView.id, "01963227-d4c7-72db-b858-f89f6af8f937"));
+    const todoRows = await drizzleOver(db)
+      .select({ overlayKind: todosView.overlay_kind })
+      .from(todosView)
+      .where(eq(todosView.id, "01963227-d4c7-72db-b858-f89f6af8f938"));
 
-    expect(authorRows.rows[0]?.overlayKind).toBe("pending_create");
-    expect(todoRows.rows[0]?.overlayKind).toBe("pending_create");
+    expect(authorRows[0]?.overlayKind).toBe("pending_create");
+    expect(todoRows[0]?.overlayKind).toBe("pending_create");
 
     const authorStats = await runtime.readMutationStats("authors");
     const todoStats = await runtime.readMutationStats("todos");
@@ -751,21 +743,16 @@ describe("overlay state helpers", () => {
     const { db, runtime } = await createOverlayTestContext();
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f939";
 
-    await db.query(
-      `
-        INSERT INTO todos (
-          id,
-          title,
-          description,
-          author_id,
-          status,
-          priority,
-          created_at_us,
-          updated_at_us
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)
-      `,
-      [todoId, "Seeded todo", null, "01963227-d4c7-72db-b858-f89f6af8f920", "todo", "medium", "100", "100"],
-    );
+    await drizzleOver(db).insert(demoSyncRegistry.todos.localTable).values({
+      id: todoId,
+      title: "Seeded todo",
+      description: null,
+      authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+      status: "todo",
+      priority: "medium",
+      createdAtUs: 100n,
+      updatedAtUs: 100n,
+    });
 
     await runtime.batch([
       {
@@ -782,13 +769,17 @@ describe("overlay state helpers", () => {
       },
     ]);
 
-    const overlayRows = await db.query<{ title: string; status: string }>(
-      `SELECT title, status FROM todos_overlay WHERE id = $1`,
-      [todoId],
-    );
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const overlayRows = await drizzleOver(db)
+      .select({
+        title: sql<string>`${todosOverlay["title"]!}`.as("title"),
+        status: sql<string>`${todosOverlay["status"]!}`.as("status"),
+      })
+      .from(todosOverlay)
+      .where(eq(todosOverlay["id"]!, todoId));
     const mutations = await runtime.readMutationDetails("todos");
 
-    expect(overlayRows.rows[0]).toEqual({
+    expect(overlayRows[0]).toEqual({
       title: "First in batch",
       status: "done",
     });
@@ -807,40 +798,30 @@ describe("overlay state helpers", () => {
     const firstTodoId = "01963227-d4c7-72db-b858-f89f6af8f944";
     const secondTodoId = "01963227-d4c7-72db-b858-f89f6af8f945";
 
-    await db.query(
-      `
-        INSERT INTO todos (
-          id,
-          title,
-          description,
-          author_id,
-          status,
-          priority,
-          created_at_us,
-          updated_at_us
-        ) VALUES
-          ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint),
-          ($9, $10, $11, $12, $13, $14, $15::bigint, $16::bigint)
-      `,
-      [
-        firstTodoId,
-        "First seeded todo",
-        null,
-        "01963227-d4c7-72db-b858-f89f6af8f920",
-        "todo",
-        "medium",
-        "100",
-        "100",
-        secondTodoId,
-        "Second seeded todo",
-        null,
-        "01963227-d4c7-72db-b858-f89f6af8f920",
-        "todo",
-        "medium",
-        "100",
-        "100",
-      ],
-    );
+    await drizzleOver(db)
+      .insert(demoSyncRegistry.todos.localTable)
+      .values([
+        {
+          id: firstTodoId,
+          title: "First seeded todo",
+          description: null,
+          authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+          status: "todo",
+          priority: "medium",
+          createdAtUs: 100n,
+          updatedAtUs: 100n,
+        },
+        {
+          id: secondTodoId,
+          title: "Second seeded todo",
+          description: null,
+          authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+          status: "todo",
+          priority: "medium",
+          createdAtUs: 100n,
+          updatedAtUs: 100n,
+        },
+      ]);
 
     await runtime.batch([
       {
@@ -863,15 +844,13 @@ describe("overlay state helpers", () => {
       },
     ]);
 
-    const journalRows = await db.query<{ id: string; mutationSeq: number }>(
-      `
-        SELECT id, mutation_seq AS "mutationSeq"
-        FROM todos_mutations
-        ORDER BY mutation_seq ASC
-      `,
-    );
+    const todosJournal = getJournalTable(demoSyncRegistry, "todos");
+    const journalRows = await drizzleOver(db)
+      .select({ id: sql<string>`${todosJournal["id"]!}`.as("id"), mutationSeq: todosJournal.mutationSeq })
+      .from(todosJournal)
+      .orderBy(asc(todosJournal.mutationSeq));
 
-    expect(journalRows.rows).toEqual([
+    expect(journalRows).toEqual([
       { id: firstTodoId, mutationSeq: 1 },
       { id: secondTodoId, mutationSeq: 2 },
       { id: firstTodoId, mutationSeq: 3 },
@@ -905,17 +884,19 @@ describe("overlay state helpers", () => {
     const stats = await runtime.readMutationStats("todos");
     expect(stats.pendingCount).toBe(2);
 
-    const visibleRows = await db.query<{ count: number }>(
-      "SELECT COUNT(*)::int AS count FROM todos_read_model WHERE id = $1",
-      [todoId],
-    );
-    expect(visibleRows.rows[0]?.count).toBe(0);
+    const todosView = demoSyncRegistry.todos.view!;
+    const visibleRows = await drizzleOver(db)
+      .select({ count: count() })
+      .from(todosView)
+      .where(eq(todosView.id, todoId));
+    expect(visibleRows[0]?.count).toBe(0);
 
-    const overlays = await db.query<{ overlayKind: string }>(
-      `SELECT overlay_kind AS "overlayKind" FROM todos_overlay WHERE id = $1`,
-      [todoId],
-    );
-    expect(overlays.rows[0]?.overlayKind).toBe("pending_delete");
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const overlays = await drizzleOver(db)
+      .select({ overlayKind: todosOverlay.overlayKind })
+      .from(todosOverlay)
+      .where(eq(todosOverlay["id"]!, todoId));
+    expect(overlays[0]?.overlayKind).toBe("pending_delete");
 
     const mutations = await runtime.readMutationDetails("todos");
     expect(
@@ -961,13 +942,15 @@ describe("overlay state helpers", () => {
       ]),
     ).rejects.toThrow("todos is already queued for deletion");
 
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const todosJournal = getJournalTable(demoSyncRegistry, "todos");
     const [overlayRows, mutationRows] = await Promise.all([
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay WHERE id = $1", [todoId]),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_mutations WHERE id = $1", [todoId]),
+      drizzleOver(db).select({ count: count() }).from(todosOverlay).where(eq(todosOverlay["id"]!, todoId)),
+      drizzleOver(db).select({ count: count() }).from(todosJournal).where(eq(todosJournal["id"]!, todoId)),
     ]);
 
-    expect(overlayRows.rows[0]?.count).toBe(0);
-    expect(mutationRows.rows[0]?.count).toBe(0);
+    expect(overlayRows[0]?.count).toBe(0);
+    expect(mutationRows[0]?.count).toBe(0);
   });
 
   it("rejects invalid local batches without partial journaling", async () => {
@@ -1000,16 +983,16 @@ describe("overlay state helpers", () => {
     ).rejects.toThrow(/value too long for type character varying/);
 
     const [authorOverlay, authorJournal, todoOverlay, todoJournal] = await Promise.all([
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors_overlay"),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors_mutations"),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay"),
-      db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_mutations"),
+      drizzleOver(db).select({ count: count() }).from(getOverlayTable(demoSyncRegistry, "authors")),
+      drizzleOver(db).select({ count: count() }).from(getJournalTable(demoSyncRegistry, "authors")),
+      drizzleOver(db).select({ count: count() }).from(getOverlayTable(demoSyncRegistry, "todos")),
+      drizzleOver(db).select({ count: count() }).from(getJournalTable(demoSyncRegistry, "todos")),
     ]);
 
-    expect(authorOverlay.rows[0]?.count).toBe(0);
-    expect(authorJournal.rows[0]?.count).toBe(0);
-    expect(todoOverlay.rows[0]?.count).toBe(0);
-    expect(todoJournal.rows[0]?.count).toBe(0);
+    expect(authorOverlay[0]?.count).toBe(0);
+    expect(authorJournal[0]?.count).toBe(0);
+    expect(todoOverlay[0]?.count).toBe(0);
+    expect(todoJournal[0]?.count).toBe(0);
   });
 
   it("clears acknowledged deletes in one reconcile pass once the synced row is gone", async () => {
@@ -1028,18 +1011,19 @@ describe("overlay state helpers", () => {
       await runtime.delete("todos", { id: rowId });
     }
 
-    await db.query(`
-      UPDATE todos_mutations
-      SET
-        status = 'acked',
-        updated_at_us = 600,
-        acked_at_us = 600
-      WHERE mutation_kind = 'delete'
-        AND id IN (
-          '01963227-d4c7-72db-b858-f89f6af8f982',
-          '01963227-d4c7-72db-b858-f89f6af8f983'
-        )
-    `);
+    const todosJournal = getJournalTable(demoSyncRegistry, "todos");
+    await drizzleOver(db)
+      .update(todosJournal)
+      .set({ status: "acked", updatedAtUs: "600", ackedAtUs: "600" })
+      .where(
+        and(
+          eq(todosJournal.mutationKind, "delete"),
+          inArray(todosJournal["id"]!, [
+            "01963227-d4c7-72db-b858-f89f6af8f982",
+            "01963227-d4c7-72db-b858-f89f6af8f983",
+          ]),
+        ),
+      );
 
     await runtime.reconcile("todos");
 
@@ -1049,41 +1033,27 @@ describe("overlay state helpers", () => {
     expect(stats.pendingCount).toBe(2);
     expect(stats.ackedCount).toBe(0);
 
-    const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_overlay");
-    expect(overlays.rows[0]?.count).toBe(0);
+    const overlays = await drizzleOver(db).select({ count: count() }).from(getOverlayTable(demoSyncRegistry, "todos"));
+    expect(overlays[0]?.count).toBe(0);
 
-    const journal = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM todos_mutations");
+    const journal = await drizzleOver(db).select({ count: count() }).from(todosJournal);
     // Create mutations remain in journal as pending
-    expect(journal.rows[0]?.count).toBe(2);
+    expect(journal[0]?.count).toBe(2);
   });
 
   it("appends multiple queued updates for the same todo", async () => {
     const { db, runtime } = await createOverlayTestContext();
 
-    await db.query(
-      `
-        INSERT INTO todos (
-          id,
-          title,
-          description,
-          author_id,
-          status,
-          priority,
-          created_at_us,
-          updated_at_us
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint)
-      `,
-      [
-        "01963227-d4c7-72db-b858-f89f6af8f910",
-        "Original",
-        null,
-        "01963227-d4c7-72db-b858-f89f6af8f920",
-        "todo",
-        "medium",
-        "100",
-        "100",
-      ],
-    );
+    await drizzleOver(db).insert(demoSyncRegistry.todos.localTable).values({
+      id: "01963227-d4c7-72db-b858-f89f6af8f910",
+      title: "Original",
+      description: null,
+      authorId: "01963227-d4c7-72db-b858-f89f6af8f920",
+      status: "todo",
+      priority: "medium",
+      createdAtUs: 100n,
+      updatedAtUs: 100n,
+    });
 
     await runtime.update(
       "todos",
@@ -1100,11 +1070,15 @@ describe("overlay state helpers", () => {
       },
     );
 
-    const overlayRows = await db.query<{ title: string; status: string }>(
-      `SELECT title, status FROM todos_overlay WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8f910"],
-    );
-    expect(overlayRows.rows[0]).toEqual({
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const overlayRows = await drizzleOver(db)
+      .select({
+        title: sql<string>`${todosOverlay["title"]!}`.as("title"),
+        status: sql<string>`${todosOverlay["status"]!}`.as("status"),
+      })
+      .from(todosOverlay)
+      .where(eq(todosOverlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8f910"));
+    expect(overlayRows[0]).toEqual({
       title: "First update",
       status: "done",
     });
@@ -1137,23 +1111,29 @@ describe("overlay state helpers", () => {
       },
     );
 
-    const overlayRows = await db.query<{ title: string; status: string; overlayKind: string }>(
-      `SELECT title, status, overlay_kind AS "overlayKind" FROM todos_overlay WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8f909"],
-    );
+    const todosOverlay = getOverlayTable(demoSyncRegistry, "todos");
+    const overlayRows = await drizzleOver(db)
+      .select({
+        title: sql<string>`${todosOverlay["title"]!}`.as("title"),
+        status: sql<string>`${todosOverlay["status"]!}`.as("status"),
+        overlayKind: todosOverlay.overlayKind,
+      })
+      .from(todosOverlay)
+      .where(eq(todosOverlay["id"]!, "01963227-d4c7-72db-b858-f89f6af8f909"));
 
-    expect(overlayRows.rows[0]).toEqual({
+    expect(overlayRows[0]).toEqual({
       title: "Updated before sync",
       status: "done",
       overlayKind: "pending_create",
     });
 
-    const visibleRows = await db.query<{ title: string; status: string; overlayKind: string }>(
-      `SELECT title, status, overlay_kind AS "overlayKind" FROM todos_read_model WHERE id = $1`,
-      ["01963227-d4c7-72db-b858-f89f6af8f909"],
-    );
+    const todosView = demoSyncRegistry.todos.view!;
+    const visibleRows = await drizzleOver(db)
+      .select({ title: todosView.title, status: todosView.status, overlayKind: todosView.overlay_kind })
+      .from(todosView)
+      .where(eq(todosView.id, "01963227-d4c7-72db-b858-f89f6af8f909"));
 
-    expect(visibleRows.rows[0]).toEqual({
+    expect(visibleRows[0]).toEqual({
       title: "Updated before sync",
       status: "done",
       overlayKind: "pending_create",
@@ -1174,58 +1154,26 @@ describe("overlay state helpers", () => {
       writeUrl,
     });
 
-    await db.exec(`
-      CREATE TABLE todos_mutations (
-        mutation_id UUID PRIMARY KEY,
-        todo_id UUID NOT NULL,
-        entity_key_json TEXT NOT NULL,
-        mutation_seq INTEGER NOT NULL,
-        mutation_kind VARCHAR(24) NOT NULL,
-        status VARCHAR(24) NOT NULL,
-        registry_version TEXT,
-        payload_json TEXT NOT NULL,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        last_http_status INTEGER,
-        conflict_reason TEXT,
-        server_updated_at_us BIGINT,
-        enqueued_at_us BIGINT NOT NULL,
-        next_retry_at_us BIGINT,
-        sent_at_us BIGINT,
-        acked_at_us BIGINT,
-        updated_at_us BIGINT NOT NULL,
-        UNIQUE (todo_id, mutation_seq)
-      );
-    `);
+    const todosJournal = getJournalTable(demoSyncRegistry, "todos");
+    await createTablesFromSchema(db, { todosJournal });
 
-    await db.query(
-      `
-        INSERT INTO todos_mutations (
-          mutation_id,
-          todo_id,
-          entity_key_json,
-          mutation_seq,
-          mutation_kind,
-          status,
-          payload_json,
-          attempt_count,
-          last_error,
-          conflict_reason,
-          enqueued_at_us,
-          next_retry_at_us,
-          updated_at_us
-        ) VALUES ($1, $2, $3, 1, 'update', 'failed', $4, 2, 'boom', '409 conflict', $5::bigint, $6::bigint, $7::bigint)
-      `,
-      [
-        "01963227-d4c7-72db-b858-f89f6af8f997",
-        "01963227-d4c7-72db-b858-f89f6af8f998",
-        '{"id":"01963227-d4c7-72db-b858-f89f6af8f998"}',
-        '{"kind":"update","patch":{"status":"done"}}',
-        "100",
-        "1000",
-        "1000",
-      ],
-    );
+    await drizzleOver(db)
+      .insert(todosJournal)
+      .values({
+        mutationId: "01963227-d4c7-72db-b858-f89f6af8f997",
+        id: "01963227-d4c7-72db-b858-f89f6af8f998",
+        entityKeyJson: '{"id":"01963227-d4c7-72db-b858-f89f6af8f998"}',
+        mutationSeq: 1,
+        mutationKind: "update",
+        status: "failed",
+        payloadJson: '{"kind":"update","patch":{"status":"done"}}',
+        attemptCount: 2,
+        lastError: "boom",
+        conflictReason: "409 conflict",
+        enqueuedAtUs: "100",
+        nextRetryAtUs: "1000",
+        updatedAtUs: "1000",
+      } as typeof todosJournal.$inferInsert);
 
     await runtime.retryFailed("todos");
 
@@ -1243,17 +1191,12 @@ describe("overlay state helpers", () => {
       name: "Interrupted author",
     });
 
-    await db.query(
-      `
-        UPDATE authors_mutations
-        SET
-          status = 'sending',
-          sent_at_us = $2::bigint,
-          updated_at_us = $2::bigint
-        WHERE mutation_id = $1
-      `,
-      [(await runtime.readMutationDetails("authors"))[0]?.mutationId, "1000"],
-    );
+    const sendingMutationId = (await runtime.readMutationDetails("authors"))[0]?.mutationId;
+    const authorsJournal = getJournalTable(demoSyncRegistry, "authors");
+    await drizzleOver(db)
+      .update(authorsJournal)
+      .set({ status: "sending", sentAtUs: "1000", updatedAtUs: "1000" })
+      .where(eq(authorsJournal.mutationId, sendingMutationId!));
 
     await runtime.recoverSending("authors");
 
@@ -1513,17 +1456,9 @@ describe("overlay state helpers", () => {
     for (let index = 0; index < mutationCount; index += 1) {
       const authorId = `01963227-d4c7-72db-b858-${(910000000000 + index).toString().padStart(12, "0")}`;
 
-      await db.query(
-        `
-          INSERT INTO authors (
-            id,
-            name,
-            created_at_us,
-            updated_at_us
-          ) VALUES ($1, $2, $3::bigint, $4::bigint)
-        `,
-        [authorId, `Seeded Author ${index}`, "100", "100"],
-      );
+      await drizzleOver(db)
+        .insert(demoSyncRegistry.authors.localTable)
+        .values({ id: authorId, name: `Seeded Author ${index}`, createdAtUs: 100n, updatedAtUs: 100n });
 
       await runtime.update("authors", { id: authorId }, { name: `Updated Author ${index}` });
     }
@@ -1555,12 +1490,14 @@ describe("overlay state helpers", () => {
       await runtime.reconcile("authors");
 
       const mutationStats = await runtime.readMutationStats("authors");
-      const overlays = await db.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM authors_overlay");
+      const overlays = await drizzleOver(db)
+        .select({ count: count() })
+        .from(getOverlayTable(demoSyncRegistry, "authors"));
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(mutationStats.pendingCount).toBe(0);
       expect(mutationStats.ackedCount).toBe(0);
-      expect(overlays.rows[0]?.count).toBe(0);
+      expect(overlays[0]?.count).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1653,12 +1590,16 @@ describe("canonical entity identity — property≠column PK (ADR-0012)", () => 
 
     // The journal's real PK column is populated, and entity_key_json is the canonical
     // column-keyed identity ({ group_id }), never the drizzle property ({ groupId }).
-    const journal = await db.query<{ groupId: string; entityKeyJson: string }>(
-      `SELECT group_id AS "groupId", entity_key_json AS "entityKeyJson"
-         FROM renamed_pk_items_mutations ORDER BY mutation_seq`,
-    );
-    expect(journal.rows).toHaveLength(2);
-    for (const row of journal.rows) {
+    const journalTable = getJournalTable(renamedPkRegistry, "renamedPk");
+    const journal = await drizzleOver(db)
+      .select({
+        groupId: sql<string>`${journalTable["group_id"]!}`.as("groupId"),
+        entityKeyJson: journalTable.entityKeyJson,
+      })
+      .from(journalTable)
+      .orderBy(asc(journalTable.mutationSeq));
+    expect(journal).toHaveLength(2);
+    for (const row of journal) {
       expect(row.groupId).toBe(groupId);
       expect(JSON.parse(row.entityKeyJson)).toEqual({ group_id: groupId });
     }

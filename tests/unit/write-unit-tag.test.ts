@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
 
+import { eq } from "drizzle-orm";
+
+import { getJournalTable } from "@pgxsinkit/client";
 import { projectsSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // ADR-0022-B — the durable write-unit tag substrate. A `batch(items, unit)` stamps every journal row of
@@ -21,20 +25,20 @@ async function seededRuntime() {
   const db = await createFreshTestPGlite();
   await db.exec(schemaSql);
   for (const id of [P1, P2]) {
-    await db.query(
-      `INSERT INTO projects (id, name, created_at_us, updated_at_us) VALUES ($1, 'seed', $2::bigint, $2::bigint)`,
-      [id, SYNCED_VERSION],
-    );
+    await drizzleOver(db)
+      .insert(projectsSyncRegistry.projects.localTable)
+      .values({ id, name: "seed", createdAtUs: BigInt(SYNCED_VERSION), updatedAtUs: BigInt(SYNCED_VERSION) });
   }
   return { db, runtime: createMutationRuntime({ db, registry: projectsSyncRegistry, writeUrl }) };
 }
 
 async function readTag(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, mutationSeq: number) {
-  const result = await db.query<{ writeUnit: string | null; writeMode: string | null }>(
-    `SELECT write_unit AS "writeUnit", write_mode AS "writeMode" FROM projects_mutations WHERE mutation_seq = $1`,
-    [mutationSeq],
-  );
-  return result.rows[0];
+  const journal = getJournalTable(projectsSyncRegistry, "projects");
+  const rows = await drizzleOver(db)
+    .select({ writeUnit: journal.writeUnit, writeMode: journal.writeMode })
+    .from(journal)
+    .where(eq(journal.mutationSeq, mutationSeq));
+  return rows[0];
 }
 
 describe("write-unit tag substrate (ADR-0022-B)", () => {

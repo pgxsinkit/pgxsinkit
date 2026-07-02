@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
 
+import { count, eq } from "drizzle-orm";
+import type { AnyPgTable } from "drizzle-orm/pg-core";
+
+import { getJournalTable, getOverlayTable } from "@pgxsinkit/client";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import {
@@ -16,6 +20,8 @@ import {
   buildWipeLocalStoreSql,
   generateLocalSchemaSql,
 } from "../../packages/client/src/schema";
+import { informationSchemaTables } from "../support/catalog-tables";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // ADR-0006: the fingerprint-keyed local store + drain-then-drop read-cache rebuild.
@@ -31,16 +37,16 @@ async function provisioned() {
 }
 
 async function tableExists(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, name: string): Promise<boolean> {
-  const result = await db.query<{ exists: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1) AS "exists"`,
-    [name],
-  );
-  return result.rows[0]?.exists ?? false;
+  const rows = await drizzleOver(db)
+    .select({ count: count() })
+    .from(informationSchemaTables)
+    .where(eq(informationSchemaTables.tableName, name));
+  return (rows[0]?.count ?? 0) > 0;
 }
 
-async function rowCount(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, table: string): Promise<number> {
-  const result = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS "count" FROM ${table}`);
-  return result.rows[0]?.count ?? 0;
+async function rowCount(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, table: AnyPgTable): Promise<number> {
+  const rows = await drizzleOver(db).select({ count: count() }).from(table);
+  return rows[0]?.count ?? 0;
 }
 
 describe("local-meta fingerprint store (ADR-0006)", () => {
@@ -82,8 +88,8 @@ describe("dropReadCache / wipe (ADR-0005 + ADR-0006)", () => {
 
     // A pending (un-flushed) write: overlay + journal rows are authority and must survive.
     await runtime.create("authors", { id: "01963227-d4c7-72db-b858-f89f6af8a001", name: "Keep me" });
-    expect(await rowCount(db, "authors_mutations")).toBe(1);
-    expect(await rowCount(db, "authors_overlay")).toBe(1);
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
+    expect(await rowCount(db, getOverlayTable(demoSyncRegistry, "authors"))).toBe(1);
 
     await db.exec(buildDropReadCacheSql(demoSyncRegistry));
 
@@ -92,13 +98,13 @@ describe("dropReadCache / wipe (ADR-0005 + ADR-0006)", () => {
     expect(await tableExists(db, "todos")).toBe(false);
     expect(await tableExists(db, "authors_overlay")).toBe(true);
     expect(await tableExists(db, "authors_mutations")).toBe(true);
-    expect(await rowCount(db, "authors_mutations")).toBe(1);
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
 
     // Re-applying the schema rebuilds the synced cache empty, ready to re-sync.
     await db.exec(schemaSql);
     expect(await tableExists(db, "authors")).toBe(true);
-    expect(await rowCount(db, "authors")).toBe(0);
-    expect(await rowCount(db, "authors_mutations")).toBe(1);
+    expect(await rowCount(db, demoSyncRegistry.authors.localTable)).toBe(0);
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
   });
 
   it("wipe removes the entire local store including overlay, journal, and meta", async () => {
@@ -178,7 +184,7 @@ describe("reconcileLocalStoreVersion (ADR-0006 drain-then-drop)", () => {
 
     expect(events).toEqual([{ status: "deferred", owed: 1 }]);
     // The journal row survived and the fingerprint was NOT advanced (retried next boot).
-    expect(await rowCount(db, "authors_mutations")).toBe(1);
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
     expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe("old-fingerprint");
   });
 });

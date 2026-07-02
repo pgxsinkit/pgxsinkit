@@ -1,9 +1,13 @@
 import { describe, expect, it, mock } from "bun:test";
 
+import { eq, sql } from "drizzle-orm";
+
+import { getJournalTable } from "@pgxsinkit/client";
 import { projectsSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // ADR-0015 Phase 1 — the Base server version capture rule (decision 2), proven in isolation BEFORE
@@ -23,10 +27,9 @@ async function createProjectsRuntime() {
   const db = await createFreshTestPGlite();
   await db.exec(schemaSql);
   // Seed the synced read cache with one project at SYNCED_VERSION — the value the user "sees".
-  await db.query(
-    `INSERT INTO projects (id, name, created_at_us, updated_at_us) VALUES ($1, 'seed', $2::bigint, $2::bigint)`,
-    [PROJECT_ID, SYNCED_VERSION],
-  );
+  await drizzleOver(db)
+    .insert(projectsSyncRegistry.projects.localTable)
+    .values({ id: PROJECT_ID, name: "seed", createdAtUs: BigInt(SYNCED_VERSION), updatedAtUs: BigInt(SYNCED_VERSION) });
   return { db, runtime: createMutationRuntime({ db, registry: projectsSyncRegistry, writeUrl }) };
 }
 
@@ -72,11 +75,15 @@ async function withFetch<T>(fetchMock: unknown, fn: () => Promise<T>): Promise<T
 }
 
 async function readJournalBase(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, mutationSeq: number) {
-  const result = await db.query<{ base: string | null; kind: string }>(
-    `SELECT base_server_version::text AS base, mutation_kind AS kind FROM projects_mutations WHERE mutation_seq = $1`,
-    [mutationSeq],
-  );
-  return result.rows[0];
+  const journal = getJournalTable(projectsSyncRegistry, "projects");
+  const rows = await drizzleOver(db)
+    .select({
+      base: sql<string | null>`${journal.baseServerVersion}::text`.as("base"),
+      kind: journal.mutationKind,
+    })
+    .from(journal)
+    .where(eq(journal.mutationSeq, mutationSeq));
+  return rows[0];
 }
 
 describe("Base server version capture (ADR-0015 Phase 1)", () => {

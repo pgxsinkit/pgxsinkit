@@ -1,9 +1,13 @@
 import { describe, expect, it, mock } from "bun:test";
 
+import { count, eq, sql } from "drizzle-orm";
+
+import { getJournalTable, getOverlayTable, getSyncStateView } from "@pgxsinkit/client";
 import { projectsSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // ADR-0015 Phase 4: the client side of a reject-if-stale conflict. A conflicted ack moves the
@@ -21,10 +25,9 @@ const SERVER_VERSION = "200"; // the external writer advanced the row to here
 async function createProjectsRuntime(onConflict?: (conflicted: MutationDetail[]) => void) {
   const db = await createFreshTestPGlite();
   await db.exec(schemaSql);
-  await db.query(
-    `INSERT INTO projects (id, name, created_at_us, updated_at_us) VALUES ($1, 'seed', $2::bigint, $2::bigint)`,
-    [PROJECT_ID, SYNCED_VERSION],
-  );
+  await drizzleOver(db)
+    .insert(projectsSyncRegistry.projects.localTable)
+    .values({ id: PROJECT_ID, name: "seed", createdAtUs: BigInt(SYNCED_VERSION), updatedAtUs: BigInt(SYNCED_VERSION) });
   return {
     db,
     runtime: createMutationRuntime({
@@ -96,20 +99,25 @@ async function withFetch<T>(fetchMock: unknown, fn: () => Promise<T>): Promise<T
 }
 
 async function readReadModel(db: Awaited<ReturnType<typeof createFreshTestPGlite>>) {
-  const result = await db.query<{ name: string; overlayKind: string }>(
-    `SELECT name, overlay_kind AS "overlayKind" FROM projects_read_model WHERE id = $1`,
-    [PROJECT_ID],
-  );
-  return result.rows[0];
+  const view = projectsSyncRegistry.projects.view!;
+  const rows = await drizzleOver(db)
+    .select({ name: view.name, overlayKind: view.overlay_kind })
+    .from(view)
+    .where(eq(view.id, PROJECT_ID));
+  return rows[0];
 }
 
 async function readJournalStatus(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, seq: number) {
-  const result = await db.query<{ status: string; reason: string | null; serverVersion: string | null }>(
-    `SELECT status, conflict_reason AS reason, server_updated_at_us::text AS "serverVersion"
-     FROM projects_mutations WHERE mutation_seq = $1`,
-    [seq],
-  );
-  return result.rows[0];
+  const journal = getJournalTable(projectsSyncRegistry, "projects");
+  const rows = await drizzleOver(db)
+    .select({
+      status: journal.status,
+      reason: journal.conflictReason,
+      serverVersion: sql<string | null>`${journal.serverUpdatedAtUs}::text`.as("serverVersion"),
+    })
+    .from(journal)
+    .where(eq(journal.mutationSeq, seq));
+  return rows[0];
 }
 
 describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
@@ -141,11 +149,12 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
       expect(readModel?.overlayKind).toBe("pending_update");
 
       // The sync-state view surfaces the conflict.
-      const syncState = await db.query<{ conflictState: string | null }>(
-        `SELECT conflict_state AS "conflictState" FROM projects_sync_state WHERE id = $1`,
-        [PROJECT_ID],
-      );
-      expect(syncState.rows[0]?.conflictState).toContain("reject-if-stale");
+      const syncStateView = getSyncStateView(projectsSyncRegistry, "projects");
+      const syncState = await drizzleOver(db)
+        .select({ conflictState: syncStateView.conflictState })
+        .from(syncStateView)
+        .where(eq(syncStateView["id"]!, PROJECT_ID));
+      expect(syncState[0]?.conflictState).toContain("reject-if-stale");
     } finally {
       await db.close();
     }
@@ -164,11 +173,12 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
       await runtime.discardConflict("projects", { id: PROJECT_ID });
 
       // The conflicted journal entry is gone...
-      const journalCount = await db.query<{ count: number }>(
-        `SELECT COUNT(*)::int AS count FROM projects_mutations WHERE id = $1`,
-        [PROJECT_ID],
-      );
-      expect(journalCount.rows[0]?.count).toBe(0);
+      const journal = getJournalTable(projectsSyncRegistry, "projects");
+      const journalCount = await drizzleOver(db)
+        .select({ count: count() })
+        .from(journal)
+        .where(eq(journal["id"]!, PROJECT_ID));
+      expect(journalCount[0]?.count).toBe(0);
 
       // ...and the overlay is cleared, so the read model falls back to the synced (server) value.
       const readModel = await readReadModel(db);
@@ -189,10 +199,10 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
 
       // The external write syncs down (echo): the synced row catches up to SERVER_VERSION. The
       // resolution is now authored against the current server state.
-      await db.query(`UPDATE projects SET name = 'external', updated_at_us = $2::bigint WHERE id = $1`, [
-        PROJECT_ID,
-        SERVER_VERSION,
-      ]);
+      await drizzleOver(db)
+        .update(projectsSyncRegistry.projects.localTable)
+        .set({ name: "external", updatedAtUs: BigInt(SERVER_VERSION) })
+        .where(eq(projectsSyncRegistry.projects.localTable.id, PROJECT_ID));
 
       // The user re-applies their edit — an ordinary new mutation. Its base resolves to the caught-up
       // synced version, so it is no longer stale and acks normally (no special transition).
@@ -207,11 +217,12 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
       // already-resolved conflict indefinitely.
       expect(await readJournalStatus(db, 1)).toBeUndefined();
 
-      const syncState = await db.query<{ conflictState: string | null }>(
-        `SELECT conflict_state AS "conflictState" FROM projects_sync_state WHERE id = $1`,
-        [PROJECT_ID],
-      );
-      expect(syncState.rows[0]?.conflictState ?? null).toBeNull();
+      const syncStateView = getSyncStateView(projectsSyncRegistry, "projects");
+      const syncState = await drizzleOver(db)
+        .select({ conflictState: syncStateView.conflictState })
+        .from(syncStateView)
+        .where(eq(syncStateView["id"]!, PROJECT_ID));
+      expect(syncState[0]?.conflictState ?? null).toBeNull();
 
       const stats = await runtime.readMutationStats("projects");
       expect(stats.conflictedCount).toBe(0);
@@ -228,74 +239,88 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
     // resolved conflict forever. The trigger must do the retire itself (it has the echo context).
     const db = await createFreshTestPGlite();
     await db.exec(schemaSql);
-    await db.query(
-      `INSERT INTO projects (id, name, created_at_us, updated_at_us) VALUES ($1, 'seed', $2::bigint, $2::bigint)`,
-      [PROJECT_ID, SYNCED_VERSION],
-    );
+    await drizzleOver(db)
+      .insert(projectsSyncRegistry.projects.localTable)
+      .values({
+        id: PROJECT_ID,
+        name: "seed",
+        createdAtUs: BigInt(SYNCED_VERSION),
+        updatedAtUs: BigInt(SYNCED_VERSION),
+      });
 
     try {
       const entityKeyJson = JSON.stringify({ id: PROJECT_ID });
       const RESOLVER_VERSION = "201"; // the version the server assigned to the acked resolution
 
+      const overlay = getOverlayTable(projectsSyncRegistry, "projects");
+      const journal = getJournalTable(projectsSyncRegistry, "projects");
       // The kept optimistic overlay (the user's edit, preserved through the conflict).
-      await db.query(
-        `INSERT INTO projects_overlay (id, name, created_at_us, updated_at_us, overlay_kind, local_updated_at_us)
-         VALUES ($1, 'my edit, retried', $2::bigint, $3::bigint, 'pending_update', $3::bigint)`,
-        [PROJECT_ID, SYNCED_VERSION, RESOLVER_VERSION],
-      );
+      await drizzleOver(db)
+        .insert(overlay)
+        .values({
+          id: PROJECT_ID,
+          name: "my edit, retried",
+          createdAtUs: BigInt(SYNCED_VERSION),
+          updatedAtUs: BigInt(RESOLVER_VERSION),
+          overlayKind: "pending_update",
+          localUpdatedAtUs: RESOLVER_VERSION,
+        } as typeof overlay.$inferInsert);
       // seq 1 — the stale write the server rejected: terminal `conflicted`, kept for resolution.
-      await db.query(
-        `INSERT INTO projects_mutations
-           (mutation_id, id, entity_key_json, mutation_seq, mutation_kind, status, base_server_version,
-            payload_json, conflict_reason, server_updated_at_us, enqueued_at_us, updated_at_us)
-         VALUES ($1, $2, $3, 1, 'update', 'conflicted', $4::bigint, $5, 'reject-if-stale', $6::bigint, $7::bigint, $7::bigint)`,
-        [
-          crypto.randomUUID(),
-          PROJECT_ID,
+      await drizzleOver(db)
+        .insert(journal)
+        .values({
+          mutationId: crypto.randomUUID(),
+          id: PROJECT_ID,
           entityKeyJson,
-          SYNCED_VERSION,
-          JSON.stringify({ name: "my edit" }),
-          SERVER_VERSION,
-          SYNCED_VERSION,
-        ],
-      );
+          mutationSeq: 1,
+          mutationKind: "update",
+          status: "conflicted",
+          baseServerVersion: SYNCED_VERSION,
+          payloadJson: JSON.stringify({ name: "my edit" }),
+          conflictReason: "reject-if-stale",
+          serverUpdatedAtUs: SERVER_VERSION,
+          enqueuedAtUs: SYNCED_VERSION,
+          updatedAtUs: SYNCED_VERSION,
+        } as typeof journal.$inferInsert);
       // seq 2 — the resolution (re-applied edit) the server ACKED; its echo is about to land.
-      await db.query(
-        `INSERT INTO projects_mutations
-           (mutation_id, id, entity_key_json, mutation_seq, mutation_kind, status, payload_json,
-            server_updated_at_us, enqueued_at_us, acked_at_us, updated_at_us)
-         VALUES ($1, $2, $3, 2, 'update', 'acked', $4, $5::bigint, $6::bigint, $6::bigint, $6::bigint)`,
-        [
-          crypto.randomUUID(),
-          PROJECT_ID,
+      await drizzleOver(db)
+        .insert(journal)
+        .values({
+          mutationId: crypto.randomUUID(),
+          id: PROJECT_ID,
           entityKeyJson,
-          JSON.stringify({ name: "my edit, retried" }),
-          RESOLVER_VERSION,
-          RESOLVER_VERSION,
-        ],
-      );
+          mutationSeq: 2,
+          mutationKind: "update",
+          status: "acked",
+          payloadJson: JSON.stringify({ name: "my edit, retried" }),
+          serverUpdatedAtUs: RESOLVER_VERSION,
+          enqueuedAtUs: RESOLVER_VERSION,
+          ackedAtUs: RESOLVER_VERSION,
+          updatedAtUs: RESOLVER_VERSION,
+        } as typeof journal.$inferInsert);
 
       // The resolver's echo arrives: the synced row catches up to RESOLVER_VERSION, firing the
       // reconcile-on-sync trigger (the ONLY cleanup that runs here — reconcileTable never does).
-      await db.query(`UPDATE projects SET name = 'my edit, retried', updated_at_us = $2::bigint WHERE id = $1`, [
-        PROJECT_ID,
-        RESOLVER_VERSION,
-      ]);
+      await drizzleOver(db)
+        .update(projectsSyncRegistry.projects.localTable)
+        .set({ name: "my edit, retried", updatedAtUs: BigInt(RESOLVER_VERSION) })
+        .where(eq(projectsSyncRegistry.projects.localTable.id, PROJECT_ID));
 
       // Both journal rows are gone: seq 1 retired (the regression — it used to orphan), seq 2 cleared.
-      const remaining = await db.query<{ count: number }>(
-        `SELECT COUNT(*)::int AS count FROM projects_mutations WHERE id = $1`,
-        [PROJECT_ID],
-      );
-      expect(remaining.rows[0]?.count).toBe(0);
+      const remaining = await drizzleOver(db)
+        .select({ count: count() })
+        .from(journal)
+        .where(eq(journal["id"]!, PROJECT_ID));
+      expect(remaining[0]?.count).toBe(0);
 
       // No conflict lingers in the convergence view, and the overlay (nothing owes it) is cleared, so
       // the read model is the converged server value.
-      const syncState = await db.query<{ count: number }>(
-        `SELECT COUNT(*)::int AS count FROM projects_sync_state WHERE id = $1`,
-        [PROJECT_ID],
-      );
-      expect(syncState.rows[0]?.count).toBe(0);
+      const syncStateView = getSyncStateView(projectsSyncRegistry, "projects");
+      const syncState = await drizzleOver(db)
+        .select({ count: count() })
+        .from(syncStateView)
+        .where(eq(syncStateView["id"]!, PROJECT_ID));
+      expect(syncState[0]?.count).toBe(0);
 
       const readModel = await readReadModel(db);
       expect(readModel?.name).toBe("my edit, retried");

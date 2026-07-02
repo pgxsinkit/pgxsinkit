@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
+import { eq } from "drizzle-orm";
+
 import { generateCopyData, serializeCopyValue } from "../../packages/client/src/sync/copy";
+import { informationSchemaColumns } from "../support/catalog-tables";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // COPY TEXT serializer (ported from upstream @electric-sql/pglite PR #1035): a faithful port of
@@ -108,11 +112,11 @@ describe("COPY TEXT serializer", () => {
 
       const columnTypes = Object.fromEntries(
         (
-          await pg.query<{ column_name: string; udt_name: string }>(
-            `SELECT column_name, udt_name FROM information_schema.columns
-             WHERE table_name = 't'`,
-          )
-        ).rows.map((c) => [c.column_name, c.udt_name]),
+          await drizzleOver(pg)
+            .select({ column_name: informationSchemaColumns.columnName, udt_name: informationSchemaColumns.udtName })
+            .from(informationSchemaColumns)
+            .where(eq(informationSchemaColumns.tableName, "t"))
+        ).map((c) => [c.column_name, c.udt_name]),
       );
 
       const copyData = generateCopyData(rows, columns, columnTypes);
@@ -273,10 +277,11 @@ describe("COPY TEXT serializer", () => {
       // Candidate: the same logical value serialized through COPY.
       const columnTypes = Object.fromEntries(
         (
-          await pg.query<{ column_name: string; udt_name: string }>(
-            `SELECT column_name, udt_name FROM information_schema.columns WHERE table_name = 't'`,
-          )
-        ).rows.map((c) => [c.column_name, c.udt_name]),
+          await drizzleOver(pg)
+            .select({ column_name: informationSchemaColumns.columnName, udt_name: informationSchemaColumns.udtName })
+            .from(informationSchemaColumns)
+            .where(eq(informationSchemaColumns.tableName, "t"))
+        ).map((c) => [c.column_name, c.udt_name]),
       );
       const copyData = generateCopyData([{ id: 2, v: copyValue }], ["id", "v"], columnTypes);
       await pg.query(`COPY t (id, v) FROM '/dev/blob' WITH (FORMAT text)`, [], {

@@ -1,13 +1,15 @@
 import { describe, expect, it, mock } from "bun:test";
 
-import { sql } from "drizzle-orm";
+import { asc, count, eq, sql } from "drizzle-orm";
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
+import { getJournalTable, getOverlayTable } from "@pgxsinkit/client";
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { projectsSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // ADR-0022 C2/D — the client routing of a pessimistic write-unit to the authoritative endpoint, and the
@@ -23,10 +25,14 @@ const ACKED_VERSION = "2000";
 async function seededRuntime(onReject?: (rejected: MutationDetail[]) => void) {
   const db = await createFreshTestPGlite();
   await db.exec(schemaSql);
-  await db.query(
-    `INSERT INTO projects (id, name, created_at_us, updated_at_us) VALUES ($1, 'seed', $2::bigint, $2::bigint)`,
-    [PROJECT_ID, SYNCED_VERSION],
-  );
+  await drizzleOver(db)
+    .insert(projectsSyncRegistry.projects.localTable)
+    .values({
+      id: PROJECT_ID,
+      name: "seed",
+      createdAtUs: BigInt(SYNCED_VERSION),
+      updatedAtUs: BigInt(SYNCED_VERSION),
+    });
   return {
     db,
     runtime: createMutationRuntime({ db, registry: projectsSyncRegistry, writeUrl, ...(onReject ? { onReject } : {}) }),
@@ -80,25 +86,25 @@ async function enqueuePessimisticUpdate(runtime: RuntimeOf, unitId: string, name
 }
 
 async function readJournalRow(db: Awaited<ReturnType<typeof createFreshTestPGlite>>) {
-  const result = await db.query<{
-    status: string;
-    writeUnit: string | null;
-    writeMode: string | null;
-    serverVersion: string | null;
-    conflictReason: string | null;
-  }>(
-    `SELECT status, write_unit AS "writeUnit", write_mode AS "writeMode", server_updated_at_us::text AS "serverVersion",
-            conflict_reason AS "conflictReason"
-     FROM projects_mutations ORDER BY mutation_seq ASC LIMIT 1`,
-  );
-  return result.rows[0];
+  const journal = getJournalTable(projectsSyncRegistry, "projects");
+  const rows = await drizzleOver(db)
+    .select({
+      status: journal.status,
+      writeUnit: journal.writeUnit,
+      writeMode: journal.writeMode,
+      serverVersion: sql<string>`${journal.serverUpdatedAtUs}::text`.as("serverVersion"),
+      conflictReason: journal.conflictReason,
+    })
+    .from(journal)
+    .orderBy(asc(journal.mutationSeq))
+    .limit(1);
+  return rows[0];
 }
 
 async function overlayCount(db: Awaited<ReturnType<typeof createFreshTestPGlite>>) {
-  const result = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM projects_overlay WHERE id = $1`, [
-    PROJECT_ID,
-  ]);
-  return result.rows[0]?.c;
+  const overlay = getOverlayTable(projectsSyncRegistry, "projects");
+  const rows = await drizzleOver(db).select({ c: count() }).from(overlay).where(eq(overlay["id"]!, PROJECT_ID));
+  return rows[0]?.c;
 }
 
 describe("pessimistic write-unit flush (ADR-0022 C2/D)", () => {
@@ -189,9 +195,7 @@ const seatsRegistry = defineSyncRegistry({
     makeColumns: () => ({
       id: uuid("id").primaryKey(),
       label: varchar("label", { length: 80 }),
-      updatedAtUs: bigint("updated_at_us", { mode: "bigint" })
-        .notNull()
-        .default(sql`0`),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
     }),
     mode: "readwrite",
     writeMode: "pessimistic",
@@ -217,12 +221,13 @@ describe("statically-pessimistic table foreground-routes its plain writes (ADR-0
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(String(fetchMock.mock.calls[0]![0])).toBe("http://localhost:3001/mutations/unit");
 
-      const row = await db.query<{ status: string; writeMode: string | null }>(
-        `SELECT status, write_mode AS "writeMode" FROM seats_mutations WHERE id = $1`,
-        [SEAT_ID],
-      );
-      expect(row.rows[0]?.status).toBe("acked");
-      expect(row.rows[0]?.writeMode).toBe("pessimistic");
+      const seatsJournal = getJournalTable(seatsRegistry, "seats");
+      const row = await drizzleOver(db)
+        .select({ status: seatsJournal.status, writeMode: seatsJournal.writeMode })
+        .from(seatsJournal)
+        .where(eq(seatsJournal["id"]!, SEAT_ID));
+      expect(row[0]?.status).toBe("acked");
+      expect(row[0]?.writeMode).toBe("pessimistic");
     } finally {
       await db.close();
     }
@@ -237,12 +242,18 @@ describe("statically-pessimistic table foreground-routes its plain writes (ADR-0
     try {
       await withFetch(fetchMock, () => runtime.create("seats", { id: SEAT_ID, label: "B2" }));
 
-      const journal = await db.query<{ status: string }>(`SELECT status FROM seats_mutations WHERE id = $1`, [SEAT_ID]);
-      expect(journal.rows[0]?.status).toBe("rejected");
-      const overlay = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM seats_overlay WHERE id = $1`, [
-        SEAT_ID,
-      ]);
-      expect(overlay.rows[0]?.c).toBe(0); // overlay auto-discarded — the optimistic row is gone
+      const seatsJournal = getJournalTable(seatsRegistry, "seats");
+      const journal = await drizzleOver(db)
+        .select({ status: seatsJournal.status })
+        .from(seatsJournal)
+        .where(eq(seatsJournal["id"]!, SEAT_ID));
+      expect(journal[0]?.status).toBe("rejected");
+      const seatsOverlay = getOverlayTable(seatsRegistry, "seats");
+      const overlay = await drizzleOver(db)
+        .select({ c: count() })
+        .from(seatsOverlay)
+        .where(eq(seatsOverlay["id"]!, SEAT_ID));
+      expect(overlay[0]?.c).toBe(0); // overlay auto-discarded — the optimistic row is gone
     } finally {
       await db.close();
     }

@@ -1,10 +1,15 @@
 import { describe, expect, it, mock } from "bun:test";
 
+import { count, eq, inArray, sql } from "drizzle-orm";
+
+import { getJournalTable, getOverlayTable, getSyncStateView } from "@pgxsinkit/client";
 import { CONVERGENCE_EVENTS } from "@pgxsinkit/contracts";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { buildDropReadCacheSql, generateLocalSchemaSql } from "../../packages/client/src/schema";
+import { pgViews } from "../support/catalog-tables";
+import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // ADR-0011 proofs for the Convergence model: the per-table `<table>_sync_state` view derives every
@@ -26,23 +31,23 @@ type PGliteDb = Awaited<ReturnType<typeof createFreshTestPGlite>>;
 type DemoRuntime = Awaited<ReturnType<typeof createContext>>["runtime"];
 
 async function seedSyncedAuthor(db: PGliteDb, id: string, version: number) {
-  await db.query(
-    `INSERT INTO authors (id, name, created_at_us, updated_at_us) VALUES ($1, $2, $3::bigint, $4::bigint)`,
-    [id, "Seeded", String(version), String(version)],
-  );
+  await drizzleOver(db)
+    .insert(demoSyncRegistry.authors.localTable)
+    .values({ id, name: "Seeded", createdAtUs: BigInt(version), updatedAtUs: BigInt(version) });
 }
 
 /** Apply an Electric echo by advancing the synced row's Server version — fires the reconcile trigger. */
 async function applyEcho(db: PGliteDb, id: string, version: number) {
-  await db.query(`UPDATE authors SET updated_at_us = $2::bigint WHERE id = $1`, [id, String(version)]);
+  await drizzleOver(db)
+    .update(demoSyncRegistry.authors.localTable)
+    .set({ updatedAtUs: BigInt(version) })
+    .where(eq(demoSyncRegistry.authors.localTable.id, id));
 }
 
 async function journalCount(db: PGliteDb, id: string) {
-  const result = await db.query<{ count: number }>(
-    `SELECT COUNT(*)::int AS count FROM authors_mutations WHERE id = $1`,
-    [id],
-  );
-  return result.rows[0]?.count ?? 0;
+  const journal = getJournalTable(demoSyncRegistry, "authors");
+  const rows = await drizzleOver(db).select({ count: count() }).from(journal).where(eq(journal["id"]!, id));
+  return rows[0]?.count ?? 0;
 }
 
 interface SyncStateRow {
@@ -57,23 +62,21 @@ interface SyncStateRow {
 }
 
 async function readSyncState(db: PGliteDb, id: string): Promise<SyncStateRow | null> {
-  const result = await db.query<SyncStateRow>(
-    `
-      SELECT
-        observed_server_version::text AS "observed",
-        acked_server_version::text AS "acked",
-        pending_count::int AS "pending",
-        has_acked_unobserved_write AS "unobserved",
-        local_delete_pending AS "deletePending",
-        conflict_state AS "conflict",
-        quarantined_count::int AS "quarantined",
-        quarantine_state AS "quarantineState"
-      FROM authors_sync_state
-      WHERE id = $1
-    `,
-    [id],
-  );
-  return result.rows[0] ?? null;
+  const view = getSyncStateView(demoSyncRegistry, "authors");
+  const rows = await drizzleOver(db)
+    .select({
+      observed: sql<string | null>`${view.observedServerVersion}::text`.as("observed"),
+      acked: sql<string | null>`${view.ackedServerVersion}::text`.as("acked"),
+      pending: view.pendingCount,
+      unobserved: view.hasAckedUnobservedWrite,
+      deletePending: view.localDeletePending,
+      conflict: view.conflictState,
+      quarantined: view.quarantinedCount,
+      quarantineState: view.quarantineState,
+    })
+    .from(view)
+    .where(eq(view["id"]!, id));
+  return rows[0] ?? null;
 }
 
 function ackingFetch(serverUpdatedAtUs: string) {
@@ -203,10 +206,11 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
       // reports the write as observed — barrier satisfied → not unobserved — WITHOUT the trigger
       // re-firing. (Acked directly so the post-ack/pre-reconcile window is observable; `flush` would
       // bundle the reconcile, which the first two cases already exercise.)
-      await db.query(
-        `UPDATE authors_mutations SET status = 'acked', server_updated_at_us = $2::bigint, acked_at_us = $2::bigint WHERE id = $1`,
-        [AUTHOR_ID, "400"],
-      );
+      const journal = getJournalTable(demoSyncRegistry, "authors");
+      await drizzleOver(db)
+        .update(journal)
+        .set({ status: "acked", serverUpdatedAtUs: "400", ackedAtUs: "400" })
+        .where(eq(journal["id"]!, AUTHOR_ID));
       state = await readSyncState(db, AUTHOR_ID);
       expect(state).toEqual({
         observed: "400",
@@ -242,18 +246,17 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
       expect(state?.conflict).toBeNull();
 
       // The lean read model hides the optimistically-deleted row...
-      const readModel = await db.query<{ count: number }>(
-        `SELECT COUNT(*)::int AS count FROM authors_read_model WHERE id = $1`,
-        [AUTHOR_ID],
-      );
-      expect(readModel.rows[0]?.count).toBe(0);
+      const view = demoSyncRegistry.authors.view!;
+      const readModel = await drizzleOver(db).select({ count: count() }).from(view).where(eq(view.id, AUTHOR_ID));
+      expect(readModel[0]?.count).toBe(0);
 
       // ...and the conflict_state slot surfaces the reason of a `conflicted` write (ADR-0015 fills it,
       // scoped to status = 'conflicted' so a non-conflict reason never leaks in).
-      await db.query(
-        `UPDATE authors_mutations SET status = 'conflicted', conflict_reason = '409 stale' WHERE id = $1`,
-        [AUTHOR_ID],
-      );
+      const journal = getJournalTable(demoSyncRegistry, "authors");
+      await drizzleOver(db)
+        .update(journal)
+        .set({ status: "conflicted", conflictReason: "409 stale" })
+        .where(eq(journal["id"]!, AUTHOR_ID));
       expect((await readSyncState(db, AUTHOR_ID))?.conflict).toBe("409 stale");
     } finally {
       await db.close();
@@ -269,10 +272,11 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
       // Drive the journal row to the terminal `quarantined` state (ADR-0006: a poison write the
       // server permanently rejected). Quarantine keeps the optimistic overlay and is NOT a pending
       // retry, so before this fix the entity showed pending=0/conflict=null and no terminal signal.
-      await db.query(
-        `UPDATE authors_mutations SET status = 'quarantined', last_error = '413 payload too large' WHERE id = $1`,
-        [AUTHOR_ID],
-      );
+      const journal = getJournalTable(demoSyncRegistry, "authors");
+      await drizzleOver(db)
+        .update(journal)
+        .set({ status: "quarantined", lastError: "413 payload too large" })
+        .where(eq(journal["id"]!, AUTHOR_ID));
 
       const state = await readSyncState(db, AUTHOR_ID);
       expect(state?.pending).toBe(0); // not a retryable owed write...
@@ -328,15 +332,17 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
       await db.exec(buildDropReadCacheSql(demoSyncRegistry));
 
       // The authority tables — the convergence facts' source — survive untouched.
-      const overlay = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM authors_overlay`);
-      expect(overlay.rows[0]?.count).toBe(1);
+      const overlayTable = getOverlayTable(demoSyncRegistry, "authors");
+      const overlay = await drizzleOver(db).select({ count: count() }).from(overlayTable);
+      expect(overlay[0]?.count).toBe(1);
       expect(await journalCount(db, AUTHOR_ID)).toBe(1);
 
       // The derived views are gone (reconstructed by re-running generateLocalSchemaSql).
-      const views = await db.query<{ name: string }>(
-        `SELECT viewname AS name FROM pg_views WHERE viewname IN ('authors_read_model', 'authors_sync_state')`,
-      );
-      expect(views.rows.length).toBe(0);
+      const views = await drizzleOver(db)
+        .select({ name: pgViews.viewname })
+        .from(pgViews)
+        .where(inArray(pgViews.viewname, ["authors_read_model", "authors_sync_state"]));
+      expect(views.length).toBe(0);
     } finally {
       await db.close();
     }

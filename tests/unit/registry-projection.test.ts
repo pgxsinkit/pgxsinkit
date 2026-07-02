@@ -31,9 +31,7 @@ const writableRestriction = () =>
       personId: uuid("person_id").notNull(),
       issuedBy: uuid("issued_by"),
       reason: varchar("reason", { length: 200 }),
-      updatedAtUs: bigint("updated_at_us", { mode: "bigint" })
-        .notNull()
-        .default(sql`0`),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
     }),
     mode: "readwrite",
     conflictPolicy: "reject-if-stale",
@@ -131,9 +129,7 @@ describe("read-contract fingerprint", () => {
         personId: uuid("person_id").notNull(),
         issuedBy: uuid("issued_by"),
         reason: varchar("reason", { length: 200 }),
-        updatedAtUs: bigint("updated_at_us", { mode: "bigint" })
-          .notNull()
-          .default(sql`0`),
+        updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
       }),
       mode: "readwrite",
       conflictPolicy: "last-write-wins",
@@ -166,9 +162,7 @@ describe("read-contract fingerprint", () => {
         issuedBy: uuid("issued_by"),
         reason: varchar("reason", { length: 200 }),
         note: varchar("note", { length: 200 }),
-        updatedAtUs: bigint("updated_at_us", { mode: "bigint" })
-          .notNull()
-          .default(sql`0`),
+        updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
       }),
       mode: "readwrite",
       conflictPolicy: "reject-if-stale",
