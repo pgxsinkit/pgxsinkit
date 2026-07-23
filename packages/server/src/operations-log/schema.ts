@@ -1,14 +1,11 @@
-import { sql } from "drizzle-orm";
 import { bigint, bigserial, index, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 
-const nowMicrosecondsSql = sql`(floor((EXTRACT(epoch FROM clock_timestamp()) * (1000000)::numeric)))`;
+import { clockMicrosecondsSql } from "@pgxsinkit/contracts";
 
 export const operationsLogTable = pgTable(
   "operations_log",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
-    source: varchar("source", { length: 24 }).notNull(),
-    backend: varchar("backend", { length: 24 }).notNull(),
     tableName: varchar("table_name", { length: 255 }),
     operationKind: varchar("operation_kind", { length: 24 }),
     userId: uuid("user_id"),
@@ -17,11 +14,17 @@ export const operationsLogTable = pgTable(
     status: varchar("status", { length: 32 }).notNull(),
     errorMessage: text("error_message"),
     httpStatus: integer("http_status"),
-    mutationId: uuid("mutation_id"),
+    // Text, NOT uuid: derived child envelopes (the expander tier) carry composite non-UUID ids of the
+    // form `${parentMutationId}:<tag>:<n>`, so the log column must accept any string the apply path may
+    // record. This is the server-side tier of the two-tier mutation-id invariant (see plpgsql-apply.ts
+    // and packages/contracts/src/mutation.ts): the apply function + this log accept opaque text for a
+    // direct caller deriving children, while pgxsinkit's public surface (route schemas, client journal)
+    // stays UUID-only. (The ::uuid casts on this id were dropped for the same reason.)
+    mutationId: text("mutation_id"),
     mutationSeq: integer("mutation_seq"),
     clientTimestampUs: bigint("client_timestamp_us", { mode: "bigint" }),
     requestPath: text("request_path"),
-    serverTimestampUs: bigint("server_timestamp_us", { mode: "bigint" }).notNull().default(nowMicrosecondsSql),
+    serverTimestampUs: bigint("server_timestamp_us", { mode: "bigint" }).notNull().default(clockMicrosecondsSql),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

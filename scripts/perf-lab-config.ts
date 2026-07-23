@@ -9,4 +9,4 @@ export const PERF_LAB_LOG_DIR = "tmp/perf-lab";
 export const PERF_LAB_DATABASE_URL = `postgresql://postgres:password@${PERF_LAB_HOST}:${PERF_LAB_POSTGRES_PORT}/pgxsinkit?sslmode=disable`;
 export const PERF_LAB_ELECTRIC_URL = `http://${PERF_LAB_HOST}:${PERF_LAB_ELECTRIC_PORT}/v1/shape`;
 export const PERF_LAB_WRITE_API_URL = `http://${PERF_LAB_HOST}:${PERF_LAB_WRITE_API_PORT}`;
-export const PERF_LAB_SHAPE_PROXY_URL = `${PERF_LAB_WRITE_API_URL}/v1/shape-proxy`;
+export const PERF_LAB_SHAPE_PROXY_URL = `${PERF_LAB_WRITE_API_URL}/v1/electric-proxy`;

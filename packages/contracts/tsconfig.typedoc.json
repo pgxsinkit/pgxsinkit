@@ -1,0 +1,10 @@
+{
+  // TypeDoc-only (apps/docs API reference). Inherits the root base `paths`, which resolve
+  // @pgxsinkit/* workspace deps to their `src`, so the API docs generate from source without
+  // first building each package's `dist`. Limited to `src` (skips tests).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "bun-types"]
+  },
+  "include": ["src"]
+}

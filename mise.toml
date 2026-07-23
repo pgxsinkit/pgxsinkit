@@ -1,6 +1,6 @@
 [tools]
 bun = "1.3"
-node = "24"
+node = "26"
 
 [tasks.install]
 description = "Install the pinned toolchain and workspace dependencies"

@@ -1,18 +1,13 @@
 import type { SQLWrapper } from "drizzle-orm";
+import type { AnyPgTable } from "drizzle-orm/pg-core";
 
-export type OpsLogSource = "crud" | "batch";
-
-export type OpsLogBackend = "drizzle" | "bulk-dynamic" | "bulk-pregenerated" | "bulk-plpgsql" | "bulk-plpgsql-artifact";
-
-export type OpsLogStatus = "succeeded" | "validation_failed" | "not_found" | "execution_failed";
+export type OpsLogStatus = "succeeded" | "validation_failed" | "not_found" | "execution_failed" | "conflicted";
 
 export interface OperationsLogConfig {
   enabled: boolean;
 }
 
 export interface OpsLogEntry {
-  source: OpsLogSource;
-  backend: OpsLogBackend;
   tableName?: string | null;
   operationKind?: "create" | "update" | "delete" | null;
   userId?: string | null;
@@ -29,4 +24,7 @@ export interface OpsLogEntry {
 
 export interface SqlExecutor {
   execute: (query: string | SQLWrapper<unknown>) => Promise<unknown>;
+  insert: (table: AnyPgTable) => {
+    values: (values: Record<string, unknown>) => PromiseLike<unknown>;
+  };
 }

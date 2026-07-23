@@ -1,25 +1,24 @@
-import { eq, sql } from "drizzle-orm";
-import type { AnyPgTable } from "drizzle-orm/pg-core";
-import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
-import { drizzle } from "drizzle-orm/postgres-js";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
-import postgres from "postgres";
+import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 
 import type {
+  JwtClaims,
+  RegistryRelations,
   RegistryTables,
-  ServerRouteSpec,
   SyncRuntimeStatus,
   SyncServerAddress,
-  SyncTableEntry,
   SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
-import { registerBulkMutationRoute } from "./mutations/bulk/route";
-import type { BulkMutationBackend } from "./mutations/bulk/types";
+import { proxyElectricShapeRequest } from "./electric-proxy";
+import {
+  authoritativeMutationPaths,
+  batchMutationPaths,
+  createMutationHandler,
+  type StartupVerificationMode,
+} from "./mutations/route";
 import { ensureOperationsLogSchema } from "./operations-log/ddl";
-import type { OpsLogBackend, OperationsLogConfig } from "./operations-log/types";
-import { logOperation, logOperationSafely } from "./operations-log/writer";
+import type { OperationsLogConfig } from "./operations-log/types";
+import { FetchRouter, type CorsScope } from "./router";
 
 const defaultAllowedOrigins = ["http://localhost:5173", "http://localhost:5174"];
 
@@ -36,29 +35,92 @@ interface BunNamespace {
   }) => BunServerHandle;
 }
 
-export interface CreateSyncServerOptions<TRegistry extends SyncTableRegistry> {
+/**
+ * How the operations-log table's presence is resolved at startup (ADR-0030 decision 3):
+ * - `"probe"` (default): the safe degradation posture (ADR-0030) — one query ensures/confirms the table,
+ *   and logging is disabled at runtime (with a warning) if it is absent, so a missing table degrades
+ *   gracefully instead of failing writes.
+ * - `"enabled"`: assume the table exists — NO query. If it is actually absent, writes then fail loudly.
+ * - `"disabled"`: turn logging off with NO query.
+ *
+ * `"enabled" | "disabled"` are the serverless posture: paired with `startupVerification: "deploy-time"`,
+ * a fresh worker sends zero queries before the mutation transaction itself.
+ */
+export type OperationsLogStartupMode = "probe" | "enabled" | "disabled";
+
+/**
+ * The `deployment` profile owns the server's startup query posture (ADR-0030 decision 3). Its defaults
+ * are the safe degradation posture — probe-and-verify at startup — so a long-lived host that never sets
+ * it still verifies and degrades gracefully; serverless / per-request workers set
+ * `{ startupVerification: "deploy-time", operationsLog: "enabled" | "disabled" }` for a
+ * zero-startup-query first write.
+ */
+export interface DeploymentProfile {
+  /** Governs ONLY the RLS auth-helper verify now (apply-fn drift is self-verifying). Default `"in-process"`. */
+  startupVerification?: StartupVerificationMode;
+  /** How the operations-log table presence is resolved. Default `"probe"`. */
+  operationsLog?: OperationsLogStartupMode;
+}
+
+export interface CreateSyncServerOptions<
+  TRegistry extends SyncTableRegistry,
+  TDb extends PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>> = PgAsyncDatabase<
+    PgQueryResultHKT,
+    RegistryRelations<TRegistry>
+  >,
+> {
   registry: TRegistry;
-  databaseUrl: string;
-  backend?: "drizzle" | BulkMutationBackend;
-  resolveAuthClaims?: (request: Request) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+  db: TDb;
+  resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
+  /**
+   * When set, the server serves a read-path Electric shape proxy that shares the
+   * single `resolveAuthClaims` adapter with the write path (ADR-0003). Without it,
+   * no shape proxy is registered.
+   */
+  electricUrl?: string;
+  /** Path for the shape proxy route. Defaults to `/api/shape`. */
+  shapeProxyPath?: string;
+  /** Optional per-request extra params passed to customWhere/shared filters. */
+  resolveShapeParams?: (request: Request) => Record<string, unknown> | undefined;
   operationsLog?: {
     enabled?: boolean;
   };
+  /** Health check endpoint. Enabled by default at `/health`; `false` disables it, `{ path }` relocates it. */
+  healthCheck?: boolean | { path: string };
   port?: number;
   host?: string;
   idleTimeoutSeconds?: number;
   allowedOrigins?: string[];
   onStatusChange?: (status: SyncRuntimeStatus) => void;
+  /**
+   * The startup query posture (ADR-0030). The apply function now verifies its own ADR-0018 fingerprint
+   * in-body on every call (SQLSTATE `PXS01` on drift), so there is no startup drift check to configure;
+   * this governs only the RLS auth-helper verify and the operations-log presence resolution. Defaults
+   * are the safe degradation posture (ADR-0030). See {@link DeploymentProfile}.
+   */
+  deployment?: DeploymentProfile;
+  /**
+   * Opt-in per-request timing log (default false). When on, each mutation and shape-proxy request emits
+   * one compact `[pgxsinkit-timing]` line with an ISO-8601(ms, UTC) timestamp and phase durations, for
+   * attributing wall-clock latency against the client's `syncDebug` lines. Off by default — a pure
+   * diagnostic surface that adds no standing query or latency when unset.
+   */
+  logTimings?: boolean;
 }
 
 export interface ServerDiagnostics<TRegistry extends SyncTableRegistry> {
   tables: Array<keyof TRegistry & string>;
   modes: Record<string, TRegistry[keyof TRegistry]["mode"]>;
-  routes: Record<string, ServerRouteSpec | undefined>;
 }
 
-export interface SyncServer<TRegistry extends SyncTableRegistry> {
-  drizzle: PostgresJsDatabase<RegistryTables<TRegistry>>;
+export interface SyncServer<
+  TRegistry extends SyncTableRegistry,
+  TDb extends PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>> = PgAsyncDatabase<
+    PgQueryResultHKT,
+    RegistryRelations<TRegistry>
+  >,
+> {
+  drizzle: TDb;
   fetch: (request: Request) => Promise<Response>;
   request: (path: string, init?: RequestInit) => Promise<Response>;
   start: () => Promise<void>;
@@ -68,13 +130,15 @@ export interface SyncServer<TRegistry extends SyncTableRegistry> {
   diagnostics: () => ServerDiagnostics<TRegistry>;
 }
 
-export function createSyncServer<TRegistry extends SyncTableRegistry>(
-  options: CreateSyncServerOptions<TRegistry>,
-): SyncServer<TRegistry> {
-  const client = createPostgresClient(options.databaseUrl);
-  const schema = buildSchema(options.registry);
-  const db = drizzle({ client, schema });
-  const app = new Hono();
+export function createSyncServer<
+  TRegistry extends SyncTableRegistry,
+  TDb extends PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>> = PgAsyncDatabase<
+    PgQueryResultHKT,
+    RegistryRelations<TRegistry>
+  >,
+>(options: CreateSyncServerOptions<TRegistry, TDb>): SyncServer<TRegistry, TDb> {
+  const db = options.db;
+  const router = new FetchRouter();
   let bunServer: BunServerHandle | undefined;
 
   const status: SyncRuntimeStatus = {
@@ -84,73 +148,107 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
 
   let address: SyncServerAddress | null = null;
   const operationsLogConfig = resolveOperationsLogConfig(options.operationsLog);
-  const operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig);
-  const backend = options.backend ?? "drizzle";
+  const operationsLogStartup = options.deployment?.operationsLog ?? "probe";
+  // ADR-0030: how operations_log presence is resolved decides whether startup issues a query at all.
+  // - "probe" (default): thread the presence probe into the effective config. operations_log is an
+  //   *optional* feature (default-enabled), so if logging was requested but the table is absent, disable
+  //   it at runtime rather than letting every write fail on a missing table — the documented degradation
+  //   (ensureOperationsLogSchema warns and returns `false`). The route awaits `operationsLogReady` before
+  //   any logOperation, so the corrected flag is in effect by the time logging runs, and the route holds
+  //   this same config object. (Board dogfooding: discarding this boolean 500'd every mutation on a
+  //   missing optional table.)
+  // - "enabled": assume the table exists — NO query; logging stays on (an actual absence then fails
+  //   writes loudly, by design). "disabled": logging off — NO query.
+  let operationsLogReady: Promise<void>;
+  if (operationsLogStartup === "probe") {
+    operationsLogReady = ensureOperationsLogSchema(db, operationsLogConfig).then((present) => {
+      operationsLogConfig.enabled = operationsLogConfig.enabled && present;
+    });
+  } else {
+    if (operationsLogStartup === "disabled") {
+      operationsLogConfig.enabled = false;
+    }
+    operationsLogReady = Promise.resolve();
+  }
 
-  app.use(
-    "/api/*",
-    cors({
-      origin: options.allowedOrigins ?? defaultAllowedOrigins,
-      allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Authorization"],
-    }),
+  const shapeProxyPath = options.shapeProxyPath ?? "/api/shape";
+
+  // CORS covers the canonical /api/* routes and the shape proxy path when it is relocated outside /api/.
+  const corsScopes: CorsScope[] = [{ prefix: "/api/" }];
+  if (options.electricUrl) {
+    corsScopes.push({ exact: shapeProxyPath });
+  }
+  router.setCors(
+    {
+      origins: options.allowedOrigins ?? defaultAllowedOrigins,
+      allowMethods: ["GET", "POST", "OPTIONS"],
+      // `apikey`: a deployment gateway (Supabase) expects it on every request, so the browser client
+      // sends it; it must be allowed in the preflight even though the server itself ignores it.
+      allowHeaders: ["Content-Type", "Authorization", "apikey"],
+    },
+    corsScopes,
   );
 
-  app.onError((error, context) => {
+  router.setErrorHandler((error) => {
     status.phase = "degraded";
     status.lastError = error instanceof Error ? error.message : "Unexpected error";
     options.onStatusChange?.(status);
 
     if (isValidationError(error)) {
-      return context.json(
-        {
-          message: "Validation failed",
-          issues: error.issues,
-        },
-        400,
-      );
+      return Response.json({ message: "Validation failed", issues: error.issues }, { status: 400 });
     }
 
-    return context.json(
-      {
-        message: error instanceof Error ? error.message : "Unexpected error",
-      },
-      500,
-    );
+    return Response.json({ message: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 });
   });
 
-  app.get("/health", (context) => {
-    return context.json({ ok: true });
-  });
+  const healthCheckPath = resolveHealthCheckPath(options.healthCheck, true);
+  if (healthCheckPath) {
+    router.get(healthCheckPath, () => Response.json({ ok: true }));
+  }
 
-  for (const [tableKey, entry] of Object.entries(options.registry)) {
-    registerTableRoutes(app, db, tableKey, entry, {
-      backend,
-      operationsLogConfig,
-      operationsLogReady,
+  // The single mutation ingress point — all writes go through POST /api/mutations.
+  const mutationHandlers = createMutationHandler(
+    db,
+    options.registry,
+    operationsLogConfig,
+    operationsLogReady,
+    options.resolveAuthClaims,
+    options.deployment?.startupVerification ?? "in-process",
+    options.logTimings ?? false,
+  );
+  for (const path of batchMutationPaths) {
+    router.post(path, mutationHandlers.batch);
+  }
+  for (const path of authoritativeMutationPaths) {
+    router.post(path, mutationHandlers.authoritative);
+  }
+
+  // The read-path shape proxy shares the same resolveAuthClaims adapter, so read and
+  // write authorization can never diverge (ADR-0003).
+  if (options.electricUrl) {
+    const electricUrl = options.electricUrl;
+    const resolveAuthClaims = options.resolveAuthClaims;
+    const resolveShapeParams = options.resolveShapeParams;
+    router.get(shapeProxyPath, async (request) => {
+      const claims = resolveAuthClaims ? await resolveAuthClaims(request) : null;
+      const extraParams = resolveShapeParams?.(request);
+      return proxyElectricShapeRequest(request, claims, {
+        registry: options.registry,
+        electricUrl,
+        ...(extraParams ? { extraParams } : {}),
+        ...(options.logTimings ? { logTimings: true } : {}),
+      });
     });
   }
 
-  if (backend !== "drizzle") {
-    registerBulkMutationRoute(
-      app,
-      db,
-      options.registry,
-      backend,
-      operationsLogConfig,
-      operationsLogReady,
-      options.resolveAuthClaims,
-    );
-  }
-
-  const fetch = async (request: Request) => app.fetch(request);
+  const fetch = router.fetch;
 
   return {
     drizzle: db,
     fetch,
     request: (path, init) => {
       const baseUrl = address === null ? "http://localhost" : `http://${address.host}:${address.port}`;
-      return fetch(new Request(new URL(path, baseUrl), init));
+      return fetch(new Request(new URL(path, baseUrl).toString(), init));
     },
     start: async () => {
       if (bunServer) {
@@ -170,7 +268,7 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
         hostname: host,
         port,
         ...(idleTimeout !== undefined ? { idleTimeout } : {}),
-        fetch: app.fetch,
+        fetch,
       });
 
       status.isRunning = true;
@@ -183,7 +281,6 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
       bunServer?.stop();
       bunServer = undefined;
       status.isRunning = false;
-      await client.end();
       options.onStatusChange?.(status);
     },
     status,
@@ -193,391 +290,32 @@ export function createSyncServer<TRegistry extends SyncTableRegistry>(
     diagnostics: () => ({
       tables: Object.keys(options.registry) as Array<keyof TRegistry & string>,
       modes: Object.fromEntries(Object.entries(options.registry).map(([key, entry]) => [key, entry.mode])),
-      routes: Object.fromEntries(Object.entries(options.registry).map(([key, entry]) => [key, entry.routes])),
     }),
   };
 }
 
-function createPostgresClient(connectionString: string) {
-  const url = new URL(connectionString);
-  const sslmode = url.searchParams.get("sslmode");
-
-  return postgres({
-    host: url.hostname,
-    port: Number(url.port || "5432"),
-    database: url.pathname.replace(/^\//, ""),
-    user: decodeURIComponent(url.username),
-    password: decodeURIComponent(url.password),
-    ssl: sslmode === "disable" ? false : "prefer",
-    max: 10,
-  });
-}
-
-function buildSchema<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
+export function buildRegistrySchema<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+): RegistryTables<TRegistry> {
   return Object.fromEntries(
     Object.entries(registry).map(([key, entry]) => [key, entry.table]),
   ) as RegistryTables<TRegistry>;
 }
 
-function registerTableRoutes<TRegistry extends SyncTableRegistry>(
-  app: Hono,
-  db: PostgresJsDatabase<RegistryTables<TRegistry>>,
-  tableKey: string,
-  entry: SyncTableEntry<AnyPgTable>,
-  options: {
-    backend: OpsLogBackend;
-    operationsLogConfig: OperationsLogConfig;
-    operationsLogReady: Promise<void>;
-  },
-) {
-  const basePath = entry.routes?.basePath;
-
-  if (!basePath) {
-    return;
+function resolveHealthCheckPath(config?: boolean | { path: string }, defaultEnabled = false): string | null {
+  if (config === false) {
+    return null;
   }
 
-  const primaryKeyColumnName = getSinglePrimaryKeyColumnName(entry, tableKey);
-  const primaryKeyColumn = getTableColumn(entry.table, primaryKeyColumnName, tableKey);
-  const crudWritesAllowed = options.backend !== "bulk-plpgsql-artifact";
-
-  if (entry.mode !== "writeonly") {
-    app.get(basePath, async (context) => {
-      const rows = await db.select().from(entry.table);
-      return context.json(parseRows(entry, rows));
-    });
+  if (config === undefined && !defaultEnabled) {
+    return null;
   }
 
-  if (entry.mode !== "readonly") {
-    if (!crudWritesAllowed) {
-      registerMethodNotAllowed(app, basePath, ["POST", "PATCH", "DELETE"], tableKey);
-      registerMethodNotAllowed(app, `${basePath}/:id`, ["PATCH", "DELETE"], tableKey);
-      return;
-    }
-
-    app.post(basePath, async (context) => {
-      await options.operationsLogReady;
-
-      const requestBody = await context.req.json();
-      let payload: unknown;
-
-      try {
-        payload = parseCreatePayload(entry, requestBody);
-      } catch (error) {
-        await logOperationSafely(db, options.operationsLogConfig, {
-          source: "crud",
-          backend: options.backend,
-          tableName: tableKey,
-          operationKind: "create",
-          entityKey: extractEntityKeyFromRecord(entry, requestBody),
-          payload: requestBody,
-          status: "validation_failed",
-          errorMessage: error instanceof Error ? error.message : "Validation failed",
-          httpStatus: 400,
-          requestPath: context.req.path,
-        });
-
-        return context.json(
-          {
-            message: "Validation failed",
-            issues: isValidationError(error) ? error.issues : [],
-          },
-          400,
-        );
-      }
-
-      try {
-        const insertedRow = await db.transaction(async (tx) => {
-          const inserted = await tx
-            .insert(entry.table)
-            .values(payload as never)
-            .returning();
-
-          const row = inserted[0];
-          if (!row) {
-            throw new Error(`Failed to insert ${tableKey}`);
-          }
-
-          await logOperation(tx, options.operationsLogConfig, {
-            source: "crud",
-            backend: options.backend,
-            tableName: tableKey,
-            operationKind: "create",
-            entityKey: extractEntityKeyFromRecord(entry, row),
-            payload,
-            status: "succeeded",
-            httpStatus: 201,
-            requestPath: context.req.path,
-          });
-
-          return row;
-        });
-
-        return context.json(parseRow(entry, insertedRow), 201);
-      } catch (error) {
-        await logOperationSafely(db, options.operationsLogConfig, {
-          source: "crud",
-          backend: options.backend,
-          tableName: tableKey,
-          operationKind: "create",
-          entityKey: extractEntityKeyFromRecord(entry, payload),
-          payload,
-          status: "execution_failed",
-          errorMessage: error instanceof Error ? error.message : "Execution failed",
-          httpStatus: 500,
-          requestPath: context.req.path,
-        });
-
-        throw error;
-      }
-    });
-
-    app.patch(`${basePath}/:id`, async (context) => {
-      await options.operationsLogReady;
-
-      const id = context.req.param("id");
-      const entityKey = {
-        [primaryKeyColumnName]: id,
-      };
-      const requestBody = await context.req.json();
-      let payload: unknown;
-
-      try {
-        payload = parseUpdatePayload(entry, requestBody);
-      } catch (error) {
-        await logOperationSafely(db, options.operationsLogConfig, {
-          source: "crud",
-          backend: options.backend,
-          tableName: tableKey,
-          operationKind: "update",
-          entityKey,
-          payload: requestBody,
-          status: "validation_failed",
-          errorMessage: error instanceof Error ? error.message : "Validation failed",
-          httpStatus: 400,
-          requestPath: context.req.path,
-        });
-
-        return context.json(
-          {
-            message: "Validation failed",
-            issues: isValidationError(error) ? error.issues : [],
-          },
-          400,
-        );
-      }
-
-      try {
-        const updatedRow = await db.transaction(async (tx) => {
-          const updated = await tx
-            .update(entry.table)
-            .set(withUpdatedAtUs(entry.table, payload))
-            .where(eq(primaryKeyColumn, id))
-            .returning();
-
-          if (updated.length === 0) {
-            await logOperation(tx, options.operationsLogConfig, {
-              source: "crud",
-              backend: options.backend,
-              tableName: tableKey,
-              operationKind: "update",
-              entityKey,
-              payload,
-              status: "not_found",
-              httpStatus: 404,
-              requestPath: context.req.path,
-            });
-
-            return null;
-          }
-
-          const row = updated[0]!;
-
-          await logOperation(tx, options.operationsLogConfig, {
-            source: "crud",
-            backend: options.backend,
-            tableName: tableKey,
-            operationKind: "update",
-            entityKey: extractEntityKeyFromRecord(entry, row) ?? entityKey,
-            payload,
-            status: "succeeded",
-            httpStatus: 200,
-            requestPath: context.req.path,
-          });
-
-          return row;
-        });
-
-        if (updatedRow === null) {
-          return context.json({ message: `${tableKey} record not found` }, 404);
-        }
-
-        return context.json(parseRow(entry, updatedRow));
-      } catch (error) {
-        await logOperationSafely(db, options.operationsLogConfig, {
-          source: "crud",
-          backend: options.backend,
-          tableName: tableKey,
-          operationKind: "update",
-          entityKey,
-          payload,
-          status: "execution_failed",
-          errorMessage: error instanceof Error ? error.message : "Execution failed",
-          httpStatus: 500,
-          requestPath: context.req.path,
-        });
-
-        throw error;
-      }
-    });
-
-    app.delete(`${basePath}/:id`, async (context) => {
-      await options.operationsLogReady;
-
-      const id = context.req.param("id");
-      const entityKey = {
-        [primaryKeyColumnName]: id,
-      };
-
-      try {
-        const deleted = await db.transaction(async (tx) => {
-          const deletedRows = await tx.delete(entry.table).where(eq(primaryKeyColumn, id)).returning();
-
-          if (deletedRows.length === 0) {
-            await logOperation(tx, options.operationsLogConfig, {
-              source: "crud",
-              backend: options.backend,
-              tableName: tableKey,
-              operationKind: "delete",
-              entityKey,
-              payload: entityKey,
-              status: "not_found",
-              httpStatus: 404,
-              requestPath: context.req.path,
-            });
-
-            return false;
-          }
-
-          await logOperation(tx, options.operationsLogConfig, {
-            source: "crud",
-            backend: options.backend,
-            tableName: tableKey,
-            operationKind: "delete",
-            entityKey,
-            payload: entityKey,
-            status: "succeeded",
-            httpStatus: 204,
-            requestPath: context.req.path,
-          });
-
-          return true;
-        });
-
-        if (!deleted) {
-          return context.json({ message: `${tableKey} record not found` }, 404);
-        }
-
-        return context.body(null, 204);
-      } catch (error) {
-        await logOperationSafely(db, options.operationsLogConfig, {
-          source: "crud",
-          backend: options.backend,
-          tableName: tableKey,
-          operationKind: "delete",
-          entityKey,
-          payload: entityKey,
-          status: "execution_failed",
-          errorMessage: error instanceof Error ? error.message : "Execution failed",
-          httpStatus: 500,
-          requestPath: context.req.path,
-        });
-
-        throw error;
-      }
-    });
-  }
-}
-
-function getSinglePrimaryKeyColumnName(entry: SyncTableEntry, tableKey: string) {
-  if (entry.primaryKey.columns.length !== 1) {
-    throw new Error(`@pgxsinkit/server currently supports single-column primary keys only: ${tableKey}`);
+  if (typeof config === "object" && "path" in config) {
+    return config.path;
   }
 
-  return entry.primaryKey.columns[0]!;
-}
-
-function getTableColumn(table: AnyPgTable, columnName: string, tableKey: string) {
-  const column = (table as unknown as Record<string, unknown>)[columnName];
-
-  if (!column) {
-    throw new Error(`Primary key column ${columnName} was not found on table ${tableKey}`);
-  }
-
-  return column as never;
-}
-
-function parseCreatePayload(entry: SyncTableEntry, input: unknown) {
-  return entry.schemas?.createSchema ? entry.schemas.createSchema.parse(input) : input;
-}
-
-function parseUpdatePayload(entry: SyncTableEntry, input: unknown) {
-  return entry.schemas?.updateSchema ? entry.schemas.updateSchema.parse(input) : input;
-}
-
-function registerMethodNotAllowed(app: Hono, path: string, methods: string[], tableKey: string) {
-  for (const method of methods) {
-    app.on(method as "POST" | "PATCH" | "DELETE", path, (context) => {
-      context.header("Allow", "GET, OPTIONS");
-
-      return context.json(
-        {
-          message: `CRUD ${method} routes are disabled for ${tableKey} when WRITE_API_BACKEND=bulk-plpgsql-artifact. Use POST /api/mutations instead.`,
-        },
-        405,
-      );
-    });
-  }
-}
-
-function parseRows(entry: SyncTableEntry, rows: unknown[]) {
-  return rows.map((row) => parseRow(entry, row));
-}
-
-function parseRow(entry: SyncTableEntry, row: unknown) {
-  const normalized = normalizeBigInts(row);
-  return entry.schemas?.recordSchema ? entry.schemas.recordSchema.parse(normalized) : normalized;
-}
-
-function withUpdatedAtUs(table: AnyPgTable, payload: unknown) {
-  const values = {
-    ...(isRecord(payload) ? payload : {}),
-  };
-
-  if ("updatedAtUs" in table) {
-    values.updatedAtUs = sql`CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)`;
-  }
-
-  return values as never;
-}
-
-function normalizeBigInts(value: unknown): unknown {
-  if (typeof value === "bigint") {
-    return value.toString();
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((entry) => normalizeBigInts(entry));
-  }
-
-  if (isRecord(value)) {
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, normalizeBigInts(entry)]));
-  }
-
-  return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return "/health";
 }
 
 function getBunNamespace(): BunNamespace | undefined {
@@ -595,32 +333,14 @@ function resolveOperationsLogConfig(options?: { enabled?: boolean }): Operations
   };
 }
 
-function extractEntityKeyFromRecord(entry: SyncTableEntry, value: unknown): Record<string, string> | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const entityKey: Record<string, string> = {};
-
-  for (const primaryKeyColumn of entry.primaryKey.columns) {
-    const rawValue = value[primaryKeyColumn];
-
-    if (rawValue === undefined || rawValue === null) {
-      return null;
-    }
-
-    if (
-      typeof rawValue === "string" ||
-      typeof rawValue === "number" ||
-      typeof rawValue === "bigint" ||
-      typeof rawValue === "boolean"
-    ) {
-      entityKey[primaryKeyColumn] = String(rawValue);
-      continue;
-    }
-
-    return null;
-  }
-
-  return entityKey;
-}
+export { authoritativeMutationPaths, batchMutationPaths, createMutationHandler } from "./mutations/route";
+export type { StartupVerificationMode } from "./mutations/route";
+export type { CorsConfig, CorsScope, FetchHandler, RouterErrorHandler } from "./router";
+export { FetchRouter } from "./router";
+export { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "./mutations/plpgsql-apply";
+export { renderPgxsinkitUtilitiesMigration } from "./migrations/utilities";
+export { ensureOperationsLogSchema, operationsLogRegclassTarget } from "./operations-log/ddl";
+export { operationsLogTable } from "./operations-log/schema";
+export { proxyElectricShapeRequest } from "./electric-proxy";
+export type { ElectricProxyOptions } from "./electric-proxy";
+export { readSqlState } from "./sql-state";

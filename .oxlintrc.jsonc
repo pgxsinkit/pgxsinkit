@@ -1,6 +1,14 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["eslint", "typescript", "react", "import", "node", "vitest", "oxc"],
+  "plugins": ["eslint", "typescript", "react", "import", "node", "oxc"],
+  // Custom JS plugin enforcing the pure/raw split of the client query surface. oxlint's jsPlugins feature
+  // is alpha and not semver-covered, so oxlint is pinned EXACT in package.json — re-verify this rule on
+  // every oxlint bump (see oxlint-plugin.js). It runs on any oxlint version, not just the pinned one.
+  // Referenced here by PATH to the exact file that ships as `@pgxsinkit/client`'s `./oxlint` subpath
+  // export — because in this source repo the workspace package is not a physical node_modules install, so
+  // oxlint's resolver can't take the specifier. Downstream repos (where it IS installed) enable it via
+  // `"jsPlugins": ["@pgxsinkit/client/oxlint"]`. Same file, both ways.
+  "jsPlugins": ["./packages/client/oxlint-plugin.js"],
   "env": {
     "browser": true,
     "node": true,
@@ -18,6 +26,8 @@
     },
   },
   "rules": {
+    "typescript/ban-ts-comment": "error",
+    "typescript/no-explicit-any": "error",
     "typescript/no-deprecated": "error",
     "typescript/consistent-type-imports": "error",
     "typescript/no-floating-promises": "error",
@@ -29,12 +39,15 @@
         },
       },
     ],
+    "pgxsinkit/guarded-query-purity": "error",
   },
   "overrides": [
     {
-      "files": ["tests/**/*.ts"],
-      "env": {
-        "vitest": true,
+      // The lazy-guard tests intentionally pass a redundant `use` against *fake* builders (no real
+      // `sql` fragment) to exercise the explicit-activation path, which would trip the redundancy check.
+      "files": ["tests/**"],
+      "rules": {
+        "pgxsinkit/guarded-query-purity": "off",
       },
     },
   ],

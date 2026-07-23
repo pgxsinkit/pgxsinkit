@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
+  "include": [
+    "**/*.ts",
+    "../../playwright.config.ts",
+    "../../playwright.opfs-repacked.config.ts",
+    "../../playwright.warm-boot.config.ts"
+  ]
+}

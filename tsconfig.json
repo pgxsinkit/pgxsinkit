@@ -1,7 +1,7 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "bun-types"]
   },
   "include": [
     "apps/**/*.ts",
@@ -10,7 +10,15 @@
     "packages/**/*.tsx",
     "scripts/**/*.ts",
     "tests/**/*.ts",
-    "vitest.config.ts",
+    "infra/**/*.ts",
     "drizzle.config.ts"
+  ],
+  "exclude": [
+    "apps/board",
+    "apps/perf-lab/src/App.tsx",
+    "apps/perf-lab/src/main.tsx",
+    "apps/perf-lab/src/bench",
+    "apps/docs",
+    "tests/e2e"
   ]
 }

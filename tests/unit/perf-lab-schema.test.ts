@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { getTableConfig } from "drizzle-orm/pg-core";
 
 import {
@@ -11,9 +13,9 @@ import {
   findSyntheticPerfLabScenarioDefinition,
   pickSyntheticWorkloadTarget,
   syntheticPerfLabPresets,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
-import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { buildPlpgsqlBatchFunctionDdl } from "../../packages/server/src/mutations/plpgsql-apply";
 
 describe("perf-lab scenario schemas", () => {
   it("builds schema-qualified synthetic tables and shape targets", () => {
@@ -23,7 +25,7 @@ describe("perf-lab scenario schemas", () => {
       extraColumnCount: 48,
       schemaName,
     });
-    const firstTable = bundle.registry.perf_items_000;
+    const firstTable = bundle.registry["perf_items_000"];
 
     expect(firstTable).toBeDefined();
 
@@ -45,9 +47,7 @@ describe("perf-lab scenario schemas", () => {
       schemaName,
     });
     const schemaSql = buildSyntheticServerSchemaSql(bundle.registry);
-    const governanceSql = buildSyntheticGovernanceSql(bundle.registry, {
-      includeAuthHelpers: false,
-    });
+    const governanceSql = buildSyntheticGovernanceSql(bundle.registry);
 
     expect(schemaSql).toContain(`CREATE SCHEMA IF NOT EXISTS "${schemaName}";`);
     expect(schemaSql).toContain(`CREATE TABLE "${schemaName}"."perf_items_000"`);
@@ -75,8 +75,11 @@ describe("perf-lab scenario schemas", () => {
     });
 
     expect(truncateSql).toBe(`TRUNCATE TABLE "${schemaName}"."perf_items_000", "${schemaName}"."perf_items_001";`);
-    expect(functionDdl).toContain(`CREATE OR REPLACE FUNCTION "${schemaName}"."pgxsinkit_apply_batch_mutations"(`);
-    expect(functionDdl).toContain(`INSERT INTO "${schemaName}"."perf_items_000" (%s) VALUES (%s)`);
+    expect(functionDdl).toContain(`CREATE OR REPLACE FUNCTION "${schemaName}"."pgxsinkit_apply_mutations"(`);
+    // ADR-0014 Phase 4: set-based create over jsonb_to_recordset, not a per-mutation VALUES.
+    expect(functionDdl).toContain(
+      `INSERT INTO "${schemaName}"."perf_items_000" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)`,
+    );
   });
 
   it("maps built-in scenarios onto deterministic schema names", () => {

@@ -10,7 +10,7 @@
   "sortPackageJson": {
     "sortScripts": true,
   },
-  "ignorePatterns": ["coverage/**", "dist/**", "node_modules/**", "tmp/**"],
+  "ignorePatterns": ["coverage/**", "dist/**", "docs/adr/**", "node_modules/**", "tmp/**"],
   "useTabs": false,
   "tabWidth": 2,
   "insertFinalNewline": true,

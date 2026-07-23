@@ -1,0 +1,120 @@
+# Board demo API gateway — Envoy (board ADR-0007/0008). Supabase's self-hosted stack is moving to an
+# Envoy-based gateway; this mirrors it, trimmed to the two surfaces the board client touches and
+# collapsed into ONE static file (the official stack ships envoy.yaml + cds.yaml + a sed-templated
+# lds.template.yaml because its keys are env-driven — the board's demo keys are fixed committed
+# constants, so no templating/entrypoint is needed).
+#
+# Routes one origin (http://localhost:54331 → :8000) so `@supabase/supabase-js` uses a single
+# SUPABASE_URL: /auth/v1/* → GoTrue, /functions/v1/* → the edge-runtime main router (board-sync /
+# board-write). PostgREST (/rest/v1) is deliberately NOT routed (the board never uses the auto-CRUD
+# data API; reads go through board-sync, writes through board-write).
+#
+# Filter chain: cors → lua (new-API-key translation) → router. The Lua mirrors the Cloud gateway:
+# it swaps an opaque `apikey` for the matching internal role JWT, but leaves a real session JWT in
+# Authorization untouched — so a signed-in user's identity always reaches the function, and the
+# functions remain the single auth point (they verify the GoTrue session token via JWKS; ADR-0007).
+
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: board_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8000 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: board_gateway
+                codec_type: AUTO
+                route_config:
+                  name: board_routes
+                  virtual_hosts:
+                    - name: board
+                      domains: ["*"]
+                      typed_per_filter_config:
+                        envoy.filters.http.cors:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                          # Permissive demo CORS. `expose_headers: "*"` lets the browser read Electric's
+                          # `electric-*` response headers (offset/handle/schema/cursor) the sync client
+                          # needs — a too-narrow list is the classic Electric MissingHeadersError.
+                          allow_origin_string_match:
+                            - safe_regex: { regex: ".*" }
+                          allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD"
+                          allow_headers: "*"
+                          expose_headers: "*"
+                          max_age: "3600"
+                      routes:
+                        - name: auth-v1
+                          match: { prefix: "/auth/v1/" }
+                          route: { cluster: auth, prefix_rewrite: "/", timeout: 30s }
+                        - name: functions-v1
+                          # The edge-runtime main router dispatches by the first path segment, so
+                          # strip the /functions/v1 prefix (board ADR-0001). 150s covers an Electric
+                          # long-poll held open by board-sync (~25s) with comfortable margin.
+                          match: { prefix: "/functions/v1/" }
+                          route: { cluster: functions, prefix_rewrite: "/", timeout: 150s }
+                http_filters:
+                  - name: envoy.filters.http.cors
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+                  # New-API-key → role-JWT translation (mirrors the Cloud/official self-hosted gateway).
+                  # Decision tree:
+                  #   1. Authorization is a real session JWT (present, not "Bearer sb_") → keep it.
+                  #   2. else apikey == the secret key      → Authorization := internal service_role JWT.
+                  #   3. else apikey == the publishable key → Authorization := internal anon JWT.
+                  # The two opaque keys MUST match infra/compose/board.env; the internal JWTs are signed
+                  # with the GOTRUE_JWT_KEYS private key, so they verify against the same JWKS. Regenerate
+                  # the whole set with `bun scripts/gen-board-demo-keys.ts`.
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      default_source_code:
+                        inline_string: |
+                          local PUBLISHABLE = "sb_publishable_boarddemoLOCALxxxxxxxxx_demo0000"
+                          local SECRET = "sb_secret_boarddemoLOCALxxxxxxxxxxxxxxx_demo0000"
+                          local ANON_JWT = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImJvYXJkLWRlbW8tZXMyNTYiLCJ0eXAiOiJKV1QifQ.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzM1Njg5NjAwLCJleHAiOjIwNTEyMjI0MDB9.uoGtMdRc7-aV_e2JXbPXqN9hPSQc9JZ6XIlifh4VnifI9EQ2fFvO1lfEbirxCN4q5GejR2D2mf2d86XcoXRkfg"
+                          local SERVICE_JWT = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImJvYXJkLWRlbW8tZXMyNTYiLCJ0eXAiOiJKV1QifQ.eyJyb2xlIjoic2VydmljZV9yb2xlIiwiaXNzIjoic3VwYWJhc2UiLCJpYXQiOjE3MzU2ODk2MDAsImV4cCI6MjA1MTIyMjQwMH0.9LtMg2HvXfcmROjj2GI6ldhPcA5-Qqp2YQDzWxiUKPVauNBpe9qN4wkSHrD_vw6oVKXgm6CQt37zvUJ3PVLiqg"
+
+                          function envoy_on_request(handle)
+                            local headers = handle:headers()
+                            local authz = headers:get("authorization")
+                            -- A real session JWT (not an opaque sb_ key) is the signed-in user's identity.
+                            if authz ~= nil and string.sub(authz, 1, 10) ~= "Bearer sb_" then
+                              return
+                            end
+                            local apikey = headers:get("apikey")
+                            local role_jwt = nil
+                            if apikey == SECRET then
+                              role_jwt = SERVICE_JWT
+                            elseif apikey == PUBLISHABLE then
+                              role_jwt = ANON_JWT
+                            end
+                            if role_jwt ~= nil then
+                              headers:replace("authorization", "Bearer " .. role_jwt)
+                            end
+                          end
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: auth
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: auth
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: auth, port_value: 9999 } } }
+    - name: functions
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: functions
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: functions, port_value: 9000 } } }

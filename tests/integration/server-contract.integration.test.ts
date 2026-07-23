@@ -1,28 +1,35 @@
-import { eq, sql } from "drizzle-orm";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { createSyncServer } from "@pgxsinkit/server";
-import { readIntegrationEnv } from "@pgxsinkit/test-utils";
+import { asc, eq } from "drizzle-orm";
 
-import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
-import {
-  ensureProjectsTableSql,
-  projectRecordSchema,
-  projectsSyncRegistry,
-  projectsTable,
-} from "../fixtures/projects-fixture";
+import { projectsSyncRegistry, projectsTable } from "@pgxsinkit/schema";
+import { createSyncServer, operationsLogTable } from "@pgxsinkit/server";
+import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
+
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
 
 const env = readIntegrationEnv();
 
 describe("server facade contract", () => {
   let server!: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>;
+  const serverDb = createServerDb(projectsSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
-    server = createSyncServer({
+    const provisioningServer = createSyncServer({
       registry: projectsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
-    await server.drizzle.execute(ensureProjectsTableSql);
+    try {
+      await installPlpgsqlBatchFunction(provisioningServer.drizzle, projectsSyncRegistry);
+    } finally {
+      await provisioningServer.stop();
+    }
+
+    server = createSyncServer({
+      registry: projectsSyncRegistry,
+      db: serverDb.db,
+    });
   });
 
   beforeEach(async () => {
@@ -32,6 +39,7 @@ describe("server facade contract", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("exposes diagnostics and serves health without starting a listener", async () => {
@@ -43,12 +51,6 @@ describe("server facade contract", () => {
       modes: {
         projects: "readwrite",
       },
-      routes: {
-        projects: {
-          basePath: "/api/projects",
-          allowBatch: false,
-        },
-      },
     });
 
     const response = await server.fetch(new Request("http://localhost/health"));
@@ -57,192 +59,10 @@ describe("server facade contract", () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
-  it("creates, lists, updates, and deletes through the public request facade", async () => {
-    const createResponse = await server.request("/api/projects", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: "01965156-5884-7a0b-a24e-31b5c9be0010",
-        name: "Server contract project",
-      }),
-    });
-
-    expect(createResponse.status).toBe(201);
-    const created = projectRecordSchema.parse(await createResponse.json());
-    expect(created.name).toBe("Server contract project");
-
-    const listResponse = await server.request("/api/projects");
-
-    expect(listResponse.status).toBe(200);
-    expect(await listResponse.json()).toEqual([
-      expect.objectContaining({
-        id: created.id,
-        name: "Server contract project",
-      }),
-    ]);
-
-    const updateResponse = await server.request(`/api/projects/${created.id}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name: "Renamed through facade",
-      }),
-    });
-
-    expect(updateResponse.status).toBe(200);
-    const updated = projectRecordSchema.parse(await updateResponse.json());
-    expect(updated.name).toBe("Renamed through facade");
-
-    const rows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, created.id));
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.name).toBe("Renamed through facade");
-
-    const deleteResponse = await server.request(`/api/projects/${created.id}`, {
-      method: "DELETE",
-    });
-
-    expect(deleteResponse.status).toBe(204);
-
-    const remainingRows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, created.id));
-
-    expect(remainingRows).toHaveLength(0);
-
-    const logRows = await readOperationsLogRows(server);
-    const successRows = logRows.filter(
-      (row) =>
-        row.backend === "drizzle" &&
-        row.source === "crud" &&
-        row.tableName === "projects" &&
-        row.status === "succeeded",
-    );
-    expect(successRows).toHaveLength(3);
-  });
-
-  it("surfaces validation and missing-record errors through the public request facade", async () => {
-    const invalidCreateResponse = await server.request("/api/projects", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: "01965156-5884-7a0b-a24e-31b5c9be0011",
-        name: "",
-      }),
-    });
-
-    expect(invalidCreateResponse.status).toBe(400);
-    expect(await invalidCreateResponse.json()).toEqual(
-      expect.objectContaining({
-        message: "Validation failed",
-      }),
-    );
-
-    const missingPatchResponse = await server.request("/api/projects/01965156-5884-7a0b-a24e-31b5c9be0012", {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name: "Never persisted",
-      }),
-    });
-
-    expect(missingPatchResponse.status).toBe(404);
-    expect(await missingPatchResponse.json()).toEqual({
-      message: "projects record not found",
-    });
-
-    const missingDeleteResponse = await server.request("/api/projects/01965156-5884-7a0b-a24e-31b5c9be0012", {
-      method: "DELETE",
-    });
-
-    expect(missingDeleteResponse.status).toBe(404);
-    expect(await missingDeleteResponse.json()).toEqual({
-      message: "projects record not found",
-    });
-
-    const logRows = await readOperationsLogRows(server);
-    const validationFailures = logRows.filter(
-      (row) =>
-        row.backend === "drizzle" &&
-        row.source === "crud" &&
-        row.tableName === "projects" &&
-        row.status === "validation_failed",
-    );
-    const notFoundRows = logRows.filter(
-      (row) =>
-        row.backend === "drizzle" &&
-        row.source === "crud" &&
-        row.tableName === "projects" &&
-        row.status === "not_found",
-    );
-
-    expect(validationFailures).toHaveLength(1);
-    expect(notFoundRows).toHaveLength(2);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Bulk mutation backends
-// ---------------------------------------------------------------------------
-
-describe.each([
-  { backend: "bulk-dynamic" as const },
-  { backend: "bulk-pregenerated" as const },
-  { backend: "bulk-plpgsql" as const },
-  { backend: "bulk-plpgsql-artifact" as const },
-])("server facade contract — $backend backend", ({ backend }) => {
-  let server!: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>;
-
-  beforeAll(async () => {
-    if (backend === "bulk-plpgsql-artifact") {
-      const provisioningServer = createSyncServer({
-        registry: projectsSyncRegistry,
-        databaseUrl: env.databaseUrl,
-      });
-
-      try {
-        await installPlpgsqlBatchFunction(provisioningServer.drizzle, projectsSyncRegistry);
-      } finally {
-        await provisioningServer.stop();
-      }
-    }
-
-    server = createSyncServer({
-      registry: projectsSyncRegistry,
-      databaseUrl: env.databaseUrl,
-      backend,
-    });
-
-    await server.drizzle.execute(ensureProjectsTableSql);
-  });
-
-  beforeEach(async () => {
-    await server.drizzle.delete(projectsTable);
-    await clearOperationsLog(server);
-  });
-
-  afterAll(async () => {
-    await server.stop();
-  });
-
-  it("exposes health and diagnostics", async () => {
-    const response = await server.fetch(new Request("http://localhost/health"));
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ok: true });
-
-    const diagnostics = server.diagnostics();
-    expect(diagnostics.tables).toContain("projects");
-  });
-
-  it("creates a row via POST /api/mutations", async () => {
+  it("creates, updates, and deletes via POST /api/mutations", async () => {
     const id = "02000001-0000-4001-8001-000000000001";
-    const response = await server.request("/api/mutations", {
+
+    const createResponse = await server.request("/api/mutations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -253,43 +73,24 @@ describe.each([
             mutationId: "12345678-1234-1234-8234-123456780001",
             mutationSeq: 1,
             kind: "create",
-            payload: { id, name: "Bulk created project" },
+            payload: { id, name: "Created project" },
             clientTimestampUs: String(Date.now() * 1000),
           },
         ],
       }),
     });
 
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      acks: Array<{ status: string; mutationId: string }>;
-    };
-    expect(body.acks).toHaveLength(1);
-    expect(body.acks[0]?.status).toBe("acked");
+    expect(createResponse.status).toBe(200);
+    expect(await createResponse.json()).toEqual({
+      acks: [
+        expect.objectContaining({
+          mutationId: "12345678-1234-1234-8234-123456780001",
+          status: "acked",
+        }),
+      ],
+    });
 
-    const rows = await server.drizzle.select().from(projectsTable);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.name).toBe("Bulk created project");
-
-    const logRows = await readOperationsLogRows(server);
-    const successRows = logRows.filter(
-      (row) =>
-        row.backend === backend &&
-        row.source === "batch" &&
-        row.tableName === "projects" &&
-        row.operationKind === "create" &&
-        row.status === "succeeded",
-    );
-    expect(successRows).toHaveLength(1);
-  });
-
-  it("updates a row via POST /api/mutations", async () => {
-    const id = "02000001-0000-4002-8002-000000000002";
-
-    // Insert directly so we have a row to update.
-    await server.drizzle.insert(projectsTable).values({ id, name: "Before update" });
-
-    const response = await server.request("/api/mutations", {
+    const updateResponse = await server.request("/api/mutations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -298,29 +99,22 @@ describe.each([
             tableName: "projects",
             entityKey: { id },
             mutationId: "12345678-1234-1234-8234-123456780002",
-            mutationSeq: 1,
+            mutationSeq: 2,
             kind: "update",
-            payload: { name: "After update" },
+            payload: { name: "Updated project" },
             clientTimestampUs: String(Date.now() * 1000),
           },
         ],
       }),
     });
 
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { acks: Array<{ status: string }> };
-    expect(body.acks[0]?.status).toBe("acked");
+    expect(updateResponse.status).toBe(200);
 
-    const rows = await server.drizzle.select().from(projectsTable);
-    expect(rows[0]?.name).toBe("After update");
-  });
+    const rowsAfterUpdate = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, id));
+    expect(rowsAfterUpdate).toHaveLength(1);
+    expect(rowsAfterUpdate[0]?.name).toBe("Updated project");
 
-  it("deletes a row via POST /api/mutations", async () => {
-    const id = "02000001-0000-4003-8003-000000000003";
-
-    await server.drizzle.insert(projectsTable).values({ id, name: "To be deleted" });
-
-    const response = await server.request("/api/mutations", {
+    const deleteResponse = await server.request("/api/mutations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -329,7 +123,7 @@ describe.each([
             tableName: "projects",
             entityKey: { id },
             mutationId: "12345678-1234-1234-8234-123456780003",
-            mutationSeq: 1,
+            mutationSeq: 3,
             kind: "delete",
             payload: { id },
             clientTimestampUs: String(Date.now() * 1000),
@@ -338,63 +132,83 @@ describe.each([
       }),
     });
 
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { acks: Array<{ status: string }> };
-    expect(body.acks[0]?.status).toBe("acked");
+    expect(deleteResponse.status).toBe(200);
 
-    const rows = await server.drizzle.select().from(projectsTable);
-    expect(rows).toHaveLength(0);
+    const remainingRows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, id));
+    expect(remainingRows).toHaveLength(0);
+
+    const logRows = await readOperationsLogRows(server);
+    const successRows = logRows.filter((row) => row.tableName === "projects" && row.status === "succeeded");
+    expect(successRows).toHaveLength(3);
   });
 
-  it("rejects CRUD write routes when using bulk-plpgsql-artifact", async () => {
-    if (backend !== "bulk-plpgsql-artifact") {
-      return;
-    }
+  it("does not expose a /mutations alias", async () => {
+    const response = await server.request("/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mutations: [] }),
+    });
 
-    const createResponse = await server.request("/api/projects", {
+    expect(response.status).toBe(404);
+  });
+
+  it("accepts ISO timestamp strings in /api/mutations payloads", async () => {
+    const id = "02000001-0000-4001-8001-000000000031";
+    const createdAt = "2026-05-15T10:11:12.345Z";
+    const updatedAt = "2026-05-16T11:12:13.456Z";
+
+    const createResponse = await server.request("/api/mutations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        id: "02000001-0000-4006-8006-000000000006",
-        name: "Should be rejected",
+        mutations: [
+          {
+            tableName: "projects",
+            entityKey: { id },
+            mutationId: "12345678-1234-1234-8234-123456780031",
+            mutationSeq: 1,
+            kind: "create",
+            payload: {
+              id,
+              name: "Timestamp-coerced project",
+              scheduled_at: createdAt,
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
       }),
     });
 
-    expect(createResponse.status).toBe(405);
-    expect(await createResponse.json()).toEqual({
-      message:
-        "CRUD POST routes are disabled for projects when WRITE_API_BACKEND=bulk-plpgsql-artifact. Use POST /api/mutations instead.",
-    });
+    expect(createResponse.status).toBe(200);
 
-    await server.drizzle.insert(projectsTable).values({
-      id: "02000001-0000-4007-8007-000000000007",
-      name: "Existing row",
-    });
-
-    const patchResponse = await server.request("/api/projects/02000001-0000-4007-8007-000000000007", {
-      method: "PATCH",
+    const updateResponse = await server.request("/api/mutations", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Rejected patch" }),
+      body: JSON.stringify({
+        mutations: [
+          {
+            tableName: "projects",
+            entityKey: { id },
+            mutationId: "12345678-1234-1234-8234-123456780032",
+            mutationSeq: 2,
+            kind: "update",
+            payload: {
+              scheduled_at: updatedAt,
+            },
+            clientTimestampUs: String(Date.now() * 1000),
+          },
+        ],
+      }),
     });
 
-    expect(patchResponse.status).toBe(405);
-    expect(await patchResponse.json()).toEqual({
-      message:
-        "CRUD PATCH routes are disabled for projects when WRITE_API_BACKEND=bulk-plpgsql-artifact. Use POST /api/mutations instead.",
-    });
+    expect(updateResponse.status).toBe(200);
 
-    const deleteResponse = await server.request("/api/projects/02000001-0000-4007-8007-000000000007", {
-      method: "DELETE",
-    });
-
-    expect(deleteResponse.status).toBe(405);
-    expect(await deleteResponse.json()).toEqual({
-      message:
-        "CRUD DELETE routes are disabled for projects when WRITE_API_BACKEND=bulk-plpgsql-artifact. Use POST /api/mutations instead.",
-    });
+    const rows = await server.drizzle.select().from(projectsTable).where(eq(projectsTable.id, id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.scheduledAt?.toISOString()).toBe(updatedAt);
   });
 
-  it("returns 400 for an unknown table name", async () => {
+  it("returns 400 for unknown table names", async () => {
     const response = await server.request("/api/mutations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -417,20 +231,12 @@ describe.each([
 
     const logRows = await readOperationsLogRows(server);
     const validationFailures = logRows.filter(
-      (row) =>
-        row.backend === backend &&
-        row.source === "batch" &&
-        row.tableName === "nonexistent_table" &&
-        row.status === "validation_failed",
+      (row) => row.tableName === "nonexistent_table" && row.status === "validation_failed",
     );
     expect(validationFailures).toHaveLength(1);
   });
 
-  it("rolls back all mutations when one fails (cross-table atomicity)", async () => {
-    // Both mutations target 'projects' — the second one has a deliberately bad
-    // table name to force a server-side error, proving the first is rolled back.
-    const id = "02000001-0000-4004-8004-000000000004";
-
+  it("rolls back all mutations when one fails", async () => {
     const response = await server.request("/api/mutations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -438,24 +244,22 @@ describe.each([
         mutations: [
           {
             tableName: "projects",
-            entityKey: { id },
+            entityKey: { id: "02000001-0000-4004-8004-000000000004" },
             mutationId: "12345678-1234-1234-8234-123456780004",
             mutationSeq: 1,
             kind: "create",
-            payload: { id, name: "Should roll back" },
+            payload: { id: "02000001-0000-4004-8004-000000000004", name: "Should roll back" },
             clientTimestampUs: String(Date.now() * 1000),
           },
-          // The extra `created_at_us` field passes Zod (not in createSchema) but
-          // causes a DB-level cast error ('not-a-bigint'::bigint), forcing a rollback.
           {
             tableName: "projects",
             entityKey: { id: "02000001-0000-4005-8005-000000000005" },
             mutationId: "12345678-1234-1234-8234-123456780005",
-            mutationSeq: 1,
+            mutationSeq: 2,
             kind: "create",
             payload: {
               id: "02000001-0000-4005-8005-000000000005",
-              name: "OK",
+              name: "Invalid row",
               created_at_us: "not-a-bigint",
             },
             clientTimestampUs: String(Date.now() * 1000),
@@ -464,65 +268,37 @@ describe.each([
       }),
     });
 
-    // Server should return 500 from the transaction error.
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(400);
 
-    // First row must NOT have been committed (transaction rolled back).
+    // The 400 attributes the failure to the invalid (second) mutation only, so the client can
+    // quarantine exactly it and keep the valid sibling retryable.
+    const body = (await response.json()) as { rejections?: Array<{ mutationId: string }> };
+    expect(body.rejections?.map((rejection) => rejection.mutationId)).toEqual(["12345678-1234-1234-8234-123456780005"]);
+
     const rows = await server.drizzle.select().from(projectsTable);
     expect(rows).toHaveLength(0);
-
-    const logRows = await readOperationsLogRows(server);
-    const successRows = logRows.filter(
-      (row) =>
-        row.backend === backend && row.source === "batch" && row.tableName === "projects" && row.status === "succeeded",
-    );
-    const executionFailures = logRows.filter(
-      (row) =>
-        row.backend === backend &&
-        row.source === "batch" &&
-        row.tableName === "projects" &&
-        row.status === "execution_failed",
-    );
-
-    expect(successRows).toHaveLength(0);
-    expect(executionFailures).toHaveLength(2);
   });
 });
 
 type OpsLogRow = {
-  source: string;
-  backend: string;
   tableName: string | null;
   operationKind: string | null;
   status: string;
 };
 
 async function clearOperationsLog(server: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>) {
-  await server.drizzle.execute(
-    sql.raw(`
-    DO $$
-    BEGIN
-      IF to_regclass('public.operations_log') IS NOT NULL THEN
-        TRUNCATE TABLE operations_log;
-      END IF;
-    END $$;
-  `),
-  );
+  await server.drizzle.delete(operationsLogTable);
 }
 
 async function readOperationsLogRows(
   server: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>,
 ): Promise<OpsLogRow[]> {
-  const result = await server.drizzle.execute<OpsLogRow>(sql`
-    SELECT
-      source,
-      backend,
-      table_name AS "tableName",
-      operation_kind AS "operationKind",
-      status
-    FROM operations_log
-    ORDER BY id ASC
-  `);
-
-  return Array.from(result, (row) => row as OpsLogRow);
+  return await server.drizzle
+    .select({
+      tableName: operationsLogTable.tableName,
+      operationKind: operationsLogTable.operationKind,
+      status: operationsLogTable.status,
+    })
+    .from(operationsLogTable)
+    .orderBy(asc(operationsLogTable.id));
 }

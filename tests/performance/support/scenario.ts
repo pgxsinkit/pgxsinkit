@@ -176,7 +176,7 @@ export interface PerfReport {
   name: string;
   startedAt: string;
   finishedAt: string;
-  config: PerfScenarioConfig;
+  config: PerfScenarioConfig | Record<string, unknown>;
   metrics: Record<string, unknown>;
 }
 
@@ -200,9 +200,9 @@ export function computeDefaultConcurrentFlushBudgetMs(baseConfig: PerfScenarioBu
 }
 
 export function readPerfScenarioConfig(): PerfScenarioConfig {
-  const concurrentPreset = resolveConcurrentPresetKey(process.env.PGXSINKIT_PERF_PRESET);
-  const scenarioKey = resolveConcurrentScenarioKey(process.env.PGXSINKIT_PERF_SCENARIO_KEY);
-  const executionMode = resolveConcurrentExecutionMode(process.env.PGXSINKIT_PERF_CONCURRENT_EXEC_MODE);
+  const concurrentPreset = resolveConcurrentPresetKey(process.env["PGXSINKIT_PERF_PRESET"]);
+  const scenarioKey = resolveConcurrentScenarioKey(process.env["PGXSINKIT_PERF_SCENARIO_KEY"]);
+  const executionMode = resolveConcurrentExecutionMode(process.env["PGXSINKIT_PERF_CONCURRENT_EXEC_MODE"]);
   const concurrentDefaults = {
     ...concurrentPresetDefaults[concurrentPreset],
     ...concurrentScenarioOverrides[scenarioKey],
@@ -317,7 +317,7 @@ export function computePercentiles(values: number[]) {
 }
 
 export async function writePerfReport(report: PerfReport): Promise<string> {
-  const resultsDir = process.env.PGXSINKIT_PERF_RESULTS_DIR ?? "tmp/perf-results";
+  const resultsDir = process.env["PGXSINKIT_PERF_RESULTS_DIR"] ?? "tmp/perf-results";
   const absoluteDir = path.isAbsolute(resultsDir) ? resultsDir : path.join(process.cwd(), resultsDir);
   await mkdir(absoluteDir, { recursive: true });
 

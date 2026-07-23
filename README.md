@@ -1,162 +1,125 @@
+<p align="center">
+  <a href="https://pgxsinkit.github.io">
+    <picture>
+      <source srcset="./brand/banner/banner.avif" type="image/avif" />
+      <source srcset="./brand/banner/banner.webp" type="image/webp" />
+      <img src="./brand/banner/banner.png" alt="pgxsinkit" width="720" />
+    </picture>
+  </a>
+</p>
+
 # pgxsinkit
 
-`pgxsinkit` is a hardened demo repository for a `PostgreSQL -> ElectricSQL -> PGlite` read path and a `client -> write API -> PostgreSQL` write path.
+`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> ElectricSQL -> PGlite` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/board`), the minimal reference server (`apps/write-api`), and the integration + performance harness exist to prove and harden them.
 
-Canonical timestamps are stored as bigint microseconds since unix epoch and cross API/sync boundaries as decimal strings.
+Canonical timestamps are stored as bigint microseconds since the unix epoch and cross API/sync boundaries as decimal strings.
 
-## Goals
+📖 **[Documentation](https://pgxsinkit.github.io)** — start with [What is pgxsinkit?](https://pgxsinkit.github.io/start/overview/), then [Getting started](https://pgxsinkit.github.io/start/getting-started/) and [Core concepts](https://pgxsinkit.github.io/concepts/). Before you ship, read [Operating in production](https://pgxsinkit.github.io/start/operating-in-production/) — the runtime gotchas (convergence cadence, edge cold starts, the browser HTTP/2 connection budget) that decide whether a live app feels fast.
 
-- Keep the downward sync path aligned with upstream `@electric-sql/pglite-sync`, while vendoring locally for hardening.
-- Put the write path behind a typed API using Bun, Drizzle, and Zod.
-- Maintain fast unit tests plus container-backed integration tests.
-- Make upgrades of PostgreSQL, ElectricSQL, and PGlite routine and measurable.
+## Requirements
 
-## Workspace layout
+`pgxsinkit` row filters may use cross-table subquery `where` clauses — for example membership
+fan-out, where a row in a container streams to every member of that container:
 
-- `apps/web`: React + Vite demo UI using local PGlite.
-- `apps/write-api`: Bun + Hono write API.
-- `packages/contracts`: shared validation schemas and DTOs.
-- `packages/pglite-sync`: vendored upstream sync implementation.
-- `packages/sync-engine`: wrapper around vendored sync package.
-- `packages/test-utils`: shared test helpers.
-- `infra/compose`: compose files for PostgreSQL and ElectricSQL.
-- `infra/sql`: local bootstrap SQL.
-- `tests/unit`: pure unit tests.
-- `tests/integration`: container-backed integration tests.
+```sql
+container_id IN (SELECT container_id FROM memberships WHERE member_id = <subject>)
+```
 
-## Quick start
+The electric-proxy forwards this verbatim as the Electric shape `where`, so streaming it relies on
+a **required** ElectricSQL capability:
+
+- **ElectricSQL >= 1.7** running with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`.
+
+This is a hard prerequisite, not an optional optimisation. Subquery `where` support is a flagged
+preview feature (still flagged as of 1.7.3); without the flag Electric rejects any subquery `where`
+with HTTP 400 (`{"where":["Subqueries are not supported"]}`). The sync then fails **closed** — no rows
+stream — it never silently fans out unfiltered data.
+
+On **managed Electric Cloud** the subquery preview is currently **activated per source by Electric staff
+on request** (no self-serve toggle yet; ElectricSQL intends to make it the default) — so ask Electric to
+enable it for your source, or self-host Electric with the flag set. A self-hosted stack sets the flag
+directly.
+
+A second point follows from the same grammar: **a PostgreSQL `enum` column referenced in a shape
+`where` must be cast to `text`** — `"role"::text = 'manager'`, not `"role" = 'manager'`. The enum
+column itself stays an enum everywhere else — RLS and the write path keep using it natively, so there
+is no enum→text migration. See
+[The Electric subquery requirement](https://pgxsinkit.github.io/concepts/electric-subqueries/) for the
+full story.
+
+## Install
+
+```bash
+bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional): bun add @pgxsinkit/react
+# Constant-handle OPFS storage (optional): bun add @pgxsinkit/pglite-opfs-repacked
+```
+
+The packages are published to public npm; install them with whichever package manager you use
+(`pnpm add`, `npm install`, `yarn add` — pgxsinkit mandates none). Then follow
+[**Getting started**](https://pgxsinkit.github.io/start/getting-started/) to wire the read and write
+paths and provision the in-database apply function.
+
+## Quick start — run the board demo
+
+The substantial example (`apps/board`, a Linear-style board + chat) drives the full read and write
+paths end-to-end against a partial Supabase + Electric stack:
 
 1. `mise install`
 2. `bun install`
 3. `cp .env.example .env`
-4. `bun run infra:up`
-5. `bun run dev:api`
-6. `bun run dev:web`
+4. `mkcert -install` — one-time: trust the local CA so the browser accepts the gateway's HTTP/2 cert
+5. `bun run infra:up` — brings up the board stack (partial Supabase + Electric), builds the edge functions, and applies the board's migration history
+6. `bun run seed:board` — GoTrue identities + fixtures
+7. `bun run dev:board`
 
-`bun run infra:up` now applies schema, the latest committed governance migration, and the committed sync function artifact.
+The board stack is self-contained on its own ports (gateway `54331`, db `54322`, electric `54330`,
+HTTP/2 gateway `54343`), so it coexists with the harness. Studio is at `http://localhost:54333`. For
+the minimal reference server (`apps/write-api`) instead, use `bun run infra:harness:up` (PostgreSQL +
+Electric) → `bun run dev:api`.
 
-## Provisioning workflow
+## The write path
 
-1. Edit schema sources in `packages/demo/src/schema.ts` and/or `packages/server/src/operations-log/schema.ts`.
-2. Generate schema migrations: `bun run db:generate`.
-3. Generate governance SQL when needed: `bun run db:generate:governance`.
-   - If the generated SQL matches the latest `*_registry_governance` migration, the command is a no-op and does not create a new directory.
-4. Regenerate sync function artifact when registry/strategy changes: `bun run sync:function:generate`.
-5. Review generated SQL under `drizzle/`.
-6. Apply schema: `bun run db:push` (or `bun run infra:up`).
-7. Apply governance SQL when RLS/auth helper state is needed outside `infra:up`: `bun run db:apply:governance`.
-8. Apply and verify the sync function artifact when needed outside `infra:up`:
-   - `bun run db:apply:sync-function`
-   - `bun run db:verify:sync-function`
+There is exactly one write path: client writes are staged locally, flushed through the write API,
+and applied to PostgreSQL in a single in-database PL/pgSQL function (`pgxsinkit_apply_mutations`).
+There is no selectable backend — the in-database bulk apply is the only strategy. See
+[The write path](https://pgxsinkit.github.io/concepts/write-path/) and
+[ADR-0002](./docs/adr/0002-single-in-database-write-path.md).
 
-See `docs/migrations.md` and `docs/function-artifacts.md`.
+## Development & contributing
 
-## Integration test model
+Contributor setup, the canonical vocabulary, and the agent guide live in [`AGENTS.md`](./AGENTS.md)
+and [`CONTEXT.md`](./CONTEXT.md). The repository is a Bun workspace:
 
-- `bun run test:integration:contract`
-- `bun run test:integration:implementation`
-- `bun run test:integration`
+- `apps/board` — the substantial demo (Linear-style board + chat) on a partial Supabase + Electric stack.
+- `apps/write-api` — the minimal `@pgxsinkit/server` reference (Bun, no web framework).
+- `packages/contracts` · `client` · `server` · `react` — the published sync toolkit.
+- `packages/pglite-opfs-repacked` — the published OPFS storage engine for PGlite.
+- `packages/schema`, `packages/board-schema` — example/demo registries (your app defines its own).
+- `infra/`, `tests/`, `supabase/functions` — compose stacks, suites, and the demo's edge functions.
 
-These spin up isolated compose stacks on ephemeral ports and tear everything down afterward.
+Scripts are check-default (a bare verb never mutates):
 
-## Perf lab
+```bash
+bun run validate         # fast pre-commit gate: format, lint, typecheck, fast unit subset
+bun run validate:full    # pre-push + CI gate: adds the PGlite-backed unit suite
+bun run test:integration # container-backed suites on isolated, ephemeral compose stacks
+```
 
-`bun run perf:lab` now owns a dedicated fixed-name stack separate from the shared demo workflow. It tears down any prior `pgxsinkit-perf-lab` containers and child processes, starts fresh PostgreSQL, ElectricSQL, a dedicated perf-lab write server, and the browser lab, then writes logs under `tmp/perf-lab/`.
+**Fresh clone:** `@electric-sql/pglite` is temporarily overridden to the `@pgxsinkit/pglite` fork (see
+[docs/runbooks/pglite-fork-override.md](./docs/runbooks/pglite-fork-override.md)). The fork is mirrored
+on public npm, so a plain `bun install` resolves it — no registry auth or extra setup needed.
 
-The browser default is the full cycle: seed PostgreSQL for the active synthetic registry, sync those rows into browser PGlite, flush local mutations upstream, and wait for the Electric echo to clear overlay state again.
+Deeper references, all under `docs/`: [architecture](./docs/architecture.md) ·
+[testing strategy](./docs/testing-strategy.md) · [migrations](./docs/migrations.md) ·
+[function artifacts](./docs/function-artifacts.md) · [performance](./tests/performance/README.md).
 
-## Performance suites
+## Releasing
 
-Long-running performance tests are intentionally separate from `bun run validate`.
+`@pgxsinkit/*` publishes from a semver **tag**: CI derives the version from the tag and publishes all
+packages at that one version — there is no version bump. See [`RELEASING.md`](./RELEASING.md) and
+[ADR-0001](./docs/adr/0001-unified-ts-release-versioning-tooling-standard.md).
 
-Commands:
+## License
 
-- `bun run test:performance`
-- `bun run test:performance:client`
-- `bun run test:performance:concurrent`
-- `bun run test:performance:concurrent:matrix`
-- `bun run test:performance:server`
-
-The concurrent lane reads configuration from `PGXSINKIT_PERF_*` environment variables. For the common case, yes: prefixing the variable before the Bun command is enough.
-
-Examples:
-
-- `PGXSINKIT_PERF_CONCURRENT_EXEC_MODE=multi-process bun run test:performance:concurrent`
-- `PGXSINKIT_PERF_CONCURRENT_EXEC_MODE=multi-process PGXSINKIT_PERF_PRESET=smoke PGXSINKIT_PERF_SCENARIO_KEY=mixed-small-bursts bun run test:performance:concurrent`
-
-Execution mode options:
-
-- `PGXSINKIT_PERF_CONCURRENT_EXEC_MODE=single-process`
-- `PGXSINKIT_PERF_CONCURRENT_EXEC_MODE=multi-process`
-
-If unset, the concurrent suite defaults to `single-process`.
-
-Preset and scenario selection:
-
-- `PGXSINKIT_PERF_PRESET=smoke|realistic|heavy`
-- `PGXSINKIT_PERF_SCENARIO_KEY=mixed-small-bursts|mixed-small-plus-large|hot-partition-overlap`
-
-The performance runner provisions its own isolated PostgreSQL and ElectricSQL stack, applies the current Drizzle schema, runs the requested perf tests, writes JSON reports under `tmp/perf-results/`, and tears the stack down afterward.
-
-More detailed performance configuration, including the full env var list and matrix runner options, lives in `tests/performance/README.md`.
-
-## Backend switching
-
-`WRITE_API_BACKEND` options:
-
-- `drizzle`
-- `bulk-dynamic`
-- `bulk-pregenerated`
-- `bulk-plpgsql`
-- `bulk-plpgsql-artifact`
-
-Long-polling shape proxy requests may need a higher Bun idle timeout than the default 10 seconds.
-
-- `WRITE_API_IDLE_TIMEOUT_SECONDS=120`
-
-To send batch writes from web client:
-
-- `VITE_BATCH_WRITE_URL=http://localhost:3001`
-
-The web app reads `VITE_*` variables from the repository root `.env`, even when launched via `bun run dev:web`.
-
-If unset, client uses per-table write routes.
-
-## Demo auth lifecycle
-
-The demo includes an end-to-end auth simulation without external identity providers:
-
-- Web app identity selector: `none`, `user`, `admin`.
-- `user` and `admin` use fixed Supabase-style HS256 JWTs.
-- Client sends `Authorization: Bearer ...` for write and shape requests.
-- Write API validates demo JWTs and maps claims into `resolveAuthClaims`.
-- Write API exposes `/v1/shape-proxy`, forwarding to Electric and enforcing owner filters for protected tables (`authors`, `todos`) unless caller role is `admin`.
-
-If `DEMO_JWT_SECRET` is unset, the shared demo secret is used.
-
-## Operations logging
-
-Server-side operations logging is startup-configured with:
-
-- `WRITE_API_OPS_LOG_ENABLED=true` (default)
-- `WRITE_API_OPS_LOG_ENABLED=false`
-
-The `operations_log` table is migration-managed (not runtime-created).
-
-## Validation
-
-Typical gates:
-
-- `bun run validate` # contains format, lint and typecheck
-- `bun run test:integration:contract`
-- `bun run test:integration:implementation`
-
-## Version policy
-
-- Type checking uses the native preview compiler (`bun run typecheck`).
-
-## References
-
-- `docs/architecture.md`
-- `docs/testing-strategy.md`
-- `docs/ai-assistant-guide.md`
+[MIT](./LICENSE) © pgxsinkit contributors.

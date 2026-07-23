@@ -1,24 +1,39 @@
 {
   "compilerOptions": {
     "target": "ES2024",
-    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "lib": ["ES2024"],
     "module": "ESNext",
+    "moduleDetection": "force",
     "moduleResolution": "Bundler",
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
+    "noEmit": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "resolveJsonModule": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedSideEffectImports": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
     "jsx": "react-jsx",
     "paths": {
+      "drizzle-orm": ["./node_modules/drizzle-orm"],
+      "drizzle-orm/*": ["./node_modules/drizzle-orm/*"],
       "@pgxsinkit/client": ["./packages/client/src/index.ts"],
-      "@pgxsinkit/demo": ["./packages/demo/src/index.ts"],
+      "@pgxsinkit/client/testing": ["./packages/client/src/testing.ts"],
+      "@pgxsinkit/board-schema": ["./packages/board-schema/src/index.ts"],
+      "@pgxsinkit/schema": ["./packages/schema/src/index.ts"],
       "@pgxsinkit/contracts": ["./packages/contracts/src/index.ts"],
+      "@pgxsinkit/pglite-opfs-repacked": ["./packages/pglite-opfs-repacked/src/index.ts"],
       "@pgxsinkit/server": ["./packages/server/src/index.ts"],
-      "@pgxsinkit/sync-engine": ["./packages/sync-engine/src/index.ts"],
-      "@pgxsinkit/test-utils": ["./packages/test-utils/src/index.ts"]
+      "@pgxsinkit/test-utils": ["./packages/test-utils/src/index.ts"],
+      "@pgxsinkit/react": ["./packages/react/src/index.ts"]
     }
   }
 }

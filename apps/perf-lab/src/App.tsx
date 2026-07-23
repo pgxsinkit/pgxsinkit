@@ -1,8 +1,10 @@
 import { Repl } from "@electric-sql/pglite-repl";
+import { count, eq, sql } from "drizzle-orm";
 import { startTransition, useEffect, useMemo, useState } from "react";
 
+import { getReadModelView } from "@pgxsinkit/client";
 import type { MutationBatchItem, MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
-import { getSyncRegistrySchema } from "@pgxsinkit/contracts";
+import { getSyncRegistrySchema, quoteIdentifier, quoteSqlLiteral, type SyncTableEntry } from "@pgxsinkit/contracts";
 import {
   buildSyntheticRegistrySchemaName,
   buildSyntheticCreatePayload,
@@ -19,10 +21,10 @@ import {
   type SyntheticPerfLabScenario,
   type SyntheticRegistryBundle,
   type SyntheticRegistryOptions,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 import {
-  buildPerfDataDir,
+  buildPerfStorePath,
   getPerfLabConnectionDefaults,
   loadPerfClient,
   type PerfLabClient,
@@ -62,7 +64,6 @@ type FailedMutationSample = {
 
 type ConnectionInput = {
   mode: PerfLabConnectionMode;
-  writeUrl: string;
   batchWriteUrl: string;
   electricUrl: string;
   authIdentity: DemoAuthIdentity;
@@ -118,7 +119,6 @@ const defaultPresetKey =
 
 const defaultConnection: ConnectionInput = {
   mode: "live",
-  writeUrl: connectionDefaults.liveWriteUrl,
   batchWriteUrl: connectionDefaults.liveBatchWriteUrl,
   electricUrl: connectionDefaults.liveElectricUrl,
   authIdentity: "user1",
@@ -168,7 +168,7 @@ export function App() {
   useEffect(() => {
     return () => {
       if (client) {
-        void client.destroy();
+        void client.stop();
       }
     };
   }, [client]);
@@ -435,7 +435,7 @@ export function App() {
     let loadedClient: Awaited<ReturnType<typeof loadPerfClient>> | null = null;
 
     if (client) {
-      await client.destroy();
+      await client.stop();
     }
 
     setStatus("booting");
@@ -463,10 +463,10 @@ export function App() {
     const nextBundle = buildSyntheticRegistry(registryOptions);
     const nextRunId = createRunId();
     const nextRuntimeDescriptor = buildRuntimeDescriptor(nextScenario, nextConnection);
-    const authToken = demoAuthTokenByIdentity[nextConnection.authIdentity];
+    const authToken = demoAuthTokenByIdentity[nextConnection.authIdentity] ?? undefined;
 
     appendLog(
-      `Preparing browser lab with ${registryOptions.tableCount} tables, ${registryOptions.extraColumnCount} extra columns, local schema ${schemaName}, ${describeConnection(nextConnection)}, and data dir ${buildPerfDataDir(nextRunId)}`,
+      `Preparing browser lab with ${registryOptions.tableCount} tables, ${registryOptions.extraColumnCount} extra columns, local schema ${schemaName}, ${describeConnection(nextConnection)}, and store path ${buildPerfStorePath(nextRunId)}`,
     );
 
     const shouldPreseedRemoteRows =
@@ -489,17 +489,19 @@ export function App() {
 
       loadedClient = await loadPerfClient(
         nextBundle.registry,
-        buildPerfDataDir(nextRunId),
+        buildPerfStorePath(nextRunId),
         {
           mode: nextConnection.mode,
-          writeUrl: nextConnection.writeUrl,
           batchWriteUrl: nextConnection.batchWriteUrl,
           electricUrl: nextConnection.electricUrl,
-          authToken,
+          getAuthToken: async () => authToken,
           syncEnabled: nextConnection.syncEnabled,
         },
         {
-          prepareLocalDb: async (db) => {
+          prepareLocalDbBeforeSchema: async (db) => {
+            await ensureLocalPerfLabPrerequisites(db, nextBundle);
+          },
+          prepareLocalDbAfterSchema: async (db) => {
             await truncateLocalPerfLabTablesInDb(db, nextBundle);
           },
         },
@@ -648,7 +650,7 @@ export function App() {
         <section className="status-strip panel">
           <div>
             <span className={`status-pill status-${status}`}>{status.toUpperCase()}</span>
-            <p className="status-copy">Data dir: {buildPerfDataDir(runId)}</p>
+            <p className="status-copy">Store path: {buildPerfStorePath(runId)}</p>
           </div>
           <div>
             <strong>{metrics.activeTable}</strong>
@@ -709,13 +711,6 @@ export function App() {
               />
               <TextField
                 label="Write API URL"
-                value={connection.writeUrl}
-                onChange={(value) => updateConnection("writeUrl", value)}
-                disabled={connection.mode === "offline"}
-                placeholder={connectionDefaults.liveWriteUrl}
-              />
-              <TextField
-                label="Batch write URL"
                 value={connection.batchWriteUrl}
                 onChange={(value) => updateConnection("batchWriteUrl", value)}
                 disabled={connection.mode === "offline"}
@@ -1070,6 +1065,35 @@ function PercentilePanel({
   );
 }
 
+const SEED_OWNER_ID = "11111111-1111-4111-8111-111111111111";
+
+function buildLocalSeedRows(tableIndex: number, start: number, end: number, extraColumnCount: number) {
+  const rows: Array<Record<string, string | bigint>> = [];
+
+  for (let rowIndex = start; rowIndex < end; rowIndex += 1) {
+    const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
+    const timestampUs = 1_700_000_000_000_000n + BigInt(rowIndex);
+    const row: Record<string, string | bigint> = {
+      id: payload.id,
+      ownerId: SEED_OWNER_ID,
+      modifiedBy: SEED_OWNER_ID,
+      status: payload.status,
+      priority: payload.priority,
+      createdAtUs: timestampUs,
+      updatedAtUs: timestampUs,
+    };
+
+    for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
+      const fieldKey = `field${columnIndex.toString().padStart(2, "0")}`;
+      row[fieldKey] = payload[fieldKey] ?? "";
+    }
+
+    rows.push(row);
+  }
+
+  return rows;
+}
+
 async function seedLocalRows(
   client: PerfLabClient,
   bundle: SyntheticRegistryBundle,
@@ -1077,16 +1101,6 @@ async function seedLocalRows(
   extraColumnCount: number,
   onProgress: (progress: ProgressState) => void,
 ) {
-  const columnNames = [
-    "id",
-    ...Array.from({ length: extraColumnCount }, (_, index) => `field_${index.toString().padStart(2, "0")}`),
-    "owner_id",
-    "modified_by",
-    "status",
-    "priority",
-    "created_at_us",
-    "updated_at_us",
-  ];
   const batchSize = 250;
   const totalRows = countSyntheticWorkloadRows(bundle.tableNames.length, rowCount);
   let completedRows = 0;
@@ -1094,45 +1108,13 @@ async function seedLocalRows(
   await truncateLocalPerfLabTables(client, bundle);
 
   for (const [tableIndex, tableName] of bundle.tableNames.entries()) {
-    const qualifiedTableName = localProjectionName(bundle, tableName);
+    const { table } = requireRegistryEntry(bundle, tableName);
 
     for (let start = 0; start < rowCount; start += batchSize) {
       const batchEnd = Math.min(rowCount, start + batchSize);
-      const values: Array<string | number> = [];
-      const tuples: string[] = [];
+      const rows = buildLocalSeedRows(tableIndex, start, batchEnd, extraColumnCount);
 
-      for (let rowIndex = start; rowIndex < batchEnd; rowIndex += 1) {
-        const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
-        const placeholders: string[] = [];
-
-        values.push(String(payload.id));
-        placeholders.push(`$${values.length}`);
-
-        for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
-          values.push(String(payload[`field${columnIndex.toString().padStart(2, "0")}`]));
-          placeholders.push(`$${values.length}`);
-        }
-
-        values.push("11111111-1111-4111-8111-111111111111");
-        placeholders.push(`$${values.length}`);
-        values.push("11111111-1111-4111-8111-111111111111");
-        placeholders.push(`$${values.length}`);
-        values.push(String(payload.status));
-        placeholders.push(`$${values.length}`);
-        values.push(String(payload.priority));
-        placeholders.push(`$${values.length}`);
-        values.push(1_700_000_000_000_000 + rowIndex);
-        placeholders.push(`$${values.length}`);
-        values.push(1_700_000_000_000_000 + rowIndex);
-        placeholders.push(`$${values.length}`);
-
-        tuples.push(`(${placeholders.join(", ")})`);
-      }
-
-      await client.pglite.query(
-        `INSERT INTO ${qualifiedTableName} (${columnNames.join(", ")}) VALUES ${tuples.join(", ")}`,
-        values,
-      );
+      await client.drizzle.insert(table).values(rows);
       completedRows += batchEnd - start;
       onProgress({ label: "Seeding local rows across hot tables", completed: completedRows, total: totalRows });
       await yieldToBrowser();
@@ -1159,7 +1141,7 @@ async function stagePendingMutations(
     for (let index = start; index < batchEnd; index += 1) {
       const target = pickSyntheticWorkloadTarget(bundle.tableNames.length, index, localRows);
       const tableName = bundle.tableNames[target.tableIndex]!;
-      const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id as string;
+      const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id;
 
       batchItems.push({
         table: tableName,
@@ -1206,14 +1188,31 @@ async function measurePointReads(
   onProgress: (progress: ProgressState) => void,
 ) {
   const timings: number[] = [];
+  // Each hot table's point-read is AUTHORED once, up front, as tier-① Drizzle over the read-model view
+  // object (`sql.placeholder` renders as `$1`), then pre-rendered to text. The measured loop below must
+  // stay exactly a raw query of that pre-rendered text, so statement construction never pollutes the
+  // per-sample timing.
+  const statementByTable = new Map<string, string>(
+    bundle.tableNames.map((tableName) => {
+      const view = getReadModelView(bundle.registry, tableName);
+      // The view's columns ride an index signature (dynamic by construction); `id` always exists.
+      const idColumn = view["id"]!;
+      const statement = client.drizzle
+        .select({ id: idColumn })
+        .from(view)
+        .where(eq(idColumn, sql.placeholder("id")))
+        .toSQL().sql;
+      return [tableName, statement];
+    }),
+  );
 
   for (let index = 0; index < readSamples; index += 1) {
     const target = pickSyntheticWorkloadTarget(bundle.tableNames.length, index, localRows);
     const tableName = bundle.tableNames[target.tableIndex]!;
-    const readModelName = localProjectionName(bundle, `${tableName}_read_model`);
-    const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id as string;
+    const statement = statementByTable.get(tableName)!;
+    const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id;
     const started = performance.now();
-    const result = await client.pglite.query<{ id: string }>(`SELECT id FROM ${readModelName} WHERE id = $1`, [rowId]);
+    const result = await client.pglite.query<{ id: string }>(statement, [rowId]);
     timings.push(performance.now() - started);
 
     if (result.rows[0]?.id !== rowId) {
@@ -1427,11 +1426,11 @@ async function waitForFlushConvergence(
 async function queryRowCounts(client: PerfLabClient, bundle: SyntheticRegistryBundle) {
   const counts = await Promise.all(
     bundle.tableNames.map(async (tableName) => {
-      const result = await client.pglite.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM ${localProjectionName(bundle, tableName)}`,
-      );
+      const result = await client.drizzle
+        .select({ count: count() })
+        .from(requireRegistryEntry(bundle, tableName).table);
 
-      return [tableName, Number.parseInt(result.rows[0]?.count ?? "0", 10)] as const;
+      return [tableName, result[0]?.count ?? 0] as const;
     }),
   );
 
@@ -1440,23 +1439,25 @@ async function queryRowCounts(client: PerfLabClient, bundle: SyntheticRegistryBu
 
 async function queryOverlayBreakdown(client: PerfLabClient, bundle: SyntheticRegistryBundle) {
   const results = await Promise.all(
-    bundle.tableNames.map((tableName) =>
-      client.pglite.query<{ overlay_kind: string; count: string }>(
-        `
-          SELECT overlay_kind, COUNT(*)::text AS count
-          FROM ${localProjectionName(bundle, `${tableName}_read_model`)}
-          GROUP BY overlay_kind
-          ORDER BY overlay_kind
-        `,
-      ),
-    ),
+    bundle.tableNames.map((tableName) => {
+      const view = getReadModelView(bundle.registry, tableName);
+      // Index-signature access (dynamic by construction); the read model always carries `overlay_kind`.
+      const overlayKind = view["overlay_kind"]!;
+
+      return client.drizzle
+        .select({ overlayKind, count: count() })
+        .from(view)
+        .groupBy(overlayKind)
+        .orderBy(overlayKind);
+    }),
   );
 
   const countsByKind = new Map<string, number>();
 
-  for (const result of results) {
-    for (const row of result.rows) {
-      countsByKind.set(row.overlay_kind, (countsByKind.get(row.overlay_kind) ?? 0) + Number.parseInt(row.count, 10));
+  for (const rows of results) {
+    for (const row of rows) {
+      const kind = String(row.overlayKind);
+      countsByKind.set(kind, (countsByKind.get(kind) ?? 0) + row.count);
     }
   }
 
@@ -1549,7 +1550,7 @@ function describeConnection(connection: ConnectionInput) {
     return "offline loopback transport";
   }
 
-  return `live perf-lab backend ${connection.writeUrl} as ${connection.authIdentity}${connection.syncEnabled ? " with Electric echo" : " without Electric echo"}`;
+  return `live perf-lab backend ${connection.batchWriteUrl} as ${connection.authIdentity}${connection.syncEnabled ? " with Electric echo" : " without Electric echo"}`;
 }
 
 function describeConnectionNote(connection: ConnectionInput) {
@@ -1616,6 +1617,30 @@ async function truncateLocalPerfLabTables(client: PerfLabClient, bundle: Synthet
   await truncateLocalPerfLabTablesInDb(client.pglite, bundle);
 }
 
+async function ensureLocalPerfLabPrerequisites(db: PerfLabDb, bundle: SyntheticRegistryBundle) {
+  const schemaName = getSyncRegistrySchema(bundle.registry);
+  const markerTypeName = "perf_lab_client_pre_schema_marker";
+  const qualifiedMarkerTypeName = localProjectionName(bundle, markerTypeName);
+  const markerTypeNameLiteral = quoteSqlLiteral(markerTypeName);
+  const schemaNameLiteral = quoteSqlLiteral(schemaName);
+
+  await db.exec(`
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_type AS t
+    INNER JOIN pg_namespace AS n ON n.oid = t.typnamespace
+    WHERE t.typname = ${markerTypeNameLiteral}
+      AND n.nspname = ${schemaNameLiteral}
+  ) THEN
+    CREATE TYPE ${qualifiedMarkerTypeName} AS ENUM ('ready');
+  END IF;
+END
+$$;
+`);
+}
+
 async function truncateLocalPerfLabTablesInDb(db: PerfLabDb, bundle: SyntheticRegistryBundle) {
   const statements = bundle.tableNames.flatMap((tableName) => [
     `DELETE FROM ${localProjectionName(bundle, `${tableName}_overlay`)}`,
@@ -1640,8 +1665,14 @@ function localProjectionName(bundle: SyntheticRegistryBundle, objectName: string
   return `${quoteIdentifier(schemaName)}.${quoteIdentifier(objectName)}`;
 }
 
-function quoteIdentifier(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
+function requireRegistryEntry(bundle: SyntheticRegistryBundle, tableName: string): SyncTableEntry {
+  const entry = bundle.registry[tableName];
+
+  if (!entry) {
+    throw new Error(`Perf-lab registry has no entry for table ${tableName}`);
+  }
+
+  return entry;
 }
 
 function formatCount(value: number) {
@@ -1720,7 +1751,7 @@ async function performPerfLabRequest<TResponse extends Record<string, unknown>>(
   },
 ) {
   const authToken = demoAuthTokenByIdentity[connection.authIdentity];
-  const response = await fetch(buildPerfLabApiUrl(connection.writeUrl, pathname), {
+  const response = await fetch(buildPerfLabApiUrl(connection.batchWriteUrl, pathname), {
     method: options.method,
     headers: {
       "Content-Type": "application/json",
@@ -1737,7 +1768,6 @@ async function performPerfLabRequest<TResponse extends Record<string, unknown>>(
   throw new Error(payload?.message ?? `Perf-lab backend request failed with status ${response.status}`);
 }
 
-function buildPerfLabApiUrl(writeUrl: string, pathname: string) {
-  const normalizedBase = writeUrl.endsWith("/") ? writeUrl : `${writeUrl}/`;
-  return new URL(pathname.replace(/^\//, ""), normalizedBase).toString();
+function buildPerfLabApiUrl(batchWriteUrl: string, pathname: string) {
+  return new URL(pathname, new URL(batchWriteUrl).origin).toString();
 }

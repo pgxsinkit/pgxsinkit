@@ -10,12 +10,12 @@ This repo is designed to be continued by AI assistants over time. The priority i
 - new integration fixtures
 - additional API endpoints following the existing contract pattern
 - sync adapter instrumentation and diagnostics
-- targeted fixes inside `packages/pglite-sync` when backed by regression tests
+- targeted fixes inside the read-path engine (`packages/client/src/sync`) when backed by regression tests
 
 ## Areas that require extra care
 
 - changing the table schema
-- changing the vendored `packages/pglite-sync` behavior without tests
+- changing the read-path engine (`packages/client/src/sync`) behavior without tests
 - introducing new PostgreSQL extensions
 - changing container images or port assumptions
 

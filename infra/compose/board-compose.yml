@@ -1,0 +1,222 @@
+# Board demo — a TRIMMED but VERSION-MATCHED self-hosted Supabase + Electric stack (board ADR-0001).
+#
+# Mirrors the official Supabase self-hosted compose at a single matched release (image tags + their
+# UNMODIFIED init scripts in ./board/db-init = Supabase's own roles.sql + jwt.sql). We never modify a
+# Supabase-owned schema object — the board touches only the `public` schema (its drizzle migrations).
+# This is what lets the same board run unchanged against cloud Supabase (BaaS): there, Supabase owns
+# the platform; here we just stand up a faithful local mirror.
+#
+# Trimmed vs. full self-hosted: dropped realtime, storage, imgproxy, analytics, vector, supavisor
+# (Storage/attachments are a board v2). Kept: db / auth / rest / meta + studio / envoy / functions
+# (edge-runtime) + electric. Board-only ports so it coexists with the harness. Every service connects
+# as `postgres`/`authenticator`/`supabase_auth_admin` (passwords set to ${POSTGRES_PASSWORD} by the
+# image + the official roles.sql). Bring up with `bun run infra:up`.
+
+name: pgxsinkit-board
+
+services:
+  db:
+    image: docker.io/supabase/postgres:17.6.1.143
+    container_name: board-db
+    # Supabase's OWN init scripts (vendored byte-unmodified), mounted at the SAME paths the official
+    # self-hosted compose uses. Order matters: the image's migrate.sh runs init-scripts/*.sql under
+    # `set -e`, so 99-roles.sql (which ALTERs supabase_functions_admin's password) MUST be preceded by
+    # 98-webhooks.sql, which creates that role. Omitting webhooks.sql makes roles.sql fail, which
+    # aborts migrate.sh before it runs the image's own migrations/ set — including the migration that
+    # hands auth.uid/role/email to supabase_auth_admin, which GoTrue needs to boot. webhooks.sql is
+    # self-contained (only needs pg_net, bundled in the image); we don't run DB webhooks, but it's the
+    # role's birthplace in the official chain. jwt.sql sets the database JWT GUCs.
+    volumes:
+      - ./board/db-init/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:ro
+      - ./board/db-init/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:ro
+      - ./board/db-init/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:ro
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      JWT_EXP: ${JWT_EXPIRY}
+    ports:
+      - "54322:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  auth:
+    image: docker.io/supabase/gotrue:v2.192.0
+    container_name: board-auth
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: ${BOARD_API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      GOTRUE_SITE_URL: ${BOARD_SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: "*"
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
+      # New asymmetric auth (board ADR-0007): with GOTRUE_JWT_KEYS set, GoTrue SIGNS sessions ES256 and
+      # exposes the public key at /auth/v1/.well-known/jwks.json; the board functions verify ES256-only.
+      # GOTRUE_JWT_SECRET is still a REQUIRED boot key (GoTrue refuses to start without it) — it is the
+      # symmetric compatibility key required by GoTrue itself, never used in the board's auth path.
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_KEYS: ${GOTRUE_JWT_KEYS}
+      GOTRUE_JWT_ISSUER: ${BOARD_API_EXTERNAL_URL}/auth/v1
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      # No mail server in the demo: confirm signups automatically so admin-API-seeded users log in.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+    ports:
+      - "54334:9999"
+
+  # NB: PostgREST (the `rest` service) is intentionally absent. The board does not use the auto-CRUD
+  # data API — reads go through board-sync (Electric, registry-filtered) and writes through
+  # board-write (the governed mutation ingress) — and exposing it would let an authenticated user
+  # bypass board-write to reach tables directly. RLS governs every table regardless, but dropping the
+  # service + its gateway route removes the surface entirely. (Studio's table editor needs PostgREST, so
+  # it is non-functional here; schema introspection via postgres-meta still works.)
+
+  meta:
+    image: docker.io/supabase/postgres-meta:v0.96.6
+    container_name: board-meta
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: "8080"
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: "5432"
+      PG_META_DB_NAME: ${POSTGRES_DB}
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+  studio:
+    image: docker.io/supabase/studio:2026.07.07-sha-a6a04f2
+    container_name: board-studio
+    depends_on:
+      - meta
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: pgxsinkit-board
+      DEFAULT_PROJECT_NAME: board
+      SUPABASE_URL: http://envoy:8000
+      SUPABASE_PUBLIC_URL: ${BOARD_API_EXTERNAL_URL}
+      SUPABASE_ANON_KEY: ${BOARD_PUBLISHABLE_KEY}
+      SUPABASE_SERVICE_KEY: ${BOARD_SECRET_KEY}
+    ports:
+      - "54333:3000"
+
+  # Envoy API gateway (board ADR-0007/0008). Supabase's self-hosted stack is moving to an Envoy-based
+  # gateway; the board mirrors it (board/envoy.yaml). It terminates the board's single origin (:54331),
+  # routes /auth/v1 + /functions/v1, and runs the new-API-key → role-JWT translation Lua filter (the
+  # same job the Cloud gateway does) while leaving a signed-in user's session JWT untouched.
+  envoy:
+    image: docker.io/envoyproxy/envoy:v1.38.3
+    container_name: board-envoy
+    depends_on:
+      - auth
+      - functions
+    volumes:
+      - ./board/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "54331:8000"
+
+  # caddy — TLS-terminating HTTP/2 + HTTP/3 front for the gateway (board dogfooding finding). The
+  # browser holds one Electric long-poll connection PER synced shape — 6 for the board (the TEAM_SCOPE
+  # group's team/team_member/channel/issue, plus singleton profile + message). Over plain HTTP/1.1 the
+  # browser's ~6-connections-per-origin cap is fully consumed by those long-polls, so board-write (and
+  # chat sends) sit Stalled in the browser's queue for a whole long-poll cycle (~6–13s) before they are
+  # even dispatched — the demo's "writes are slow" symptom. h2/h3 multiplex every request over ONE
+  # connection, so the cap never binds. A real deployment already serves h2 over TLS at its gateway
+  # (istio); this gives the local demo the same property. The cert is a mkcert-issued localhost cert
+  # (infra:up generates it into ./certs; the local mkcert CA is already trusted, which h3/QUIC needs).
+  # The browser talks https://localhost:54343; tests + seed scripts still use envoy directly on 54331.
+  caddy:
+    image: docker.io/caddy:2.11.4-alpine
+    container_name: board-caddy
+    depends_on:
+      - envoy
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    ports:
+      - "54343:54343/tcp"
+      - "54343:54343/udp" # HTTP/3 (QUIC)
+
+  functions:
+    image: docker.io/supabase/edge-runtime:v1.74.2
+    container_name: board-functions
+    depends_on:
+      db:
+        condition: service_healthy
+    # The vendored official main router (functions-dist/main) dispatches /board-write and /board-sync
+    # to their bundled workers. VERIFY_JWT=false: the board functions verify the GoTrue token
+    # themselves (apps/board-api/src/core/auth.ts), keeping that the single, runtime-portable auth point.
+    command: ["start", "--main-service", "/home/deno/functions/main"]
+    volumes:
+      - ../../supabase/functions-dist:/home/deno/functions:ro
+    environment:
+      VERIFY_JWT: "false"
+      # The board functions verify each GoTrue session token against the project JWKS, fetched from
+      # `${SUPABASE_URL}/auth/v1/.well-known/jwks.json` (board ADR-0007). No JWT_SECRET (no HS256).
+      SUPABASE_URL: http://envoy:8000
+      SUPABASE_ANON_KEY: ${BOARD_PUBLISHABLE_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${BOARD_SECRET_KEY}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      ELECTRIC_SHAPE_URL: http://electric:3000/v1/shape
+      BOARD_ALLOWED_ORIGINS: ${BOARD_SITE_URL},http://localhost:5174
+      # Keep a board-sync long-poll worker alive ~10min instead of the stock 60s, so the read path
+      # is not forced to reconnect every minute when the worker hits its wall-clock budget (read by
+      # the vendored main router). Demo realism: Cloud Supabase manages worker lifetime for you.
+      EDGE_WORKER_TIMEOUT_MS: "600000"
+
+  electric:
+    image: docker.io/electricsql/electric:1.7.7
+    container_name: board-electric
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      ELECTRIC_INSECURE: "true"
+      # Preview feature the board's membership row-filters require (cross-table subquery `where`).
+      ELECTRIC_FEATURE_FLAGS: allow_subqueries,tagged_subqueries
+    ports:
+      - "54330:3000"
+
+  # warmer — keeps the board-write + board-sync edge workers hot (board dogfooding finding).
+  #
+  # Self-hosted edge-runtime suspends an idle user worker within ~15s and evicts a cold one's module
+  # cache after longer idle. Without warming, a learner's first drag after a quiet period pays an
+  # edge cold start: ~5.8s to import the board-write bundle, or ~0.45s to re-establish the worker's
+  # Postgres connection after a shorter idle — felt as the convergence dot lingering for seconds even
+  # though the sync rail itself is fast (~75ms Electric echo, ~20ms apply). A cheap request every 8s
+  # keeps the workers active, so real writes stay ~20ms. The empty-`mutations` POST is rejected at
+  # validation (400) *before* any DB work — the cheapest request that still reaches the worker — and
+  # the anon `board-sync` shape (200, empty) warms the read proxy. Pure demo realism: a managed BaaS
+  # (Cloud Supabase) keeps functions warm for you, so nothing like this ships in the app.
+  warmer:
+    image: docker.io/curlimages/curl:8.21.0
+    container_name: board-warmer
+    depends_on:
+      - envoy
+    environment:
+      BOARD_PUBLISHABLE_KEY: ${BOARD_PUBLISHABLE_KEY}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        while true; do
+          curl -fsS -o /dev/null -X POST "http://envoy:8000/functions/v1/board-write/api/mutations" \
+            -H "apikey: $$BOARD_PUBLISHABLE_KEY" -H "Authorization: Bearer $$BOARD_PUBLISHABLE_KEY" \
+            -H "Content-Type: application/json" -d '{"mutations":[]}' 2>/dev/null || true
+          curl -fsS -o /dev/null "http://envoy:8000/functions/v1/board-sync?table=team&offset=-1" \
+            -H "apikey: $$BOARD_PUBLISHABLE_KEY" -H "Authorization: Bearer $$BOARD_PUBLISHABLE_KEY" 2>/dev/null || true
+          sleep 8
+        done

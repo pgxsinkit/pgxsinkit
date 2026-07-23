@@ -1,5 +1,11 @@
+import { bigint, pgSchema, text } from "drizzle-orm/pg-core";
+import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
+
 import type { PerfLabDb } from "./pglite";
 
+// Tier ③ (justified): bootstrap DDL — CREATE SCHEMA / CREATE TABLE with an identity column. No
+// drizzle-kit migration lane exists for the browser-local REPL store, and Drizzle objects cannot
+// express DDL execution, so the bootstrap stays a raw string.
 const HISTORY_SCHEMA_SQL = `
   CREATE SCHEMA IF NOT EXISTS debug;
   CREATE TABLE IF NOT EXISTS debug.repl_history (
@@ -11,9 +17,25 @@ const HISTORY_SCHEMA_SQL = `
   );
 `;
 
+// The history table as a Drizzle query-authoring object, mirroring the bootstrap DDL above (which
+// remains the source of truth for the physical shape). `seq` is GENERATED ALWAYS — never inserted.
+const replHistory = pgSchema("debug").table("repl_history", {
+  seq: bigint("seq", { mode: "bigint" }).generatedAlwaysAsIdentity().primaryKey(),
+  sql: text("sql").notNull(),
+  resultJson: text("result_json"),
+  errorMessage: text("error_message"),
+  executedAtUs: bigint("executed_at_us", { mode: "number" }).notNull(),
+});
+
 const MAX_RESULT_BYTES = 8192;
 
+// Same shape-cast the toolkit's own `createDrizzleDatabase` uses: the live/electric-extended PGlite
+// interface (`ClientPGlite`) is not type-assignable to drizzle's `client` param, though it is the same
+// runtime object.
+const createHistoryDatabase = drizzle as unknown as (config: { client: PerfLabDb }) => PgliteDatabase;
+
 export function createReplProxy(db: PerfLabDb): PerfLabDb {
+  const history = createHistoryDatabase({ client: db });
   let historyTableReady: Promise<void> | null = null;
 
   function ensureHistoryTable(): Promise<void> {
@@ -53,13 +75,7 @@ export function createReplProxy(db: PerfLabDb): PerfLabDb {
           throw error;
         } finally {
           void ensureHistoryTable()
-            .then(() =>
-              target.query(
-                `INSERT INTO debug.repl_history (sql, result_json, error_message, executed_at_us)
-                 VALUES ($1, $2, $3, $4)`,
-                [sql, resultJson, errorMessage, executedAtUs],
-              ),
-            )
+            .then(() => history.insert(replHistory).values({ sql, resultJson, errorMessage, executedAtUs }))
             .catch(() => {
               // REPL history persistence is best-effort only.
             });

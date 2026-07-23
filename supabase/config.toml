@@ -1,0 +1,26 @@
+# Supabase CLI config for deploying the board demo's edge functions to a Cloud project (board ADR-0008).
+# Used only by the cloud path (`bun run board:cloud:deploy` → `supabase functions deploy …`); the LOCAL
+# demo serves these same functions through the vendored edge-runtime main router (infra/compose), not
+# the CLI, so nothing here affects `bun run infra:up`.
+#
+# `project_id` is a local label; scripts pass BOARD_SUPABASE_PROJECT_REF as `--project-ref`.
+project_id = "pgxsinkit-board"
+
+# Each function deploys from its PRE-BUILT bundle (bun run edge:build → functions-dist/<name>/index.js),
+# not its workspace source: the source imports the unpublished @pgxsinkit/board-schema + extensionless
+# @pgxsinkit/* specifiers the CLI's resolver can't load, whereas the bundle is self-contained (npm: +
+# node: externals the hosted Deno runtime provides). board ADR-0001/0008.
+#
+# verify_jwt = false: the functions verify the GoTrue session token themselves against the project JWKS
+# (ES256-only; ADR-0007). With the new sb_ API keys the platform gateway does not enforce the apikey
+# header anyway, so the functions are the single auth point — exactly as they are locally.
+
+[functions.board-write]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions-dist/board-write/index.js"
+
+[functions.board-sync]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions-dist/board-sync/index.js"

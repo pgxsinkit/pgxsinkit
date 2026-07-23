@@ -1,19 +1,25 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-const destroyMock = vi.fn<() => Promise<void>>(async () => undefined);
-const createSyncClientMock = vi.fn<
-  () => Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: () => Promise<void> }>
->(async () => ({
-  pglite: { name: "perf-lab-db" },
-  ready: Promise.resolve(),
-  destroy: destroyMock,
-}));
+import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
-vi.mock("@pgxsinkit/client", () => ({
-  createSyncClient: createSyncClientMock,
-}));
+const destroyMock = mock(async (): Promise<void> => undefined);
+const createSyncClientMock = mock(
+  async (): Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: () => Promise<void> }> => ({
+    pglite: { name: "perf-lab-db" },
+    ready: Promise.resolve(),
+    destroy: destroyMock,
+  }),
+);
 
 describe("perf-lab pglite loader", () => {
+  beforeAll(async () => {
+    await mock.module("@pgxsinkit/client", () => ({
+      createSyncClient: createSyncClientMock,
+    }));
+  });
+
+  afterAll(() => mock.restore());
+
   beforeEach(() => {
     destroyMock.mockClear();
     createSyncClientMock.mockClear();
@@ -34,17 +40,15 @@ describe("perf-lab pglite loader", () => {
             syncedTable: "perf_items_000",
             overlayTable: "perf_items_000_overlay",
             journalTable: "perf_items_000_mutations",
-            readModel: "perf_items_000_read_model",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       "idb://pgxsinkit-perf-lab-browser",
       {
         mode: "live",
-        writeUrl: "http://127.0.0.1:3101",
-        batchWriteUrl: "http://127.0.0.1:3101",
-        electricUrl: "http://127.0.0.1:3101/v1/shape-proxy",
-        authToken: "token-user1",
+        batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+        getAuthToken: async () => "token-user1",
         syncEnabled: true,
       },
     );
@@ -72,16 +76,14 @@ describe("perf-lab pglite loader", () => {
             syncedTable: "perf_items_000",
             overlayTable: "perf_items_000_overlay",
             journalTable: "perf_items_000_mutations",
-            readModel: "perf_items_000_read_model",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       "idb://pgxsinkit-perf-lab-browser",
       {
         mode: "offline",
-        writeUrl: "http://127.0.0.1:3101",
-        batchWriteUrl: "http://127.0.0.1:3101",
-        electricUrl: "http://127.0.0.1:3101/v1/shape-proxy",
+        batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
         syncEnabled: true,
       },
     );
@@ -94,7 +96,7 @@ describe("perf-lab pglite loader", () => {
 
   it("passes the local database preparation hook through to the sync client", async () => {
     const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
-    const prepareLocalDb = vi.fn<(db: unknown) => Promise<void>>(async (_db) => undefined);
+    const prepareLocalDbAfterSchema = mock(async (_db: unknown): Promise<void> => undefined);
 
     await loadPerfClient(
       {
@@ -108,22 +110,53 @@ describe("perf-lab pglite loader", () => {
             syncedTable: "perf_items_000",
             overlayTable: "perf_items_000_overlay",
             journalTable: "perf_items_000_mutations",
-            readModel: "perf_items_000_read_model",
           },
         },
-      } as any,
+      } as unknown as SyncTableRegistry,
       "idb://pgxsinkit-perf-lab-browser",
       {
         mode: "live",
-        writeUrl: "http://127.0.0.1:3101",
-        batchWriteUrl: "http://127.0.0.1:3101",
-        electricUrl: "http://127.0.0.1:3101/v1/shape-proxy",
-        authToken: "token-user1",
+        batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+        getAuthToken: async () => "token-user1",
         syncEnabled: true,
       },
-      { prepareLocalDb },
+      { prepareLocalDbAfterSchema },
     );
 
-    expect(createSyncClientMock).toHaveBeenCalledWith(expect.objectContaining({ prepareLocalDb }));
+    expect(createSyncClientMock).toHaveBeenCalledWith(expect.objectContaining({ prepareLocalDbAfterSchema }));
+  });
+
+  it("passes the pre-schema local database preparation hook through to the sync client", async () => {
+    const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
+    const prepareLocalDbBeforeSchema = mock(async (_db: unknown): Promise<void> => undefined);
+
+    await loadPerfClient(
+      {
+        perf_items_000: {
+          mode: "readwrite",
+          table: {},
+          primaryKey: { columns: ["id"] },
+          shape: { tableName: "perf_items_000", shapeKey: "perf_lab_local_100k.perf_items_000" },
+          routes: { basePath: "/api/perf_items_000" },
+          clientProjection: {
+            syncedTable: "perf_items_000",
+            overlayTable: "perf_items_000_overlay",
+            journalTable: "perf_items_000_mutations",
+          },
+        },
+      } as unknown as SyncTableRegistry,
+      "idb://pgxsinkit-perf-lab-browser",
+      {
+        mode: "live",
+        batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+        getAuthToken: async () => "token-user1",
+        syncEnabled: true,
+      },
+      { prepareLocalDbBeforeSchema },
+    );
+
+    expect(createSyncClientMock).toHaveBeenCalledWith(expect.objectContaining({ prepareLocalDbBeforeSchema }));
   });
 });

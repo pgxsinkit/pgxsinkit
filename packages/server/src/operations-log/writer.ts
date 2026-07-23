@@ -1,13 +1,20 @@
-import { sql } from "drizzle-orm";
-
+import { operationsLogTable } from "./schema";
 import type { OpsLogEntry, OperationsLogConfig, SqlExecutor } from "./types";
 
-function toJson(value: unknown): string | null {
+function toJsonValue(value: unknown): unknown {
   if (value === undefined) {
     return null;
   }
 
-  return JSON.stringify(value);
+  return value;
+}
+
+function toBigIntValue(value: string | null | undefined): bigint | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  return BigInt(value);
 }
 
 export async function logOperation(
@@ -19,44 +26,20 @@ export async function logOperation(
     return;
   }
 
-  const entityKeyJson = toJson(entry.entityKey ?? null);
-  const payloadJson = toJson(entry.payload);
-
-  await executor.execute(sql`
-    INSERT INTO operations_log (
-      source,
-      backend,
-      table_name,
-      operation_kind,
-      user_id,
-      entity_key_json,
-      payload_json,
-      status,
-      error_message,
-      http_status,
-      mutation_id,
-      mutation_seq,
-      client_timestamp_us,
-      request_path,
-      server_timestamp_us
-    ) VALUES (
-      ${entry.source},
-      ${entry.backend},
-      ${entry.tableName ?? null},
-      ${entry.operationKind ?? null},
-      ${entry.userId ?? null},
-      ${entityKeyJson}::jsonb,
-      ${payloadJson}::jsonb,
-      ${entry.status},
-      ${entry.errorMessage ?? null},
-      ${entry.httpStatus ?? null},
-      ${entry.mutationId ?? null},
-      ${entry.mutationSeq ?? null},
-      ${entry.clientTimestampUs ?? null},
-      ${entry.requestPath ?? null},
-      CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-    )
-  `);
+  await executor.insert(operationsLogTable).values({
+    tableName: entry.tableName ?? null,
+    operationKind: entry.operationKind ?? null,
+    userId: entry.userId ?? null,
+    entityKeyJson: toJsonValue(entry.entityKey ?? null),
+    payloadJson: toJsonValue(entry.payload),
+    status: entry.status,
+    errorMessage: entry.errorMessage ?? null,
+    httpStatus: entry.httpStatus ?? null,
+    mutationId: entry.mutationId ?? null,
+    mutationSeq: entry.mutationSeq ?? null,
+    clientTimestampUs: toBigIntValue(entry.clientTimestampUs),
+    requestPath: entry.requestPath ?? null,
+  });
 }
 
 export async function logOperationSafely(

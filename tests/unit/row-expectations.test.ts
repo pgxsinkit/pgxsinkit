@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { selectRowExpectationsForVerification } from "../performance/support/row-expectations";
 
 describe("row expectation selection", () => {

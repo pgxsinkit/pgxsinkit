@@ -1,0 +1,27 @@
+pgxsinkit
+=========
+
+This product includes software vendored from third parties.
+
+------------------------------------------------------------------------------
+ElectricSQL — @electric-sql/pglite, package `pglite-sync`
+------------------------------------------------------------------------------
+
+The read-path sync engine under `packages/client/src/sync/` and the test suites
+listed below were originally seeded from ElectricSQL's `@electric-sql/pglite`
+monorepo, package `packages/pglite-sync`:
+
+  Source:  https://github.com/electric-sql/pglite/tree/main/packages/pglite-sync
+  License: Apache License 2.0
+  Copyright (c) ElectricSQL and contributors
+
+The engine and these suites are now fully internalized (ADR-0009) and owned; they
+diverge freely from upstream and upstream compatibility is an explicit anti-goal
+(ADR-0028). This attribution is retained because the code began as a copy — the
+Apache-2.0 terms are permanent. The seeded-from suites:
+
+  - tests/unit/sync-engine.test.ts                     (from test/sync.test.ts)
+  - tests/integration/sync-engine-e2e.integration.test.ts  (from test-e2e/sync-e2e.test.ts)
+
+A copy of the Apache License 2.0 is available at:
+  https://www.apache.org/licenses/LICENSE-2.0

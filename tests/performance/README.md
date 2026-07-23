@@ -118,6 +118,37 @@ The browser lab is intended for browser-based full-cycle testing of the client r
 
 Set `PGXSINKIT_PERF_MUTATION_BATCH_SIZE` before `bun run perf:lab` to change how many local mutations the browser lab stages per `client.mutate.batch(...)` call. The default is `1`, which keeps one-mutation-at-a-time behavior.
 
-`bun run perf:lab` owns its own dedicated stack. It first tears down any prior `pgxsinkit-perf-lab` containers and fixed child processes, then starts a fresh PostgreSQL, ElectricSQL, perf-lab write server, and Vite browser server on fixed names and ports. The default live URLs are `http://127.0.0.1:3101` for writes and `http://127.0.0.1:3101/v1/shape-proxy` for Electric proxying. The browser app respects `VITE_WRITE_API_URL`, `VITE_BATCH_WRITE_URL`, and `VITE_ELECTRIC_URL` if you intentionally override them.
+`bun run perf:lab` owns its own dedicated stack. It first tears down any prior `pgxsinkit-perf-lab` containers and fixed child processes, then starts a fresh PostgreSQL, ElectricSQL, perf-lab write server, and Vite browser server on fixed names and ports. The default live URLs are `http://127.0.0.1:3101/api/mutations` for writes and `http://127.0.0.1:3101/v1/electric-proxy` for Electric proxying. The browser app respects `VITE_WRITE_API_ORIGIN` and `VITE_ELECTRIC_URL` if you intentionally override them.
 
 Offline loopback mode remains available for purely local pressure checks, but that is not the default path.
+
+## RLS read load
+
+`bun run test:performance:rls` measures the cost of **RLS-governed reads** at scale — the path a
+direct (non-synced) read endpoint takes — for the two authorization shapes the toolkit ships:
+
+- **membership fan-out** — visibility via `container IN (SELECT … FROM membership …)`, and
+- **grant-scope** — visibility via a JWT-resident grant set (`app_metadata.authorization.grants`), no join.
+
+Because Electric cannot read RLS, each shape is measured three ways so the numbers are comparable:
+
+- **baseline** — privileged `SELECT`, no predicate (the floor),
+- **shape-query** — privileged `SELECT` + the resolved row-filter `where` (what Electric runs on the synced path),
+- **rls** — `SET ROLE authenticated` + claims, policy active (what a direct read runs).
+
+The `rls` line is run for both the InitPlan-correct policy and a deliberately **naive** (correlated)
+variant, **with and without** the supporting index. The report records `cliffRatioP95` (naive ÷
+correct), `indexSpeedupP95` (no-index ÷ index), and `rlsVsShapeP95` (direct-read RLS ÷ Electric
+shape query — close to 1 means a direct read costs about what the synced shape query costs), plus an
+`EXPLAIN ANALYZE` capture for the correct and naive plans. The **only asserted** budget is the
+correct, indexed `rls` p95 (`PGXSINKIT_PERF_RLS_P95_MAX_MS`); the naive / no-index lines are reported,
+not gated (they are expected to be slow — that is the demonstration).
+
+Knobs (all default per `PGXSINKIT_PERF_PRESET`):
+
+- `PGXSINKIT_PERF_RLS_CONTAINERS` — workspaces / offerings seeded
+- `PGXSINKIT_PERF_RLS_FOCAL` — how many of them the focal caller can see (member / granted)
+- `PGXSINKIT_PERF_RLS_ROWS_PER_CONTAINER` — rows seeded per container
+- `PGXSINKIT_PERF_RLS_MEMBERS_PER_CONTAINER` — membership volume per container
+- `PGXSINKIT_PERF_RLS_SAMPLES` — read samples per measured cell
+- `PGXSINKIT_PERF_RLS_P95_MAX_MS` — the asserted budget for the correct, indexed read

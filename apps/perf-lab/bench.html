@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pgxsinkit storage benchmarks</title>
+    <style>
+      :root {
+        --border: #d0d5dd;
+        --muted: #667085;
+        --bg-soft: #f7f8fa;
+        --accent: #3538cd;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        margin: 0 auto;
+        max-width: 72rem;
+        padding: 1.25rem;
+        line-height: 1.45;
+        color: #101828;
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin: 0 0 0.25rem;
+      }
+      h2 {
+        font-size: 1.05rem;
+        margin: 1.75rem 0 0.5rem;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0.25rem;
+      }
+      h3 {
+        font-size: 1rem;
+        margin: 0 0 0.25rem;
+      }
+      p.lede {
+        color: var(--muted);
+        margin: 0 0 1rem;
+        max-width: 52rem;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.5rem;
+        align-items: flex-start;
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        border-radius: 0.5rem;
+        padding: 0.9rem 1rem;
+      }
+      .controls fieldset {
+        border: none;
+        margin: 0;
+        padding: 0;
+      }
+      .controls legend {
+        font-weight: 600;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+        margin-bottom: 0.4rem;
+      }
+      .opt {
+        display: flex;
+        gap: 0.4rem;
+        align-items: baseline;
+        font-size: 0.9rem;
+        margin: 0.15rem 0;
+        cursor: pointer;
+      }
+      button {
+        font-size: 1rem;
+        font-weight: 600;
+        padding: 0.6rem 1.4rem;
+        margin: 1rem 0 0.5rem;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 0.4rem;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #envelope dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 0.15rem 0.9rem;
+        font-size: 0.85rem;
+        margin: 0.5rem 0 0;
+      }
+      #envelope dt {
+        color: var(--muted);
+      }
+      #envelope dd {
+        margin: 0;
+        word-break: break-word;
+      }
+      #progress {
+        background: #0b1020;
+        color: #cfe1ff;
+        border-radius: 0.4rem;
+        padding: 0.7rem;
+        max-height: 34vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 0.8rem;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      section.battery {
+        margin: 1.5rem 0;
+      }
+      section.battery .tag {
+        font-size: 0.7rem;
+        font-weight: 500;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 1rem;
+        padding: 0.05rem 0.5rem;
+        vertical-align: middle;
+      }
+      p.desc {
+        color: var(--muted);
+        font-size: 0.85rem;
+        margin: 0.1rem 0 0.5rem;
+        max-width: 60rem;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 34rem;
+      }
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 0.4rem 0.6rem;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        vertical-align: top;
+      }
+      thead th {
+        background: var(--bg-soft);
+        text-align: right;
+      }
+      thead th:first-child,
+      td.rowlabel {
+        text-align: left;
+      }
+      td.rowlabel {
+        font-weight: 500;
+      }
+      .detail {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .warn {
+        color: #b54708;
+        font-size: 0.75rem;
+        font-style: italic;
+      }
+      .muted {
+        color: var(--muted);
+        text-align: center;
+      }
+      .unavailable {
+        color: #b42318;
+        text-align: center;
+      }
+      #restore-notice {
+        background: #fffaeb;
+        border: 1px solid #fedf89;
+        color: #93370d;
+        border-radius: 0.4rem;
+        padding: 0.6rem 0.8rem;
+        margin: 1rem 0;
+        font-size: 0.85rem;
+      }
+      #sw-proof {
+        border-radius: 0.4rem;
+        padding: 0.6rem 0.8rem;
+        margin: 1rem 0;
+        font-size: 0.85rem;
+        border: 1px solid var(--border);
+      }
+      #sw-proof.sw-granted {
+        background: #ecfdf3;
+        border-color: #abefc6;
+        color: #067647;
+      }
+      #sw-proof.sw-denied {
+        background: var(--bg-soft);
+        color: var(--muted);
+      }
+      #sw-proof.sw-failed {
+        background: #fef3f2;
+        border-color: #fecdca;
+        color: #b42318;
+      }
+      #results-json {
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        border-radius: 0.4rem;
+        padding: 0.7rem;
+        overflow: auto;
+        max-height: 40vh;
+        font-size: 0.78rem;
+      }
+      footer {
+        margin-top: 2rem;
+        color: var(--muted);
+        font-size: 0.8rem;
+        border-top: 1px solid var(--border);
+        padding-top: 0.75rem;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>pgxsinkit storage benchmarks</h1>
+    <p class="lede">
+      A wa-sqlite-style suite of timed SQL batteries across four PGlite storage backends — <code>idb</code>,
+      <code>opfs-ahp</code>, the constant-four-handle <code>opfs-repacked</code> (per-cell dedicated worker), and
+      <code>opfs-repacked-sw</code>: the identical engine hosted directly in a SharedWorker, runnable only where the
+      engine grants sync-access handles there (WebKit) — the side-by-side hosting comparison. Durability is relaxed by
+      default; flip the strict toggle to measure per-commit flush cost. Open this page on a real device (iPhone/Safari)
+      to gather the per-engine numbers — nothing here needs a network.
+    </p>
+
+    <div class="controls">
+      <fieldset>
+        <legend>Batteries</legend>
+        <div id="battery-list"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Backends</legend>
+        <div id="backend-list"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Durability</legend>
+        <label class="opt"
+          ><input type="checkbox" id="strict-toggle" /><span>strict (non-matrix batteries)</span></label
+        >
+      </fieldset>
+    </div>
+
+    <button id="run" type="button">Run selected</button>
+
+    <div id="envelope"></div>
+
+    <div id="sw-proof" hidden></div>
+
+    <div id="restore-notice" hidden></div>
+
+    <h2>Progress</h2>
+    <pre id="progress"></pre>
+
+    <h2>Results</h2>
+    <div id="results-tables"></div>
+
+    <h2>Raw JSON</h2>
+    <pre id="results-json"></pre>
+
+    <footer>
+      Times in each cell are wall-clock for the whole step (worker thread, <code>performance.now()</code>). Per-op
+      batteries also show mean / p50 / p95 / max per operation. The final envelope is on
+      <code>window.__benchResults</code>; <code>?auto=1</code> runs everything on load. Results survive a page reload —
+      the latest envelope is mirrored to <code>sessionStorage</code> and restored behind a notice (iOS Safari may reload
+      the page under memory pressure). <code>?debug=1</code> turns on PGlite/VFS tracing (<code
+        >console.log('[opfs-ahp]', …)</code
+      >) in the console for diagnosing the opfs-ahp store-open hang.
+    </footer>
+
+    <script type="module" src="/src/bench/main.ts"></script>
+  </body>
+</html>

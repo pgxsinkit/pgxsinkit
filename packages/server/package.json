@@ -1,14 +1,39 @@
 {
   "name": "@pgxsinkit/server",
-  "private": true,
+  "version": "0.0.0",
+  "keywords": [
+    "tanstack-intent"
+  ],
+  "license": "MIT",
+  "bin": {
+    "pgxsinkit-generate": "bin/pgxsinkit-generate.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "README.md",
+    "skills"
+  ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@pgxsinkit/contracts": "workspace:*",
-    "drizzle-orm": "1.0.0-beta.22",
-    "hono": "4.12.14",
-    "postgres": "3.4.9"
+    "@pgxsinkit/contracts": "workspace:*"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "1.0.0-rc.4"
   }
 }

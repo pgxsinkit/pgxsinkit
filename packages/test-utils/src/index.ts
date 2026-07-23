@@ -1,4 +1,22 @@
+import { drizzle } from "drizzle-orm/bun-sql";
+import { defineRelations } from "drizzle-orm/relations";
 import { z } from "zod";
+
+import type { RegistryRelations, SyncTableRegistry } from "@pgxsinkit/contracts";
+import { buildRegistrySchema } from "@pgxsinkit/server";
+
+export function createServerDb<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+  databaseUrl: string,
+): { db: ReturnType<typeof drizzle<RegistryRelations<TRegistry>>>; close: () => Promise<void> } {
+  const schema = buildRegistrySchema(registry);
+  const relations = defineRelations(schema) as RegistryRelations<TRegistry>;
+  const db = drizzle({ connection: databaseUrl, relations });
+  return {
+    db: db as ReturnType<typeof drizzle<RegistryRelations<TRegistry>>>,
+    close: () => db.$client.close(),
+  };
+}
 
 export const integrationEnvSchema = z.object({
   databaseUrl: z.string().default("postgresql://postgres:password@localhost:54321/pgxsinkit?sslmode=disable"),
@@ -9,8 +27,8 @@ export type IntegrationEnv = z.infer<typeof integrationEnvSchema>;
 
 export function readIntegrationEnv(overrides?: Partial<IntegrationEnv>) {
   return integrationEnvSchema.parse({
-    databaseUrl: process.env.DATABASE_URL,
-    electricUrl: process.env.ELECTRIC_URL,
+    databaseUrl: process.env["DATABASE_URL"],
+    electricUrl: process.env["ELECTRIC_URL"],
     ...overrides,
   });
 }

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+mapfile -d '' staged_files < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if ((${#staged_files[@]} == 0)); then
+  echo "No staged files to check."
+  exit 0
+fi
+
+echo "→ Delegating staged commit checks to bun run validate"
+bun run validate

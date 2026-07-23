@@ -1,15 +1,47 @@
 {
   "name": "@pgxsinkit/client",
-  "private": true,
+  "version": "0.0.0",
+  "keywords": [
+    "tanstack-intent"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "skills",
+    "oxlint-plugin.js"
+  ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./oxlint": "./oxlint-plugin.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@electric-sql/pglite": "0.4.4",
-    "@electric-sql/pglite-react": "0.3.4",
+    "@electric-sql/client": "^1.5.24",
+    "@electric-sql/experimental": "^6.0.24",
+    "@electric-sql/pglite-tools": "0.4.4",
     "@pgxsinkit/contracts": "workspace:*",
-    "@pgxsinkit/sync-engine": "workspace:*",
-    "drizzle-orm": "1.0.0-beta.22"
+    "@pgxsinkit/pglite-opfs-repacked": "workspace:*"
+  },
+  "peerDependencies": {
+    "@electric-sql/pglite": ">=0.5.4-pgx.0 <0.5.5",
+    "drizzle-orm": "1.0.0-rc.4",
+    "zod": "^4.4.3"
   }
 }

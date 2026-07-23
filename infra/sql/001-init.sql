@@ -1,5 +1,0 @@
--- Intentionally empty.
---
--- The application schema is owned by Drizzle and applied via `bun run db:push`.
--- Keeping bootstrap SQL free of extension-owned objects avoids drift and makes
--- schema pushes deterministic across PostgreSQL upgrades.

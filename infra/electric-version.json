@@ -1,0 +1,5 @@
+{
+  "image": "docker.io/electricsql/electric",
+  "version": "1.7.7",
+  "floor": "1.7"
+}

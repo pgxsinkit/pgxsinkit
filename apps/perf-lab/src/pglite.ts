@@ -8,39 +8,35 @@ export type PerfLabConnectionMode = "live" | "offline";
 
 export interface PerfLabConnectionOptions {
   mode: PerfLabConnectionMode;
-  writeUrl: string;
   batchWriteUrl: string;
   electricUrl: string;
-  authToken?: string | null;
+  getAuthToken?: () => Promise<string | null | undefined>;
   syncEnabled?: boolean;
 }
 
 export interface PerfLabConnectionDefaults {
-  liveWriteUrl: string;
   liveBatchWriteUrl: string;
   liveElectricUrl: string;
-  offlineWriteUrl: string;
   offlineBatchWriteUrl: string;
   offlineElectricUrl: string;
 }
 
 export interface LoadPerfClientOptions {
-  prepareLocalDb?: (db: PerfLabDb) => Promise<void>;
+  prepareLocalDbBeforeSchema?: (db: PerfLabDb) => Promise<void>;
+  prepareLocalDbAfterSchema?: (db: PerfLabDb) => Promise<void>;
 }
 
 const offlineConnectionDefaults = {
-  offlineWriteUrl: "http://127.0.0.1:1",
-  offlineBatchWriteUrl: "http://127.0.0.1:1",
+  offlineBatchWriteUrl: "http://127.0.0.1:1/api/mutations",
   offlineElectricUrl: "http://127.0.0.1:1/v1/shape",
 } as const;
 
 export function getPerfLabConnectionDefaults(): PerfLabConnectionDefaults {
-  const liveWriteUrl = import.meta.env.VITE_WRITE_API_URL ?? "http://127.0.0.1:3101";
-  const liveBatchWriteUrl = import.meta.env.VITE_BATCH_WRITE_URL ?? liveWriteUrl;
-  const liveElectricUrl = import.meta.env.VITE_ELECTRIC_URL ?? `${liveWriteUrl}/v1/shape-proxy`;
+  const writeApiOrigin = (import.meta.env["VITE_WRITE_API_ORIGIN"] ?? "http://127.0.0.1:3101").replace(/\/+$/, "");
+  const liveBatchWriteUrl = `${writeApiOrigin}/api/mutations`;
+  const liveElectricUrl = import.meta.env["VITE_ELECTRIC_URL"] ?? `${writeApiOrigin}/v1/electric-proxy`;
 
   return {
-    liveWriteUrl,
     liveBatchWriteUrl,
     liveElectricUrl,
     ...offlineConnectionDefaults,
@@ -49,59 +45,63 @@ export function getPerfLabConnectionDefaults(): PerfLabConnectionDefaults {
 
 export async function loadPerfClient(
   registry: SyncTableRegistry,
-  dataDir: string,
+  storePath: string,
   connectionOptions: PerfLabConnectionOptions,
   options: LoadPerfClientOptions = {},
 ) {
-  const resolved = resolveConnectionOptions(connectionOptions);
+  const resolved = await resolveConnectionOptions(connectionOptions);
   const client = await createSyncClient({
     registry,
     electricUrl: resolved.electricUrl,
-    writeUrl: resolved.writeUrl,
     batchWriteUrl: resolved.batchWriteUrl,
-    ...(resolved.authToken ? { authToken: resolved.authToken } : {}),
+    ...(resolved.getAuthToken ? { getAuthToken: resolved.getAuthToken } : {}),
     syncEnabled: resolved.syncEnabled,
     ...(resolved.syncEnabled ? { resetSubscriptionKeys: getRegistryShapeKeys(registry) } : {}),
-    ...(options.prepareLocalDb ? { prepareLocalDb: options.prepareLocalDb } : {}),
-    dataDir,
+    ...(options.prepareLocalDbBeforeSchema ? { prepareLocalDbBeforeSchema: options.prepareLocalDbBeforeSchema } : {}),
+    ...(options.prepareLocalDbAfterSchema ? { prepareLocalDbAfterSchema: options.prepareLocalDbAfterSchema } : {}),
+    storePath,
   });
 
   return {
     client,
     db: client.pglite,
     dispose: async () => {
-      await client.destroy();
+      await client.stop();
     },
   };
 }
 
-export function buildPerfDataDir(runId: string) {
+export function buildPerfStorePath(runId: string) {
   void runId;
-  return "idb://pgxsinkit-perf-lab-browser";
+  // A plain store path (ADR-0036); the browser derives the IndexedDB backend.
+  return "pgxsinkit-perf-lab-browser";
 }
 
-function resolveConnectionOptions(connectionOptions: PerfLabConnectionOptions) {
+async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOptions) {
   if (connectionOptions.mode === "offline") {
     return {
-      writeUrl: offlineConnectionDefaults.offlineWriteUrl,
       batchWriteUrl: offlineConnectionDefaults.offlineBatchWriteUrl,
       electricUrl: offlineConnectionDefaults.offlineElectricUrl,
-      authToken: undefined,
+      getAuthToken: undefined,
       syncEnabled: false,
     };
   }
 
-  const writeUrl = connectionOptions.writeUrl.trim();
-  const batchWriteUrl = connectionOptions.batchWriteUrl.trim() || writeUrl;
-  const electricUrl = connectionOptions.electricUrl.trim() || `${writeUrl}/v1/shape-proxy`;
-  const authToken = connectionOptions.authToken?.trim() || undefined;
+  const batchWriteUrl = connectionOptions.batchWriteUrl.trim();
+  const electricUrl = connectionOptions.electricUrl.trim() || `${batchWriteUrl}/v1/electric-proxy`;
+  const getAuthToken = connectionOptions.getAuthToken
+    ? async () => {
+        const token = await connectionOptions.getAuthToken?.();
+        return token?.trim() || undefined;
+      }
+    : undefined;
+  const initialAuthToken = await getAuthToken?.();
 
   return {
-    writeUrl,
     batchWriteUrl,
     electricUrl,
-    authToken,
-    syncEnabled: Boolean(connectionOptions.syncEnabled && authToken),
+    getAuthToken,
+    syncEnabled: Boolean(connectionOptions.syncEnabled && initialAuthToken),
   };
 }
 

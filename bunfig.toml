@@ -1,0 +1,6 @@
+# bunfig.toml — bun's native config for this workspace.
+
+[test]
+# Global cleanup hook for every `bun test` run — closes PGlite handles the support helpers hand out so
+# they don't leak across files in a shared process (see tests/support/setup.ts).
+preload = ["./tests/support/setup.ts"]

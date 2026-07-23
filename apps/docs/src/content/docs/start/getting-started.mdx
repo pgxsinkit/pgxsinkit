@@ -1,0 +1,390 @@
+---
+title: Getting started
+description: Install the @pgxsinkit/* packages and stand up the read and write paths.
+---
+
+import { Steps, Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+This page gets you from zero to a working read + write path. For what each package does, see
+[Packages](/packages/); for the model behind it, see [Core concepts](/concepts/).
+
+## Prerequisites
+
+- **PostgreSQL 17+** (Supabase-compatible; the write path uses Supabase-style auth claims for RLS).
+- **ElectricSQL ≥ 1.7**, run with the subquery feature flag — this is **mandatory**:
+
+  ```bash
+  ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries
+  ```
+
+  Without it, sync fails closed (no rows stream). See
+  [The Electric subquery requirement](/concepts/electric-subqueries/).
+
+- **A runtime that serves a web `fetch` handler** for the pgxsinkit server — Bun, Deno, **Supabase Edge
+  Functions**, Cloudflare Workers, etc. The server core is runtime-neutral and framework-free
+  (web-standard `Request`/`Response`, with the DB client injected); only the optional `server.start()`
+  helper is Bun-specific. And **Drizzle** (`drizzle-orm@1.0.0-rc.4`+) for schema.
+
+<Aside type="caution" title="Enum columns in shape filters">
+  A PostgreSQL `enum` referenced in a shape `where` must be cast to `text` — `"role"::text = 'manager'`, not `"role" =
+  'manager'`. The column stays an enum everywhere else.
+</Aside>
+
+## Install
+
+<Tabs syncKey="pkg">
+<TabItem label="bun">
+
+```bash
+bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional)
+bun add @pgxsinkit/react
+```
+
+</TabItem>
+<TabItem label="pnpm">
+
+```bash
+pnpm add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional)
+pnpm add @pgxsinkit/react
+```
+
+</TabItem>
+<TabItem label="npm">
+
+```bash
+npm install @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional)
+npm install @pgxsinkit/react
+```
+
+</TabItem>
+<TabItem label="yarn">
+
+```bash
+yarn add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
+# React bindings (optional)
+yarn add @pgxsinkit/react
+```
+
+</TabItem>
+</Tabs>
+
+The packages are published to public npm; install them with whichever package manager your app uses —
+pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql/pglite`, and `zod`.
+
+## Stand up the write path
+
+<Steps>
+
+1. **Define your sync registry** — the tables, their sync mode, and governance (managed fields like
+   owner/timestamps). This is the single source of truth both paths read from.
+
+   ```ts
+   // sync-registry.ts
+   import { clockMicrosecondsSql, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+   import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+
+   export const registry = defineSyncRegistry({
+     widgets: defineSyncTable({
+       tableName: "widgets",
+       mode: "readwrite",
+       makeColumns: () => ({
+         id: uuid("id").primaryKey(),
+         label: varchar("label", { length: 120 }).notNull(),
+         ownerId: uuid("owner_id"),
+         // Server version: a strictly-monotonic per-row token convergence keys on.
+         updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(clockMicrosecondsSql),
+       }),
+       // Both are REQUIRED for a writable table — no silent default:
+       conflictPolicy: "reject-if-stale", // or "last-write-wins"
+       governance: {
+         managedFields: [
+           { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+           // Stamp the owner from the verified `sub` claim. (`auth.uid()` is just claimPath: ["sub"];
+           // use ["app_metadata","person_id"] etc. for an app-minted identity.)
+           { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
+         ],
+       },
+       // Add a shape.rowFilter for row-level read filtering (see the security note below).
+     }),
+   });
+   ```
+
+   <Aside type="caution" title="Writable tables have two hard requirements">
+     `defineSyncRegistry` throws unless every `readwrite` table declares **both**: a **Server version** (a
+     `nowMicroseconds`-on-`update` managed field, conventionally `updated_at_us`) that optimistic convergence keys on,
+     and a **`conflictPolicy`** (`reject-if-stale` | `last-write-wins`) — there is no silent default, because a silent
+     last-write-wins is exactly the data loss the choice exists to surface. Fields stamped by `authClaim` (a verified
+     claim at a JSON path — `["sub"]` is the old `auth.uid()` owner) / `nowMicroseconds` are server-assigned; the server
+     rejects them if present in a client write payload.
+   </Aside>
+
+2. **Provision the apply function.** The write path applies batches through one in-database PL/pgSQL
+   function, `pgxsinkit_apply_mutations`. Generate a drizzle-kit migration that installs it from your
+   registry with the published `pgxsinkit-generate` CLI (a `bin` of `@pgxsinkit/server`), run from
+   your own project. The CLI **requires [Bun](https://bun.sh) on PATH** — it imports your TypeScript
+   registry and runs `drizzle-kit` — but the bin itself launches under any runner; `bunx`, or `npx` /
+   `pnpm exec` / `yarn` once Bun is installed (it prints a clear message if Bun is missing).
+
+   ```bash
+   bunx pgxsinkit-generate \
+     --registry ./sync-registry.ts \
+     --export registry \
+     --project-dir ./db \
+     --config drizzle.config.ts \
+     --name sync_artifact
+   ```
+
+   This writes a standard drizzle-kit migration you commit and apply through your normal migration
+   flow. The migration lands wherever your drizzle config's `out` points — pass `--config` and the
+   generator reads `out` from it (or set `--out` explicitly); with neither it probes `drizzle/` and
+   `infra/drizzle/`.
+
+   The generated apply function and the audit/version column DEFAULTs (`clockMicrosecondsSql` above)
+   both **call** the canonical `public.pgxsinkit_clock_us()` microsecond clock, so its **utilities
+   migration must be the first folder in the chain** — generate it once with `--utilities`, before the
+   drizzle-kit schema baseline, passing an early-sorting folder name:
+
+   ```bash
+   bunx pgxsinkit-generate --utilities \
+     --project-dir ./db \
+     --config drizzle.config.ts \
+     --name 20200101000000_pgxsinkit_utilities
+   ```
+
+   The generated function carries a fingerprint of itself (a `COMMENT ON FUNCTION`). It **verifies
+   itself on every call** (ADR-0030): the server passes the fingerprint it expects for its registry +
+   codegen, and the function compares that against its own stamped comment before touching any table —
+   raising `PXS01` and applying nothing on a mismatch. So a registry change or a `@pgxsinkit/server`
+   upgrade you forgot to regenerate + apply fails loud (a stale — or hand-installed, unfingerprinted —
+   function is refused) instead of writing against the wrong applier. The check rides the existing call:
+   no extra round trip, no startup query, no read-then-call race. To catch the same drift in CI before it
+   ships, run the generator in `--check` mode — read-only, writes nothing, non-zero exit on drift:
+
+   ```bash
+   bunx pgxsinkit-generate --check \
+     --registry ./sync-registry.ts --export registry \
+     --project-dir ./db --config drizzle.config.ts
+   ```
+
+3. **Create the server** and serve its `fetch`. All writes go through `POST /api/mutations`; the
+   ownership-enforcing shape proxy is served from the same app.
+
+   ```ts
+   import { createSyncServer } from "@pgxsinkit/server";
+   import { registry } from "./sync-registry";
+
+   const server = createSyncServer({
+     registry,
+     db, // your Drizzle database
+     electricUrl: process.env.ELECTRIC_URL!, // e.g. http://localhost:3000/v1/shape
+     resolveAuthClaims: async (_request) => {
+       // verify the request's JWT and return its claims, or null to block all rows
+       return null;
+     },
+   });
+
+   export default { fetch: server.fetch };
+   // `server.fetch` is a web-standard handler — deploy it on Bun, Deno, Supabase Edge
+   // Functions, or Cloudflare Workers. Only the optional `server.start()` helper needs Bun.
+   ```
+
+   Deploying onto a non-Bun runtime (Deno / Supabase Edge Functions) has a couple of concrete steps —
+   a path rewrite and resolving claims from the platform's JWT. See
+   [Deploying the server](/start/deploying-the-server/).
+
+</Steps>
+
+<Aside type="note" title="Two execution contexts enforce the same authorization">
+  Authorization runs in two different engines, so the subject is referenced two ways — derive both
+  from one predicate so a row is never readable-but-unwritable (or the reverse) by accident:
+
+- **Write path — RLS in Postgres:** the applier sets the auth context (`role`,
+  `current_setting('request.jwt.claims')`) before applying a batch, and RLS policies read it
+  (`auth.uid()` is just `request.jwt.claims ->> 'sub'`). The owner/author column itself is stamped
+  from those same claims by an `authClaim` managed field at a claim path — `["sub"]` is the old
+  `auth.uid()` owner, but it can be any verified claim (e.g. `["app_metadata","person_id"]`).
+- **Read path — the shape `rowFilter`:** the proxy builds the Electric shape `where` and
+  **Electric** runs it, not Postgres — so a `customWhere` returns a Drizzle `SQL` fragment built from
+  the table's columns: reference each column through `c()` (a bare identifier, as Electric requires)
+  and bind the authorizing claim (`claims.sub` by default) as a `$n` param rather than hand-escaping
+  it, with any enum cast to `text`.
+  Return `DENY_ALL` to block all rows, or `null` to bypass filtering — note `null`/`""` means _no
+  filter, all rows visible_, so an owner filter must return `DENY_ALL` (not `null`) when the claim is
+  absent. When you define the table and its filter **together in one `defineSyncTable`**, write
+  `shape.rowFilter` as a **function of the built columns** — `rowFilter: (columns) => ({ customWhere:
+(claims) => … c(columns.ownerId) … })` — so `c()` references the real typed columns this call is
+  creating (the same columns `extras` receives), with no separately-built table needed.
+
+For a **cross-table membership fan-out** (sync a row only if the subject belongs to its container), the
+`customWhere` predicate is a subquery — author it the same typed way, never a string: `c()` for each
+column, the **table object** for the `FROM`, the subject as a **bound param**, factored into a helper so
+read filter and any narrower variant share it:
+
+```ts
+const memberContainers = (subject: string): SQL =>
+  sql`select ${c(memberships.containerId)} from ${memberships} where ${c(memberships.memberId)} = ${subject}`;
+const widgetsReadFilter = (claims: JwtClaims) =>
+  claims.sub ? sql`${c(widgets.containerId)} in (${memberContainers(claims.sub)})` : DENY_ALL;
+```
+
+Subqueries **nest** by interpolation (wrap one `sql` fragment in another to narrow a fan-out) and must
+be **self-contained** (not correlated). The subquery `where` is the flagged Electric preview — run with
+`allow_subqueries,tagged_subqueries` or it fails closed. `apps/board`'s `packages/board-schema/src/registry.ts`
+is a worked end-to-end example.
+
+For RLS, `@pgxsinkit/contracts` ships `buildSupabaseOwnerOrAdminNativePolicies` and
+`buildSupabaseMembershipNativePolicies` for the owner and membership shapes — they take **Drizzle
+columns** and derive the table from them, so call them inside `defineSyncTable`'s `extras: (t) => …`
+callback. The read filter and the write policy build from the same Drizzle columns, so they cannot
+silently drift. For anything beyond them (e.g. collaborative any-member writes), compose your own
+from `pgPolicy` + Drizzle operators (`and`/`or`/`eq`).
+
+</Aside>
+
+## Stand up the read path
+
+The client writes locally into an overlay + a durable journal, flushes the journal to the server's
+write route, and subscribes to Electric shapes that land in local PGlite. Reads are served from
+PGlite; the server's **shape proxy** forwards shape requests to Electric and enforces ownership.
+
+```ts
+import { createSyncClient } from "@pgxsinkit/client";
+import { registry } from "./sync-registry";
+
+const client = await createSyncClient({
+  registry,
+  electricUrl: "/api/shape", // your shape-proxy path (createSyncServer's default route)
+  batchWriteUrl: "/api/mutations", // the exact pgxsinkit batch endpoint
+  getAuthToken: async () => currentJwt(),
+});
+// `createSyncClient` resolves at LOCAL-READ readiness (ADR-0041): cached rows are queryable immediately —
+// offline included — and writes transparently await the write runtime, so you can read and write straight
+// away. `await client.ready` below is optional: it waits for WHOLE-SYNC catch-up (every eager group), which
+// this demo does so the first read reflects the server. For a UI, paint at creation and drive per-view
+// loading with `hydrating`/`groupReady` instead of blocking on `ready`.
+await client.ready;
+
+// Optimistic local write — staged in the overlay + journal, flushed on the next pass.
+await client.tables.widgets.create({ id: crypto.randomUUID(), label: "Hello" });
+
+// Reads come from the local read model (the overlay unioned over synced rows).
+const widgets = await client.drizzle.select().from(client.views.widgets);
+```
+
+These snippets compile against the published packages, so they stay in step with the shipped API. See
+[The read path](/concepts/read-path/) and [The write path](/concepts/write-path/) for the full flow,
+and [Packages](/packages/) for the client entry points.
+
+### Naming the local store
+
+Pass a `storePath` to name the local store — a plain name, **never** a storage URL:
+
+```ts
+const client = await createSyncClient({
+  registry,
+  electricUrl: "/api/shape",
+  batchWriteUrl: "/api/mutations",
+  storePath: "my-app-store", // a plain name; omit it to use the built-in default
+});
+```
+
+The storage backend is **derived** from where the code runs — IndexedDB in the browser, the filesystem on
+Node/Bun — so you never write `idb://…` or `file://…` yourself. A scheme-bearing string is rejected at boot
+with a clear error. A memory-backed store is deliberately not a production option; pgxsinkit's durability
+guarantees (persistent retention, the optimistic write journal) assume a persisted store.
+
+### Testing
+
+For unit tests that want a fast, throwaway in-memory store, import `memoryStoreForTests` from
+`@pgxsinkit/client/testing` and spread it into the options — a named, deliberate opt-in whose durability
+caveats are documented on the helper:
+
+```ts
+import { memoryStoreForTests } from "@pgxsinkit/client/testing";
+
+const client = await createSyncClient({
+  registry,
+  electricUrl: "/api/shape",
+  batchWriteUrl: "/api/mutations",
+  ...memoryStoreForTests("my-test"),
+});
+```
+
+`createSyncClient` runs the engine on the calling thread — right for Node, tests, and as a fallback. In a
+**browser app** you will usually attach through a SharedWorker instead: `defineSyncWorker` in a worker entry
+and `attachSyncClient` in the tab return the same client shape off the main thread. Capability placement can
+host the OPFS engine in that SharedWorker on Safari or behind it in an elected worker on Chromium/Firefox. See
+[Worker mode](/concepts/worker-mode/).
+
+## Project a writable table read-only per client
+
+When two clients consume the same table at different capabilities — a teacher writes a `posting_restriction`
+a learner only reads, or a learner writes a `report` a teacher only moderates — `mode` is **per-client**, not
+a property of the table. Define the table **once** in an authoritative registry at its writable capability,
+generate the server from that, and give each client a **projection** of it.
+
+`mode` is resolved at `defineSyncTable` time and drives the local write machinery (overlay + journal) and the
+overlay-merged read-model view, so you cannot hand-spread `{ ...entry, mode: "readonly" }` — the entry would
+keep a view over overlay state the readonly client never creates. Use `asReadonly`, which re-derives a true
+readonly entry: it drops the overlay/journal projection, the read-model view, and
+`conflictPolicy`/`governance`/`writeMode`, and keeps the read contract (columns, primary key, synced table,
+the shape/row filter) intact.
+
+```ts
+import { asReadonly, assertReadContractPreserved, defineSyncRegistry } from "@pgxsinkit/contracts";
+import { postingRestriction } from "./tables"; // defineSyncTable(…, { mode: "readwrite", conflictPolicy, governance })
+
+// One authoritative registry — the server's apply function + shape proxy are generated from this.
+export const authoritativeRegistry = defineSyncRegistry({ posting_restriction: postingRestriction });
+
+// Per-client projections: the teacher writes the table; the learner only reads it.
+export const teacherRegistry = defineSyncRegistry({ posting_restriction: postingRestriction });
+export const learnerRegistry = defineSyncRegistry({ posting_restriction: asReadonly(postingRestriction) });
+
+// Fail closed if a projection ever diverges the data it syncs (columns / pk / row-filter shape):
+assertReadContractPreserved(authoritativeRegistry, teacherRegistry, { label: "teacher" });
+assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "learner" });
+```
+
+<Aside type="note" title="Generate the server from the authoritative registry">
+  The apply function emits a write branch for **every** table and stamps managed fields / reject-if-stale from the
+  entry's write contract, so it must be generated from the writable entry — generate from the authoritative registry,
+  not a readonly projection. A claims-branching `customWhere` then serves every client from one shape definition (each
+  request carries its own claims). A projection may differ **only** in write capability and lifecycle
+  (`subscription`/`retention`/group), never in the read contract — that is what `assertReadContractPreserved` enforces.
+  It cannot see the `customWhere` body, so bump `rowFilter.revision` on a logic change. The full registry fingerprint
+  differs between the writable and readonly variants — expected and fine: it is client-local, guarding each client's own
+  store, and the server never sees it. See
+  [ADR-0025](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0025-per-client-mode-projection.md).
+</Aside>
+
+## Try the demo
+
+The repository's `apps/board` (a Linear-style board + chat) drives all of the above end-to-end
+against a partial Supabase + Electric stack:
+
+```bash
+mise install && bun install
+mkcert -install       # one-time: trust the local CA so the browser accepts the gateway's TLS cert
+cp .env.example .env
+bun run infra:up      # the full board stack (Supabase + Electric) via Podman compose
+bun run seed:board    # GoTrue identities + fixtures
+bun run dev:board
+```
+
+<Aside type="note" title="The board's gateway is served over HTTPS (HTTP/2) — mkcert is a prerequisite">
+  The browser holds one Electric long-poll connection **per synced shape**, and the board syncs six. Over plain HTTP/1.1
+  those long-polls exhaust the browser's ~6-connections-per-origin cap and writes starve behind them (see [Deploying the
+  server → the gateway must speak HTTP/2](/start/deploying-the-server/)). So the demo fronts its gateway with a
+  TLS-terminating **HTTP/2 + HTTP/3** Caddy sidecar, and the board's browser origin is `https://localhost:54343`.
+  `infra:up` issues the cert with [`mkcert`](https://github.com/FiloSottile/mkcert), but the local CA must be
+  **trusted** first — `mkcert -install` (one-time) — because a browser `fetch()` to an untrusted cert fails outright (no
+  click-through), and HTTP/3's QUIC refuses an untrusted cert entirely. Without mkcert the stack still comes up on plain
+  `http://localhost:54331` (used by the integration tests and seed scripts); only the fast browser path is unavailable.
+</Aside>
+
+For the minimal `@pgxsinkit/server` reference instead, use `bun run infra:harness:up` (PostgreSQL +
+Electric) + `bun run dev:api`. See [Demo & harness](/demo-and-harness/) for what each is for.

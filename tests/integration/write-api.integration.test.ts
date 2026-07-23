@@ -1,9 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { eq, sql } from "drizzle-orm";
-import { pgTable, uuid, varchar } from "drizzle-orm/pg-core";
+import { count, eq, sql } from "drizzle-orm";
 
-import { defineSyncRegistry, defineSyncTable, defineTableGovernance } from "@pgxsinkit/contracts";
 import {
   authorsTable,
   demoSyncRegistry,
@@ -11,263 +9,36 @@ import {
   DEMO_JWT_USER1,
   DEMO_JWT_USER2,
   DEMO_USER1_ID,
+  fkChildrenTable,
+  fkParentsTable,
+  fkSyncRegistry,
+  rlsSyncRegistry,
+  rlsTodosTable,
   todosTable,
-} from "@pgxsinkit/demo";
-import { createSyncServer } from "@pgxsinkit/server";
-import { readIntegrationEnv } from "@pgxsinkit/test-utils";
+} from "@pgxsinkit/schema";
+import { createSyncServer, operationsLogRegclassTarget, operationsLogTable } from "@pgxsinkit/server";
+import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../apps/write-api/src/demo-auth";
-import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createTablesFromSchema } from "../support/drizzle";
 
 const env = readIntegrationEnv();
 
-const ensureTablesSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF to_regclass('public.authors') IS NULL THEN
-      CREATE TABLE authors (
-        id UUID PRIMARY KEY,
-        name VARCHAR(120) NOT NULL,
-        owner_id UUID,
-        modified_by UUID,
-        created_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT),
-        updated_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-      );
-    END IF;
-  END $$;
-
-  ALTER TABLE authors ADD COLUMN IF NOT EXISTS owner_id UUID;
-  ALTER TABLE authors ADD COLUMN IF NOT EXISTS modified_by UUID;
-
-  DO $$
-  BEGIN
-    IF to_regclass('public.todos') IS NULL THEN
-      CREATE TABLE todos (
-        id UUID PRIMARY KEY,
-        title VARCHAR(120) NOT NULL,
-        description TEXT,
-        author_id UUID NOT NULL REFERENCES authors(id),
-        owner_id UUID,
-        modified_by UUID,
-        status VARCHAR(24) NOT NULL DEFAULT 'todo',
-        priority VARCHAR(24) NOT NULL DEFAULT 'medium',
-        created_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT),
-        updated_at_us BIGINT NOT NULL DEFAULT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
-      );
-    END IF;
-  END $$;
-
-  ALTER TABLE todos ADD COLUMN IF NOT EXISTS owner_id UUID;
-  ALTER TABLE todos ADD COLUMN IF NOT EXISTS modified_by UUID;
-`);
-
-const fkParentsTable = pgTable("fk_parents", {
-  id: uuid("id").primaryKey(),
-  name: varchar("name", { length: 120 }).notNull(),
-});
-
-const fkChildrenTable = pgTable("fk_children", {
-  id: uuid("id").primaryKey(),
-  name: varchar("name", { length: 120 }).notNull(),
-  parentId: uuid("parent_id")
-    .notNull()
-    .references(() => fkParentsTable.id),
-});
-
-const fkSyncRegistry = defineSyncRegistry({
-  fk_parents: defineSyncTable({
-    table: fkParentsTable,
-    mode: "readwrite",
-    primaryKey: { columns: ["id"] },
-    shape: { tableName: "fk_parents", shapeKey: "fk_parents" },
-    routes: { basePath: "/api/fk-parents", allowBatch: false },
-  }),
-  fk_children: defineSyncTable({
-    table: fkChildrenTable,
-    mode: "readwrite",
-    primaryKey: { columns: ["id"] },
-    shape: { tableName: "fk_children", shapeKey: "fk_children" },
-    routes: { basePath: "/api/fk-children", allowBatch: false },
-  }),
-});
-
-const ensureFkTablesSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF to_regclass('public.fk_parents') IS NULL THEN
-      CREATE TABLE fk_parents (
-        id UUID PRIMARY KEY,
-        name VARCHAR(120) NOT NULL
-      );
-    END IF;
-  END $$;
-
-  DO $$
-  BEGIN
-    IF to_regclass('public.fk_children') IS NULL THEN
-      CREATE TABLE fk_children (
-        id UUID PRIMARY KEY,
-        name VARCHAR(120) NOT NULL,
-        parent_id UUID NOT NULL,
-        CONSTRAINT fk_children_parent_fk FOREIGN KEY (parent_id) REFERENCES fk_parents(id)
-      );
-    END IF;
-  END $$;
-`);
-
-const ensureFkConstraintDeferrableSql = sql.raw(`
-  ALTER TABLE "fk_children"
-  ALTER CONSTRAINT "fk_children_parent_fk"
-  DEFERRABLE INITIALLY IMMEDIATE;
-`);
-
-const rlsTodosTable = pgTable("rls_todos", {
-  id: uuid("id").primaryKey(),
-  title: varchar("title", { length: 120 }).notNull(),
-  ownerId: uuid("owner_id"),
-});
-
-const rlsSyncRegistry = defineSyncRegistry({
-  rls_todos: defineSyncTable({
-    table: rlsTodosTable,
-    mode: "readwrite",
-    primaryKey: { columns: ["id"] },
-    shape: { tableName: "rls_todos", shapeKey: "rls_todos" },
-    routes: { basePath: "/api/rls-todos", allowBatch: false },
-    governance: defineTableGovernance(rlsTodosTable, {
-      rls: {
-        enabled: true,
-        force: false,
-        policies: [],
-      },
-    }),
-  }),
-});
-
-const ensureSupabaseAuthHelpersSql = sql.raw(`
-  CREATE SCHEMA IF NOT EXISTS auth;
-
-  DO $$
-  BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-      BEGIN
-        CREATE ROLE authenticated NOLOGIN;
-      EXCEPTION
-        WHEN insufficient_privilege THEN
-          NULL;
-      END;
-    END IF;
-  END;
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.set_auth_context(claims jsonb)
-  RETURNS void
-  LANGUAGE plpgsql
-  AS $$
-  DECLARE
-    normalized_claims jsonb := COALESCE(claims, '{}'::jsonb);
-    target_role text := COALESCE(NULLIF(normalized_claims ->> 'role', ''), 'authenticated');
-  BEGIN
-    BEGIN
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = target_role) THEN
-        PERFORM set_config('role', target_role, true);
-      ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-        PERFORM set_config('role', 'authenticated', true);
-      END IF;
-    EXCEPTION
-      WHEN insufficient_privilege THEN
-        NULL;
-    END;
-    PERFORM set_config('request.jwt.claims', normalized_claims::text, true);
-
-    IF normalized_claims ? 'sub' THEN
-      PERFORM set_config('request.jwt.claim.sub', normalized_claims ->> 'sub', true);
-    END IF;
-  END;
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.uid()
-  RETURNS uuid
-  LANGUAGE sql
-  STABLE
-  AS $$
-    SELECT coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.jwt()
-  RETURNS jsonb
-  LANGUAGE sql
-  STABLE
-  AS $$
-    SELECT coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb
-  $$;
-
-  CREATE OR REPLACE FUNCTION auth.has_role(role_name text)
-  RETURNS boolean
-  LANGUAGE sql
-  STABLE
-  AS $$
-    SELECT EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements_text(COALESCE(auth.jwt() -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS assigned_role(role_name_value)
-      WHERE assigned_role.role_name_value = role_name
-    )
-  $$;
-
-  DO $$
-  BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-      EXECUTE 'GRANT USAGE ON SCHEMA auth TO authenticated';
-      EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO authenticated';
-    END IF;
-  END;
-  $$;
-`);
-
-const ensureRlsTablesSql = sql.raw(`
-  DO $$
-  BEGIN
-    IF to_regclass('public.rls_todos') IS NULL THEN
-      CREATE TABLE rls_todos (
-        id UUID PRIMARY KEY,
-        title VARCHAR(120) NOT NULL,
-        owner_id UUID DEFAULT auth.uid()
-      );
-    END IF;
-  END $$;
-
-  ALTER TABLE rls_todos ENABLE ROW LEVEL SECURITY;
-
-  DO $$
-  BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-      EXECUTE 'GRANT SELECT, INSERT ON TABLE rls_todos TO authenticated';
-    END IF;
-  END;
-  $$;
-
-  DROP POLICY IF EXISTS "rls_todos_select_owner" ON "rls_todos";
-  CREATE POLICY "rls_todos_select_owner" ON "rls_todos"
-  AS PERMISSIVE
-  FOR SELECT
-  TO "authenticated" USING (owner_id = auth.uid());
-
-  DROP POLICY IF EXISTS "rls_todos_insert_owner" ON "rls_todos";
-  CREATE POLICY "rls_todos_insert_owner" ON "rls_todos"
-  AS PERMISSIVE
-  FOR INSERT
-  TO "authenticated" WITH CHECK (owner_id = auth.uid());
-`);
-
 describe("write api implementation integration", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     server = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
+      resolveAuthClaims: () => ({
+        role: "authenticated",
+        sub: DEMO_USER1_ID,
+      }),
     });
-    await server.drizzle.execute(ensureTablesSql);
+    await installPlpgsqlBatchFunction(server.drizzle, demoSyncRegistry);
   });
 
   beforeEach(async () => {
@@ -277,18 +48,23 @@ describe("write api implementation integration", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("rejects invalid payloads", async () => {
-    const response = await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        title: "",
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: "0fd99c86-dca0-47c3-b8f7-6555633e8bf2" },
+        mutationId: "0e6dca9b-c37f-471b-bc37-c84ff0467a1c",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: "0fd99c86-dca0-47c3-b8f7-6555633e8bf2",
+          title: "",
+        },
       }),
-    });
+    ]);
 
     expect(response.status).toBe(400);
   });
@@ -307,31 +83,46 @@ describe("write api implementation integration", () => {
     }
   });
 
-  it("returns an empty todo list", async () => {
-    const response = await server.request("/api/todos");
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual([]);
-  });
-
-  it("creates and lists authors", async () => {
-    const authorId = "01963227-d4c7-72db-b858-f89f6af8f920";
-    const createResponse = await server.request("/api/authors", {
-      method: "POST",
+  it("allows the apikey header in the preflight (a deployment gateway sends it alongside Authorization)", async () => {
+    // Regression: a Supabase-style client sends `apikey` on every request; a preflight that does not
+    // allow it blocks the write path entirely (browser "Request header field apikey is not allowed").
+    const response = await server.request("/api/todos", {
+      method: "OPTIONS",
       headers: {
-        "Content-Type": "application/json",
+        Origin: "http://localhost:5173",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,apikey",
       },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Ada Lovelace",
-      }),
     });
 
-    expect(createResponse.status).toBe(201);
+    expect(response.headers.get("Access-Control-Allow-Headers")?.toLowerCase()).toContain("apikey");
+  });
 
-    const listResponse = await server.request("/api/authors");
-    expect(listResponse.status).toBe(200);
-    expect(await listResponse.json()).toEqual([
+  it("returns an empty todo list via direct DB query", async () => {
+    const rows = await server.drizzle.select().from(todosTable);
+    expect(rows).toEqual([]);
+  });
+
+  it("creates via /api/mutations and verifies via direct DB query", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8f920";
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "bc14916d-c484-4f9b-b643-90fda3f466f0",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Ada Lovelace",
+        },
+      }),
+    ]);
+
+    expect(createResponse.status).toBe(200);
+
+    const rows = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId));
+    expect(rows).toEqual([
       expect.objectContaining({
         id: authorId,
         name: "Ada Lovelace",
@@ -343,45 +134,43 @@ describe("write api implementation integration", () => {
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f999";
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f920";
 
-    await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Ada Lovelace",
+    await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "fef6d5a5-1719-49f9-89e3-813b131868cb",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Ada Lovelace",
+        },
       }),
-    });
+    ]);
 
-    const response = await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: todoId,
-        title: "Persist from integration test",
-        description: "written through Hono + Drizzle",
-        authorId,
-        status: "todo",
-        priority: "high",
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "4c97657d-fdb8-4bca-938f-3c57f9a5e72f",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Persist from integration test",
+          description: "written through Hono + Drizzle",
+          author_id: authorId,
+          status: "todo",
+          priority: "high",
+        },
       }),
-    });
+    ]);
 
-    expect(response.status).toBe(201);
-    const created = (await response.json()) as {
-      id: string;
-      createdAtUs: string;
-      updatedAtUs: string;
-    };
+    expect(response.status).toBe(200);
 
-    const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, created.id));
+    const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId));
 
     expect(rows).toHaveLength(1);
-    expect(created.id).toBe(todoId);
-    expect(created.createdAtUs).toMatch(/^[0-9]+$/);
-    expect(created.updatedAtUs).toMatch(/^[0-9]+$/);
     expect(rows[0]?.authorId).toBe(authorId);
     expect(rows[0]?.title).toBe("Persist from integration test");
   });
@@ -390,89 +179,102 @@ describe("write api implementation integration", () => {
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f981";
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f921";
 
-    await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Grace Hopper",
+    await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "4fe40c68-7a5d-4938-ab35-c625f6736f4a",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Grace Hopper",
+        },
       }),
-    });
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a93d7cb9-1f57-40cb-af3d-b74703e439df",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Before patch",
+          description: null,
+          author_id: authorId,
+          status: "todo",
+          priority: "medium",
+        },
+      }),
+    ]);
 
-    await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: todoId,
-        title: "Before patch",
-        description: null,
-        authorId,
-        status: "todo",
-        priority: "medium",
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "88451f95-962e-4e39-9733-3c8660cc260d",
+        mutationSeq: 3,
+        kind: "update",
+        payload: {
+          status: "done",
+          title: "After patch",
+        },
       }),
-    });
-
-    const response = await server.request(`/api/todos/${todoId}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        status: "done",
-        title: "After patch",
-      }),
-    });
+    ]);
 
     expect(response.status).toBe(200);
-    const updated = (await response.json()) as {
-      title: string;
-      status: string;
-      updatedAtUs: string;
-    };
-    expect(updated.title).toBe("After patch");
-    expect(updated.status).toBe("done");
-    expect(updated.updatedAtUs).toMatch(/^[0-9]+$/);
+
+    const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.title).toBe("After patch");
+    expect(rows[0]?.status).toBe("done");
   });
 
   it("deletes an existing todo", async () => {
     const todoId = "01963227-d4c7-72db-b858-f89f6af8f982";
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f922";
 
-    await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: authorId,
-        name: "Margaret Hamilton",
+    await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "eff3d2ec-9fd9-47f0-8f85-f938f9ee16f8",
+        mutationSeq: 1,
+        kind: "create",
+        payload: {
+          id: authorId,
+          name: "Margaret Hamilton",
+        },
       }),
-    });
-
-    await server.request("/api/todos", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: todoId,
-        title: "Delete me",
-        description: null,
-        authorId,
-        status: "todo",
-        priority: "medium",
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "7f11678f-3831-490f-a3ac-7d7e8a2d7b39",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Delete me",
+          description: null,
+          author_id: authorId,
+          status: "todo",
+          priority: "medium",
+        },
       }),
-    });
+    ]);
 
-    const response = await server.request(`/api/todos/${todoId}`, {
-      method: "DELETE",
-    });
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "5745ab9d-c8c9-4f95-9778-c5a6557a90aa",
+        mutationSeq: 3,
+        kind: "delete",
+        payload: { id: todoId },
+      }),
+    ]);
 
-    expect(response.status).toBe(204);
+    expect(response.status).toBe(200);
 
     const rows = await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId));
     expect(rows).toHaveLength(0);
@@ -483,45 +285,51 @@ describe("write api implementation integration", () => {
 
     const disabledServer = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
+      resolveAuthClaims: () => ({
+        role: "authenticated",
+        sub: DEMO_USER1_ID,
+      }),
       operationsLog: {
         enabled: false,
       },
     });
 
-    await disabledServer.drizzle.execute(ensureTablesSql);
+    await installPlpgsqlBatchFunction(disabledServer.drizzle, demoSyncRegistry);
 
     try {
       const authorId = "01963227-d4c7-72db-b858-f89f6af8f933";
       const todoId = "01963227-d4c7-72db-b858-f89f6af8f983";
 
-      const createAuthorResponse = await disabledServer.request("/api/authors", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          id: authorId,
-          name: "Disabled logger author",
+      const batchResponse = await postBatchMutations(disabledServer, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "cfc76477-cdc8-4be7-bf2d-045ae815ec8c",
+          mutationSeq: 1,
+          kind: "create",
+          payload: {
+            id: authorId,
+            name: "Disabled logger author",
+          },
         }),
-      });
-      expect(createAuthorResponse.status).toBe(201);
-
-      const createTodoResponse = await disabledServer.request("/api/todos", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          id: todoId,
-          title: "Write with ops log disabled",
-          description: null,
-          authorId,
-          status: "todo",
-          priority: "medium",
+        buildBatchMutation({
+          tableName: "todos",
+          entityKey: { id: todoId },
+          mutationId: "233d36a2-fde4-4e23-98f6-7ff633d28674",
+          mutationSeq: 2,
+          kind: "create",
+          payload: {
+            id: todoId,
+            title: "Write with ops log disabled",
+            description: null,
+            author_id: authorId,
+            status: "todo",
+            priority: "medium",
+          },
         }),
-      });
-      expect(createTodoResponse.status).toBe(201);
+      ]);
+      expect(batchResponse.status).toBe(200);
     } finally {
       await disabledServer.stop();
     }
@@ -529,42 +337,416 @@ describe("write api implementation integration", () => {
     const afterCount = await readOperationsLogRowCount(server);
     expect(afterCount).toBe(beforeCount);
   });
+
+  it("applies a multi-row, multi-(table,kind,column-set) batch set-based (ADR-0014 Phase 4)", async () => {
+    const a1 = "0196322c-0000-7000-8000-0000000000a1";
+    const a2 = "0196322c-0000-7000-8000-0000000000a2";
+    const a3 = "0196322c-0000-7000-8000-0000000000a3";
+    const t1 = "0196322c-0000-7000-8000-0000000000b1";
+    const t2 = "0196322c-0000-7000-8000-0000000000b2";
+
+    // Batch 1: three authors (one set-based INSERT of 3 rows) + two todos (a second set-based INSERT).
+    // Each table has its own mutation sequence, so both groups start at 1. The submitted array order,
+    // rather than those table-local sequences, must keep the author group before its dependent todos.
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a1 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c1",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: a1, name: "Author One" },
+      }),
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a2 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c2",
+        mutationSeq: 2,
+        kind: "create",
+        payload: { id: a2, name: "Author Two" },
+      }),
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a3 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c3",
+        mutationSeq: 3,
+        kind: "create",
+        payload: { id: a3, name: "Author Three" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t1 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c4",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: t1, title: "T1", description: null, author_id: a1, status: "todo", priority: "low" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t2 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c5",
+        mutationSeq: 2,
+        kind: "create",
+        payload: { id: t2, title: "T2", description: null, author_id: a2, status: "todo", priority: "low" },
+      }),
+    ]);
+
+    await expectResponseStatus(createResponse, 200);
+    const createBody = (await createResponse.json()) as {
+      acks: Array<{ status: string; serverUpdatedAtUs?: string }>;
+    };
+    expect(createBody.acks).toHaveLength(5);
+    expect(createBody.acks.every((ack) => ack.status === "acked")).toBe(true);
+    expect(createBody.acks.every((ack) => /^[0-9]+$/.test(ack.serverUpdatedAtUs ?? ""))).toBe(true);
+
+    expect(await server.drizzle.select().from(authorsTable)).toHaveLength(3);
+    const todosAfterCreate = await server.drizzle.select().from(todosTable);
+    expect(todosAfterCreate).toHaveLength(2);
+    for (const todo of todosAfterCreate) {
+      // Managed fields stamped by the set-based INSERT, not read from payload.
+      expect(todo.createdAtUs).toBeTypeOf("bigint");
+      expect(todo.updatedAtUs).toBeTypeOf("bigint");
+    }
+
+    // Batch 2: two partial updates with DIFFERENT column-sets ({status} vs {priority, title}) — two
+    // UPDATE groups — plus a delete. All set-based; each row's untouched columns must survive.
+    const updateResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t1 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c6",
+        mutationSeq: 6,
+        kind: "update",
+        payload: { status: "done" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: t2 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c7",
+        mutationSeq: 7,
+        kind: "update",
+        payload: { title: "T2-renamed", priority: "high" },
+      }),
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: a3 },
+        mutationId: "0196322c-0000-4000-8000-0000000000c8",
+        mutationSeq: 8,
+        kind: "delete",
+        payload: { id: a3 },
+      }),
+    ]);
+
+    await expectResponseStatus(updateResponse, 200);
+
+    const t1Row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, t1)))[0];
+    const t2Row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, t2)))[0];
+    expect(t1Row?.status).toBe("done");
+    expect(t1Row?.title).toBe("T1"); // untouched by the {status} group
+    expect(t2Row?.title).toBe("T2-renamed");
+    expect(t2Row?.priority).toBe("high");
+    expect(t2Row?.status).toBe("todo"); // untouched by the {priority, title} group
+
+    const remainingAuthors = await server.drizzle.select().from(authorsTable);
+    expect(remainingAuthors.map((author) => author.id).sort()).toEqual([a1, a2].sort()); // a3 deleted
+  });
+
+  // ADR-0015 Phase 5: the interleave proof against real Postgres. An external write advances the row
+  // BETWEEN a mutation's Base server version and its apply; the table's Conflict policy decides the
+  // outcome. The applier ran via the regenerated sync-function migration (db:migrate) + the runtime
+  // install, so this also proves the RETURNS TABLE function applies on a real database.
+  it("reject-if-stale: an interleaving external write conflicts a stale write instead of clobbering it", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8c001";
+    const todoId = "01963227-d4c7-72db-b858-f89f6af8c002";
+
+    await expectResponseStatus(
+      await postBatchMutations(server, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "a1000000-0000-4000-8000-000000000001",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "Author" },
+        }),
+      ]),
+      200,
+    );
+
+    // Create the reject-if-stale todo and capture the Server version the first client now "sees".
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a1000000-0000-4000-8000-000000000002",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: todoId, title: "original", author_id: authorId },
+      }),
+    ]);
+    const baseVersion = (await readFirstAck(createResponse)).serverUpdatedAtUs;
+    if (baseVersion === undefined) {
+      throw new Error("create ack did not carry a Server version");
+    }
+
+    // An external writer (authored against the same base, so NOT itself stale) advances the row.
+    const externalResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a1000000-0000-4000-8000-000000000003",
+        mutationSeq: 2,
+        kind: "update",
+        payload: { title: "external write" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    const externalAck = await readFirstAck(externalResponse);
+    expect(externalAck.status).toBe("acked");
+    const currentVersion = externalAck.serverUpdatedAtUs!;
+    expect(BigInt(currentVersion)).toBeGreaterThan(BigInt(baseVersion));
+
+    // A second client, still on the OLD base, submits its edit — the row has moved on: stale.
+    const staleResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "a1000000-0000-4000-8000-000000000004",
+        mutationSeq: 3,
+        kind: "update",
+        payload: { title: "stale write" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    expect(staleResponse.status).toBe(200);
+    const staleAck = await readFirstAck(staleResponse);
+    expect(staleAck.status).toBe("conflicted");
+    expect(staleAck.serverUpdatedAtUs).toBe(currentVersion);
+    expect(staleAck.conflictReason).toContain("reject-if-stale");
+
+    // The row keeps the external writer's value — the stale write was NOT applied.
+    const row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId)))[0];
+    expect(row?.title).toBe("external write");
+  });
+
+  it("authoritative endpoint: applies a clean unit and acks every member with its Server version (ADR-0022)", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8d001";
+
+    const response = await postAuthoritativeUnit(
+      server,
+      [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "b1000000-0000-4000-8000-000000000001",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "Authoritative author" },
+        }),
+      ],
+      "unit-ok",
+    );
+
+    expect(response.status).toBe(200);
+    const ack = await readFirstAck(response);
+    expect(ack.status).toBe("acked");
+    expect(ack.serverUpdatedAtUs).toBeDefined();
+
+    const rows = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.name).toBe("Authoritative author");
+  });
+
+  it("authoritative endpoint: a constraint violation rejects the whole unit (not a 500) and rolls it back", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8d002";
+
+    await expectResponseStatus(
+      await postAuthoritativeUnit(server, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "b1000000-0000-4000-8000-000000000010",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "First" },
+        }),
+      ]),
+      200,
+    );
+
+    // A second create with the SAME id violates the PK — a DB-enforced invariant. The authoritative path
+    // turns the raised exception into a clean per-mutation `rejected` ack; the batch path would 500.
+    const dupResponse = await postAuthoritativeUnit(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000011",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: authorId, name: "Second" },
+      }),
+    ]);
+
+    expect(dupResponse.status).toBe(200);
+    const ack = await readFirstAck(dupResponse);
+    expect(ack.status).toBe("rejected");
+    expect(ack.rejectionReason).toBeDefined();
+    // ADR-0022 §4: the client-facing reason is SANITISED — it must not leak the raw DB error internals
+    // (constraint name, the offending key value/PII). Full detail stays in the operations log.
+    expect(ack.rejectionReason).not.toContain("constraint");
+    expect(ack.rejectionReason).not.toContain("duplicate key");
+    expect(ack.rejectionReason).not.toContain(authorId);
+
+    // The unit rolled back: the original row is untouched and there is no second row.
+    const rows = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.name).toBe("First");
+  });
+
+  it("authoritative endpoint: a stale member conflicts the atomic unit (overlay kept, nothing applied)", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8d003";
+    const todoId = "01963227-d4c7-72db-b858-f89f6af8d004";
+
+    await expectResponseStatus(
+      await postBatchMutations(server, [
+        buildBatchMutation({
+          tableName: "authors",
+          entityKey: { id: authorId },
+          mutationId: "b1000000-0000-4000-8000-000000000020",
+          mutationSeq: 1,
+          kind: "create",
+          payload: { id: authorId, name: "Author" },
+        }),
+      ]),
+      200,
+    );
+
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "b1000000-0000-4000-8000-000000000021",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: todoId, title: "original", author_id: authorId },
+      }),
+    ]);
+    const baseVersion = (await readFirstAck(createResponse)).serverUpdatedAtUs;
+    if (baseVersion === undefined) {
+      throw new Error("create ack did not carry a Server version");
+    }
+
+    // An external writer advances the row, so the next write authored against `baseVersion` is stale.
+    await expectResponseStatus(
+      await postBatchMutations(server, [
+        buildBatchMutation({
+          tableName: "todos",
+          entityKey: { id: todoId },
+          mutationId: "b1000000-0000-4000-8000-000000000022",
+          mutationSeq: 2,
+          kind: "update",
+          payload: { title: "external write" },
+          baseServerVersion: baseVersion,
+        }),
+      ]),
+      200,
+    );
+
+    // The stale update goes through the AUTHORITATIVE endpoint: the atomic unit conflicts (overlay kept),
+    // and — being atomic — applies nothing.
+    const staleResponse = await postAuthoritativeUnit(server, [
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "b1000000-0000-4000-8000-000000000023",
+        mutationSeq: 3,
+        kind: "update",
+        payload: { title: "stale write" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+
+    expect(staleResponse.status).toBe(200);
+    const staleAck = await readFirstAck(staleResponse);
+    expect(staleAck.status).toBe("conflicted");
+    expect(staleAck.conflictReason).toContain("reject-if-stale");
+
+    const row = (await server.drizzle.select().from(todosTable).where(eq(todosTable.id, todoId)))[0];
+    expect(row?.title).toBe("external write");
+  });
+
+  it("last-write-wins: a stale write is applied anyway — today's behaviour, now a named choice", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8c003";
+
+    const createResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000001",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: authorId, name: "v0" },
+      }),
+    ]);
+    const baseVersion = (await readFirstAck(createResponse)).serverUpdatedAtUs;
+    if (baseVersion === undefined) {
+      throw new Error("create ack did not carry a Server version");
+    }
+
+    const externalResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000002",
+        mutationSeq: 2,
+        kind: "update",
+        payload: { name: "external" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    expect((await readFirstAck(externalResponse)).status).toBe("acked");
+
+    // A stale write on the old base: last-write-wins applies it (and acks), clobbering the external
+    // write — the deliberate, named choice (no silent default).
+    const staleResponse = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "b1000000-0000-4000-8000-000000000003",
+        mutationSeq: 3,
+        kind: "update",
+        payload: { name: "stale-but-applied" },
+        baseServerVersion: baseVersion,
+      }),
+    ]);
+    const staleAck = await readFirstAck(staleResponse);
+    expect(staleAck.status).toBe("acked");
+
+    const row = (await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, authorId)))[0];
+    expect(row?.name).toBe("stale-but-applied");
+  });
 });
 
-describe.each([
-  {
-    backend: "bulk-plpgsql" as const,
-    expectedStatus: 500,
-  },
-  {
-    backend: "bulk-plpgsql-artifact" as const,
-    expectedStatus: 200,
-  },
-])("write api deferred FK behavior — $backend", ({ backend, expectedStatus }) => {
+describe("write api deferred FK behavior", () => {
   let server!: ReturnType<typeof createSyncServer<typeof fkSyncRegistry>>;
+  const serverDb = createServerDb(fkSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
-    if (backend === "bulk-plpgsql-artifact") {
-      const provisioningServer = createSyncServer({
-        registry: fkSyncRegistry,
-        databaseUrl: env.databaseUrl,
-      });
+    const provisioningServer = createSyncServer({
+      registry: fkSyncRegistry,
+      db: serverDb.db,
+    });
 
-      try {
-        await installPlpgsqlBatchFunction(provisioningServer.drizzle, fkSyncRegistry);
-      } finally {
-        await provisioningServer.stop();
-      }
+    try {
+      await installPlpgsqlBatchFunction(provisioningServer.drizzle, fkSyncRegistry);
+    } finally {
+      await provisioningServer.stop();
     }
 
     server = createSyncServer({
       registry: fkSyncRegistry,
-      databaseUrl: env.databaseUrl,
-      backend,
+      db: serverDb.db,
     });
-
-    await server.drizzle.execute(ensureFkTablesSql);
-    await server.drizzle.execute(ensureFkConstraintDeferrableSql);
   });
 
   beforeEach(async () => {
@@ -574,6 +756,7 @@ describe.each([
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("handles out-of-order parent/child creates in one batch", async () => {
@@ -616,44 +799,36 @@ describe.each([
       }),
     });
 
-    expect(response.status).toBe(expectedStatus);
+    expect(response.status).toBe(200);
 
     const children = await server.drizzle.select().from(fkChildrenTable);
     const parents = await server.drizzle.select().from(fkParentsTable);
 
-    if (backend === "bulk-plpgsql-artifact") {
-      expect(children).toHaveLength(1);
-      expect(parents).toHaveLength(1);
-      expect(children[0]?.parentId).toBe(parentId);
-      return;
-    }
-
-    expect(children).toHaveLength(0);
-    expect(parents).toHaveLength(0);
+    expect(children).toHaveLength(1);
+    expect(parents).toHaveLength(1);
+    expect(children[0]?.parentId ?? null).toBe(parentId);
   });
 });
 
-describe("write api artifact backend RLS auth context", () => {
+describe("write api RLS auth context", () => {
   let server!: ReturnType<typeof createSyncServer<typeof rlsSyncRegistry>>;
+  const serverDb = createServerDb(rlsSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: rlsSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, rlsSyncRegistry);
-      await provisioningServer.drizzle.execute(ensureSupabaseAuthHelpersSql);
-      await provisioningServer.drizzle.execute(ensureRlsTablesSql);
     } finally {
       await provisioningServer.stop();
     }
 
     server = createSyncServer({
       registry: rlsSyncRegistry,
-      databaseUrl: env.databaseUrl,
-      backend: "bulk-plpgsql-artifact",
+      db: serverDb.db,
       resolveAuthClaims: () => ({
         role: "authenticated",
         sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d",
@@ -667,13 +842,13 @@ describe("write api artifact backend RLS auth context", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("returns 401 when claims are missing in RLS mode", async () => {
     const unauthorizedServer = createSyncServer({
       registry: rlsSyncRegistry,
-      databaseUrl: env.databaseUrl,
-      backend: "bulk-plpgsql-artifact",
+      db: serverDb.db,
       resolveAuthClaims: () => null,
     });
 
@@ -707,8 +882,10 @@ describe("write api artifact backend RLS auth context", () => {
     }
   });
 
-  it("applies claims context so auth.uid defaults can be used", async () => {
+  it("applies claims context so an authClaim default (owner_id from the sub claim) is stamped", async () => {
     const id = "91e2a1e4-940f-4d4a-b61b-f0b89e0f24ce";
+    // owner_id is an authClaim managed field at claimPath ["sub"], so the applier stamps it from the
+    // verified request claims — the same value `auth.uid()` would have read, now via one general path.
     const expectedOwnerId = "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d";
 
     const response = await server.request("/api/mutations", {
@@ -742,27 +919,25 @@ describe("write api artifact backend RLS auth context", () => {
   });
 });
 
-describe("write api artifact backend missing governance prerequisites", () => {
+describe("write api missing governance prerequisites", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
-      await provisioningServer.drizzle.execute(ensureTablesSql);
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, demoSyncRegistry);
-      await provisioningServer.drizzle.execute(sql`DROP SCHEMA IF EXISTS auth CASCADE`);
     } finally {
       await provisioningServer.stop();
     }
 
     server = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
-      backend: "bulk-plpgsql-artifact",
+      db: serverDb.db,
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
@@ -772,9 +947,13 @@ describe("write api artifact backend missing governance prerequisites", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
-  it("returns a clear error when governance auth helpers are missing", async () => {
+  it("stamps an authClaim owner from the sub claim and acks under Supabase-native RLS helpers", async () => {
+    // `authors.owner_id` is an authClaim managed field (claimPath ["sub"]) — the applier stamps it from
+    // the verified claims (no `auth.uid()` in the write path anymore). The table's RLS still uses
+    // `auth.uid()`, which is native to Supabase, so the claim-stamped create applies and acks.
     const response = await postBatchMutations(
       server,
       [
@@ -793,40 +972,38 @@ describe("write api artifact backend missing governance prerequisites", () => {
       DEMO_JWT_USER1,
     );
 
-    await expectResponseStatus(response, 500);
-    expect(await response.json()).toEqual({
-      message:
-        "bulk-plpgsql-artifact backend with RLS-enabled tables requires governance SQL to be applied. Missing: auth.set_auth_context(jsonb), auth.uid(), auth.jwt(), auth.has_role(text). Run bun run db:apply:governance.",
-    });
+    // With Supabase-native auth.uid(), this should succeed.
+    // The verifyRlsAuthHelpers check only requires auth.uid()
+    // which is always present in a Supabase-compatible database.
+    await expectResponseStatus(response, 200);
+    const body = (await response.json()) as { acks: Array<{ status?: string }> };
+    expect(body.acks).toBeDefined();
+    expect(body.acks).toHaveLength(1);
+    expect(body.acks[0]?.status).toBe("acked");
   });
 });
 
-describe("write api artifact backend demo auth RLS", () => {
+describe("write api demo auth RLS", () => {
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
   const demoAdminId = "22222222-2222-4222-8222-222222222222";
 
   beforeAll(async () => {
     const provisioningServer = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
-      await provisioningServer.drizzle.execute(ensureTablesSql);
-      await executeSqlFile(
-        provisioningServer.drizzle,
-        "../../drizzle/20260416114759_registry_governance/migration.sql",
-      );
-      await executeSqlFile(provisioningServer.drizzle, "../../infra/sql/functions/pgxsinkit_apply_batch_mutations.sql");
+      await installPlpgsqlBatchFunction(provisioningServer.drizzle, demoSyncRegistry);
     } finally {
       await provisioningServer.stop();
     }
 
     server = createSyncServer({
       registry: demoSyncRegistry,
-      databaseUrl: env.databaseUrl,
-      backend: "bulk-plpgsql-artifact",
+      db: serverDb.db,
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
@@ -841,6 +1018,7 @@ describe("write api artifact backend demo auth RLS", () => {
 
   afterAll(async () => {
     await server.stop();
+    await serverDb.close();
   });
 
   it("returns 401 when demo jwt claims are missing", async () => {
@@ -861,26 +1039,6 @@ describe("write api artifact backend demo auth RLS", () => {
     ]);
 
     await expectResponseStatus(response, 401);
-  });
-
-  it("rejects non-batch CRUD writes in bulk-plpgsql-artifact mode", async () => {
-    const createResponse = await server.request("/api/authors", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${DEMO_JWT_USER1}`,
-      },
-      body: JSON.stringify({
-        id: "9531dc53-78c6-4e1e-a0a1-1db2b48e0127",
-        name: "Should be rejected",
-      }),
-    });
-
-    await expectResponseStatus(createResponse, 405);
-    expect(await createResponse.json()).toEqual({
-      message:
-        "CRUD POST routes are disabled for authors when WRITE_API_BACKEND=bulk-plpgsql-artifact. Use POST /api/mutations instead.",
-    });
   });
 
   it("applies owner and audit fields from demo jwt claims for authors and todos", async () => {
@@ -949,7 +1107,7 @@ describe("write api artifact backend demo auth RLS", () => {
     expect(todos[0]?.updatedAtUs).toBeGreaterThanOrEqual(todos[0]?.createdAtUs ?? 0n);
   });
 
-  it("rejects client-supplied managed fields in artifact mode", async () => {
+  it("rejects client-supplied managed fields", async () => {
     const authorId = "f3e55040-1b89-4ea2-9983-b13074184e78";
 
     const response = await postBatchMutations(
@@ -975,9 +1133,20 @@ describe("write api artifact backend demo auth RLS", () => {
     );
 
     await expectResponseStatus(response, 400);
+    const reason =
+      "authors/de76c555-659c-40be-af41-848a845d6f2c includes server-managed fields: ownerId, modifiedBy, createdAtUs, updatedAtUs";
     expect(await response.json()).toEqual({
-      message:
-        "Payload validation failed: authors/de76c555-659c-40be-af41-848a845d6f2c includes server-managed fields: ownerId, modifiedBy, createdAtUs, updatedAtUs",
+      message: `Payload validation failed: ${reason}`,
+      // The 400 attributes the rejection to the offending mutation so the client can quarantine
+      // exactly it and keep innocent siblings retryable.
+      rejections: [
+        {
+          tableName: "authors",
+          mutationId: "de76c555-659c-40be-af41-848a845d6f2c",
+          mutationSeq: 1,
+          reason,
+        },
+      ],
     });
   });
 
@@ -1088,26 +1257,117 @@ describe("write api artifact backend demo auth RLS", () => {
   });
 });
 
+describe("write api tolerates a missing operations_log table", () => {
+  // Regression (board dogfooding): operations_log is an *optional*, default-enabled feature. A
+  // consumer that leaves it enabled but never creates the table (exactly the board's setup) must still
+  // have writes succeed — the startup probe disables logging when the table is absent. The bug: the
+  // probe's boolean was discarded, so the success-path log INSERT 500'd on the missing table and
+  // rolled back every write. The suite shares one database (db:migrate runs once), so this drops the
+  // table for the scenario and restores it afterwards for the later integration files.
+  const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
+  let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
+
+  beforeAll(async () => {
+    await serverDb.db.execute(sql`DROP TABLE IF EXISTS ${operationsLogTable}`);
+    server = createSyncServer({
+      registry: demoSyncRegistry,
+      db: serverDb.db,
+      resolveAuthClaims: () => ({ role: "authenticated", sub: DEMO_USER1_ID }),
+      // operationsLog omitted → defaults to { enabled: true }, the board's configuration.
+    });
+    await installPlpgsqlBatchFunction(server.drizzle, demoSyncRegistry);
+  });
+
+  afterAll(async () => {
+    // Restore the optional table (with its indexes) so the later integration files that share this
+    // database keep logging — the DDL is generated from `operationsLogTable` itself, so there is no
+    // hand-mirrored copy to drift. The beforeAll DROP in this describe guarantees absence, so the
+    // generated bare `CREATE TABLE` (no IF NOT EXISTS) cannot collide.
+    await createTablesFromSchema(serverDb.db, { operationsLogTable });
+    await server.stop();
+    await serverDb.close();
+  });
+
+  beforeEach(async () => {
+    await serverDb.db.delete(todosTable);
+    await serverDb.db.delete(authorsTable);
+  });
+
+  it("applies a write with operation logging silently disabled", async () => {
+    const authorId = "01963227-d4c7-72db-b858-f89f6af8fa01";
+    const todoId = "01963227-d4c7-72db-b858-f89f6af8fa02";
+
+    const response = await postBatchMutations(server, [
+      buildBatchMutation({
+        tableName: "authors",
+        entityKey: { id: authorId },
+        mutationId: "0a111111-0000-4000-8000-000000000001",
+        mutationSeq: 1,
+        kind: "create",
+        payload: { id: authorId, name: "No-ops-log author" },
+      }),
+      buildBatchMutation({
+        tableName: "todos",
+        entityKey: { id: todoId },
+        mutationId: "0a111111-0000-4000-8000-000000000002",
+        mutationSeq: 2,
+        kind: "create",
+        payload: {
+          id: todoId,
+          title: "Write without an operations_log table",
+          description: null,
+          author_id: authorId,
+          status: "todo",
+          priority: "medium",
+        },
+      }),
+    ]);
+
+    expect(response.status).toBe(200);
+
+    const rows = await serverDb.db.select().from(todosTable).where(eq(todosTable.id, todoId));
+    expect(rows).toHaveLength(1);
+
+    // Degraded, not auto-created: the optional table is still absent. The probe target is derived
+    // from the real pgTable (same identity the server's startup probe uses), bound as a parameter.
+    const presence = await serverDb.db.execute<{ tableName: string | null }>(
+      sql`SELECT to_regclass(${operationsLogRegclassTarget()})::text AS "tableName"`,
+    );
+    const presenceRow = Array.from(presence as Iterable<unknown>, (e) => e as { tableName: string | null })[0];
+    expect(presenceRow?.tableName).toBeNull();
+  });
+});
+
+describe("pgxsinkit_clock_us canonical microsecond clock", () => {
+  const clockDb = createServerDb(demoSyncRegistry, env.databaseUrl);
+
+  afterAll(async () => {
+    await clockDb.close();
+  });
+
+  it("advances WITHIN a transaction (clock_timestamp, not now())", async () => {
+    // Two stamps in ONE transaction separated by a 1ms pg_sleep. This is the DISCRIMINATING assertion:
+    // under a now()/transaction_timestamp() clock both reads are frozen at tx start, so they would be
+    // EQUAL despite the sleep; only clock_timestamp() advances mid-transaction, so the second stamp is
+    // STRICTLY greater. (Two immediate stamps would be flaky — same microsecond — and would NOT catch a
+    // now() regression, which is exactly the semantic this function is chosen to guarantee.)
+    const { first, second } = await clockDb.db.transaction(async (tx) => {
+      const before = await tx.execute<{ us: string }>(sql`SELECT public.pgxsinkit_clock_us()::text AS us`);
+      await tx.execute(sql`SELECT pg_sleep(0.001)`);
+      const after = await tx.execute<{ us: string }>(sql`SELECT public.pgxsinkit_clock_us()::text AS us`);
+      const read = (result: unknown) => BigInt(Array.from(result as Iterable<{ us: string }>)[0]!.us);
+      return { first: read(before), second: read(after) };
+    });
+
+    expect(second).toBeGreaterThan(first);
+  });
+});
+
 async function readOperationsLogRowCount(
   server: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>,
 ): Promise<number> {
-  const result = await server.drizzle.execute<{ count: number }>(sql`
-    SELECT COUNT(*)::int AS count
-    FROM operations_log
-  `);
-
-  const firstRow = Array.from(result, (row) => row as { count: number })[0];
-  return firstRow?.count ?? 0;
-}
-
-async function executeSqlFile(
-  db: {
-    execute: (query: ReturnType<typeof sql.raw>) => Promise<unknown>;
-  },
-  relativePath: string,
-): Promise<void> {
-  const statement = await readFile(new URL(relativePath, import.meta.url), "utf8");
-  await db.execute(sql.raw(statement));
+  const result = await server.drizzle.select({ count: count() }).from(operationsLogTable);
+  return result[0]?.count ?? 0;
 }
 
 function buildBatchMutation(input: {
@@ -1117,6 +1377,7 @@ function buildBatchMutation(input: {
   mutationSeq: number;
   kind: "create" | "update" | "delete";
   payload: Record<string, unknown>;
+  baseServerVersion?: string;
 }) {
   return {
     ...input,
@@ -1124,22 +1385,56 @@ function buildBatchMutation(input: {
   };
 }
 
+interface AckShape {
+  status: string;
+  serverUpdatedAtUs?: string;
+  conflictReason?: string;
+  rejectionReason?: string;
+}
+
+/** Read the first ack of a /api/mutations response with a typed shape (ADR-0015 proofs). */
+async function readFirstAck(response: Response): Promise<AckShape> {
+  const text = await response.clone().text();
+  const body = JSON.parse(text) as { acks?: AckShape[] };
+  const ack = body.acks?.[0];
+  if (!ack) {
+    throw new Error(`expected at least one ack (HTTP ${response.status}): ${text}`);
+  }
+  return ack;
+}
+
 async function postBatchMutations(
   server: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>,
   mutations: Array<ReturnType<typeof buildBatchMutation>>,
-  authToken?: string,
+  accessToken?: string,
 ) {
   return server.request("/api/mutations", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify({ mutations }),
   });
 }
 
+/** POST one pessimistic write-unit to the authoritative endpoint (ADR-0022 §3). */
+async function postAuthoritativeUnit(
+  server: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>,
+  mutations: Array<ReturnType<typeof buildBatchMutation>>,
+  writeUnit?: string,
+) {
+  return server.request("/api/mutations/unit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...(writeUnit ? { writeUnit } : {}), mutations }),
+  });
+}
+
 async function expectResponseStatus(response: Response, expectedStatus: number): Promise<void> {
   const responseText = await response.clone().text();
-  expect(response.status, responseText).toBe(expectedStatus);
+
+  if (response.status !== expectedStatus) {
+    throw new Error(`Expected HTTP ${expectedStatus}, got ${response.status}: ${responseText}`);
+  }
 }

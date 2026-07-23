@@ -1,0 +1,73 @@
+name: Demo reset
+
+# Nightly full rebuild of the hosted board /demo's shared backend (board ADR-0009):
+# purge → migrate → reseed.
+#
+# The /demo is a PUBLIC, signed-in-as-a-fixture, writable board — anyone can create/move issues and
+# post chat. This job restores it to the known seeded fixtures every night so vandalism (offensive
+# issue titles, chat spam) never persists — and it rebuilds the SCHEMA, not just the rows:
+#   1. `purge:board` drops every migration-created board object in public (model-derived drop list)
+#      plus the `drizzle` bookkeeping schema;
+#   2. `db:board:migrate` re-applies the latest committed history from scratch;
+#   3. `seed:board` recreates the deterministic identities + fixtures.
+# That makes the cloud database effectively ephemeral (the same posture as every other database these
+# migrations target — docs/runbooks/regenerate-migrations.md), so a rewritten/collapsed history ships
+# by simply dispatching this workflow — no hand-reconciling `drizzle.__drizzle_migrations`. The
+# function bundles are separate: deploy those with `bun run board:cloud:functions` from a linked CL.
+# All three steps are the exact scripts used locally and by `board:cloud:*`, pointed at the cloud via
+# env. DDL through the SESSION pooler is fine — privileges hang off the `postgres.<ref>` role, not the
+# connection path (the direct host is IPv6-only and unreachable from GitHub runners; see below).
+#
+# It talks ONLY to the managed services (GoTrue admin API + the project's Postgres via the Supavisor
+# SESSION pooler); no Postgres/Electric containers, no Pages deploy. Inputs:
+#   - var    DEMO_BOARD_SUPABASE_URL   the project URL (public; the GoTrue admin gateway)
+#   - secret DEMO_BOARD_SECRET_KEY     the project's sb_secret_… key (admin API auth)
+#   - secret DEMO_BOARD_DATABASE_URL   the SESSION pooler connection (pooler host, port 5432,
+#     user postgres.<ref>) — truncate + insert as `postgres`. NOT the direct connection: that host
+#     is IPv6-only and GitHub-hosted runners have no outbound IPv6, so the first query dies with
+#     "Connection closed" (run 28500294690). Session mode (not the 6543 transaction pooler) keeps
+#     the seed's prepared statements on one backend connection.
+#
+# The fixtures use the in-script shared password (`board-demo-password`) the login screen publishes —
+# a public demo's sign-in password is public by design, so there is nothing to inject here.
+#
+# Gated on the public variable so a fork (which has neither the variable nor the secrets) skips it
+# instead of failing every night. Disable open signups on the Supabase project so the only accounts
+# are the seeded fixtures (the reset truncates all board ROWS regardless of author, but only deletes
+# the FIXTURE auth identities) — see the hosted-demo guide.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch: # manual reset on demand
+
+concurrency:
+  group: demo-reset
+  cancel-in-progress: true
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    if: ${{ vars.DEMO_BOARD_SUPABASE_URL != '' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install
+      - name: Purge the board's migration objects
+        run: bun run purge:board
+        env:
+          BOARD_DATABASE_URL: ${{ secrets.DEMO_BOARD_DATABASE_URL }}
+      - name: Migrate from the latest committed history
+        run: bun run db:board:migrate
+        env:
+          BOARD_DATABASE_URL: ${{ secrets.DEMO_BOARD_DATABASE_URL }}
+      - name: Reseed the hosted demo
+        run: bun run seed:board
+        env:
+          BOARD_GATEWAY_URL: ${{ vars.DEMO_BOARD_SUPABASE_URL }}
+          BOARD_SECRET_KEY: ${{ secrets.DEMO_BOARD_SECRET_KEY }}
+          BOARD_DATABASE_URL: ${{ secrets.DEMO_BOARD_DATABASE_URL }}

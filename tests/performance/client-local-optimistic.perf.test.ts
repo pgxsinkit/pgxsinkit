@@ -1,6 +1,12 @@
+import { describe, expect, it } from "bun:test";
 import { performance } from "node:perf_hooks";
 
-import { createSyncClient, type ClientPGlite } from "@pgxsinkit/client";
+import { eq, sql } from "drizzle-orm";
+import type { AnyPgTable } from "drizzle-orm/pg-core";
+
+import { createSyncClient, getReadModelView, type SyncClient } from "@pgxsinkit/client";
+import { memoryStoreForTests } from "@pgxsinkit/client/testing";
+import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import {
   assertPerfBudgets,
@@ -22,19 +28,23 @@ describe("performance: client local optimistic views", () => {
         extraColumnCount: config.extraColumnCount,
       });
       const targetTable = tableNames[0]!;
+      const targetEntry = registry[targetTable];
+
+      if (!targetEntry) {
+        throw new Error(`Missing registry entry for ${targetTable}`);
+      }
 
       const client = await createSyncClient({
         registry,
         electricUrl: "http://127.0.0.1:1/v1/shape",
-        writeUrl: "http://127.0.0.1:1",
-        batchWriteUrl: "http://127.0.0.1:1",
+        batchWriteUrl: "http://127.0.0.1:1/api/mutations",
         syncEnabled: false,
-        dataDir: `memory://perf-client-${Date.now()}`,
+        ...memoryStoreForTests(`perf-client-${Date.now()}`),
       });
 
       try {
         await client.ready;
-        await seedLocalRows(client.pglite, targetTable, config.localRows, config.extraColumnCount);
+        await seedLocalRows(client.drizzle, targetEntry.table, config.localRows, config.extraColumnCount);
 
         const mutationTimings: number[] = [];
         const effectiveMutationBatchSize = Math.max(1, config.mutationBatchSize);
@@ -45,8 +55,7 @@ describe("performance: client local optimistic views", () => {
           const batchItems: UpdateBatchItem[] = [];
 
           for (let index = start; index < batchEnd; index += 1) {
-            const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount)
-              .id as string;
+            const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount).id;
 
             batchItems.push({
               table: targetTable,
@@ -74,13 +83,28 @@ describe("performance: client local optimistic views", () => {
 
         const readTimings: number[] = [];
 
+        // Authored ONCE from the registry's schema-qualified read-model view factory (tier-①) and
+        // rendered to raw text with a bound-parameter placeholder; the timed loop below keeps calling the
+        // raw driver with this pre-rendered string, so no per-iteration builder work enters the read metric.
+        const readModelView = getReadModelView(registry, targetTable);
+
+        const readModelId = readModelView["id"];
+        const readModelOverlayKind = readModelView["overlay_kind"];
+
+        if (!readModelId || !readModelOverlayKind) {
+          throw new Error(`Missing id/overlay_kind columns on the ${targetTable} read-model view`);
+        }
+
+        const readQuerySql = client.drizzle
+          .select({ id: readModelId, overlay_kind: readModelOverlayKind })
+          .from(readModelView)
+          .where(eq(readModelId, sql.placeholder("id")))
+          .toSQL().sql;
+
         for (let index = 0; index < config.readSamples; index += 1) {
-          const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount).id as string;
+          const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount).id;
           const started = performance.now();
-          const result = await client.pglite.query<{ id: string; overlay_kind: string }>(
-            `SELECT id, overlay_kind FROM ${targetTable}_read_model WHERE id = $1`,
-            [rowId],
-          );
+          const result = await client.pglite.query<{ id: string; overlay_kind: string }>(readQuerySql, [rowId]);
           readTimings.push(performance.now() - started);
           expect(result.rows[0]?.id).toBe(rowId);
         }
@@ -115,59 +139,48 @@ describe("performance: client local optimistic views", () => {
         console.log("[perf] client-local-optimistic report", { reportPath });
         assertPerfBudgets(budgetResults);
       } finally {
-        await client.destroy();
+        await client.stop();
       }
     },
     10 * 60_000,
   );
 });
 
-async function seedLocalRows(db: ClientPGlite, tableName: string, rowCount: number, extraColumnCount: number) {
-  const columnNames = [
-    "id",
-    ...Array.from({ length: extraColumnCount }, (_, index) => `field_${index.toString().padStart(2, "0")}`),
-    "owner_id",
-    "modified_by",
-    "status",
-    "priority",
-    "created_at_us",
-    "updated_at_us",
-  ];
+// Setup-phase seeding (unmeasured): tier-① inserts through the client's drizzle handle over the
+// registry table, in the same 250-row batches as the raw form.
+async function seedLocalRows(
+  db: SyncClient<SyncTableRegistry>["drizzle"],
+  table: AnyPgTable,
+  rowCount: number,
+  extraColumnCount: number,
+) {
   const batchSize = 250;
 
   for (let start = 0; start < rowCount; start += batchSize) {
     const batchEnd = Math.min(rowCount, start + batchSize);
-    const values: Array<string | number> = [];
-    const tuples: string[] = [];
+    const rows: Array<Record<string, string | bigint>> = [];
 
     for (let rowIndex = start; rowIndex < batchEnd; rowIndex += 1) {
       const payload = buildSyntheticCreatePayload(0, rowIndex, extraColumnCount);
-      const placeholders: string[] = [];
-
-      values.push(String(payload.id));
-      placeholders.push(`$${values.length}`);
+      const timestampUs = 1_700_000_000_000_000n + BigInt(rowIndex);
+      const row: Record<string, string | bigint> = {
+        id: payload.id,
+        ownerId: "11111111-1111-4111-8111-111111111111",
+        modifiedBy: "11111111-1111-4111-8111-111111111111",
+        status: payload.status,
+        priority: payload.priority,
+        createdAtUs: timestampUs,
+        updatedAtUs: timestampUs,
+      };
 
       for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
-        values.push(String(payload[`field${columnIndex.toString().padStart(2, "0")}`]));
-        placeholders.push(`$${values.length}`);
+        const fieldKey = `field${columnIndex.toString().padStart(2, "0")}`;
+        row[fieldKey] = payload[fieldKey] ?? "";
       }
 
-      values.push("11111111-1111-4111-8111-111111111111");
-      placeholders.push(`$${values.length}`);
-      values.push("11111111-1111-4111-8111-111111111111");
-      placeholders.push(`$${values.length}`);
-      values.push(String(payload.status));
-      placeholders.push(`$${values.length}`);
-      values.push(String(payload.priority));
-      placeholders.push(`$${values.length}`);
-      values.push(1_700_000_000_000_000 + rowIndex);
-      placeholders.push(`$${values.length}`);
-      values.push(1_700_000_000_000_000 + rowIndex);
-      placeholders.push(`$${values.length}`);
-
-      tuples.push(`(${placeholders.join(", ")})`);
+      rows.push(row);
     }
 
-    await db.query(`INSERT INTO ${tableName} (${columnNames.join(", ")}) VALUES ${tuples.join(", ")}`, values);
+    await db.insert(table).values(rows);
   }
 }

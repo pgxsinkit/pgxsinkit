@@ -1,0 +1,29 @@
+{
+  "name": "@pgxsinkit/board",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.4",
+    "@electric-sql/pglite-repl": "0.4.4",
+    "@mantine/core": "9.4.1",
+    "@mantine/hooks": "9.4.1",
+    "@pgxsinkit/board-schema": "workspace:*",
+    "@pgxsinkit/client": "workspace:*",
+    "@pgxsinkit/contracts": "workspace:*",
+    "@pgxsinkit/react": "workspace:*",
+    "@supabase/supabase-js": "2.110.7",
+    "@tanstack/react-router": "1.170.18",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "uuid": "14.0.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.0.3",
+    "vite": "8.1.5"
+  }
+}

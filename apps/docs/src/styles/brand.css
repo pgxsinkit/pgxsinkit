@@ -1,0 +1,71 @@
+/* pgxsinkit brand theming for Starlight.
+   Tokens mirror brand/brand-tokens.css; the Supabase-green "x" is the accent,
+   Postgres blue is the secondary. */
+:root {
+  --pgx-ink: #11181c;
+  --pgx-paper: #f8f9fa;
+  --pgx-mute: #8a94a0;
+  --pgx-pg: #336791;
+  --pgx-pg-light: #008bb9;
+  --pgx-green: #249361;
+  --pgx-green-bright: #3ecf8e;
+
+  --sl-font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Dark theme (Starlight default): bright green accent on ink. */
+:root,
+:root[data-theme="dark"] {
+  --sl-color-accent-low: #0a3b29;
+  --sl-color-accent: #249361;
+  --sl-color-accent-high: #3ecf8e;
+  --sl-color-text-accent: #3ecf8e;
+}
+
+/* Light theme: deeper green for contrast on paper. */
+:root[data-theme="light"] {
+  --sl-color-accent-low: #c7efdc;
+  --sl-color-accent: #249361;
+  --sl-color-accent-high: #0f5f3f;
+  --sl-color-text-accent: #0f5f3f;
+}
+
+/* Splash hero, desktop-only layout.
+   Mobile keeps Starlight's default (centred banner on top, text below) — untouched.
+   Above the hero's desktop breakpoint, drop the two-column split so the banner runs
+   full-bleed across the top with the title/tagline/actions centred beneath it.
+   The [class] attribute bumps specificity past Starlight's `:where()`-scoped rules
+   without depending on its build-time scope hash.
+
+   Coupling/fragility note: this leans on Starlight's hero class names
+   (.hero / .hero-html / .stack / .copy / .actions). These have been stable across
+   Starlight releases, but they are internal, not a public API. If a future Starlight
+   renames them, these rules simply stop matching and the hero reverts to Starlight's
+   own two-column default — a graceful fallback, never a broken page. The banner image
+   itself is set via the supported `hero.image.html` frontmatter API and is unaffected. */
+@media (min-width: 50rem) {
+  .hero[class] {
+    grid-template-columns: 1fr;
+    gap: 2.5rem;
+  }
+
+  .hero[class] > .hero-html {
+    order: -1;
+    width: 100%;
+    max-width: 52rem;
+    margin-inline: auto;
+  }
+
+  .hero[class] .stack {
+    text-align: center;
+    align-items: center;
+  }
+
+  .hero[class] .copy {
+    align-items: center;
+  }
+
+  .hero[class] .actions {
+    justify-content: center;
+  }
+}

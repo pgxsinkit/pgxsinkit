@@ -1,0 +1,189 @@
+import { describe, expect, it } from "bun:test";
+
+import { count, eq } from "drizzle-orm";
+import type { AnyPgTable } from "drizzle-orm/pg-core";
+
+import { getJournalTable, getOverlayTable } from "@pgxsinkit/client";
+import { demoSyncRegistry } from "@pgxsinkit/schema";
+
+import {
+  clearLazyGroupActivation,
+  readActivatedLazyGroups,
+  readStoredRegistryFingerprint,
+  reconcileLocalStoreVersion,
+  writeLazyGroupActivation,
+  writeStoredRegistryFingerprint,
+} from "../../packages/client/src/local-store";
+import { createMutationRuntime } from "../../packages/client/src/mutation";
+import {
+  buildDropReadCacheSql,
+  buildWipeLocalStoreSql,
+  generateLocalSchemaSql,
+} from "../../packages/client/src/schema";
+import { informationSchemaTables } from "../support/catalog-tables";
+import { drizzleOver } from "../support/drizzle";
+import { createSchemaTestPGlite } from "../support/pglite";
+
+// ADR-0006: the fingerprint-keyed local store + drain-then-drop read-cache rebuild.
+
+const schemaSql = generateLocalSchemaSql(demoSyncRegistry);
+const batchWriteUrl = "http://localhost:3001/api/mutations";
+
+async function provisioned() {
+  const db = await createSchemaTestPGlite(schemaSql);
+  const runtime = createMutationRuntime({ db, registry: demoSyncRegistry, batchWriteUrl });
+  return { db, runtime };
+}
+
+async function tableExists(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, name: string): Promise<boolean> {
+  const rows = await drizzleOver(db)
+    .select({ count: count() })
+    .from(informationSchemaTables)
+    .where(eq(informationSchemaTables.tableName, name));
+  return (rows[0]?.count ?? 0) > 0;
+}
+
+async function rowCount(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, table: AnyPgTable): Promise<number> {
+  const rows = await drizzleOver(db).select({ count: count() }).from(table);
+  return rows[0]?.count ?? 0;
+}
+
+describe("local-meta fingerprint store (ADR-0006)", () => {
+  it("round-trips the stored registry fingerprint", async () => {
+    const { db } = await provisioned();
+
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBeNull();
+
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, "fp-1");
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe("fp-1");
+
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, "fp-2");
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe("fp-2");
+  });
+});
+
+describe("lazy activation flags (ADR-0021 §2 lazy+persistent promotion)", () => {
+  it("round-trips group activations, is idempotent, and clears one on desync without touching the fingerprint", async () => {
+    const { db } = await provisioned();
+    expect([...(await readActivatedLazyGroups(db, demoSyncRegistry))]).toEqual([]);
+
+    await writeLazyGroupActivation(db, demoSyncRegistry, "forum");
+    await writeLazyGroupActivation(db, demoSyncRegistry, "archive-shape");
+    await writeLazyGroupActivation(db, demoSyncRegistry, "forum"); // idempotent
+    expect([...(await readActivatedLazyGroups(db, demoSyncRegistry))].sort()).toEqual(["archive-shape", "forum"]);
+
+    // The activation scan is prefix-scoped — it must not pick up the fingerprint key, and desync
+    // clears only its own group.
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, "fp-keep");
+    await clearLazyGroupActivation(db, demoSyncRegistry, "forum");
+    expect([...(await readActivatedLazyGroups(db, demoSyncRegistry))]).toEqual(["archive-shape"]);
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe("fp-keep");
+  });
+});
+
+describe("dropReadCache / wipe (ADR-0005 + ADR-0006)", () => {
+  it("dropReadCache removes the synced read cache but preserves overlay + journal", async () => {
+    const { db, runtime } = await provisioned();
+
+    // A pending (un-flushed) write: overlay + journal rows are authority and must survive.
+    await runtime.create("authors", { id: "01963227-d4c7-72db-b858-f89f6af8a001", name: "Keep me" });
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
+    expect(await rowCount(db, getOverlayTable(demoSyncRegistry, "authors"))).toBe(1);
+
+    await db.exec(buildDropReadCacheSql(demoSyncRegistry));
+
+    // Synced read cache + its view are gone; authority tables remain with their data.
+    expect(await tableExists(db, "authors")).toBe(false);
+    expect(await tableExists(db, "todos")).toBe(false);
+    expect(await tableExists(db, "authors_overlay")).toBe(true);
+    expect(await tableExists(db, "authors_mutations")).toBe(true);
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
+
+    // Re-applying the schema rebuilds the synced cache empty, ready to re-sync.
+    await db.exec(schemaSql);
+    expect(await tableExists(db, "authors")).toBe(true);
+    expect(await rowCount(db, demoSyncRegistry.authors.localTable)).toBe(0);
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
+  });
+
+  it("wipe removes the entire local store including overlay, journal, and meta", async () => {
+    const { db, runtime } = await provisioned();
+    await runtime.create("authors", { id: "01963227-d4c7-72db-b858-f89f6af8a002", name: "Gone" });
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, "fp-x");
+
+    await db.exec(buildWipeLocalStoreSql(demoSyncRegistry));
+
+    for (const name of ["authors", "todos", "authors_overlay", "authors_mutations", "pgxsinkit_local_meta"]) {
+      expect(await tableExists(db, name)).toBe(false);
+    }
+  });
+});
+
+describe("reconcileLocalStoreVersion (ADR-0006 drain-then-drop)", () => {
+  it("stamps a fresh (unstamped) store with the current fingerprint", async () => {
+    const { db, runtime } = await provisioned();
+
+    await reconcileLocalStoreVersion({ db, registry: demoSyncRegistry, runtime });
+
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe(runtime.registryVersion);
+  });
+
+  it("is a no-op when the stored fingerprint already matches", async () => {
+    const { db, runtime } = await provisioned();
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, runtime.registryVersion);
+
+    const events: string[] = [];
+    await reconcileLocalStoreVersion({
+      db,
+      registry: demoSyncRegistry,
+      runtime,
+      onSchemaChange: (event) => {
+        events.push(event.status);
+      },
+    });
+
+    expect(events).toEqual([]);
+  });
+
+  it("rebuilds the read cache on a clean (nothing-owed) registry change", async () => {
+    const { db, runtime } = await provisioned();
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, "old-fingerprint");
+
+    const events: string[] = [];
+    await reconcileLocalStoreVersion({
+      db,
+      registry: demoSyncRegistry,
+      runtime,
+      onSchemaChange: (event) => {
+        events.push(event.status);
+      },
+    });
+
+    expect(events).toEqual(["rebuilt"]);
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe(runtime.registryVersion);
+    expect(await tableExists(db, "authors")).toBe(true);
+  });
+
+  it("defers the rebuild while writes are still owed, never dropping them", async () => {
+    const { db, runtime } = await provisioned();
+    await writeStoredRegistryFingerprint(db, demoSyncRegistry, "old-fingerprint");
+
+    // An un-flushed write is owed; the upgrade must not wipe it.
+    await runtime.create("authors", { id: "01963227-d4c7-72db-b858-f89f6af8a003", name: "Owed" });
+
+    const events: { status: string; owed: number }[] = [];
+    await reconcileLocalStoreVersion({
+      db,
+      registry: demoSyncRegistry,
+      runtime,
+      onSchemaChange: (event) => {
+        events.push({ status: event.status, owed: event.owedMutations });
+      },
+    });
+
+    expect(events).toEqual([{ status: "deferred", owed: 1 }]);
+    // The journal row survived and the fingerprint was NOT advanced (retried next boot).
+    expect(await rowCount(db, getJournalTable(demoSyncRegistry, "authors"))).toBe(1);
+    expect(await readStoredRegistryFingerprint(db, demoSyncRegistry)).toBe("old-fingerprint");
+  });
+});

@@ -1,14 +1,16 @@
-import { sql } from "drizzle-orm";
-import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
-import { drizzle } from "drizzle-orm/postgres-js";
+import { and, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/bun-sql";
+import { PgDialect, type AnyPgTable } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
+import { createSchemaFactory } from "drizzle-orm/zod";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import postgres from "postgres";
 import { z } from "zod";
 
 import {
   batchMutationRequestSchema,
+  buildOwnershipShapeWhere,
+  quoteIdentifier as quoteIdent,
   type BatchMutationRequest,
   type MutationAck,
   type SyncTableEntry,
@@ -27,20 +29,27 @@ import {
   findSyntheticPerfLabScenarioDefinition,
   syntheticPerfLabScenarioDefinitions,
   type DemoJwtClaims,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 
 import { parseDemoAuthClaimsFromRequest } from "../apps/write-api/src/demo-auth";
 import {
   buildPlpgsqlBatchFunctionDdl,
   executePlpgsqlBatch,
-} from "../packages/server/src/mutations/bulk/plpgsql-strategy";
-import type { TransactionClient } from "../packages/server/src/mutations/bulk/types";
+  expectedApplyFingerprint,
+} from "../packages/server/src/mutations/plpgsql-apply";
+import type { TransactionClient } from "../packages/server/src/mutations/types";
 import {
   PERF_LAB_DATABASE_URL,
   PERF_LAB_ELECTRIC_URL,
   PERF_LAB_HOST,
   PERF_LAB_WRITE_API_PORT,
 } from "./perf-lab-config";
+
+const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
+  coerce: { date: true },
+});
+
+type PerfLabReadQueryClient = Pick<typeof adminDb, "select">;
 
 const allowedOrigins = ["http://localhost:5174", "http://127.0.0.1:5174"];
 
@@ -75,13 +84,12 @@ declare const Bun: {
   }) => BunServerHandle;
 };
 
-const databaseUrl = process.env.DATABASE_URL ?? PERF_LAB_DATABASE_URL;
-const electricUrl = process.env.ELECTRIC_URL ?? PERF_LAB_ELECTRIC_URL;
-const host = process.env.WRITE_API_HOST ?? PERF_LAB_HOST;
-const port = readPort(process.env.WRITE_API_PORT, PERF_LAB_WRITE_API_PORT);
+const databaseUrl = process.env["DATABASE_URL"] ?? PERF_LAB_DATABASE_URL;
+const electricUrl = process.env["ELECTRIC_URL"] ?? PERF_LAB_ELECTRIC_URL;
+const host = process.env["WRITE_API_HOST"] ?? PERF_LAB_HOST;
+const port = readPort(process.env["WRITE_API_PORT"], PERF_LAB_WRITE_API_PORT);
 
-const adminClient = postgres(databaseUrl, { max: 6 });
-const adminDb = drizzle({ client: adminClient });
+const adminDb = drizzle({ connection: databaseUrl });
 const app = new Hono();
 
 const preparedRegistries = new Map<string, PreparedPerfRegistry>();
@@ -195,7 +203,6 @@ app.post("/api/mutations", async (context) => {
     }
 
     const syncEntry = entry as SyncTableEntry;
-    const schemas = syncEntry.schemas;
     const normalizedPayload = toSchemaPayload(syncEntry, mutation.payload);
     const managedFieldViolations = findManagedFieldViolations(syncEntry, mutation.kind, normalizedPayload);
 
@@ -207,11 +214,21 @@ app.post("/api/mutations", async (context) => {
     }
 
     try {
-      if (mutation.kind === "create" && schemas?.createSchema) {
-        schemas.createSchema.parse(normalizedPayload);
-      } else if (mutation.kind === "update" && schemas?.updateSchema) {
-        schemas.updateSchema.parse(normalizedPayload);
+      if (mutation.kind === "update") {
+        const payloadKeys =
+          typeof normalizedPayload === "object" && normalizedPayload !== null
+            ? Object.keys(normalizedPayload as object)
+            : [];
+        if (payloadKeys.length === 0) {
+          throw new Error("At least one field must be provided");
+        }
+        createMutationInsertSchema(syncEntry.table as AnyPgTable)
+          .partial()
+          .parse(normalizedPayload);
+      } else if (mutation.kind === "create") {
+        createMutationInsertSchema(syncEntry.table as AnyPgTable).parse(normalizedPayload);
       }
+      // delete has no payload to validate
     } catch (error) {
       const suffix = isValidationError(error) ? ` (${JSON.stringify(error.issues)})` : "";
       validationErrors.push(`${mutation.tableName}/${mutation.mutationId}${suffix}`);
@@ -228,7 +245,7 @@ app.post("/api/mutations", async (context) => {
     return context.json({ message: "Perf-lab mutations require a demo auth token." }, 401);
   }
 
-  const sanitizedBatch = sanitizeArtifactManagedFields(body, currentRegistry.registry);
+  const sanitizedBatch = sanitizeManagedFields(body, currentRegistry.registry);
 
   try {
     const acks = await adminDb.transaction(async (tx) => {
@@ -241,6 +258,8 @@ app.post("/api/mutations", async (context) => {
         false,
         true,
         { ...claims },
+        // ADR-0030: the installed apply function verifies itself against this fingerprint in-body.
+        expectedApplyFingerprint(currentRegistry.registry, { functionSchema: currentRegistry.schemaName }),
         { functionSchema: currentRegistry.schemaName },
       );
 
@@ -248,11 +267,7 @@ app.post("/api/mutations", async (context) => {
 
       for (const mutation of sanitizedBatch.mutations) {
         const entry = currentRegistry.registry[mutation.tableName] as SyncTableEntry;
-        const serverUpdatedAtUs = await readServerUpdatedAtUs(
-          tx as unknown as TransactionClient,
-          entry,
-          mutation.entityKey,
-        );
+        const serverUpdatedAtUs = await readServerUpdatedAtUs(tx, entry, mutation.entityKey);
 
         responseAcks.push({
           tableName: mutation.tableName,
@@ -289,14 +304,14 @@ app.post("/api/mutations", async (context) => {
   }
 });
 
-app.get("/v1/shape-proxy", async (context) => {
+app.get("/v1/electric-proxy", async (context) => {
   const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
 
   if (!activeRegistry) {
     return context.json({ message: "Perf-lab registry is not ready yet." }, 503);
   }
 
-  return await proxyShapeRequest(context.req.raw, claims, activeRegistry.electricTables);
+  return await proxyShapeRequest(context.req.raw, claims, activeRegistry);
 });
 
 app.onError((error, context) => {
@@ -329,7 +344,7 @@ const server = Bun.serve({
 console.log(`Perf-lab write server ready on http://${host}:${port}`);
 
 async function installSharedAuthHelpers() {
-  await adminClient.unsafe(buildSyntheticGovernanceSql({} as SyncTableRegistry));
+  await adminDb.execute(sql.raw(buildSyntheticGovernanceSql({} as SyncTableRegistry)));
 }
 
 async function prebuildKnownScenarioSchemas() {
@@ -347,7 +362,7 @@ async function activateRegistry(tableCount: number, extraColumnCount: number) {
   const truncateSql = buildSyntheticTruncateSql(preparedRegistry.registry);
 
   if (truncateSql.length > 0) {
-    await adminClient.unsafe(truncateSql);
+    await adminDb.execute(sql.raw(truncateSql));
   }
 
   console.log(
@@ -385,12 +400,14 @@ async function ensurePreparedRegistry(options: { tableCount: number; extraColumn
     `Preparing perf-lab schema ${schemaName} (${options.tableCount} tables, ${options.extraColumnCount} extra columns)`,
   );
 
-  await adminClient.unsafe(buildSyntheticServerSchemaSql(bundle.registry));
-  await adminClient.unsafe(buildSyntheticGovernanceSql(bundle.registry, { includeAuthHelpers: false }));
-  await adminClient.unsafe(
-    buildPlpgsqlBatchFunctionDdl(bundle.registry, {
-      functionSchema: schemaName,
-    }),
+  await adminDb.execute(sql.raw(buildSyntheticServerSchemaSql(bundle.registry)));
+  await adminDb.execute(sql.raw(buildSyntheticGovernanceSql(bundle.registry)));
+  await adminDb.execute(
+    sql.raw(
+      buildPlpgsqlBatchFunctionDdl(bundle.registry, {
+        functionSchema: schemaName,
+      }),
+    ),
   );
 
   const preparedRegistry: PreparedPerfRegistry = {
@@ -421,15 +438,9 @@ async function seedRegistryRows(preparedRegistry: PreparedPerfRegistry, rowCount
 
     for (let start = 0; start < rowCount; start += batchSize) {
       const batchEnd = Math.min(rowCount, start + batchSize);
-      const sqlText = buildSeedInsertSql(
-        entry,
-        tableIndex,
-        start,
-        batchEnd,
-        preparedRegistry.extraColumnCount,
-        claims.sub,
-      );
-      await adminClient.unsafe(sqlText);
+      const rows = buildSeedInsertRows(tableIndex, start, batchEnd, preparedRegistry.extraColumnCount, claims.sub);
+
+      await adminDb.insert(entry.table as AnyPgTable).values(rows);
     }
   }
 
@@ -438,51 +449,41 @@ async function seedRegistryRows(preparedRegistry: PreparedPerfRegistry, rowCount
   );
 }
 
-function buildSeedInsertSql(
-  entry: SyncTableEntry,
+function buildSeedInsertRows(
   tableIndex: number,
   start: number,
   end: number,
   extraColumnCount: number,
   ownerId: string,
 ) {
-  const tableConfig = getTableConfig(entry.table as AnyPgTable);
-  const qualifiedTableName = qualifyIdent(tableConfig.schema, tableConfig.name);
-  const columns = [
-    "id",
-    ...Array.from({ length: extraColumnCount }, (_, index) => `field_${index.toString().padStart(2, "0")}`),
-    "owner_id",
-    "modified_by",
-    "status",
-    "priority",
-    "created_at_us",
-    "updated_at_us",
-  ];
-  const tuples: string[] = [];
+  const rows: Array<Record<string, string | bigint>> = [];
 
   for (let rowIndex = start; rowIndex < end; rowIndex += 1) {
     const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
-    const values = [sqlString(String(payload.id))];
+    const timestampUs = 1_700_000_000_000_000n + BigInt(rowIndex);
+    const row: Record<string, string | bigint> = {
+      id: payload.id,
+      ownerId,
+      modifiedBy: ownerId,
+      status: payload.status,
+      priority: payload.priority,
+      createdAtUs: timestampUs,
+      updatedAtUs: timestampUs,
+    };
 
     for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
-      values.push(sqlString(String(payload[`field${columnIndex.toString().padStart(2, "0")}`])));
+      const fieldKey = `field${columnIndex.toString().padStart(2, "0")}`;
+      row[fieldKey] = payload[fieldKey] ?? "";
     }
 
-    const timestampUs = (1_700_000_000_000_000n + BigInt(rowIndex)).toString();
-    values.push(sqlString(ownerId));
-    values.push(sqlString(ownerId));
-    values.push(sqlString(String(payload.status)));
-    values.push(sqlString(String(payload.priority)));
-    values.push(timestampUs);
-    values.push(timestampUs);
-    tuples.push(`(${values.join(", ")})`);
+    rows.push(row);
   }
 
-  return `INSERT INTO ${qualifiedTableName} (${columns.map(quoteIdent).join(", ")}) VALUES ${tuples.join(", ")};`;
+  return rows;
 }
 
-async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null, protectedTables: string[]) {
-  const targetUrl = buildShapeTargetUrl(request, claims, protectedTables);
+async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null, registry: PreparedPerfRegistry) {
+  const targetUrl = buildShapeTargetUrl(request, claims, registry);
   const response = await fetch(targetUrl, {
     method: "GET",
     headers: forwardHeaders(request.headers),
@@ -501,10 +502,10 @@ async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null,
   });
 }
 
-function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, protectedTables: string[]) {
+function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, registry: PreparedPerfRegistry) {
   const requestUrl = new URL(request.url);
   const targetUrl = new URL(electricUrl);
-  const activeTables = new Set(protectedTables);
+  const activeTables = new Set(registry.electricTables);
 
   targetUrl.search = requestUrl.search;
 
@@ -514,7 +515,7 @@ function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, pro
     return targetUrl.toString();
   }
 
-  const ownershipFilter = claims?.sub ? `owner_id = '${escapeSqlLiteral(claims.sub)}'` : "1 = 0";
+  const ownershipFilter = renderOwnershipShapeFilter(registry, table, claims?.sub);
   const existingWhere = targetUrl.searchParams.get("where");
 
   if (!existingWhere) {
@@ -524,6 +525,32 @@ function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, pro
 
   targetUrl.searchParams.set("where", `(${existingWhere}) AND (${ownershipFilter})`);
   return targetUrl.toString();
+}
+
+/**
+ * The ownership `where` the proxy pins onto a non-admin shape request, authored from the registry's
+ * real owner COLUMN via `buildOwnershipShapeWhere` (bare column + typed subject; `DENY_ALL` = `false`
+ * when unauthenticated) and rendered inline once for the shape URL. The rendered text carries a QUOTED
+ * bare column (`"owner_id" = '…'`) — Electric's shape grammar accepts quoted bare columns, and `false`
+ * exactly as it accepted the old hand-written `1 = 0`.
+ */
+function renderOwnershipShapeFilter(
+  registry: PreparedPerfRegistry,
+  electricTable: string,
+  subject: string | undefined,
+) {
+  const entry = Object.values(registry.registry).find(
+    (candidate) => (candidate.shape?.electricTable ?? candidate.shape?.tableName) === electricTable,
+  );
+  // Index-signature access (registry columns are dynamic by construction); every synthetic perf-lab
+  // table defines `ownerId`, and `electricTables` above derives from this same registry.
+  const ownerColumn = entry ? getColumns(entry.table as AnyPgTable)["ownerId"] : undefined;
+
+  if (!ownerColumn) {
+    throw new Error(`Perf-lab registry has no ownerId column for shape table ${electricTable}`);
+  }
+
+  return new PgDialect().sqlToQuery(buildOwnershipShapeWhere(ownerColumn, subject).inlineParams()).sql;
 }
 
 function findManagedFieldViolations(
@@ -544,7 +571,7 @@ function findManagedFieldViolations(
   return managedFields.filter((field) => payloadKeys.has(field.propertyKey)).map((field) => field.propertyKey);
 }
 
-function sanitizeArtifactManagedFields(batch: BatchMutationRequest, registry: SyncTableRegistry): BatchMutationRequest {
+function sanitizeManagedFields(batch: BatchMutationRequest, registry: SyncTableRegistry): BatchMutationRequest {
   return {
     mutations: batch.mutations.map((mutation) => {
       if (mutation.kind === "delete") {
@@ -614,7 +641,7 @@ function toSchemaPayload(entry: SyncTableEntry, payload: unknown): unknown {
 }
 
 async function readServerUpdatedAtUs(
-  tx: TransactionClient,
+  tx: PerfLabReadQueryClient,
   entry: SyncTableEntry,
   entityKey: Record<string, string>,
 ): Promise<string | undefined> {
@@ -625,7 +652,6 @@ async function readServerUpdatedAtUs(
     return undefined;
   }
 
-  const tableConfig = getTableConfig(entry.table as AnyPgTable);
   const conditions = entry.primaryKey.columns.map((primaryKeyColumn) => {
     const rawValue = entityKey[primaryKeyColumn];
 
@@ -633,18 +659,27 @@ async function readServerUpdatedAtUs(
       throw new Error(`Missing entity key value for primary key column ${primaryKeyColumn}`);
     }
 
-    return sql`${sql.raw(quoteIdent(primaryKeyColumn))} = ${rawValue}`;
+    const primaryKeyTableColumn = Object.values(columns).find((column) => column.name === primaryKeyColumn);
+
+    if (!primaryKeyTableColumn) {
+      throw new Error(`Missing table column metadata for primary key column ${primaryKeyColumn}`);
+    }
+
+    return eq(primaryKeyTableColumn, rawValue);
   });
 
-  const result = (await tx.execute(sql`
-    SELECT ${sql.raw(quoteIdent("updated_at_us"))}::text AS "updatedAtUs"
-    FROM ${sql.raw(qualifyIdent(tableConfig.schema, tableConfig.name))}
-    WHERE ${sql.join(conditions, sql` AND `)}
-    LIMIT 1
-  `)) as Iterable<{ updatedAtUs: string | null }>;
+  const whereClause = conditions.length === 1 ? conditions[0]! : and(...conditions);
+  const rows = await tx
+    .select({ updatedAtUs: updatedAtColumn })
+    .from(entry.table as AnyPgTable)
+    .where(whereClause)
+    .limit(1);
 
-  const row = Array.from(result)[0];
-  return row?.updatedAtUs ?? undefined;
+  // The column is bigint `mode: "bigint"`, so drizzle maps the driver value to a BigInt (the generic
+  // column object erases that type, hence the assertion); `String(...)` renders the same digits the
+  // old `::text` projection produced (no suffix), keeping the JSON-safe string form callers expect.
+  const updatedAtUs = rows[0]?.updatedAtUs as bigint | string | undefined;
+  return updatedAtUs == null ? undefined : String(updatedAtUs);
 }
 
 function formatBatchExecutionError(error: unknown): string {
@@ -739,26 +774,6 @@ function appendVaryHeader(existingValue: string | null, nextValue: string) {
   return values.join(", ");
 }
 
-function escapeSqlLiteral(value: string) {
-  return value.replace(/'/g, "''");
-}
-
-function sqlString(value: string) {
-  return `'${escapeSqlLiteral(value)}'`;
-}
-
-function quoteIdent(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-function qualifyIdent(schemaName: string | undefined, tableName: string) {
-  if (!schemaName) {
-    return quoteIdent(tableName);
-  }
-
-  return `${quoteIdent(schemaName)}.${quoteIdent(tableName)}`;
-}
-
 function enqueueProvision(task: () => Promise<void>) {
   const nextTask = provisionQueue.then(task);
   provisionQueue = nextTask.catch(() => undefined);
@@ -777,6 +792,6 @@ async function shutdown() {
 
   shuttingDown = true;
   server.stop();
-  await adminClient.end();
+  await adminDb.$client.close();
   process.exit(0);
 }

@@ -7,10 +7,9 @@
   },
   "dependencies": {
     "@pgxsinkit/contracts": "workspace:*",
-    "@pgxsinkit/demo": "workspace:*",
+    "@pgxsinkit/schema": "workspace:*",
     "@pgxsinkit/server": "workspace:*",
-    "drizzle-orm": "1.0.0-beta.22",
-    "hono": "4.12.14",
-    "zod": "4.3.6"
+    "drizzle-orm": "1.0.0-rc.4",
+    "zod": "4.4.3"
   }
 }

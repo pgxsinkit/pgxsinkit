@@ -1,3 +1,5 @@
+import { describe, expect, it } from "bun:test";
+
 import { runConcurrentMixedLoadScenario } from "./support/concurrent-mixed-load";
 import {
   assertPerfBudgets,
@@ -31,14 +33,8 @@ describe("performance: client concurrent mixed load", () => {
       expect(result.totalOperations).toBe(config.concurrentClients * config.operationsPerClient);
       expect(result.failedFlushCount).toBe(0);
       expect(result.nonConvergedClientCount).toBe(0);
-
-      if (config.createProbability > 0) {
-        expect(result.createMutations).toBeGreaterThan(0);
-      }
-
-      if (config.deleteProbability > 0) {
-        expect(result.deleteMutations).toBeGreaterThan(0);
-      }
+      expect(result.createMutations > 0).toBe(config.createProbability > 0);
+      expect(result.deleteMutations > 0).toBe(config.deleteProbability > 0);
 
       const reportPath = await writePerfReport({
         name: `client-concurrent-${config.scenarioKey}`,

@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install
+      - run: bun run validate:full
+      # ADR-0018: fail the build if a committed sync-function migration no longer matches the
+      # registry + applier codegen it is generated from (drift the server also rejects at startup).
+      - name: Apply-function migrations match the registry (ADR-0018 drift check)
+        run: bun run sync:function:check
+
+  # The documentation proves the product interface (ADR-0008): the docs site (with its
+  # TypeDoc API reference) must build, and a packed downstream fixture must install the
+  # public tarballs and exercise the published entry points. Neither needs Postgres/Electric.
+  docs-and-fixture:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install
+      - name: Build the documentation site (TypeDoc API reference + Starlight)
+        run: bun run docs:build
+      - name: Packed downstream fixture smoke (published install path)
+        run: bun run fixture:smoke
+
+  # The ADR-0032 S3 SharedWorker browser lane, promoted to a required PR gate (ADR-0032 decision 8): a real
+  # Chromium drives the worker-mode bridge over the board's caddy TLS front. The remaining integration
+  # suites stay release-gated in github-packages.yml — only this browser lane runs on every PR here.
+  browser-lane:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install
+      # Install mkcert + register its CA so both caddy's cert issuance and Playwright's Chromium accept
+      # the local https front. This runs on the THROWAWAY runner only. Chromium on Linux trusts the USER
+      # NSS DB (~/.pki/nssdb), not the system store — the runner has none, and `mkcert -install` silently
+      # skips NSS when none exists, which left Chromium rejecting the front with ERR_CERT_AUTHORITY_INVALID
+      # (run 28689039197). Create the DB first, then verify the CA actually landed in it.
+      - name: Trust a local mkcert CA for the browser lane
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3-tools mkcert
+          mkdir -p "$HOME/.pki/nssdb"
+          certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password
+          mkcert -install
+          certutil -d "sql:$HOME/.pki/nssdb" -L | grep -i mkcert
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+      # GH runners ship podman but never start its rootless API socket, and `podman compose` (which the
+      # infra scripts use) delegates to the docker-compose provider OVER that socket — without it the lane
+      # dies at its first compose call ("Cannot connect to the Docker daemon at …/podman/podman.sock").
+      # A backgrounded `podman system service` survives across job steps on the hosted runners.
+      - name: Start the rootless podman API socket
+        run: |
+          podman system service --time=0 &
+          SOCK="/run/user/$(id -u)/podman/podman.sock"
+          for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.5; done
+          [ -S "$SOCK" ] || { echo "podman API socket never appeared at $SOCK"; exit 1; }
+      # The compose stacks publish host ports 54321–54343 — inside Linux's ephemeral range (32768–60999),
+      # so any outbound connection the runner happens to open can transiently occupy one and `compose up`
+      # then fails to bind ("rootlessport listen tcp 0.0.0.0:54334: address already in use",
+      # run 29227659330). Reserving the range excludes those ports from automatic ephemeral allocation;
+      # explicit binds (the containers') still succeed.
+      - name: Reserve the compose stacks' host ports against ephemeral allocation
+        run: sudo sysctl -w net.ipv4.ip_local_reserved_ports=54321-54343
+      - name: Worker-mode browser lane (ADR-0032 S3)
+        run: bun run test:integration:worker
+      # Playwright already retains traces + error context on failure (retain-on-failure); without this
+      # upload they die with the runner and a CI-only failure is undiagnosable (run 28688852669's trace
+      # was lost exactly this way).
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-lane-traces
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7

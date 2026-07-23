@@ -4,16 +4,37 @@ import path from "node:path";
 const workspaceRoot = process.cwd();
 
 const allowedRootEntries = new Set([
+  ".buildcache",
+  ".claude",
+  ".codex",
   ".env",
   ".env.example",
+  // Cloud board demo credentials (board ADR-0008): the committed template + the gitignored real env.
+  "board.cloud.env.example",
+  "board.cloud.env",
   ".git",
+  ".githooks",
   ".github",
   ".gitignore",
+  ".intent",
+  // Committed bunfig.toml — bun's native config (the shared `bun test` preload).
+  "bunfig.toml",
+  // CI-written GitHub Packages auth for the publish job (gitignored); also written locally when
+  // previewing the CI publish path.
+  ".npmrc",
   ".oxfmtrc.jsonc",
   ".oxlintrc.jsonc",
   ".vscode",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "CONTEXT-MAP.md",
+  "CONTEXT.md",
+  "LICENSE",
+  "NOTICE",
   "README.md",
+  "RELEASING.md",
   "apps",
+  "brand",
   "bun.lock",
   "docs",
   "drizzle",
@@ -23,7 +44,15 @@ const allowedRootEntries = new Set([
   "node_modules",
   "package.json",
   "packages",
+  // Playwright browser lane (ADR-0032 S3): the config is a permanent root file; its run outputs
+  // (test-results/, playwright-report/) are gitignored but land at root, so they are allowed as
+  // entries while remaining ignored by git — the lane's teardown removes them best-effort.
+  "playwright.config.ts",
+  "playwright.warm-boot.config.ts",
+  "playwright-report",
+  "test-results",
   "scripts",
+  "supabase",
   "tests",
   "tmp",
   "tools",

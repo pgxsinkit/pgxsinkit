@@ -5,11 +5,18 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { sql } from "drizzle-orm";
-import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
-import postgres from "postgres";
+import { count, eq, getColumns, inArray, max, sql } from "drizzle-orm";
+import { drizzle as bunDrizzle } from "drizzle-orm/bun-sql";
+import type { AnyPgTable, PgAsyncDatabase, PgColumn, PgQueryResultHKT, PgView } from "drizzle-orm/pg-core";
 
-import { createSyncClient, type MutationBatchItem } from "@pgxsinkit/client";
+import {
+  createSyncClient,
+  getOverlayTable,
+  getReadModelView,
+  getSyncedLocalTable,
+  type MutationBatchItem,
+} from "@pgxsinkit/client";
+import type { RegistryRelations, SyncTableRegistry } from "@pgxsinkit/contracts";
 import {
   DEMO_JWT_USER1,
   DEMO_JWT_USER10,
@@ -66,15 +73,12 @@ import {
   buildSyntheticRegistry,
   buildSyntheticServerSchemaSql,
   buildSyntheticUpdatePatch,
-} from "@pgxsinkit/demo";
+} from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../../apps/write-api/src/demo-auth";
-import {
-  installPlpgsqlBatchFunction,
-  verifyPlpgsqlBatchFunction,
-} from "../../../packages/server/src/mutations/bulk/plpgsql-strategy";
+import { installPlpgsqlBatchFunction } from "../../../packages/server/src/mutations/plpgsql-apply";
 import {
   applyConcurrentMutationToRowPool,
   buildConcurrentMutationPlan,
@@ -101,7 +105,7 @@ interface ConcurrentClientHandle {
   key: string;
   clientIndex: number;
   assignment: DemoPerfUser;
-  dataDir: string;
+  storePath: string;
   client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>;
   sharedRowPoolState: SharedConcurrentRowPoolState;
   localRowPool: ConcurrentRowPool;
@@ -175,8 +179,8 @@ interface ConcurrentMixedLoadWorkerInput {
   clientIndex: number;
   config: PerfScenarioConfig;
   coordinatorUrl: string;
-  dataDir: string;
-  writeUrl: string;
+  storePath: string;
+  batchWriteUrl: string;
 }
 
 interface ConcurrentMixedLoadWorkerResult {
@@ -388,26 +392,25 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
     ConcurrentClientHandle & { client: Awaited<ReturnType<typeof createSyncClient<typeof registry>>> }
   > = [];
   const sharedRowPoolsByUser = new Map<string, SharedConcurrentRowPoolState>();
+  const serverDb = createServerDb(registry, env.databaseUrl);
 
   try {
     const provisioningServer = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticServerSchemaSql(registry)));
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticGovernanceSql(registry)));
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
-      await verifyPlpgsqlBatchFunction(provisioningServer.drizzle);
-      const executeQuery = (query: ReturnType<typeof sql.raw>) => provisioningServer.drizzle.execute(query);
       await seedSyntheticRows(
         registry,
         tableNames,
         config.seedRowsPerTable,
         config.extraColumnCount,
         users,
-        executeQuery,
+        provisioningServer.drizzle,
       );
     } finally {
       await provisioningServer.stop();
@@ -415,8 +418,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
     server = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
-      backend: "bulk-plpgsql-artifact",
+      db: serverDb.db,
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
@@ -425,22 +427,21 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
     const startedFetchServer = await startFetchServer(server.fetch, 0);
     httpServer = startedFetchServer.server;
-    const writeUrl = `http://127.0.0.1:${startedFetchServer.port}`;
+    const batchWriteUrl = `http://127.0.0.1:${startedFetchServer.port}/api/mutations`;
 
     for (let clientIndex = 0; clientIndex < config.concurrentClients; clientIndex += 1) {
       const assignment = users[clientIndex % users.length]!;
       const ownedRowCount = countOwnedRows(config.seedRowsPerTable, assignment.userIndex, users.length);
       const rowPoolSize = resolveRowPoolSize(config, ownedRowCount);
-      const dataDir = await createPersistentDataDir();
-      dataDirs.push(dataDir);
+      const storePath = await createPersistentDataDir();
+      dataDirs.push(storePath);
 
       const client = await createSyncClient({
         registry,
         electricUrl: env.electricUrl,
-        writeUrl,
-        batchWriteUrl: writeUrl,
-        authToken: assignment.token,
-        dataDir,
+        batchWriteUrl,
+        getAuthToken: async () => assignment.token,
+        storePath,
       });
 
       await client.ready;
@@ -451,7 +452,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
         users.length,
         config.extraColumnCount,
       );
-      await waitForSeedSync(client, expectedSyncedIdsByTable);
+      await waitForSeedSync(registry, client, expectedSyncedIdsByTable);
 
       const sharedRowPoolState = sharedRowPoolsByUser.get(assignment.key) ?? {
         rowPool: createConcurrentRowPool(
@@ -465,7 +466,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
         key: `client-${clientIndex.toString().padStart(2, "0")}`,
         clientIndex,
         assignment,
-        dataDir,
+        storePath,
         client,
         sharedRowPoolState,
         localRowPool: createConcurrentRowPool(tableNames.map(() => [])),
@@ -494,6 +495,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
         executeClientWorkload({
           handle,
           config,
+          registry,
           tableNames,
           users,
         }),
@@ -510,10 +512,11 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
     return buildRunResult(config, tableNames, performance.now() - startedAtMs, clientHandles, finalDiagnostics);
   } finally {
-    await Promise.all(clientHandles.map((handle) => handle.client.destroy()));
+    await Promise.all(clientHandles.map((handle) => handle.client.stop()));
     await stopHttpServer(httpServer);
     await server?.stop();
-    await Promise.all(dataDirs.map((dataDir) => rm(dataDir, { recursive: true, force: true })));
+    await serverDb.close();
+    await Promise.all(dataDirs.map((storePath) => rm(storePath, { recursive: true, force: true })));
   }
 }
 
@@ -531,26 +534,25 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
   let coordinatorServer: Server | undefined;
   const dataDirs: string[] = [];
   const sharedRowPoolsByUser = new Map<string, SharedConcurrentRowPoolState>();
+  const serverDb = createServerDb(registry, env.databaseUrl);
 
   try {
     const provisioningServer = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
+      db: serverDb.db,
     });
 
     try {
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticServerSchemaSql(registry)));
       await provisioningServer.drizzle.execute(sql.raw(buildSyntheticGovernanceSql(registry)));
       await installPlpgsqlBatchFunction(provisioningServer.drizzle, registry);
-      await verifyPlpgsqlBatchFunction(provisioningServer.drizzle);
-      const executeQuery = (query: ReturnType<typeof sql.raw>) => provisioningServer.drizzle.execute(query);
       await seedSyntheticRows(
         registry,
         tableNames,
         config.seedRowsPerTable,
         config.extraColumnCount,
         users,
-        executeQuery,
+        provisioningServer.drizzle,
       );
     } finally {
       await provisioningServer.stop();
@@ -558,8 +560,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
 
     server = createSyncServer({
       registry,
-      databaseUrl: env.databaseUrl,
-      backend: "bulk-plpgsql-artifact",
+      db: serverDb.db,
       resolveAuthClaims: (request) => {
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
@@ -568,7 +569,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
 
     const startedFetchServer = await startFetchServer(server.fetch, 0);
     httpServer = startedFetchServer.server;
-    const writeUrl = `http://127.0.0.1:${startedFetchServer.port}`;
+    const batchWriteUrl = `http://127.0.0.1:${startedFetchServer.port}/api/mutations`;
 
     for (const assignment of users) {
       if (sharedRowPoolsByUser.has(assignment.key)) {
@@ -605,15 +606,15 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
 
     for (let clientIndex = 0; clientIndex < config.concurrentClients; clientIndex += 1) {
       const assignment = users[clientIndex % users.length]!;
-      const dataDir = await createPersistentDataDir();
-      dataDirs.push(dataDir);
+      const storePath = await createPersistentDataDir();
+      dataDirs.push(storePath);
       workerInputs.push({
         assignment,
         clientIndex,
         config,
         coordinatorUrl,
-        dataDir,
-        writeUrl,
+        storePath,
+        batchWriteUrl,
       });
     }
 
@@ -643,12 +644,13 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
     await stopHttpServer(coordinatorServer);
     await stopHttpServer(httpServer);
     await server?.stop();
-    await Promise.all(dataDirs.map((dataDir) => rm(dataDir, { recursive: true, force: true })));
+    await serverDb.close();
+    await Promise.all(dataDirs.map((storePath) => rm(storePath, { recursive: true, force: true })));
   }
 }
 
 async function runConcurrentMixedLoadWorkerProcess(input: ConcurrentMixedLoadWorkerInput) {
-  const outputFile = join(input.dataDir, "worker-result.json");
+  const outputFile = join(input.storePath, "worker-result.json");
   const encodedInput = Buffer.from(JSON.stringify(input), "utf8").toString("base64url");
   const workerFile = join(process.cwd(), "tests/performance/support/concurrent-mixed-load-worker.ts");
 
@@ -947,7 +949,7 @@ function buildConcurrentBatchPlan(options: {
 export async function runConcurrentMixedLoadWorker(
   input: ConcurrentMixedLoadWorkerInput,
 ): Promise<ConcurrentMixedLoadWorkerResult> {
-  const { assignment, clientIndex, config, coordinatorUrl, dataDir, writeUrl } = input;
+  const { assignment, clientIndex, config, coordinatorUrl, storePath, batchWriteUrl } = input;
   const { registry, tableNames } = buildSyntheticRegistry({
     tableCount: Math.max(1, config.tableCount),
     extraColumnCount: config.extraColumnCount,
@@ -955,10 +957,9 @@ export async function runConcurrentMixedLoadWorker(
   const client = await createSyncClient({
     registry,
     electricUrl: env.electricUrl,
-    writeUrl,
-    batchWriteUrl: writeUrl,
-    authToken: assignment.token,
-    dataDir,
+    batchWriteUrl,
+    getAuthToken: async () => assignment.token,
+    storePath,
   });
 
   const localRowPool = createConcurrentRowPool(tableNames.map(() => []));
@@ -966,7 +967,7 @@ export async function runConcurrentMixedLoadWorker(
     key: `client-${clientIndex.toString().padStart(2, "0")}`,
     clientIndex,
     assignment,
-    dataDir,
+    storePath,
     client,
     localRowPool,
     nextCreateSequence: 0,
@@ -1001,7 +1002,7 @@ export async function runConcurrentMixedLoadWorker(
       resolveDemoUsers(config.distinctUsers).length,
       config.extraColumnCount,
     );
-    await waitForSeedSync(client, expectedSyncedIdsByTable);
+    await waitForSeedSync(registry, client, expectedSyncedIdsByTable);
 
     const random = createDeterministicRandom(hashSeed(`${config.scenarioKey}:${handle.key}:${handle.assignment.key}`));
     const mutationMix = resolveConcurrentMutationMix(config.createProbability, config.deleteProbability);
@@ -1055,6 +1056,7 @@ export async function runConcurrentMixedLoadWorker(
 
       const convergenceStartedAt = performance.now();
       await waitForConvergence(
+        registry,
         handle as ConcurrentClientHandle & {
           client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>;
         },
@@ -1111,7 +1113,7 @@ export async function runConcurrentMixedLoadWorker(
       },
     };
   } finally {
-    await client.destroy();
+    await client.stop();
   }
 }
 
@@ -1220,10 +1222,11 @@ function buildConcurrentMutationRequests(options: {
 async function executeClientWorkload(options: {
   handle: ConcurrentClientHandle & { client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>> };
   config: PerfScenarioConfig;
+  registry: SyncTableRegistry;
   tableNames: string[];
   users: DemoPerfUser[];
 }) {
-  const { handle, config, tableNames } = options;
+  const { handle, config, registry, tableNames } = options;
   const random = createDeterministicRandom(hashSeed(`${config.scenarioKey}:${handle.key}:${handle.assignment.key}`));
   const mutationMix = resolveConcurrentMutationMix(config.createProbability, config.deleteProbability);
 
@@ -1374,7 +1377,7 @@ async function executeClientWorkload(options: {
     handle.flushTimingsMs.push(performance.now() - flushStartedAt);
 
     const convergenceStartedAt = performance.now();
-    await waitForConvergence(handle, config, selectRowExpectationsForVerification(batchExpectations));
+    await waitForConvergence(registry, handle, config, selectRowExpectationsForVerification(batchExpectations));
     handle.convergenceTimingsMs.push(performance.now() - convergenceStartedAt);
     handle.acknowledgedMutations += batchItems.length;
     handle.nextCreateSequence += batchCounts.create;
@@ -1450,6 +1453,7 @@ function buildRunResult(
 }
 
 async function waitForConvergence(
+  registry: SyncTableRegistry,
   handle: ConcurrentClientHandle & { client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>> },
   config: PerfScenarioConfig,
   expectations: RowPresenceExpectation[] = [],
@@ -1476,7 +1480,7 @@ async function waitForConvergence(
           throw new Error(`${handle.key} still has pending mutation state`);
         }
 
-        await verifyLocalRowExpectations(handle.client, expectations);
+        await verifyLocalRowExpectations(registry, handle.client, expectations);
 
         if (diagnostics.mutation.ackedCount > 0) {
           throw new Error(`${handle.key} still has acknowledged mutations waiting for Electric echo`);
@@ -1504,8 +1508,8 @@ async function waitForConvergence(
       conflictReason: mutation.conflictReason,
       serverUpdatedAtUs: mutation.serverUpdatedAtUs,
     }));
-    const recentEntityState = await readLocalEntityStateDiagnostics(handle.client, recentMutations);
-    const recentServerEntityState = await readServerEntityStateDiagnostics(recentMutations);
+    const recentEntityState = await readLocalEntityStateDiagnostics(registry, handle.client, recentMutations);
+    const recentServerEntityState = await readServerEntityStateDiagnostics(registry, recentMutations);
     const waitReason = isAckOnlyMutationState(diagnostics.mutation)
       ? "waiting for Electric echo to clear acknowledged mutations"
       : "waiting for local mutation state to drain";
@@ -1527,20 +1531,22 @@ async function waitForConvergence(
   }
 }
 
+// Pre-measurement wait loop — a live tier-① builder per poll is fine here (nothing is being timed).
 async function waitForSeedSync(
+  registry: SyncTableRegistry,
   client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>,
   expectedSyncedIdsByTable: Map<string, string[]>,
 ) {
   await waitFor(
     async () => {
       for (const [tableName, expectedIds] of expectedSyncedIdsByTable.entries()) {
-        const placeholders = expectedIds.map((_, index) => `$${index + 1}`).join(", ");
-        const result = await client.pglite.query<{ row_count: number }>(
-          `SELECT COUNT(*)::int AS row_count FROM ${tableName} WHERE id IN (${placeholders})`,
-          expectedIds,
-        );
+        const table = requireRegistryEntry(registry, tableName).table;
+        const rows = await client.drizzle
+          .select({ rowCount: count() })
+          .from(table)
+          .where(inArray(requireColumn(table, "id"), expectedIds));
 
-        if ((result.rows[0]?.row_count ?? 0) !== expectedIds.length) {
+        if ((rows[0]?.rowCount ?? 0) !== expectedIds.length) {
           throw new Error(`expected ${expectedIds.length} synced target rows in ${tableName}`);
         }
       }
@@ -1552,59 +1558,48 @@ async function waitForSeedSync(
   );
 }
 
-async function seedSyntheticRows(
-  registry: ReturnType<typeof buildSyntheticRegistry>["registry"],
+// Setup-phase seeding (unmeasured): tier-① inserts through the provisioning server's drizzle handle,
+// in the same 250-row chunks (mirrors scripts/perf-lab-server.ts `seedRegistryRows`).
+async function seedSyntheticRows<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
   tableNames: string[],
   seedRowsPerTable: number,
   extraColumnCount: number,
   users: DemoPerfUser[],
-  execute: (query: ReturnType<typeof sql.raw>) => Promise<unknown>,
+  db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
 ) {
   const batchSize = 250;
-  const extraColumns = Array.from(
-    { length: extraColumnCount },
-    (_, index) => `field_${index.toString().padStart(2, "0")}`,
-  );
-  const columnNames = [
-    "id",
-    ...extraColumns,
-    "owner_id",
-    "modified_by",
-    "status",
-    "priority",
-    "created_at_us",
-    "updated_at_us",
-  ];
 
   for (const [tableIndex, tableName] of tableNames.entries()) {
-    const qualifiedTableName = qualifyRegistryTableName(registry, tableName);
+    const entry = requireRegistryEntry(registry, tableName);
 
     for (let start = 0; start < seedRowsPerTable; start += batchSize) {
       const batchEnd = Math.min(seedRowsPerTable, start + batchSize);
-      const tuples: string[] = [];
+      const rows: Array<Record<string, string | bigint>> = [];
 
       for (let rowIndex = start; rowIndex < batchEnd; rowIndex += 1) {
         const payload = buildSyntheticCreatePayload(tableIndex, rowIndex, extraColumnCount);
         const owner = users[rowIndex % users.length]!;
-        const values = [
-          sqlLiteral(String(payload.id)),
-          ...extraColumns.map((_, columnIndex) =>
-            sqlLiteral(String(payload[`field${columnIndex.toString().padStart(2, "0")}`])),
-          ),
-          sqlLiteral(owner.userId),
-          sqlLiteral(owner.userId),
-          sqlLiteral(String(payload.status)),
-          sqlLiteral(String(payload.priority)),
-          String(1_700_000_000_000_000 + tableIndex * seedRowsPerTable + rowIndex),
-          String(1_700_000_000_000_000 + tableIndex * seedRowsPerTable + rowIndex),
-        ];
+        const timestampUs = 1_700_000_000_000_000n + BigInt(tableIndex * seedRowsPerTable + rowIndex);
+        const row: Record<string, string | bigint> = {
+          id: payload.id,
+          ownerId: owner.userId,
+          modifiedBy: owner.userId,
+          status: payload.status,
+          priority: payload.priority,
+          createdAtUs: timestampUs,
+          updatedAtUs: timestampUs,
+        };
 
-        tuples.push(`(${values.join(", ")})`);
+        for (let columnIndex = 0; columnIndex < extraColumnCount; columnIndex += 1) {
+          const fieldKey = `field${columnIndex.toString().padStart(2, "0")}`;
+          row[fieldKey] = payload[fieldKey] ?? "";
+        }
+
+        rows.push(row);
       }
 
-      await execute(
-        sql.raw(`INSERT INTO ${qualifiedTableName} (${columnNames.join(", ")}) VALUES ${tuples.join(", ")}`),
-      );
+      await db.insert(entry.table as AnyPgTable).values(rows);
     }
   }
 }
@@ -1712,14 +1707,14 @@ function buildConcurrentUpdatePatch(
 ) {
   const patch = {
     ...buildSyntheticUpdatePatch(rowIndex + operationIndex + mutationIndex, extraColumnCount),
-  } as Record<string, unknown>;
+  };
 
   if (extraColumnCount > 0) {
-    patch.field00 = `c${clientIndex}-o${operationIndex}-m${mutationIndex}`;
+    patch["field00"] = `c${clientIndex}-o${operationIndex}-m${mutationIndex}`;
   }
 
   if (extraColumnCount > 1) {
-    patch.field01 = `row-${rowIndex}`;
+    patch["field01"] = `row-${rowIndex}`;
   }
 
   return patch;
@@ -1760,16 +1755,21 @@ async function withSharedRowPoolPlanningLock<T>(state: SharedConcurrentRowPoolSt
   }
 }
 
+// Poll-dominated convergence window — live tier-① builders over the registry read-model view are
+// acceptable here (the convergence metric is wait-bound, not statement-bound). The view's `id`
+// column rides the entry's own property key (`id` for the synthetic registry).
 async function verifyLocalRowExpectations(
+  registry: SyncTableRegistry,
   client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>,
   expectations: RowPresenceExpectation[],
 ) {
   for (const expectation of expectations) {
-    const result = await client.pglite.query<{ row_count: number }>(
-      `SELECT COUNT(*)::int AS row_count FROM ${expectation.tableName}_read_model WHERE id = $1`,
-      [expectation.entityId],
-    );
-    const rowCount = result.rows[0]?.row_count ?? 0;
+    const view = requireReadModelView(registry, expectation.tableName);
+    const rows = await client.drizzle
+      .select({ rowCount: count() })
+      .from(view)
+      .where(eq(requireColumn(view, "id"), expectation.entityId));
+    const rowCount = rows[0]?.rowCount ?? 0;
 
     if (expectation.shouldExist && rowCount < 1) {
       throw new Error(`expected ${expectation.entityId} to be visible in ${expectation.tableName}_read_model`);
@@ -1781,7 +1781,10 @@ async function verifyLocalRowExpectations(
   }
 }
 
+// Failure-path diagnostics only: tier-① aggregates over the registry's synced/read-model/overlay
+// relations (no `::text` casts — the returned bigint/varchar values are stringified for the report).
 async function readLocalEntityStateDiagnostics(
+  registry: SyncTableRegistry,
   client: Awaited<ReturnType<typeof createSyncClient<typeof registryPlaceholder>>>,
   mutations: Array<{
     tableName: string;
@@ -1806,59 +1809,68 @@ async function readLocalEntityStateDiagnostics(
   }> = [];
 
   for (const mutation of mutations) {
-    const entityId = mutation.entityKey.id;
+    const entityId = mutation.entityKey["id"];
 
     if (!entityId) {
       continue;
     }
 
-    const syncedResult = await client.pglite.query<{
-      row_count: number;
-      updated_at_us: string | null;
-    }>(
-      `SELECT COUNT(*)::int AS row_count, MAX(updated_at_us)::text AS updated_at_us FROM ${mutation.tableName} WHERE id = $1`,
-      [entityId],
-    );
-    const readModelResult = await client.pglite.query<{
-      row_count: number;
-      overlay_kind: string | null;
-      updated_at_us: string | null;
-      local_updated_at_us: string | null;
-    }>(
-      `SELECT COUNT(*)::int AS row_count, MAX(overlay_kind) AS overlay_kind, MAX(updated_at_us)::text AS updated_at_us, MAX(local_updated_at_us)::text AS local_updated_at_us FROM ${mutation.tableName}_read_model WHERE id = $1`,
-      [entityId],
-    );
-    const overlayResult = await client.pglite.query<{
-      row_count: number;
-      overlay_kind: string | null;
-      updated_at_us: string | null;
-      local_updated_at_us: string | null;
-    }>(
-      `SELECT COUNT(*)::int AS row_count, MAX(overlay_kind) AS overlay_kind, MAX(updated_at_us)::text AS updated_at_us, MAX(local_updated_at_us)::text AS local_updated_at_us FROM ${mutation.tableName}_overlay WHERE id = $1`,
-      [entityId],
-    );
+    const syncedTable = getSyncedLocalTable(registry, mutation.tableName);
+    const syncedRows = await client.drizzle
+      .select({
+        rowCount: count(),
+        updatedAtUs: max(requireColumn(syncedTable, "updatedAtUs")),
+      })
+      .from(syncedTable)
+      .where(eq(requireColumn(syncedTable, "id"), entityId));
+
+    const readModelView = requireReadModelView(registry, mutation.tableName);
+    const readModelRows = await client.drizzle
+      .select({
+        rowCount: count(),
+        overlayKind: max(requireColumn(readModelView, "overlay_kind")),
+        updatedAtUs: max(requireColumn(readModelView, "updatedAtUs")),
+        localUpdatedAtUs: max(requireColumn(readModelView, "local_updated_at_us")),
+      })
+      .from(readModelView)
+      .where(eq(requireColumn(readModelView, "id"), entityId));
+
+    const overlayTable = getOverlayTable(registry, mutation.tableName);
+    const overlayRows = await client.drizzle
+      .select({
+        rowCount: count(),
+        overlayKind: max(overlayTable.overlayKind),
+        updatedAtUs: max(requireColumn(overlayTable, "updatedAtUs")),
+        localUpdatedAtUs: max(overlayTable.localUpdatedAtUs),
+      })
+      .from(overlayTable)
+      .where(eq(requireColumn(overlayTable, "id"), entityId));
 
     diagnostics.push({
       tableName: mutation.tableName,
       entityKey: mutation.entityKey,
       serverUpdatedAtUs: mutation.serverUpdatedAtUs ?? null,
-      readModelRowCount: readModelResult.rows[0]?.row_count ?? 0,
-      readModelOverlayKind: readModelResult.rows[0]?.overlay_kind ?? null,
-      readModelUpdatedAtUs: readModelResult.rows[0]?.updated_at_us ?? null,
-      readModelLocalUpdatedAtUs: readModelResult.rows[0]?.local_updated_at_us ?? null,
-      syncedRowCount: syncedResult.rows[0]?.row_count ?? 0,
-      syncedUpdatedAtUs: syncedResult.rows[0]?.updated_at_us ?? null,
-      overlayRowCount: overlayResult.rows[0]?.row_count ?? 0,
-      overlayKind: overlayResult.rows[0]?.overlay_kind ?? null,
-      overlayUpdatedAtUs: overlayResult.rows[0]?.updated_at_us ?? null,
-      overlayLocalUpdatedAtUs: overlayResult.rows[0]?.local_updated_at_us ?? null,
+      readModelRowCount: readModelRows[0]?.rowCount ?? 0,
+      readModelOverlayKind: formatNullableDiagnosticValue(readModelRows[0]?.overlayKind),
+      readModelUpdatedAtUs: formatNullableDiagnosticValue(readModelRows[0]?.updatedAtUs),
+      readModelLocalUpdatedAtUs: formatNullableDiagnosticValue(readModelRows[0]?.localUpdatedAtUs),
+      syncedRowCount: syncedRows[0]?.rowCount ?? 0,
+      syncedUpdatedAtUs: formatNullableDiagnosticValue(syncedRows[0]?.updatedAtUs),
+      overlayRowCount: overlayRows[0]?.rowCount ?? 0,
+      overlayKind: formatNullableDiagnosticValue(overlayRows[0]?.overlayKind),
+      overlayUpdatedAtUs: formatNullableDiagnosticValue(overlayRows[0]?.updatedAtUs),
+      overlayLocalUpdatedAtUs: formatNullableDiagnosticValue(overlayRows[0]?.localUpdatedAtUs),
     });
   }
 
   return diagnostics;
 }
 
+// Failure-path diagnostics against the SERVER database, authored over the registry's server table.
+// Postgres has no max(uuid) aggregate, so the uuid columns keep the raw probe's `::text` cast as a
+// tier-② typed fragment (the bigint columns keep it too, for byte-parity with the original probe).
 async function readServerEntityStateDiagnostics(
+  registry: SyncTableRegistry,
   mutations: Array<{
     tableName: string;
     entityKey: Record<string, string>;
@@ -1869,9 +1881,7 @@ async function readServerEntityStateDiagnostics(
     return [];
   }
 
-  const sqlClient = postgres(env.databaseUrl, {
-    max: 1,
-  });
+  const diagnosticDb = bunDrizzle(env.databaseUrl);
 
   try {
     const diagnostics: Array<{
@@ -1886,49 +1896,40 @@ async function readServerEntityStateDiagnostics(
     }> = [];
 
     for (const mutation of mutations) {
-      const entityId = mutation.entityKey.id;
+      const entityId = mutation.entityKey["id"];
 
       if (!entityId) {
         continue;
       }
 
-      const result = await sqlClient.unsafe<
-        {
-          row_count: number;
-          owner_id: string | null;
-          modified_by: string | null;
-          created_at_us: string | null;
-          updated_at_us: string | null;
-        }[]
-      >(
-        `
-          SELECT
-            COUNT(*)::int AS row_count,
-            MAX(owner_id::text) AS owner_id,
-            MAX(modified_by::text) AS modified_by,
-            MAX(created_at_us::text) AS created_at_us,
-            MAX(updated_at_us::text) AS updated_at_us
-          FROM ${mutation.tableName}
-          WHERE id = $1
-        `,
-        [entityId],
-      );
+      const table = requireRegistryEntry(registry, mutation.tableName).table;
+      const rows = await diagnosticDb
+        .select({
+          rowCount: count(),
+          ownerId: max(sql<string>`${requireColumn(table, "ownerId")}::text`),
+          modifiedBy: max(sql<string>`${requireColumn(table, "modifiedBy")}::text`),
+          createdAtUs: max(sql<string>`${requireColumn(table, "createdAtUs")}::text`),
+          updatedAtUs: max(sql<string>`${requireColumn(table, "updatedAtUs")}::text`),
+        })
+        .from(table)
+        .where(eq(requireColumn(table, "id"), entityId));
 
+      const row = rows[0];
       diagnostics.push({
         tableName: mutation.tableName,
         entityKey: mutation.entityKey,
         serverUpdatedAtUs: mutation.serverUpdatedAtUs ?? null,
-        rowCount: result[0]?.row_count ?? 0,
-        ownerId: result[0]?.owner_id ?? null,
-        modifiedBy: result[0]?.modified_by ?? null,
-        createdAtUs: result[0]?.created_at_us ?? null,
-        updatedAtUs: result[0]?.updated_at_us ?? null,
+        rowCount: row?.rowCount ?? 0,
+        ownerId: formatNullableDiagnosticValue(row?.ownerId),
+        modifiedBy: formatNullableDiagnosticValue(row?.modifiedBy),
+        createdAtUs: formatNullableDiagnosticValue(row?.createdAtUs),
+        updatedAtUs: formatNullableDiagnosticValue(row?.updatedAtUs),
       });
     }
 
     return diagnostics;
   } finally {
-    await sqlClient.end({ timeout: 5 });
+    await diagnosticDb.$client.close();
   }
 }
 
@@ -2068,7 +2069,7 @@ async function handleIncomingRequest(
   const body = await readRequestBody(incoming);
   const request = new Request(`http://127.0.0.1:${port}${incoming.url ?? "/"}`, {
     method: incoming.method,
-    headers: incoming.headers as HeadersInit,
+    headers: incoming.headers as Bun.HeadersInit,
     body: shouldSendBody(incoming.method) ? body : undefined,
     duplex: "half",
   } as RequestInit & { duplex: "half" });
@@ -2115,25 +2116,51 @@ async function stopHttpServer(server: Server | undefined) {
   });
 }
 
-function qualifyRegistryTableName(registry: ReturnType<typeof buildSyntheticRegistry>["registry"], tableName: string) {
-  const table = registry[tableName]?.table;
+function requireRegistryEntry(registry: SyncTableRegistry, tableName: string) {
+  const entry = registry[tableName];
 
-  if (!table) {
+  if (!entry) {
     throw new Error(`Missing registry table ${tableName}`);
   }
 
-  const tableConfig = getTableConfig(table as AnyPgTable);
-  return tableConfig.schema
-    ? `${quoteIdent(tableConfig.schema)}.${quoteIdent(tableConfig.name)}`
-    : quoteIdent(tableConfig.name);
+  return entry;
 }
 
-function quoteIdent(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
+// The `<t>_read_model` view carries the entry's projected columns under their own property keys plus
+// `overlay_kind` / `local_updated_at_us`. This harness is generic over any `SyncTableRegistry`, so the
+// factory resolves to its index-signature fallback (`Record<string, PgColumn>` entity columns) — which
+// is exactly this return type, so no cast is needed.
+function requireReadModelView(registry: SyncTableRegistry, tableName: string): PgView & Record<string, PgColumn> {
+  // The schema-qualified read-model factory (mirrors the sibling `getSyncedLocalTable`/`getOverlayTable`
+  // reads); it throws if the entry is missing or not writable, preserving the previous guard behavior.
+  return getReadModelView(registry, tableName);
 }
 
-function sqlLiteral(value: string) {
-  return `'${value.replace(/'/g, "''")}'`;
+function requireColumn(relation: AnyPgTable | PgView, propertyKey: string): PgColumn {
+  const column = (getColumns(relation) as Record<string, PgColumn | undefined>)[propertyKey];
+
+  if (!column) {
+    throw new Error(`Missing column ${propertyKey} on relation`);
+  }
+
+  return column;
+}
+
+// Failure-path diagnostics render whatever drizzle returns (bigint, string, number, …) as text.
+function formatNullableDiagnosticValue(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+    return value.toString();
+  }
+
+  return JSON.stringify(value) ?? null;
 }
 
 function delay(durationMs: number) {

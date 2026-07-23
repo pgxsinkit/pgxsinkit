@@ -1,0 +1,18 @@
+{
+  "name": "@pgxsinkit/board-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./src/runtime/bun.ts --target=bun --outfile dist/server.js",
+    "dev": "bun --env-file=../../.env --hot src/runtime/bun.ts",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@pgxsinkit/board-schema": "workspace:*",
+    "@pgxsinkit/contracts": "workspace:*",
+    "@pgxsinkit/server": "workspace:*",
+    "drizzle-orm": "1.0.0-rc.4",
+    "jose": "6.2.3",
+    "zod": "4.4.3"
+  }
+}

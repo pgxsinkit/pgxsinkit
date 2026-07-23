@@ -1,0 +1,10 @@
+{
+  // TypeDoc-only (apps/docs API reference). Inherits the root base paths and
+  // includes browser OPFS types while generating directly from package source.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "bun-types"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src"]
+}

@@ -2,7 +2,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { z } from "zod";
 
-import { DEMO_AUTH_SECRET, type DemoJwtClaims } from "@pgxsinkit/demo";
+import { DEMO_AUTH_SECRET, type DemoJwtClaims } from "@pgxsinkit/schema";
+
+import { writeApiEnv } from "./env";
 
 const bearerPrefix = /^Bearer\s+/i;
 
@@ -50,7 +52,7 @@ export function parseDemoAuthClaimsFromRequest(request: Request): DemoJwtClaims 
 
 export function verifyDemoJwt(
   token: string,
-  secret = process.env.DEMO_JWT_SECRET ?? DEMO_AUTH_SECRET,
+  secret = writeApiEnv.DEMO_JWT_SECRET ?? DEMO_AUTH_SECRET,
 ): DemoJwtClaims | null {
   const parts = token.split(".");
 
