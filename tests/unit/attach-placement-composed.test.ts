@@ -33,7 +33,7 @@ import {
 import { type ElectedEngineWorker, wrapEngineWorker } from "../../packages/client/src/worker/attach-sync-client";
 import { bindGlobalScope, bootstrapWorkerScope } from "../../packages/client/src/worker/define-sync-worker";
 import type { CoordinatorDeps } from "../../packages/client/src/worker/election-coordinator";
-import type { BridgePort } from "../../packages/client/src/worker/protocol";
+import type { AttachPayload, BridgePort, RestoreArtefactWire } from "../../packages/client/src/worker/protocol";
 import type { SwPlacementResult } from "../../packages/client/src/worker/sw-placement";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -101,6 +101,7 @@ function makeFakeDedicatedScope(implicitPort: MessagePort) {
  */
 function scriptedEngineCore(rpcValue: unknown) {
   const attachedPorts: BridgePort[] = [];
+  const restoreAttaches: RestoreArtefactWire[] = [];
   let provisionCount = 0;
   let bootCount = 0;
   const connect = (port: BridgePort) => {
@@ -114,6 +115,9 @@ function scriptedEngineCore(rpcValue: unknown) {
         postBridgeMessage(port, identityCodec, "provision-ack", { ok: true });
       } else if (data.type === "attach") {
         bootCount += 1; // one engine boot, whether fresh or adopting the pre-spawned store
+        // Record any restore artifact that actually REACHED the engine (the elected-restore regression seam).
+        const attach = identityCodec.decode(data.payload) as AttachPayload;
+        if (attach.restore != null) restoreAttaches.push(attach.restore);
         postBridgeMessage(port, identityCodec, "attach-ack", { alreadyBooted: false });
         postBridgeMessage(port, identityCodec, "event", {
           kind: "status",
@@ -128,6 +132,7 @@ function scriptedEngineCore(rpcValue: unknown) {
   return {
     connect,
     attachedPorts,
+    restoreAttaches,
     provisionCount: () => provisionCount,
     bootCount: () => bootCount,
   };
@@ -234,6 +239,57 @@ describe("composed elected placement path — attach → placement query → ele
 
     // Invariant 6: the SW port carried the (dropped) initial attach + the pgx0049 control plane, but NEVER an rpc.
     expect(swSeenFromTab).not.toContain("rpc");
+
+    await client.stop();
+    await settle(4);
+  });
+
+  it("a restore artifact reaches the ELECTED engine over the pipe — never dropped with the payload-blind router", async () => {
+    // The bug this pins: the ONLY restore-bearing handshake used to be posted on the SW port, which a
+    // router-only SharedWorker silently drops — transferring (detaching) the artifact's ArrayBuffer into the
+    // void. The elected engine then booted a PLAIN store: registry tables filled from sync, artifact-only
+    // content never existed (the transcrobes empty-`word` boots). The fix routes a restore-bearing attach by
+    // the placement reply: withheld from the SW port in elected mode, carried on the FIRST pipe handshake.
+    const { scope: swScope, connect: swOnConnect } = makeFakeSharedScope();
+    bootstrapWorkerScope({
+      connect: () => undefined, // NEVER called in elected mode (router-only)
+      peerCount: () => 0,
+      decidePlacement: deniedPlacement,
+      globalScope: swScope,
+    });
+
+    const tabSw = track(new MessageChannel());
+    // Record every attach ENVELOPE the SW port carries, so we can prove none of them held the restore.
+    const swAttachPayloads: AttachPayload[] = [];
+    tabSw.port2.addEventListener("message", (event) => {
+      const data = (event as MessageEvent).data;
+      if (isBridgeEnvelope(data) && data.type === "attach") {
+        swAttachPayloads.push(identityCodec.decode(data.payload) as AttachPayload);
+      }
+    });
+    swOnConnect(tabSw.port2 as unknown as BridgePort);
+
+    const { core, worker: electedWorker } = makeElectedEngine(7);
+    const grantingLocks = makeGrantingLocks();
+
+    const restoreBytes = new TextEncoder().encode("pgdata-backup-tarball");
+    const client = await attachSyncClient({
+      registry: attachRegistry,
+      worker: { port: tabSw.port1 as unknown as BridgePort } as unknown as never,
+      createEngineWorker: (): ElectedEngineWorker => electedWorker,
+      electionIo: { locks: grantingLocks.locks },
+      restoreFrom: new Blob([restoreBytes], { type: "application/x-gzip" }),
+    });
+    await client.ready;
+    await settle();
+
+    // Exactly ONE attach carried the restore, at the ENGINE, with the artifact's bytes intact.
+    expect(core.restoreAttaches).toHaveLength(1);
+    const delivered = core.restoreAttaches[0]!;
+    expect(new Uint8Array(delivered.buffer)).toEqual(restoreBytes);
+    expect(delivered.mimeType).toBe("application/x-gzip");
+    // The SW-port handshake (router-dropped in this mode) never held it — the buffer was never destroyed.
+    expect(swAttachPayloads.every((attach) => attach.restore == null)).toBe(true);
 
     await client.stop();
     await settle(4);

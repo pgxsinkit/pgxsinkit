@@ -57,6 +57,7 @@ import {
   type BridgeCodec,
   type BridgeEnvelope,
   type BridgeEvent,
+  type BridgeErrorWire,
   type BridgePort,
   type ExportArtefactWire,
   type GuardedQueryWireArgs,
@@ -456,8 +457,8 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   // exactly once off the booted client's stage promises (`milestonesWired`), then driven purely by them.
   const milestones = { writeReady: false, bootSettled: false };
   const stageErrors: {
-    writeReady?: { message: string; detail?: unknown };
-    bootSettled?: { message: string; detail?: unknown };
+    writeReady?: BridgeErrorWire;
+    bootSettled?: BridgeErrorWire;
   } = {};
   let milestonesWired = false;
   const markMilestone = (stage: BootMilestone) => {
@@ -985,7 +986,11 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         if (alreadyBooted && attach.restore != null) {
           postBridgeMessage(port, codec, "attach-ack", {
             alreadyBooted,
+            // `name` (BridgeErrorWire) makes this refusal type-detectable tab-side, like the
+            // `RestoreTargetExistsError` the createSyncClient path throws — both mean "a store is already
+            // there; this restore lost the race", the only refusals a consumer may fall back from.
             error: {
+              name: "RestoreIntoRunningStoreError",
               message:
                 "[pgxsinkit] cannot restore into a running store: the worker engine has already booted, and a store backup can only seed a brand-new store on the FIRST attach (ADR-0035 decision 6). Restore into a fresh worker instead.",
             },
@@ -1150,9 +1155,28 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     }
   };
 
+  // The host's own placement identity for DIRECT connections (no bootstrapWorkerScope): minted once per host.
+  const hostInstanceId = crypto.randomUUID();
   const connect = (port: BridgePort) => {
     ports.add(port);
     const listener = (event: { data: unknown }) => {
+      // A DIRECTLY-connected host IS the in-scope engine home, so it answers the placement query itself —
+      // `electionRequired: false`, exactly what `bootstrapWorkerScope`'s meta listener reports for SW-direct.
+      // This makes "every host answers the placement query" true on EVERY transport (including plain test
+      // ports), which a restore-bearing attach RELIES on: it awaits the reply to route the one-shot restore
+      // artifact to the port that reaches the engine. In a real SW-direct scope both this and the meta
+      // listener answer; the tab's placement decision is single-shot and the meta reply (registered first)
+      // wins — the duplicate is ignored.
+      if (isPlacementQuery(event.data)) {
+        port.postMessage({
+          [PLACEMENT_RESULT_KEY]: {
+            engineHome: "shared-worker",
+            electionRequired: false,
+            swInstanceId: hostInstanceId,
+          } satisfies PlacementQueryResult,
+        });
+        return;
+      }
       if (isBridgeEnvelope(event.data) && event.data.type === "detach") {
         detachPort(port);
         port.removeEventListener("message", listener);
@@ -1228,14 +1252,22 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   };
 }
 
-/** Serialize a thrown value into the bridge's `{message, detail}` error shape (detail only when structured). */
-function serializeError(error: unknown): { message: string; detail?: unknown } {
+/**
+ * Serialize a thrown value into the bridge's {@link BridgeErrorWire} shape. `name` is carried whenever the
+ * error's is not the bare `"Error"` default, so a typed refusal (e.g. `RestoreTargetExistsError`) stays
+ * type-detectable after the tab rebuilds it; `detail` only when structured.
+ */
+function serializeError(error: unknown): BridgeErrorWire {
   if (error instanceof ExecutionLimitMismatchError) {
     return { message: error.message, detail: executionLimitMismatchToWire(error) };
   }
   if (error instanceof Error) {
     const detail = (error as Error & { detail?: unknown }).detail;
-    return { message: error.message, ...(detail !== undefined ? { detail } : {}) };
+    return {
+      message: error.message,
+      ...(error.name && error.name !== "Error" ? { name: error.name } : {}),
+      ...(detail !== undefined ? { detail } : {}),
+    };
   }
   return { message: String(error) };
 }
@@ -1621,7 +1653,7 @@ function wireSharedWorkerPlacement(
   let placement: SwPlacementResult | undefined;
   let router: EngineRouter | undefined;
   const pendingPorts: BridgePort[] = [];
-  let sharedHostTeardown: Promise<{ error?: { message: string; detail?: unknown } }> | undefined;
+  let sharedHostTeardown: Promise<{ error?: BridgeErrorWire }> | undefined;
 
   const currentPeerCount = (): number =>
     placement?.engineHome === "elected-worker" ? (router?.tabCount() ?? 0) : deps.peerCount();

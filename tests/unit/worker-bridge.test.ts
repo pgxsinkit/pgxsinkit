@@ -365,6 +365,55 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
     expect(await attemptAttach(channel2)).toContain("boot poison");
     expect(poisonHits).toBeGreaterThan(afterFirst);
   });
+
+  it("preserves the boot error's name across the bridge (typed-refusal detection, e.g. RestoreTargetExistsError)", async () => {
+    // A consumer distinguishes a benign restore refusal (RestoreTargetExistsError → fall back to a plain
+    // attach) from a genuine restore failure (fail the boot) by the error's NAME. The bridge's serialized
+    // error must therefore carry `name`, not just `message` — otherwise every worker-mode boot failure
+    // rebuilds as a bare `Error` and the consumer is forced into message matching.
+    const refusal = new Error("store already exists at the restore target");
+    refusal.name = "RestoreTargetExistsError";
+    const poison = new Proxy(
+      {},
+      {
+        get: () => {
+          throw refusal;
+        },
+        set: () => {
+          throw refusal;
+        },
+      },
+    ) as unknown as ClientPGlite;
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      pgliteInstance: poison,
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+    });
+    hosts.push(host);
+
+    const channel = new MessageChannel();
+    channels.push(channel);
+    host.connect(channel.port1 as unknown as never);
+    // try/catch rather than `expect().rejects` — a MessageChannel-driven rejection does not settle a bun
+    // `expect(...).rejects` matcher here, but a plain await/catch observes it.
+    let caught: Error | undefined;
+    try {
+      await attachSyncClient({
+        registry: todosRegistry,
+        port: channel.port2 as unknown as never,
+        getToken: async () => null,
+      });
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).toContain("store already exists");
+    expect(caught?.name).toBe("RestoreTargetExistsError");
+  });
 });
 
 describe("write RPC round trip (ADR-0032 decision 4)", () => {

@@ -148,8 +148,8 @@ export type EngineControlMessage =
       type: "control-ack";
       identity: EngineIdentity;
       pingId: number;
-      /** Present only when the reserved teardown acknowledgement reports that host close failed. */
-      error?: { message: string; detail?: unknown };
+      /** Present only when the reserved teardown acknowledgement reports that host close failed. Mirrors `protocol.ts`'s `BridgeErrorWire` (this module deliberately imports nothing from the bridge). */
+      error?: { message: string; name?: string; detail?: unknown };
     }
   /**
    * tab → SharedWorker: an execution-limit report — a dispatch has been outstanding `elapsedMs` past the

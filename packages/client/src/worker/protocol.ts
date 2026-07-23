@@ -77,6 +77,19 @@ export type BridgeMessageType =
 
 // ─── Payload shapes ───────────────────────────────────────────────────────────
 
+/**
+ * The bridge's serialized-error wire shape. `message` always; `name` when the source error carried a
+ * non-default one, so a TYPED failure (e.g. a restore refused with `RestoreTargetExistsError`) stays
+ * type-detectable after the tab rebuilds it — a consumer must never be forced into message matching;
+ * `detail` for structured payloads (execution-limit mismatch, engine-relocated, …) that rebuild as their
+ * typed error class tab-side.
+ */
+export interface BridgeErrorWire {
+  message: string;
+  name?: string;
+  detail?: unknown;
+}
+
 /** A single auth token snapshot the tab owns and pushes to the worker (ADR-0032 decision 3). */
 export interface AuthTokenSnapshot {
   accessToken: string;
@@ -216,15 +229,15 @@ export interface AttachAckPayload {
    * itself still RESOLVES (the engine reached `localReadReady`; only the tail failed). A live milestone
    * failure after attach rides the `milestone-error` broadcast instead.
    */
-  writeReadyError?: { message: string; detail?: unknown };
-  bootSettledError?: { message: string; detail?: unknown };
+  writeReadyError?: BridgeErrorWire;
+  bootSettledError?: BridgeErrorWire;
   /**
    * Present when the engine boot REJECTED for this attach: the tab rejects `attachSyncClient` with this
    * message instead of hanging forever on the ack (ADR-0032 FIX 1). A later attach retries the boot. This
    * is a LOCAL-READ-CORE failure (the engine never reached `localReadReady`); a tail failure after
    * `localReadReady` uses the stage-error fields above and does NOT reject the attach.
    */
-  error?: { message: string; detail?: unknown };
+  error?: BridgeErrorWire;
 }
 
 /** worker → tab: a broadcast pull-request — any attached tab may answer, first response wins (ADR-0032 decision 3). */
@@ -336,7 +349,7 @@ export interface RpcResultPayload {
   /** The resolved value (present when `ok`). */
   value?: unknown;
   /** The rejection message + optional structured detail (present when `!ok`). */
-  error?: { message: string; detail?: unknown };
+  error?: BridgeErrorWire;
 }
 
 /** tab → worker: register a live query. `id` correlates the initial snapshot; `queryId` keys subsequent diffs. */
@@ -429,7 +442,7 @@ export type BridgeEvent =
   // The mirror failure edge: the background write/sync tail REJECTED a downstream stage (ADR-0041). Rejects
   // the tab's matching `writeReady` / `bootSettled` promise so an awaiter fails loudly rather than hanging;
   // `localReadReady` (and the resolved attach) are unaffected — the engine reached local-read readiness.
-  | { kind: "milestone-error"; stage: BootMilestone; error: { message: string; detail?: unknown } }
+  | { kind: "milestone-error"; stage: BootMilestone; error: BridgeErrorWire }
   | { kind: "conflict"; details: unknown }
   | { kind: "quarantine"; details: unknown }
   | { kind: "reject"; details: unknown }

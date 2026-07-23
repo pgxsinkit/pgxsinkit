@@ -85,6 +85,7 @@ import {
   type ExportArtefactWire,
   type GuardedQueryWireArgs,
   identityCodec,
+  type BridgeErrorWire,
   isBridgeEnvelope,
   type LiveDiffPayload,
   type LiveHydratedPayload,
@@ -430,9 +431,14 @@ export interface AttachSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * Restore the worker's store from a backup on attach (ADR-0035 decision 6) — the worker-mode `restoreFrom`.
    * A `File`/`Blob` as produced by {@link SyncClient.exportStore}; the facade decomposes it into a transferred
    * `ArrayBuffer` + name/mime ({@link RestoreArtefactWire}) and the worker recomposes it for `createSyncClient`.
-   * Restore rides the FIRST (boot) attach: passing it when the worker's engine has ALREADY booted rejects the
-   * attach with a typed error (you cannot restore into a running store). The restored engine boots offline and
-   * its recovered journal is quarantined, exactly as in-process — see `restoreFrom` on `createSyncClient`.
+   * Restore rides the one handshake that reaches the ENGINE HOME: a restore-bearing attach awaits the
+   * placement reply, then carries the artifact on the SW-port handshake when the in-scope host is the engine
+   * (SW-direct / declared-idbfs) or on the first per-tab PIPE handshake when the engine is elected — the
+   * router-only SharedWorker is payload-blind, so a restore posted there would be dropped and destroyed.
+   * Passing it when the engine has ALREADY booted rejects the attach with a typed error
+   * (`RestoreIntoRunningStoreError` by name — you cannot restore into a running store). The restored engine
+   * boots offline and its recovered journal is quarantined, exactly as in-process — see `restoreFrom` on
+   * `createSyncClient`.
    */
   restoreFrom?: File | Blob;
   codec?: BridgeCodec;
@@ -735,13 +741,22 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   let releaseElectionClaim: (() => void) | undefined;
   let destroyVerdictResolver: ((peers: number) => void) | undefined;
   let placementResult: PlacementQueryResult | undefined;
-  let swTeardownAckResolver: ((error?: { message: string; detail?: unknown }) => void) | undefined;
+  let swTeardownAckResolver: ((error?: BridgeErrorWire) => void) | undefined;
   let swTeardownIdentity: EngineIdentity | undefined;
   // Set to the store path when this attach ADOPTED a shared (provision-registered) coordinator — so detach
   // releases the shared ref (ref-counted registry cleanup). Undefined when this tab built its own coordinator.
   let adoptedSharedCoordinatorStore: string | undefined;
   // The placement decision is single-shot: once we act on the first `electionRequired` reply we ignore any repeat.
   let placementDecided = false;
+  // Settles when the FIRST placement reply arrives (the bootstrap meta listener answers the query in BOTH SW
+  // modes). Restore-bearing boots await it before the first handshake — see the send site for why.
+  let resolvePlacementKnown: (() => void) | undefined;
+  const placementKnown = new Promise<void>((resolve) => {
+    resolvePlacementKnown = resolve;
+  });
+  // The restore artifact rides EXACTLY ONE handshake — its ArrayBuffer detaches on first post, so a resend
+  // would carry an empty buffer. Set the moment a handshake actually carries it (see `runAttachHandshake`).
+  let restoreConsumed = false;
 
   // ─── ADR-0049 first-attach gate (placement-query-FIRST ordering — elected-mode ack routing) ───────
   // `attachSyncClient` no longer gates on the SW-port attach ack: a router-only SharedWorker (elected-worker home)
@@ -1164,7 +1179,10 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     swapDataPort(pipe, replacing);
     hasPipe = true;
     try {
-      await runAttachHandshake(pipe, false);
+      // `includeRestore: true` — in elected mode THIS is the engine's boot attach, so the restore artifact
+      // (withheld from the router-dropped SW-port handshake) rides here, over the direct tab↔engine pipe.
+      // The `restoreConsumed` guard makes it first-carry-only: a pipe REPLACEMENT re-attach never re-sends.
+      await runAttachHandshake(pipe, true);
     } catch {
       // A failed re-attach leaves the window open; a later notice / connect-port can retry. Never auto-retried.
       return;
@@ -1248,6 +1266,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     if (detached || placementDecided) return;
     placementDecided = true;
     placementResult = result;
+    resolvePlacementKnown?.();
     // SW-direct / declared-idbfs (or a non-placement transport that never replies): the SW-port attach ack gates the flow.
     if (!result.electionRequired) return;
     // Elected-worker (router-only): resolve the engine factory. Auto-derivation from the reported script URL is the
@@ -1428,14 +1447,19 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   let pendingAttachAck: { resolve: (ack: AttachAckPayload) => void; reject: (error: Error) => void } | null = null;
   const runAttachHandshake = (target: BridgePort, includeRestore: boolean): Promise<AttachAckPayload> =>
     new Promise<AttachAckPayload>((resolve, reject) => {
+      // The restore artifact rides at most ONE handshake ever (`restoreConsumed`): posting transfers (detaches)
+      // its ArrayBuffer, so any later handshake would carry an empty husk. The caller chooses the target that
+      // actually reaches the engine home; this guard makes a second carry structurally impossible.
+      const carryRestore = includeRestore && restoreWire !== undefined && !restoreConsumed;
+      if (carryRestore) restoreConsumed = true;
       pendingAttachAck = { resolve, reject };
       postBridgeMessage(
         target,
         codec,
         "attach",
-        buildAttachPayload(includeRestore),
+        buildAttachPayload(carryRestore),
         undefined,
-        includeRestore && restoreWire ? [restoreWire.buffer] : undefined,
+        carryRestore && restoreWire ? [restoreWire.buffer] : undefined,
       );
     });
 
@@ -1619,8 +1643,9 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
       }
     : undefined;
   // The attach payload builder — reused by the FIRST attach and every re-attach (pipe swap / reconnect). Restore
-  // rides ONLY the first attach (`includeRestore`); a re-attach never carries it (its buffer is already
-  // transferred/detached, and you cannot restore into a running store).
+  // rides ONLY the one handshake that reaches the engine home (SW port in SW-direct, first pipe attach when
+  // elected — see the send sites); `runAttachHandshake`'s `restoreConsumed` guard makes any later carry
+  // structurally impossible (the buffer is transferred/detached, and you cannot restore into a running store).
   function buildAttachPayload(includeRestore: boolean): AttachPayload {
     return {
       token: initialToken,
@@ -1647,12 +1672,23 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   // drives election. In SW-direct / declared-idbfs (and the no-placement / plain-port case) the reply is
   // `electionRequired: false` (or absent) and the SW-port attach below acks normally — a plain in-scope host attach.
   controlPort.postMessage({ [PLACEMENT_QUERY_KEY]: true });
+  // A restore-bearing boot must know the engine HOME before the first handshake: the restore's ArrayBuffer
+  // detaches on first post, and in elected mode the router-only SharedWorker silently DROPS bridge `attach`
+  // envelopes — posting the restore there destroys the artifact without it ever reaching the engine (the
+  // engine then boots a PLAIN store that only ever fills from sync). So await the placement reply (the
+  // bootstrap meta listener answers in both SW modes — the same guarantee the whole elected flow rests on)
+  // and route the restore over the port that reaches the engine: the SW port when the in-scope host IS the
+  // engine (SW-direct / declared-idbfs), the per-tab pipe (`onConnectPort` handshake) when the engine is
+  // elected. Non-restore boots keep the concurrent fire-and-forget handshake — no added latency.
+  if (restoreWire !== undefined) {
+    await placementKnown;
+  }
   // Send the tab's attach handshake on the SW/control port. `firstAttachReady` settles off the FIRST ack from
   // EITHER home: the in-scope SW engine (SW-direct / baseline) acks THIS handshake; the elected engine acks the
   // per-tab PIPE handshake (`onConnectPort`, after election). In elected mode the router silently drops THIS
   // send (payload-blind — never taught to answer bridge envelopes); the gate then settles off the pipe, never the
   // SW port. `.catch` swallows the orphaned handshake promise (its `pendingAttachAck` is superseded by the pipe).
-  void runAttachHandshake(currentDataPort(), true).catch(() => undefined);
+  void runAttachHandshake(currentDataPort(), placementResult?.electionRequired !== true).catch(() => undefined);
   try {
     await firstAttachReady;
   } catch (error) {
@@ -2392,13 +2428,20 @@ function deriveEngineWorkerFactory(swScriptUrl: string | undefined): (() => Elec
   return () => wrapEngineWorker(new WorkerCtor(swScriptUrl, { type: "module" }));
 }
 
-/** Rebuild an Error from the bridge's serialized `{message, detail}` shape, carrying `detail` through. */
+/**
+ * Rebuild an Error from the bridge's serialized {@link BridgeErrorWire} shape, carrying `name` and `detail`
+ * through. Restoring `name` is what keeps a typed worker-side failure (e.g. a restore refused with
+ * `RestoreTargetExistsError`) detectable by the consumer without message matching.
+ */
 function rebuildError(error: RpcResultPayload["error"]): Error {
   if (error && "detail" in error) {
     const mismatch = executionLimitMismatchFromWire(error.detail);
     if (mismatch !== undefined) return mismatch;
   }
   const rebuilt = new Error(error?.message ?? "worker rpc failed");
+  if (error?.name !== undefined) {
+    rebuilt.name = error.name;
+  }
   if (error && "detail" in error && error.detail !== undefined) {
     (rebuilt as Error & { detail?: unknown }).detail = error.detail;
   }

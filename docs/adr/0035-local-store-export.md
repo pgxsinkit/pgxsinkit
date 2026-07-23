@@ -79,8 +79,12 @@ toolkit refuses to build on.
    session-scoped — but measured by an implementation probe for bloat).
 
 6. **Restore is "boot on a restored datadir", always offline, journal quarantined.** A
-   `restoreFrom: File | Blob` boot option on `createSyncClient` (carried on the first-attach message
-   in worker mode) passes the tarball to PGlite's `loadDataDir` — **only into a dataDir that does
+   `restoreFrom: File | Blob` boot option on `createSyncClient` (in worker mode, carried on the one
+   first-attach handshake that reaches the ENGINE HOME — the attach awaits the ADR-0049 placement
+   reply and rides the SW port when the in-scope host is the engine, or the first per-tab pipe
+   handshake when the engine is elected; the router-only SharedWorker is payload-blind, so a restore
+   posted there would be dropped and its transferred buffer destroyed) passes the tarball to
+   PGlite's `loadDataDir` — **only into a dataDir that does
    not yet exist**; overlaying an existing store is refused (that path is a deliberate manual
    `destroy()` first). Sync correctness then rides machinery that already exists: fingerprint check,
    persisted subscriptions, expired-handle refetch, watermark alignment (ADR-0031). Two restore-only
