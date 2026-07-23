@@ -10,20 +10,20 @@
   "dependencies": {
     "@electric-sql/pglite": "0.5.4",
     "@electric-sql/pglite-repl": "0.4.4",
-    "@mantine/core": "9.4.1",
-    "@mantine/hooks": "9.4.1",
+    "@mantine/core": "9.4.2",
+    "@mantine/hooks": "9.4.2",
     "@pgxsinkit/board-schema": "workspace:*",
     "@pgxsinkit/client": "workspace:*",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/react": "workspace:*",
-    "@supabase/supabase-js": "2.110.7",
+    "@supabase/supabase-js": "2.110.8",
     "@tanstack/react-router": "1.170.18",
-    "react": "19.2.7",
-    "react-dom": "19.2.7",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "uuid": "14.0.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "6.0.3",
+    "@vitejs/plugin-react": "6.0.4",
     "vite": "8.1.5"
   }
 }
