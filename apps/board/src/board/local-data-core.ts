@@ -66,14 +66,20 @@ export interface WipeSurfaces {
   pgliteIdbPrefix: string;
 }
 
+/** The outer clamp for a per-store full destruction ({@link destroyKnownStores}). The wipe now QUIESCES the
+ * store's SharedWorker (a bounded ~6s teardown handshake) BEFORE `destroyStoreArtifacts` (its own ~5s
+ * blocked-timeout on the idb delete), so the clamp must accommodate BOTH steps back-to-back — a tighter budget
+ * would truncate the teardown and report a generic board timeout in place of `quiesceThenDestroyStore`'s own
+ * diagnostic (which names whether the WORKER teardown or the artifact delete stalled). This ceiling bites only
+ * a genuinely stuck store; the converging case (the whole point of quiescing) settles in well under a second. */
+const KNOWN_STORE_DESTROY_TIMEOUT_MS = 13000;
+
 /** Clamp a deletion-target promise: a store held by another tab (or an extended-lifetime worker surviving our
  * reload) can stall a delete indefinitely, and the wipe runs ON THE BOOT PATH — so every target gets a
- * deadline and reports an honest timeout failure instead of hanging the app. The default is 6000ms, matching
- * the library's `destroyStoreArtifacts` internal 5s blocked-timeout on the idb delete (a tighter wrapper would
- * truncate it — reporting a board timeout where the library would have reported the precise error or succeeded
- * at ~4.5s). The wipe's first pass does NOT quiesce (ADR-0050 — the background obsolete-cleanup does), so no
- * extra teardown budget is needed here. (The idb prefix sweep does not use this wrapper — {@link
- * deleteIdbDatabase} owns its own deadline so a blocked event can shape the message.) */
+ * deadline and reports an honest timeout failure instead of hanging the app. Callers pass the budget: the
+ * per-store destroy uses {@link KNOWN_STORE_DESTROY_TIMEOUT_MS} (quiesce + destroy back-to-back). (The idb
+ * prefix sweep does not use this wrapper — {@link deleteIdbDatabase} owns its own deadline so a blocked event
+ * can shape the message.) */
 function withDeletionTimeout(target: string, work: Promise<DeletionResult>, ms = 6000): Promise<DeletionResult> {
   return Promise.race([
     work,
@@ -83,7 +89,7 @@ function withDeletionTimeout(target: string, work: Promise<DeletionResult>, ms =
           resolve({
             target,
             ok: false,
-            detail: `timed out after ${ms}ms — another tab or the store's live worker likely holds it; retained for retry at next launch (close other board tabs to release it sooner)`,
+            detail: `timed out after ${ms}ms — the store's own background sync worker has not shut down yet (or, less often, another open board tab still holds it); retained and retried automatically at next launch`,
           }),
         ms,
       );
@@ -141,7 +147,7 @@ function deleteIdbDatabase(
           target,
           ok: false,
           detail: blocked
-            ? `still held after ${ms}ms — another tab or the store's live worker keeps its connection open; retained for retry at next launch (close other board tabs to release it sooner)`
+            ? `still held after ${ms}ms — the store's own background sync worker still has its IndexedDB connection open (or, less often, another open board tab); retained and retried automatically at next launch`
             : `timed out after ${ms}ms — retained for retry at next launch`,
         }),
       ms,
@@ -252,6 +258,7 @@ async function destroyKnownStores(surfaces: WipeSurfaces): Promise<KnownStoresOu
               detail: `${cause instanceof Error ? cause.message : String(cause)} — retained for retry at next launch`,
             }) satisfies DeletionResult,
         ),
+        KNOWN_STORE_DESTROY_TIMEOUT_MS,
       ).then((result) => ({ path, result })),
     ),
   );

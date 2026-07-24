@@ -248,9 +248,9 @@ export function LoginRoute() {
                   ))}
                 </List>
                 <Text size="xs" mt={4}>
-                  These stores are still held by another tab or a worker that has not yet shut down. They are kept and
-                  retried automatically each time you open the board — no action needed. Closing other board tabs
-                  releases them sooner.
+                  These stores are still held by their own background sync worker, which has not finished shutting down
+                  yet. They are kept and retried automatically each time you open the board — no action needed. If you
+                  have the board open in other tabs, closing them can release the stores sooner.
                 </Text>
               </Alert>
             )}

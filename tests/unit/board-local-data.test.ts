@@ -6,6 +6,7 @@ import {
   type WipeIdbRequestSurface,
   type WipeSurfaces,
 } from "../../apps/board/src/board/local-data-core";
+import { quiesceThenDestroyStoreWith } from "../../apps/board/src/board/quiesce-destroy-core";
 import { REGISTRY_KEY, storePathForStore, type StoreRegistryState } from "../../apps/board/src/board/store-registry";
 
 // Unit test of the board's "Delete local data" wipe DECISION logic through the DOM-free core
@@ -152,5 +153,45 @@ describe("deleteAllLocalBoardData — partial failure retains, full success remo
     expect(outcome.allOk).toBe(true);
     // A clean wipe with no held stores still removes the registry key.
     expect(backing.state()).toBeNull();
+  });
+
+  it("wipe path: a store whose WORKER TEARDOWN times out surfaces the diagnostic in its per-store detail", async () => {
+    // The wipe's real destroyStore is store-registry-default's `quiesceThenDestroyStore(path, { diagnostic: true })`.
+    // Emulate its DOM-free core here: the quiesce times out and the subsequent artifact delete then blocks — the
+    // reported failure detail must name the WORKER teardown, not a generic timeout, so a real device is self-diagnosing.
+    const heldPath = storePathForStore("held");
+    const backing = makeRegistryBacking({ version: 1, map: { "user-1": "held" } });
+    const surfaces: WipeSurfaces = {
+      localStorage: backing.localStorage,
+      indexedDb: makeIdbFactory([`/pglite/${heldPath}`]),
+      destroyStore: (storePath) =>
+        quiesceThenDestroyStoreWith(
+          {
+            workerMode: true,
+            quiesce: async () => {
+              throw new Error("[pgxsinkit] quiesceStoreWorker timed out after 6000ms");
+            },
+            destroy: async () => {
+              throw new Error("deleteDatabase blocked after 5000ms");
+            },
+          },
+          storePath,
+          { diagnostic: true },
+        ),
+      retention: backing.retention,
+      pgliteIdbPrefix: "/pglite/",
+    };
+
+    const outcome = await deleteAllLocalBoardDataWith(surfaces);
+
+    expect(outcome.allOk).toBe(false);
+    const failure = outcome.results.find((result) => result.target === `store ${heldPath}`);
+    expect(failure?.ok).toBe(false);
+    // The diagnostic reaches the user: the WORKER teardown is named as the step that stalled, plus the retry note.
+    expect(failure?.detail).toContain("worker teardown timed out after 6000ms");
+    expect(failure?.detail).toContain("background sync worker did not shut down");
+    expect(failure?.detail).toContain("retained for retry at next launch");
+    // The failed path is retained on the Obsolete list for the belt-and-suspenders background retry.
+    expect(backing.state()?.obsolete).toEqual([heldPath]);
   });
 });

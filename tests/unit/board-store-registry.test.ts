@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
-import type { ClientPGlite } from "@pgxsinkit/client";
+import type { ClientPGlite, StoreWorkerQuiesceOutcome } from "@pgxsinkit/client";
 
+import {
+  type QuiesceThenDestroyDeps,
+  quiesceThenDestroyStoreWith,
+} from "../../apps/board/src/board/quiesce-destroy-core";
 import {
   createStoreRegistry,
   idbNameForStore,
@@ -414,5 +418,117 @@ describe("retainObsoletePaths — a partial wipe hands failed paths to the Obsol
 
     expect(lockCalls).toBe(1);
     expect(harness.state()?.obsolete).toEqual([storePathForStore("held")]);
+  });
+});
+
+// ─── quiesceThenDestroyStoreWith (ADR-0050): quiesce-before-destroy + the wipe/background failure split ─────
+
+describe("quiesceThenDestroyStoreWith — quiesce the store's worker before destroying its artifacts", () => {
+  const path = storePathForStore("s");
+  const toreDownOutcome: StoreWorkerQuiesceOutcome = { engineHome: "shared-worker", toreDown: true };
+  const timeoutError = () => new Error("[pgxsinkit] quiesceStoreWorker timed out after 6000ms");
+
+  /** A deps fake recording the call order across quiesce/destroy so a test can prove quiesce ran FIRST. */
+  function makeDeps(overrides: Partial<QuiesceThenDestroyDeps> = {}): {
+    deps: QuiesceThenDestroyDeps;
+    order: string[];
+  } {
+    const order: string[] = [];
+    const deps: QuiesceThenDestroyDeps = {
+      workerMode: true,
+      quiesce: async () => {
+        order.push("quiesce");
+        return toreDownOutcome;
+      },
+      destroy: async () => {
+        order.push("destroy");
+      },
+      ...overrides,
+    };
+    return { deps, order };
+  }
+
+  async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+    try {
+      await promise;
+    } catch (error) {
+      return error;
+    }
+    throw new Error("expected the promise to reject, but it resolved");
+  }
+
+  it("(a) quiesces the store's worker BEFORE destroying its artifacts", async () => {
+    const { deps, order } = makeDeps();
+    await quiesceThenDestroyStoreWith(deps, path);
+    expect(order).toEqual(["quiesce", "destroy"]);
+  });
+
+  it("skips the quiesce entirely in the in-process fallback (workerMode false) — only destroy runs", async () => {
+    const { deps, order } = makeDeps({ workerMode: false });
+    await quiesceThenDestroyStoreWith(deps, path);
+    expect(order).toEqual(["destroy"]);
+  });
+
+  it("(b) diagnostic: a quiesce TIMEOUT followed by a destroy failure throws a WORKER-TEARDOWN message", async () => {
+    const { deps } = makeDeps({
+      quiesce: async () => {
+        throw timeoutError();
+      },
+      destroy: async () => {
+        throw new Error("deleteDatabase blocked");
+      },
+    });
+
+    const error = await rejectionOf(quiesceThenDestroyStoreWith(deps, path, { diagnostic: true }));
+
+    expect(error).toBeInstanceOf(Error);
+    // The message names the WORKER teardown as the step that stalled, carrying the 6000ms timeout figure.
+    expect((error as Error).message).toContain("worker teardown timed out after 6000ms");
+    expect((error as Error).message).toContain("background sync worker did not shut down");
+    // The subsequent artifact-delete failure is included so the whole picture is legible.
+    expect((error as Error).message).toContain("deleteDatabase blocked");
+  });
+
+  it("diagnostic: a SUCCEEDED teardown (toreDown) but a still-blocked delete names the delete, not the teardown", async () => {
+    const { deps } = makeDeps({
+      destroy: async () => {
+        throw new Error("deleteDatabase blocked");
+      },
+    });
+
+    const error = await rejectionOf(quiesceThenDestroyStoreWith(deps, path, { diagnostic: true }));
+
+    const message = (error as Error).message;
+    expect(message).toContain("worker teardown succeeded but the artifact delete was still blocked");
+    expect(message).toContain("deleteDatabase blocked");
+    expect(message).not.toContain("timed out");
+  });
+
+  it("(c) background best-effort: a quiesce failure is SWALLOWED when the destroy then succeeds (no throw)", async () => {
+    const { deps, order } = makeDeps({
+      quiesce: async () => {
+        order.push("quiesce");
+        throw timeoutError();
+      },
+    });
+
+    // No diagnostic option → the background obsolete-drain semantics: quiesce failure never aborts the destroy.
+    await quiesceThenDestroyStoreWith(deps, path);
+    expect(order).toEqual(["quiesce", "destroy"]);
+  });
+
+  it("without diagnostic, a destroy failure propagates the ORIGINAL error unchanged (no synthesized message)", async () => {
+    const { deps } = makeDeps({
+      quiesce: async () => {
+        throw timeoutError();
+      },
+      destroy: async () => {
+        throw new Error("raw destroy failure");
+      },
+    });
+
+    const error = await rejectionOf(quiesceThenDestroyStoreWith(deps, path));
+
+    expect((error as Error).message).toBe("raw destroy failure");
   });
 });

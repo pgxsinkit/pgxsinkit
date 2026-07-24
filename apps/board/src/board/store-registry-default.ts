@@ -9,6 +9,7 @@ import {
 
 import { boardWorkerMode } from "./engine-host";
 import { warmPgliteBootAssets } from "./pglite-warm";
+import { type QuiesceThenDestroyOptions, quiesceThenDestroyStoreWith } from "./quiesce-destroy-core";
 import { boardStorageDeclaration, readBackendPreference, readDurabilityPreference } from "./storage-preference";
 import {
   createStoreRegistry,
@@ -99,21 +100,29 @@ function quiesceWorkerForStore(storePath: string): SharedWorker {
 /**
  * Release a store's backend connection before a path-addressed destroy (ADR-0050): tear down its SharedWorker
  * host so an `extendedLifetime` idbfs worker surviving a reload stops holding its IndexedDB connection (else
- * `deleteDatabase` blocks forever). Best-effort — a quiesce failure (timeout, or the worker already gone) is
- * swallowed; `destroyStoreArtifacts` then runs regardless, its own ownership-lag retry reporting honestly and
- * leaving the path re-runnable. `storage` is deliberately omitted (no opinion) so a live worker bound to an
- * older declaration is never refused. Not called in the in-process fallback (no worker to tear down).
+ * `deleteDatabase` blocks forever), then destroy the artifacts. The real-browser binding of the DOM-free
+ * {@link quiesceThenDestroyStoreWith} orchestration — `quiesceWorkerForStore` (the teardown port) +
+ * `destroyStoreArtifacts`. `storage` is deliberately omitted from the quiesce (no opinion) so a live worker
+ * bound to an older declaration is never refused. The quiesce step is skipped in the in-process fallback
+ * (`boardWorkerMode` false — no worker to tear down).
+ *
+ * Two callers, two failure policies (via {@link QuiesceThenDestroyOptions.diagnostic}):
+ *   - the WIPE path ({@link import("./local-data")}) passes `{ diagnostic: true }` — a failure THROWS a message
+ *     naming which step stalled (worker teardown vs. artifact delete), which the wipe surfaces to the user;
+ *   - the background obsolete-list drain (the registry `destroyStore` adapter below) omits it — the quiesce
+ *     stays best-effort/swallowed and the destroy's own error propagates unchanged, so `destroyObsoleteStores`
+ *     keeps its swallow-and-continue retry behaviour.
  */
-async function quiesceThenDestroyStore(storePath: string): Promise<void> {
-  if (boardWorkerMode) {
-    // Best-effort: release the store's SharedWorker host so its idbfs connection frees before the delete
-    // (ADR-0050). A quiesce failure (timeout, or the worker already gone) is swallowed; destroyStoreArtifacts
-    // then runs regardless and reports honestly, leaving the path re-runnable.
-    await quiesceStoreWorker(() => quiesceWorkerForStore(storePath) as unknown as { port: BridgePort }).catch(
-      () => undefined,
-    );
-  }
-  await destroyStoreArtifacts(storePath);
+export function quiesceThenDestroyStore(storePath: string, opts?: QuiesceThenDestroyOptions): Promise<void> {
+  return quiesceThenDestroyStoreWith(
+    {
+      workerMode: boardWorkerMode,
+      quiesce: (path) => quiesceStoreWorker(() => quiesceWorkerForStore(path) as unknown as { port: BridgePort }),
+      destroy: (path) => destroyStoreArtifacts(path),
+    },
+    storePath,
+    opts,
+  );
 }
 
 /**

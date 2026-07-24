@@ -1,4 +1,4 @@
-import { destroyStoreArtifacts, storeIndexedDbDatabaseName } from "@pgxsinkit/client";
+import { storeIndexedDbDatabaseName } from "@pgxsinkit/client";
 
 import {
   type DeleteLocalDataOutcome,
@@ -9,15 +9,16 @@ import {
   type WipeSurfaces,
 } from "./local-data-core";
 import { type ObsoleteRetentionAdapters, REGISTRY_KEY, REGISTRY_LOCK } from "./store-registry";
+import { quiesceThenDestroyStore } from "./store-registry-default";
 
 // Board-local "Delete local data" (login screen affordance). Wipes every local store the board holds on
 // THIS browser profile so a demo visitor can start clean without digging into browser settings — the
 // PGlite store artifacts (OPFS directory + sentinel + meta + idb) and the board's own localStorage bindings.
 //
 // This module is the DOM wiring only: it binds real globalThis surfaces (localStorage / IndexedDB /
-// navigator.locks / `destroyStoreArtifacts`) into {@link WipeSurfaces} and drives the DOM-free core
-// (./local-data-core) — the split mirrors store-registry.ts vs store-registry-default.ts, so the wipe's
-// decision logic stays unit-testable without pulling DOM globals into the root typecheck.
+// navigator.locks / the store-registry-default quiesce-then-destroy) into {@link WipeSurfaces} and drives the
+// DOM-free core (./local-data-core) — the split mirrors store-registry.ts vs store-registry-default.ts, so the
+// wipe's decision logic stays unit-testable without pulling DOM globals into the root typecheck.
 //
 // WIPE-ON-BOOT DESIGN (replacing an in-place wipe that hung): the login page ITSELF holds the spare store's
 // SharedWorker (ensureSpare provisions it at mount) and that worker's engine holds the store's connections,
@@ -29,14 +30,16 @@ import { type ObsoleteRetentionAdapters, REGISTRY_KEY, REGISTRY_LOCK } from "./s
 // The reload releases NOTHING immediately, though: the board's workers are `extendedLifetime: true`
 // (store-registry-default.ts:60-68), so they deliberately OUTLIVE the document that spawned them and keep
 // holding their connections across our reload — an idbfs engine holds its IndexedDB connection for its whole
-// life. So the wipe's first pass WAITS through blocked deletes under a per-target deadline (an OPFS store's
-// handle releases when idle, so it deletes; a held idbfs store's delete blocks past the deadline) and RETAINS
-// any path still held on the registry's Obsolete-stores list ({@link retainObsoletePaths}) — the same retry
-// state a preference change uses. It does NOT quiesce here (ADR-0050): a teardown handshake per known path,
-// awaited before render, would delay the whole boot by seconds. Instead `boardStoreRegistry.destroyObsoleteStores()`
-// (main.tsx, every boot, off the sign-in path) QUIESCES-then-destroys each retained path in the background — it
-// tears the surviving idbfs worker down so its connection releases — so the very NEXT boot completes the wipe
-// with no user action.
+// life. So the wipe QUIESCES each known store before destroying it: it tears down the store's surviving
+// SharedWorker host (`quiesceThenDestroyStore`) so an idbfs worker releases its IndexedDB connection, THEN
+// destroys the artifacts — which now converges on THIS boot instead of blocking past the deadline. An OPFS
+// store's handle releases when idle either way. Any path whose destruction still fails (the teardown itself
+// timed out) is RETAINED on the registry's Obsolete-stores list ({@link retainObsoletePaths}) — the same retry
+// state a preference change uses. The teardown handshake is why this pass now runs BEFORE render (bounded,
+// best-effort) rather than deferring quiescence: because the wipe runs at boot before any spare is provisioned,
+// it only tears down the surviving pre-reload workers, and delaying an explicit destructive action by that
+// bounded handshake is acceptable. `boardStoreRegistry.destroyObsoleteStores()` (main.tsx, every boot, off the
+// sign-in path) stays as a belt-and-suspenders background retry for anything still failing.
 //
 // HONEST PARTIAL FAILURE: we collect a per-target result and surface what could NOT be deleted rather than
 // pretending success (see login.tsx). Crucially, a partial failure does NOT clear the registry: doing so
@@ -53,9 +56,8 @@ const PREFIX_MARKER = "x";
 const PGLITE_IDB_PREFIX = storeIndexedDbDatabaseName(PREFIX_MARKER).slice(0, -PREFIX_MARKER.length);
 
 /** The minimal registry-state seams {@link retainObsoletePaths} needs — localStorage read/write + the
- * cross-tab lock. Built HERE (not imported from store-registry-default) so the boot-path wipe never drags in
- * that module's worker/create wiring; mirrors its localStorage/locks adapters exactly, minus everything
- * retention never touches. */
+ * cross-tab lock. Built HERE rather than reaching for the full StoreRegistryAdapters: retention touches only
+ * localStorage + the lock, so it mirrors just those two adapters, minus everything retention never uses. */
 function retentionAdapters(): ObsoleteRetentionAdapters {
   return {
     readRegistry: () => globalThis.localStorage.getItem(REGISTRY_KEY),
@@ -69,24 +71,26 @@ function retentionAdapters(): ObsoleteRetentionAdapters {
   };
 }
 
-/** Bind the real browser surfaces (globalThis localStorage / IndexedDB / navigator.locks + the library's
- * `destroyStoreArtifacts`) into the DOM-free core's {@link WipeSurfaces}. A genuinely unavailable localStorage /
+/** Bind the real browser surfaces (globalThis localStorage / IndexedDB / navigator.locks + the store-registry's
+ * `quiesceThenDestroyStore`) into the DOM-free core's {@link WipeSurfaces}. A genuinely unavailable localStorage /
  * indexedDB is left `undefined` — the core reports it honestly per target rather than throwing.
  *
- * The wipe's first pass does NOT quiesce (ADR-0050): it must stay fast so the post-wipe login screen (and its
- * outcome report) renders promptly — quiescing every known path here (a SharedWorker + teardown handshake per
- * store, AWAITED on the boot path before render) would delay the whole app boot by seconds. An OPFS store
- * releases its handle when idle, so it deletes straight away; a signed-in idbfs store whose `extendedLifetime`
- * worker survives the reload blocks and is RETAINED on the Obsolete-stores list. `destroyObsoleteStores()`
- * (main.tsx, every boot, off the sign-in path) then QUIESCES-then-destroys each retained path in the background
- * (store-registry-default) — tearing the surviving idbfs worker down so the very next boot's cleanup completes
- * the wipe with no user action. Quiescence lives in that background retry, not this synchronous render-blocking
- * pass. */
+ * The wipe QUIESCES-then-destroys each known store (ADR-0050): `quiesceThenDestroyStore` tears down the store's
+ * surviving SharedWorker host so an `extendedLifetime` idbfs worker releases its IndexedDB connection, THEN
+ * destroys the artifacts — so the wipe converges on the SAME boot instead of blocking past the deadline and
+ * deferring to a later invisible background pass. The quiesce primitive (`quiesceStoreWorker`) exists precisely
+ * so this pass can do the teardown in-line; because the wipe runs at boot before any spare is provisioned, it
+ * only tears down the surviving pre-reload workers, and the bounded (~6s) best-effort handshake delays only this
+ * explicit destructive action's boot, which is acceptable. `{ diagnostic: true }` makes a still-failing store's
+ * thrown message name WHICH step stalled (worker teardown vs. artifact delete) so a real-device failure is
+ * self-diagnosing. An OPFS store releases its handle when idle, so it deletes straight away regardless; anything
+ * still held is RETAINED on the Obsolete-stores list, which `destroyObsoleteStores()` (main.tsx) retries as a
+ * belt-and-suspenders background pass. */
 function realWipeSurfaces(): WipeSurfaces {
   return {
     localStorage: (globalThis as { localStorage?: WipeStorageSurface }).localStorage,
     indexedDb: (globalThis as { indexedDB?: WipeIdbFactorySurface }).indexedDB,
-    destroyStore: (storePath) => destroyStoreArtifacts(storePath),
+    destroyStore: (storePath) => quiesceThenDestroyStore(storePath, { diagnostic: true }),
     retention: retentionAdapters(),
     pgliteIdbPrefix: PGLITE_IDB_PREFIX,
   };
