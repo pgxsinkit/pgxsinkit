@@ -183,17 +183,71 @@ function adminHeaders(): Record<string, string> {
 // settling, even though `/auth/v1/health` (which infra:up awaits) already reports OK. Every admin call
 // here tolerates a retry (list is a GET; delete treats 404 as done; create recovers from the ambiguous
 // landed-then-5xx case at its call site), so retry 5xx/network failures with linear backoff, bounded.
-async function adminFetch(url: string, init?: RequestInit): Promise<Response> {
+//
+// It ALSO tolerates a transient `403 bad_jwt`. Right after a Supabase signing-key rotation (legacy HS256
+// revoked, ES256 the only in-use key) the edge/GoTrue fleet propagates the new signing config across
+// nodes slowly and inconsistently, so a fraction of calls hit a stale node that mints a kid-less token
+// and GoTrue answers 403 `{"error_code":"bad_jwt",...unrecognized JWT kid <nil> for algorithm ES256}`.
+// That is node-routing luck (a retry hits a good node), not a wrong key — so retry it on a short fixed
+// delay. Any OTHER 403 is genuine authz and is returned to the caller un-retried, body intact.
+interface AdminFetchDeps {
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response>;
+  sleep: (ms: number) => Promise<void>;
+}
+
+const defaultAdminFetchDeps: AdminFetchDeps = {
+  fetchImpl: fetch,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+// Defensive classifier: is a 403 body the transient `bad_jwt` we retry? The body might not be JSON, so
+// guard the parse — a parse failure or any other error_code is treated as a NON-retryable 403.
+function isTransientBadJwt(bodyText: string): boolean {
+  try {
+    return (JSON.parse(bodyText) as { error_code?: unknown }).error_code === "bad_jwt";
+  } catch {
+    return false;
+  }
+}
+
+async function adminFetch(
+  url: string,
+  init?: RequestInit,
+  deps: AdminFetchDeps = defaultAdminFetchDeps,
+): Promise<Response> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 8; attempt++) {
+    let delayMs = attempt * 1000;
     try {
-      const response = await fetch(url, init);
-      if (response.status < 500) return response;
-      lastError = new Error(`GoTrue admin request to ${url} got ${response.status}: ${await response.text()}`);
+      const response = await deps.fetchImpl(url, init);
+      if (response.status === 403) {
+        // A 403 body can be read only once, and the caller reads it too — so consume it here exactly once
+        // to classify, then either retry (transient bad_jwt, nothing returned) or hand back a fresh
+        // Response carrying the same body so the caller's `.json()`/`.text()` still works.
+        const bodyText = await response.text();
+        if (!isTransientBadJwt(bodyText)) {
+          return new Response(bodyText, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
+        }
+        lastError = new Error(
+          `GoTrue admin request to ${url} failed after ${attempt} attempt(s) with a transient 403 bad_jwt: ` +
+            `a stale edge/GoTrue node kept minting a kid-less token after the Supabase signing-key rotation ` +
+            `(ES256). This is JWT-config propagation lag across the fleet, NOT a wrong or expired key. ` +
+            `Re-run; body: ${bodyText}`,
+        );
+        delayMs = 500; // node-routing luck, not server overload — a short fixed delay, not the 5xx backoff
+      } else if (response.status < 500) {
+        return response;
+      } else {
+        lastError = new Error(`GoTrue admin request to ${url} got ${response.status}: ${await response.text()}`);
+      }
     } catch (error) {
       lastError = error;
     }
-    await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+    await deps.sleep(delayMs);
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
@@ -382,4 +436,9 @@ async function main(): Promise<void> {
   console.log(`Sign in at /login with any identity (e.g. alice@board.local) — password: ${SEED_PASSWORD}`);
 }
 
-await main();
+if (import.meta.main) {
+  await main();
+}
+
+// Exported for focused unit tests of the retry seam (fake fetch + fake sleep, no real timers/network).
+export { adminFetch, isTransientBadJwt, type AdminFetchDeps };

@@ -13,7 +13,7 @@ description: >-
 metadata:
   type: core
   library: "@pgxsinkit/client"
-  library_version: "0.2.0"
+  library_version: "0.2.2"
   source: https://pgxsinkit.github.io/llms-full.txt
 ---
 
