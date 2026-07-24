@@ -47,11 +47,15 @@ export function idbNameForStore(storeId: string): string {
   return storeIndexedDbDatabaseName(storePathForStore(storeId));
 }
 
-/** The persisted registry shape: userId→storeId bindings plus at most one unbound spare. */
+/** The persisted registry shape: userId→storeId bindings plus at most one unbound spare, plus the
+ * Obsolete-stores list — exact store PATHS a preference change dropped (ADR-0050: a declaration is immutable,
+ * so Apply mints fresh stores and records the old paths here for best-effort background destruction). A path
+ * stays listed until `destroyObsoleteStores` succeeds on it; the list itself is the retry state. */
 export interface StoreRegistryState {
   version: 1;
   map: Record<string, string>;
   spare?: string;
+  obsolete?: string[];
 }
 
 /** A PGlite instance opened by an adapter, paired with the store id it actually opened. */
@@ -77,6 +81,10 @@ export interface StoreRegistryAdapters {
   deleteDatabase: (name: string) => Promise<void>;
   /** Create the raw PGlite store at `storePath` (consumes the WASM warm) — the eager/opening step. */
   createStore: (storePath: string) => Promise<ClientPGlite>;
+  /** Destroy every local artifact of a NOT-running store by path (OPFS directory + sentinel + meta + idb) —
+   * the library's `destroyStoreArtifacts` (ADR-0050). MAY reject (a live worker still holds the store);
+   * the caller keeps the path listed and retries next boot. */
+  destroyStore: (storePath: string) => Promise<void>;
   /** Generate a fresh random store id. */
   randomId: () => string;
   /** Run `fn` under the cross-tab registry lock when available; best-effort (just `fn()`) otherwise. */
@@ -122,10 +130,33 @@ export interface StoreRegistry {
    * `boot store claimed`.
    */
   openUserStore: (userId: string) => Promise<OpenUserStoreResult>;
+  /**
+   * Apply-time entry point (ADR-0050): under the registry lock, atomically drop EVERY binding and the
+   * spare, recording their exact store paths on the Obsolete-stores list. Runs BEFORE the new preferences
+   * are written (see `applyStoragePreferences`), so an interruption leaves dropped bindings under the old
+   * preferences — never old paths bound under new ones. Returns the paths recorded. Throws only when the
+   * registry storage itself is unavailable (the caller surfaces it; nothing was changed then).
+   */
+  obsoleteAllStores: () => Promise<string[]>;
+  /**
+   * Boot-time cleanup (ADR-0050): destroy each Obsolete-stores path via the injected `destroyStore` —
+   * fire-and-forget from the caller, never awaited on the sign-in path. A path that fails (an
+   * extended-lifetime old worker may still hold it — expected) STAYS listed and is retried next boot; a
+   * destroyed path is removed under the lock. Never throws.
+   */
+  destroyObsoleteStores: () => Promise<void>;
 }
 
+/**
+ * The registry-state seams {@link retainObsoletePaths} needs — the localStorage read/write pair plus the
+ * cross-tab lock. A strict SUBSET of {@link StoreRegistryAdapters} so a caller on the BOOT PATH (the
+ * "Delete local data" wipe, local-data.ts) can supply just these three without dragging in the
+ * worker/create/GC wiring that lives in store-registry-default. Full adapters satisfy it.
+ */
+export type ObsoleteRetentionAdapters = Pick<StoreRegistryAdapters, "readRegistry" | "writeRegistry" | "withLock">;
+
 /** Parse the persisted registry, defaulting/repairing any malformed shape to an empty registry. */
-function readState(adapters: StoreRegistryAdapters): StoreRegistryState {
+function readState(adapters: Pick<StoreRegistryAdapters, "readRegistry">): StoreRegistryState {
   const raw = adapters.readRegistry();
   if (raw == null) return { version: 1, map: {} };
   const parsed = JSON.parse(raw) as unknown;
@@ -138,36 +169,77 @@ function readState(adapters: StoreRegistryAdapters): StoreRegistryState {
   ) {
     return { version: 1, map: {} };
   }
-  const source = parsed as { map: Record<string, unknown>; spare?: unknown };
+  const source = parsed as { map: Record<string, unknown>; spare?: unknown; obsolete?: unknown };
   const map: Record<string, string> = {};
   for (const [userId, storeId] of Object.entries(source.map)) {
     if (typeof storeId === "string") map[userId] = storeId;
   }
+  const obsolete = Array.isArray(source.obsolete)
+    ? source.obsolete.filter((path): path is string => typeof path === "string")
+    : [];
   return {
     version: 1,
     map,
     ...(typeof source.spare === "string" ? { spare: source.spare } : {}),
+    ...(obsolete.length > 0 ? { obsolete } : {}),
   };
 }
 
-function writeState(adapters: StoreRegistryAdapters, state: StoreRegistryState): void {
+function writeState(adapters: Pick<StoreRegistryAdapters, "writeRegistry">, state: StoreRegistryState): void {
   adapters.writeRegistry(JSON.stringify(state));
 }
 
-/** Delete any board IndexedDB store whose id is neither a `map` value nor the current `spare`. */
-async function gcOrphans(adapters: StoreRegistryAdapters, state: StoreRegistryState): Promise<void> {
+/**
+ * Merge `paths` onto the Obsolete-stores list under the cross-tab lock, collapsing the registry to an EMPTY
+ * map and NO spare. The retry state for the "Delete local data" wipe's PARTIAL failure (local-data.ts): the
+ * wipe just attempted to destroy every registry-known store, and the paths whose destruction FAILED (an
+ * extended-lifetime worker still holds them across the reload) are handed here so `destroyObsoleteStores`
+ * retries them each boot and drops them on success — exactly like {@link StoreRegistry.obsoleteAllStores}'s
+ * state shape. Deduped against any paths already listed (a previously-obsolete path that failed AGAIN stays
+ * once). Emptying map+spare is the point: those stores are gone or now listed, so no binding may survive
+ * pointing at a deleted store. Standalone (not a {@link StoreRegistry} method) so the boot-path wipe can call
+ * it with the minimal {@link ObsoleteRetentionAdapters} — no worker/create wiring pulled in.
+ */
+export async function retainObsoletePaths(adapters: ObsoleteRetentionAdapters, paths: string[]): Promise<void> {
+  await adapters.withLock(async () => {
+    const state = readState(adapters);
+    const merged = new Set<string>(state.obsolete ?? []);
+    for (const path of paths) merged.add(path);
+    writeState(adapters, {
+      version: 1,
+      map: {},
+      ...(merged.size > 0 ? { obsolete: [...merged] } : {}),
+    });
+  });
+}
+
+/** Compute the orphan board IndexedDB names — those whose id is neither a `map` value, the current `spare`,
+ * nor an obsolete path (their full destruction, OPFS artifacts included, belongs to `destroyObsoleteStores`;
+ * half-cleaning them here would leave the list pointing at phantom stores). SNAPSHOT ONLY — the enumeration
+ * and the keep-set are read together (call under the registry lock), but the actual `deleteDatabase` sweep is
+ * run by the caller OUTSIDE the lock: a delete blocks on a live `extendedLifetime` worker's connection, and
+ * holding REGISTRY_LOCK across that blocking I/O starves every other lock user — notably
+ * `destroyObsoleteStores`'s obsolete-list removal, which then never clears and the wipe never converges. The
+ * orphan ids are minted-unique, so a store created after this snapshot can never collide with one of them,
+ * making the deferred (unlocked) sweep race-free. */
+async function computeOrphanIdbNames(adapters: StoreRegistryAdapters, state: StoreRegistryState): Promise<string[]> {
   const names = await adapters.listDatabases();
   // `indexedDB.databases()` unavailable (older Firefox / a non-DOM host): skip GC entirely.
-  if (names == null) return;
+  if (names == null) return [];
   const keep = new Set<string>(Object.values(state.map));
   if (state.spare != null) keep.add(state.spare);
+  for (const path of state.obsolete ?? []) {
+    if (path.startsWith(STORE_PREFIX)) keep.add(path.slice(STORE_PREFIX.length));
+  }
+  const orphans: string[] = [];
   for (const name of names) {
     if (!name.startsWith(IDB_PREFIX)) continue;
     const storeId = name.slice(IDB_PREFIX.length);
     // Any board store not mapped to a user and not held as the spare is an orphan under the current registry.
     if (keep.has(storeId)) continue;
-    await adapters.deleteDatabase(name);
+    orphans.push(name);
   }
+  return orphans;
 }
 
 export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegistry {
@@ -311,16 +383,25 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
   return {
     ensureSpare: async () => {
       try {
-        const decision = await adapters.withLock(async () => {
+        const { decision, orphans } = await adapters.withLock(async () => {
           const state = readState(adapters);
-          await gcOrphans(adapters, state);
-          if (state.spare != null) return { spareId: state.spare, created: false as const };
+          // Enumerate orphan idbs UNDER the lock (atomic snapshot with the keep-set) but do NOT delete here:
+          // deleteDatabase blocks on a live extendedLifetime worker's connection, and holding REGISTRY_LOCK
+          // across that blocking I/O starves destroyObsoleteStores's obsolete-list removal (same lock), which
+          // then never clears — leaving a phantom obsolete entry so "Delete local data" never converges.
+          const orphans = await computeOrphanIdbNames(adapters, state);
+          if (state.spare != null) return { decision: { spareId: state.spare, created: false as const }, orphans };
           const spareId = adapters.randomId();
           // Record the spare FIRST, then start the create — so a crash between the two leaves a recorded
           // spare (recoverable next load) rather than an orphaned, unrecorded store.
           writeState(adapters, { ...state, spare: spareId });
-          return { spareId, created: true as const };
+          return { decision: { spareId, created: true as const }, orphans };
         });
+
+        // Sweep the orphan idbs AFTER releasing the lock (see computeOrphanIdbNames): a blocked delete here
+        // can no longer stall the registry lock. Best-effort and sequential — a blocked delete resolves via
+        // the adapter's onblocked and the next boot's sweep retries.
+        for (const name of orphans) await adapters.deleteDatabase(name);
 
         if (decision.created) {
           startEagerOpen(decision.spareId);
@@ -336,6 +417,58 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
         // The accelerator failed (storage/idb/locks) — the deterministic fallback still boots.
         syncDebug("boot spare store ensured", { created: false });
         return { created: false };
+      }
+    },
+
+    obsoleteAllStores: async () => {
+      // The one lock-guarded mutation of Apply (ADR-0050). Ordering is the caller's contract: this runs
+      // BEFORE the new preferences are written, so an interruption strands dropped bindings under the OLD
+      // preferences (harmless — the next boot mints fresh stores), never old paths under new ones.
+      const dropped = await adapters.withLock(async () => {
+        const state = readState(adapters);
+        const paths = new Set<string>(state.obsolete ?? []);
+        for (const storeId of Object.values(state.map)) paths.add(storePathForStore(storeId));
+        if (state.spare != null) paths.add(storePathForStore(state.spare));
+        writeState(adapters, { version: 1, map: {}, obsolete: [...paths] });
+        return [...paths];
+      });
+      // Drop the page-local memos too: the eager spare and any memoised opens point at now-obsolete stores.
+      eager = null;
+      openByUser.clear();
+      syncDebug("storage preferences obsoleted stores", { count: dropped.length });
+      return dropped;
+    },
+
+    destroyObsoleteStores: async () => {
+      try {
+        const pending = readState(adapters).obsolete ?? [];
+        for (const path of pending) {
+          try {
+            await adapters.destroyStore(path);
+          } catch (error) {
+            // Expected while an extended-lifetime old worker still holds the store — the path stays
+            // listed and the next boot retries. Never blocks or fails the boot.
+            syncDebug("obsolete store destruction deferred", {
+              path,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            continue;
+          }
+          await adapters.withLock(async () => {
+            const state = readState(adapters);
+            const remaining = (state.obsolete ?? []).filter((entry) => entry !== path);
+            const next: StoreRegistryState = {
+              version: 1,
+              map: state.map,
+              ...(state.spare != null ? { spare: state.spare } : {}),
+              ...(remaining.length > 0 ? { obsolete: remaining } : {}),
+            };
+            writeState(adapters, next);
+          });
+          syncDebug("obsolete store destroyed", { path });
+        }
+      } catch {
+        // Registry storage unavailable — nothing to clean up from, and never a boot dependency.
       }
     },
 

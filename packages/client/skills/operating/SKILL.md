@@ -294,13 +294,52 @@ offline for inspection; a clean-journal restore may honor the normal online opti
 persisted store normally. Consumer docs:
 <https://pgxsinkit.github.io/concepts/export-and-restore/>.
 
-**Adoption and construction changes.** An existing idb store is authoritative and is never silently
-replaced by a newly capable OPFS home. Automatic adoption is default-off and requires the worker-entry
-declaration `adoption: "server-reconstructible"`; only a drained journal, authorized online reconstruction,
-and a returned strict barrier permit the idb predecessor to be deleted. `adoptStore()` is the manual
-creation-path equivalent and refuses a live store with `StoreInUseError`. Before changing a SW-direct
-construction identity such as durability, await `retireSyncWorkerHost()` so an extended-lifetime worker
-releases its handle without deleting the store; it refuses peers and does not apply to elected placement.
+**Adoption.** An existing idb store is authoritative and is never silently replaced by a newly capable
+OPFS home. Automatic adoption is default-off and requires the worker-entry declaration
+`adoption: "server-reconstructible"`; only a drained journal, authorized online reconstruction, and a
+returned strict barrier permit the idb predecessor to be deleted. `adoptStore()` is the manual
+creation-path equivalent and refuses a live store with `StoreInUseError`.
+
+**Resetting and deleting stores (ADR-0050).** Three non-interchangeable levers — pick by what you keep
+and whether the store is running:
+
+- `client.dropReadCache()` — keep the store, drop synced rows, resync in place (overlay + journal survive).
+- `client.destroy()` — delete a RUNNING store from an attached client: peer-count checked
+  (`StoreDestroyRefusedError` while peers hold it), owed-journal checked (refused unless `force`),
+  teardown-acknowledged before deletion.
+- `destroyStoreArtifacts(storePath)` — delete a NOT-running store by path: OPFS directory + commitment
+  sentinel + meta record + idb database, backend-agnostic, bounded ownership-lag retry. Documented
+  precondition, no liveness probe: on a still-held path it throws the ownership error — loud and safely
+  re-runnable (idempotent, phase-recorded; a `deleting`-marked store is refused for boot). Keep failed
+  paths on a retry list for the next boot. An idb-only sweep is NOT a substitute — it leaks the OPFS arena.
+- `quiesceStoreWorker(worker, opts?)` (ADR-0050) — the by-path TEARDOWN companion that MAKES a store
+  not-running before `destroyStoreArtifacts`. Give it a worker factory of the same shape `attachSyncClient`
+  takes (`() => new SharedWorker(url, { name: storePath })`) — but the factory MUST construct the worker with
+  **byte-identical options to the LIVE store worker**, `extendedLifetime: true` included. A named SharedWorker
+  dedups onto one instance, and Chromium (148+) FAILS a second `new SharedWorker(name, …)` whose options
+  disagree with the live one (an `error` event, no `onconnect`) — the teardown port then exchanges zero
+  messages and only times out. Omitting `extendedLifetime` on the teardown worker does not shorten its life
+  (`closeHost` + `scope.close()` end it); it only breaks the dedup and defeats the primitive. It reaches the
+  worker by name, posts the
+  declaration, queries placement, and for an SW-direct home (idbfs, real-Safari opfs) sends `engine-teardown`
+  and AWAITS the reserved ack (engine stopped, backend connection released → `{ toreDown: true }`); an elected
+  home is a no-op (`{ toreDown: false }` — the elected engine dies with its tab). Compose best-effort:
+  `await quiesceStoreWorker(f).catch(() => {}); await destroyStoreArtifacts(path)`. A timeout REJECTS (not
+  proof of teardown, default 6s) and must not abort the destroy; omit `storage` (no opinion) so a worker on
+  an older declaration is never refused; idempotent + safe on an already-dead store.
+
+**Storage-preference changes.** A store's storage declaration (backend/durability) is IMMUTABLE — bound at
+first contact, conflicts refused typed (`StorageDeclarationRefusedError`). Never re-home or
+delete-and-recreate a live path (an `extendedLifetime` predecessor may still hold it). The pattern:
+atomically drop bindings + record the old exact paths on an obsolete list FIRST, then write the new
+preference and reload; fresh stores mint under fresh paths, and each boot walks the obsolete list in
+the background (never awaited on sign-in), per path QUIESCING the worker (`quiesceStoreWorker`) BEFORE
+`destroyStoreArtifacts`. The quiesce is what makes idbfs converge: an `extendedLifetime` idbfs
+predecessor holds its IndexedDB connection across the reload, so a bare destroy would block forever
+(opfs releases on idle; idbfs does not) — tearing the host down releases the connection so the first
+retry wins. Dynamic declarations travel as the wire `storage` option on
+`attachSyncClient`/`provisionSyncWorker`; a registry-attached static declaration stays authoritative. Consumer docs:
+<https://pgxsinkit.github.io/concepts/local-store-lifecycle/>.
 
 ## Proxying Electric: force `cache-control: no-store`
 

@@ -1,35 +1,14 @@
 /// <reference lib="webworker" />
 import { boardMemberRegistry, boardSyncRegistry } from "@pgxsinkit/board-schema";
 import { defineSyncWorker } from "@pgxsinkit/client";
-import { attachSyncRegistryStorage } from "@pgxsinkit/contracts";
 
 import { boardConfig } from "../config";
-import {
-  backendPreferenceFromWorkerName,
-  boardStorageDeclaration,
-  durabilityPreferenceFromWorkerName,
-} from "./storage-preference";
 
-// Both storage preferences threaded through the worker's NAME as `<storePath>?durability=<dur>&backend=<backend>`
-// by store-registry-default (a SharedWorker has no localStorage, and the script URL cannot carry a dynamic query —
-// Vite's worker bundling requires the `new URL(...)` literal inline in the constructor, see the identity caveat in
-// ./storage-preference). Read them back off `globalThis.name` — a SharedWorkerGlobalScope exposes the constructing
-// tab's `name` — and coerce to valid preferences (durability default `relaxed`, backend default `opfs`). Because
-// the name is part of the worker's dedup identity, every tab on one store agrees on the values by construction.
-const workerName = (globalThis as { name?: string }).name ?? "";
-const durability = durabilityPreferenceFromWorkerName(workerName);
-const backend = backendPreferenceFromWorkerName(workerName);
-
-// Storage (durability + backend) is registry-declared (ADR-0047; ADR-0049 decision 1). The worker bakes BOTH role
-// registries and picks between them at claim/attach, and both mint stores for the SAME store path, so stamp the
-// identical boot-read declaration onto each — the toolkit's mint seam (createSyncClient boot + the default
-// provision factory) reads it back off the registry. `boardStorageDeclaration` produces the SAME shape the tab
-// stamps (board-client's in-process fallback): `durability` always, `backend: "idbfs"` only when forced (the
-// `opfs` default omits it). `attachSyncRegistryStorage` is idempotent for an equal re-declaration and throws on a
-// conflicting one, so both sides MUST agree — which the shared helper guarantees.
-const storage = boardStorageDeclaration(durability, backend);
-attachSyncRegistryStorage(boardSyncRegistry, storage);
-attachSyncRegistryStorage(boardMemberRegistry, storage);
+// Storage (durability + backend) reaches this scope over the WIRE (ADR-0050): the tab posts its declaration
+// message on every worker port before the placement query, and the toolkit's bootstrap defers the placement
+// decision until the first one arrives and binds it. The board's registries stay storage-SILENT here — the
+// preferences are the board's dynamic demo toggle, so the registry (the static, authoritative seam) must not
+// pin them. The worker NAME carries the store path only, never configuration.
 
 // Dev-only: turn the toolkit's opt-in instrumentation on INSIDE the worker scope too (main.tsx does the
 // same on the tab). `timeAsync`/`instrumentShapeFetch` gate their rail lines on this WORKER-scope flag, so

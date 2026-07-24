@@ -177,10 +177,30 @@ after the last client leaves, which can let a pending relaxed IndexedDB snapshot
 quickly reopened tab. Firefox and Safari ignore the unknown option safely. It does not retain Chromium's
 elected engine worker and is not part of the OPFS durability guarantee.
 
-If you change a construction identity such as the registry's `storage` declaration, first await
-`retireSyncWorkerHost({ worker })` (or pass its port). It quiesces a SW-direct host and releases its handle
-without deleting the store, refuses while peers are attached, and rejects on elected placement because
-the election coordinator owns retirement there.
+### The storage declaration on the wire (ADR-0050)
+
+The worker **name carries the store path and nothing else** — never configuration. The store's
+storage declaration (`SyncStorageDeclaration`: `backend`, `durability`) normally lives statically on
+the registry (`attachSyncRegistryStorage`), and that remains authoritative. For a consumer whose declaration is
+**dynamic** (a runtime storage toggle, like the board demo's), the declaration travels on the wire
+instead: pass `storage` to `attachSyncClient`/`provisionSyncWorker`, and the library posts a
+**declaration message** on every worker port _before_ its placement query. A registry-silent worker
+defers its placement decision until the first declaration arrives — `backend: "idbfs"` must skip the
+OPFS probe, so the declaration has to precede the decision — and the first arrival binds for the
+worker's lifetime. The same declaration rides the provision/attach payloads so the engine binds the
+mint's durability wherever it runs.
+
+The rules are strict, per field, on **explicit values only**: an unset field is "no opinion" and never
+conflicts; an explicit field disagreeing with the registry's declaration or the already-bound one — or
+any provision/attach arriving on a port that has not declared — is a typed
+`StorageDeclarationRefusedError`, never a silent fallback. A store's declaration is **immutable**: to
+change a preference, mint a fresh store under a fresh path, point users at it, and destroy the old
+path's artifacts in the background with
+[`destroyStoreArtifacts`](/concepts/local-store-lifecycle/) — never delete-and-recreate the same path
+while an `extendedLifetime` predecessor may still hold it. Each obsolete (or wiped) path is first
+**quiesced** — `quiesceStoreWorker` tears the store's SharedWorker host down by path so an
+`extendedLifetime` idbfs predecessor releases the IndexedDB connection it holds across the reload
+(else `deleteDatabase` blocks forever); OPFS releases on idle and needs no teardown (ADR-0050).
 
 ## Relocation and the execution limit
 

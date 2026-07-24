@@ -138,6 +138,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
         flush: async () => undefined,
         reconcile: async () => undefined,
         retryFailed: async () => undefined,
+        abortInFlight: () => undefined,
         discardConflict: async () => undefined,
         readMutationDetails: async () => [],
         readMutationStats: async () => mutationStats,

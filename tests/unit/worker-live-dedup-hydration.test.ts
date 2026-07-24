@@ -129,6 +129,7 @@ describe("dedup × hydration over the worker bridge (ADR-0040 Slice 3)", () => {
         flush: async () => undefined,
         reconcile: async () => undefined,
         retryFailed: async () => undefined,
+        abortInFlight: () => undefined,
         discardConflict: async () => undefined,
         readMutationDetails: async () => [],
         readMutationStats: async () => ({

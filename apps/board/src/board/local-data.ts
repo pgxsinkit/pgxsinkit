@@ -1,22 +1,49 @@
-import { storeIndexedDbDatabaseName } from "@pgxsinkit/client";
+import { destroyStoreArtifacts, storeIndexedDbDatabaseName } from "@pgxsinkit/client";
 
-import { idbNameForStore, REGISTRY_KEY } from "./store-registry";
+import {
+  type DeleteLocalDataOutcome,
+  deleteAllLocalBoardDataWith,
+  type DeletionResult,
+  type WipeIdbFactorySurface,
+  type WipeStorageSurface,
+  type WipeSurfaces,
+} from "./local-data-core";
+import { type ObsoleteRetentionAdapters, REGISTRY_KEY, REGISTRY_LOCK } from "./store-registry";
 
 // Board-local "Delete local data" (login screen affordance). Wipes every local store the board holds on
 // THIS browser profile so a demo visitor can start clean without digging into browser settings — the
-// PGlite IndexedDB databases and the board's own localStorage bindings.
+// PGlite store artifacts (OPFS directory + sentinel + meta + idb) and the board's own localStorage bindings.
+//
+// This module is the DOM wiring only: it binds real globalThis surfaces (localStorage / IndexedDB /
+// navigator.locks / `destroyStoreArtifacts`) into {@link WipeSurfaces} and drives the DOM-free core
+// (./local-data-core) — the split mirrors store-registry.ts vs store-registry-default.ts, so the wipe's
+// decision logic stays unit-testable without pulling DOM globals into the root typecheck.
 //
 // WIPE-ON-BOOT DESIGN (replacing an in-place wipe that hung): the login page ITSELF holds the spare store's
-// SharedWorker (ensureSpare provisions it at mount), that worker's PGlite holds the IndexedDB connection, and
-// a tab has NO API to terminate a SharedWorker — so deleting from the live page cannot succeed: `deleteDatabase`
-// sits in `blocked`. The wipe therefore runs in two steps: {@link requestLocalDataWipe} persists a flag and
-// reloads; the reload destroys this document, which kills its SharedWorkers and releases their connections;
-// {@link applyPendingLocalDataWipe} then runs at app boot — BEFORE any store machinery constructs a worker —
-// where the stores are unheld.
+// SharedWorker (ensureSpare provisions it at mount) and that worker's engine holds the store's connections,
+// and a tab has NO API to terminate a SharedWorker — so deleting from the live page cannot succeed:
+// `deleteDatabase` sits in `blocked`. The wipe therefore runs in two steps: {@link requestLocalDataWipe}
+// persists a flag and reloads; {@link applyPendingLocalDataWipe} then runs at app boot — BEFORE any store
+// machinery constructs a worker — where THIS page holds nothing.
 //
-// HONEST PARTIAL FAILURE: an engine in ANOTHER tab still holds its stores across our reload. We collect
-// a per-target result and surface what could NOT be deleted rather than pretending success (see
-// login.tsx); every target is additionally clamped by a timeout so a held store can never hang boot.
+// The reload releases NOTHING immediately, though: the board's workers are `extendedLifetime: true`
+// (store-registry-default.ts:60-68), so they deliberately OUTLIVE the document that spawned them and keep
+// holding their connections across our reload — an idbfs engine holds its IndexedDB connection for its whole
+// life. So the wipe's first pass WAITS through blocked deletes under a per-target deadline (an OPFS store's
+// handle releases when idle, so it deletes; a held idbfs store's delete blocks past the deadline) and RETAINS
+// any path still held on the registry's Obsolete-stores list ({@link retainObsoletePaths}) — the same retry
+// state a preference change uses. It does NOT quiesce here (ADR-0050): a teardown handshake per known path,
+// awaited before render, would delay the whole boot by seconds. Instead `boardStoreRegistry.destroyObsoleteStores()`
+// (main.tsx, every boot, off the sign-in path) QUIESCES-then-destroys each retained path in the background — it
+// tears the surviving idbfs worker down so its connection releases — so the very NEXT boot completes the wipe
+// with no user action.
+//
+// HONEST PARTIAL FAILURE: we collect a per-target result and surface what could NOT be deleted rather than
+// pretending success (see login.tsx). Crucially, a partial failure does NOT clear the registry: doing so
+// would discard the only record of the failed store PATHS (OPFS directory paths included), leaving the
+// idb-only prefix sweep unable to ever reach those OPFS arenas — so the failed paths are retained for retry.
+
+export type { DeleteLocalDataOutcome, DeletionResult };
 
 // PGlite maps `idb://<storePath>` to the IndexedDB database `/pglite/<storePath>`. Derive the namespace prefix
 // from the library's own helper (never re-encode `/pglite/` here) so a rename upstream stays in lockstep. A
@@ -25,162 +52,50 @@ const PREFIX_MARKER = "x";
 /** The IndexedDB database-name prefix PGlite uses for every store (`/pglite/`). */
 const PGLITE_IDB_PREFIX = storeIndexedDbDatabaseName(PREFIX_MARKER).slice(0, -PREFIX_MARKER.length);
 
-/** The outcome of deleting one target (an IndexedDB db, or the localStorage bindings). */
-export interface DeletionResult {
-  /** Human-readable target label for the UI (e.g. an idb db name, "localStorage bindings"). */
-  target: string;
-  ok: boolean;
-  /** Why it failed, or an informative note on success (e.g. "nothing to delete"). */
-  detail?: string;
+/** The minimal registry-state seams {@link retainObsoletePaths} needs — localStorage read/write + the
+ * cross-tab lock. Built HERE (not imported from store-registry-default) so the boot-path wipe never drags in
+ * that module's worker/create wiring; mirrors its localStorage/locks adapters exactly, minus everything
+ * retention never touches. */
+function retentionAdapters(): ObsoleteRetentionAdapters {
+  return {
+    readRegistry: () => globalThis.localStorage.getItem(REGISTRY_KEY),
+    writeRegistry: (value) => globalThis.localStorage.setItem(REGISTRY_KEY, value),
+    withLock: async (fn) => {
+      const locks = (globalThis.navigator as Navigator & { locks?: LockManager }).locks;
+      // Best-effort without Web Locks: a rare cross-tab race is harmless here (the next boot re-reads the list).
+      if (locks == null) return fn();
+      return locks.request(REGISTRY_LOCK, () => fn());
+    },
+  };
 }
 
-/** The aggregate outcome of {@link deleteAllLocalBoardData}. */
-export interface DeleteLocalDataOutcome {
-  results: DeletionResult[];
-  /** True only when EVERY target was deleted (or was provably absent) — the reload gate. */
-  allOk: boolean;
+/** Bind the real browser surfaces (globalThis localStorage / IndexedDB / navigator.locks + the library's
+ * `destroyStoreArtifacts`) into the DOM-free core's {@link WipeSurfaces}. A genuinely unavailable localStorage /
+ * indexedDB is left `undefined` — the core reports it honestly per target rather than throwing.
+ *
+ * The wipe's first pass does NOT quiesce (ADR-0050): it must stay fast so the post-wipe login screen (and its
+ * outcome report) renders promptly — quiescing every known path here (a SharedWorker + teardown handshake per
+ * store, AWAITED on the boot path before render) would delay the whole app boot by seconds. An OPFS store
+ * releases its handle when idle, so it deletes straight away; a signed-in idbfs store whose `extendedLifetime`
+ * worker survives the reload blocks and is RETAINED on the Obsolete-stores list. `destroyObsoleteStores()`
+ * (main.tsx, every boot, off the sign-in path) then QUIESCES-then-destroys each retained path in the background
+ * (store-registry-default) — tearing the surviving idbfs worker down so the very next boot's cleanup completes
+ * the wipe with no user action. Quiescence lives in that background retry, not this synchronous render-blocking
+ * pass. */
+function realWipeSurfaces(): WipeSurfaces {
+  return {
+    localStorage: (globalThis as { localStorage?: WipeStorageSurface }).localStorage,
+    indexedDb: (globalThis as { indexedDB?: WipeIdbFactorySurface }).indexedDB,
+    destroyStore: (storePath) => destroyStoreArtifacts(storePath),
+    retention: retentionAdapters(),
+    pgliteIdbPrefix: PGLITE_IDB_PREFIX,
+  };
 }
 
-/** Clamp a deletion-target promise: a store held by another tab can stall a delete indefinitely (a blocked
- * IndexedDB `deleteDatabase` may sit unresolved), and the wipe now runs ON THE BOOT PATH — so every target
- * gets a deadline and reports an honest timeout failure instead of hanging the app. */
-function withDeletionTimeout(target: string, work: Promise<DeletionResult>, ms = 4000): Promise<DeletionResult> {
-  return Promise.race([
-    work,
-    new Promise<DeletionResult>((resolve) => {
-      setTimeout(
-        () =>
-          resolve({
-            target,
-            ok: false,
-            detail: `timed out after ${ms}ms — another tab's engine likely holds it; close other tabs and retry`,
-          }),
-        ms,
-      );
-    }),
-  ]);
-}
-
-/** Best-effort access to `indexedDB.databases()` (unavailable on some engines, e.g. older Firefox). */
-function idbFactory(): (IDBFactory & { databases?: () => Promise<Array<{ name?: string }>> }) | undefined {
-  const factory = (globalThis as { indexedDB?: IDBFactory }).indexedDB as
-    | (IDBFactory & { databases?: () => Promise<Array<{ name?: string }>> })
-    | undefined;
-  return factory;
-}
-
-/** The board store IndexedDB db names to delete when `indexedDB.databases()` is unavailable: derive them from
- * the localStorage registry's known bindings (every mapped store id + the spare). Best-effort — an unreadable
- * or malformed registry yields none. */
-function boardIdbNamesFromBindings(): string[] {
-  try {
-    const raw = (globalThis as { localStorage?: Storage }).localStorage?.getItem(REGISTRY_KEY);
-    if (raw == null) return [];
-    const parsed = JSON.parse(raw) as { map?: Record<string, unknown>; spare?: unknown };
-    const ids = new Set<string>();
-    if (parsed?.map != null && typeof parsed.map === "object") {
-      for (const storeId of Object.values(parsed.map)) if (typeof storeId === "string") ids.add(storeId);
-    }
-    if (typeof parsed?.spare === "string") ids.add(parsed.spare);
-    return [...ids].map((storeId) => idbNameForStore(storeId));
-  } catch {
-    return [];
-  }
-}
-
-/** Delete one IndexedDB database, resolving to a per-target result. A BLOCKED delete (another tab/worker holds
- * the store) is reported as a failure — the user must close other tabs — never faked as success. */
-function deleteIdbDatabase(name: string): Promise<DeletionResult> {
-  return new Promise<DeletionResult>((resolve) => {
-    const factory = idbFactory();
-    if (factory == null) {
-      resolve({ target: `IndexedDB ${name}`, ok: false, detail: "indexedDB unavailable" });
-      return;
-    }
-    const request = factory.deleteDatabase(name);
-    request.onsuccess = () => resolve({ target: `IndexedDB ${name}`, ok: true });
-    request.onerror = () =>
-      resolve({
-        target: `IndexedDB ${name}`,
-        ok: false,
-        detail: request.error?.message ?? "deleteDatabase failed",
-      });
-    request.onblocked = () =>
-      resolve({
-        target: `IndexedDB ${name}`,
-        ok: false,
-        detail: "blocked — another tab or the store's live worker holds it; close other tabs and retry",
-      });
-  });
-}
-
-/** Delete every board PGlite IndexedDB store. Enumerates `indexedDB.databases()` and deletes each name under the
- * `/pglite/` prefix; where enumeration is unavailable, falls back to the db names derivable from the board's
- * known store bindings. */
-async function deleteIndexedDbStores(): Promise<DeletionResult[]> {
-  const factory = idbFactory();
-  if (typeof factory?.databases === "function") {
-    let names: string[];
-    try {
-      const infos = await factory.databases();
-      names = infos
-        .map((info) => info.name)
-        .filter((name): name is string => typeof name === "string" && name.startsWith(PGLITE_IDB_PREFIX));
-    } catch (cause) {
-      return [
-        {
-          target: "IndexedDB (enumeration)",
-          ok: false,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        },
-      ];
-    }
-    if (names.length === 0) {
-      return [{ target: "IndexedDB (PGlite stores)", ok: true, detail: "no stores found" }];
-    }
-    return Promise.all(names.map((name) => withDeletionTimeout(`IndexedDB ${name}`, deleteIdbDatabase(name))));
-  }
-
-  // `indexedDB.databases()` unavailable — delete the db names derivable from the board's known bindings.
-  const fallbackNames = boardIdbNamesFromBindings();
-  if (fallbackNames.length === 0) {
-    return [
-      {
-        target: "IndexedDB (PGlite stores)",
-        ok: true,
-        detail: "indexedDB.databases() unavailable and no known bindings — nothing to delete",
-      },
-    ];
-  }
-  return Promise.all(fallbackNames.map((name) => withDeletionTimeout(`IndexedDB ${name}`, deleteIdbDatabase(name))));
-}
-
-/** Clear the board's own localStorage bindings — the userId→storeId registry — so no stale binding points at a
- * now-deleted store. The durability PREFERENCE is deliberately PRESERVED: a data wipe removes stores and
- * bindings, not a UI setting. */
-function clearLocalStorageBindings(): DeletionResult {
-  const target = "localStorage bindings";
-  try {
-    const storage = (globalThis as { localStorage?: Storage }).localStorage;
-    if (storage == null) return { target, ok: true, detail: "localStorage unavailable — nothing to clear" };
-    storage.removeItem(REGISTRY_KEY);
-    return { target, ok: true };
-  } catch (cause) {
-    return { target, ok: false, detail: cause instanceof Error ? cause.message : String(cause) };
-  }
-}
-
-/**
- * Delete ALL local board data on this browser profile: every PGlite IndexedDB store and the board's localStorage
- * bindings. Returns a per-target result set and `allOk` — deliberately does NOT reload (the caller reloads only on
- * a fully-clean wipe, and shows the partial-failure detail otherwise). Order matters: IndexedDB first (its
- * fallback reads the bindings), then the localStorage bindings.
- */
+/** Delete ALL local board data on this browser profile through the DOM-free core, bound to the real browser
+ * surfaces. See {@link deleteAllLocalBoardDataWith} for the ordering and the partial-failure retention branch. */
 export async function deleteAllLocalBoardData(): Promise<DeleteLocalDataOutcome> {
-  const results: DeletionResult[] = [];
-  results.push(...(await deleteIndexedDbStores()));
-  results.push(clearLocalStorageBindings());
-  return { results, allOk: results.every((result) => result.ok) };
+  return deleteAllLocalBoardDataWith(realWipeSurfaces());
 }
 
 // ─── The wipe-on-boot flow (see the module header for why deletion cannot run on a live page) ────────────
@@ -191,10 +106,13 @@ const WIPE_FLAG_KEY = "board:wipe-local-data";
 const WIPE_OUTCOME_KEY = "board:wipe-local-data-outcome";
 
 /**
- * Request the wipe: persist the flag and reload. The reload destroys this document, which kills the
- * SharedWorkers it holds (the login page's own spare worker included) and releases their IndexedDB
- * connections — the precondition the actual deletion needs. If localStorage is unavailable the flag cannot
- * persist; reloading anyway is harmless (nothing will be wiped, and the login screen simply shows no outcome).
+ * Request the wipe: persist the flag and reload. The reload destroys this document but does NOT terminate the
+ * SharedWorkers it spawned — they are `extendedLifetime: true` and survive their spawning document for a grace
+ * period (store-registry-default.ts) — so the deletion at next boot still has to WAIT through blocked deletes
+ * under a deadline, retaining anything still held (see {@link applyPendingLocalDataWipe} / the module header).
+ * The reload's value is that it moves the deletion off the live page (where THIS page's own port kept the
+ * store pinned with no chance of ever releasing) onto the boot path, where the workers are at least dying. If
+ * localStorage is unavailable the flag cannot persist; reloading anyway is harmless (nothing will be wiped).
  */
 export function requestLocalDataWipe(): void {
   try {

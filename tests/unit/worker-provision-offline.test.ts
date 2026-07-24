@@ -10,7 +10,7 @@ import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulate
 import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
-import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { attachSyncRegistryStorage, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
 import {
   attachSyncClient,
@@ -483,6 +483,58 @@ describe("role-selected registry (ADR-0032 S3, config.role → resolveRegistry)"
     });
     await client.ready;
     expect(roles).toEqual(["member"]);
+  });
+
+  it("refuses a role registry whose static storage declaration conflicts with the bound placement (ADR-0050)", async () => {
+    // The spare is placed against `options.registry` before any role exists (storage-silent here → the
+    // opfs/relaxed default). A role-selected registry that EXPLICITLY declares idbfs cannot re-home the
+    // already-placed store, so boot refuses it typed rather than booting under the wrong placement.
+    const idbfsRoleRegistry = attachSyncRegistryStorage(
+      defineSyncRegistry({
+        todos: defineSyncTable({
+          tableName: "todos",
+          makeColumns: () => ({
+            id: uuid("id").primaryKey(),
+            title: varchar("title", { length: 200 }).notNull(),
+            done: boolean("done").notNull(),
+            updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+          }),
+          mode: "readwrite",
+          conflictPolicy: "last-write-wins",
+          governance: {
+            managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+          },
+        }),
+      }) as unknown as TodosRegistry,
+      { backend: "idbfs" },
+    );
+    const host = defineSyncWorker({
+      registry: todosRegistry, // storage-silent → bound opfs default
+      resolveRegistry: (role) => (role === "member" ? idbfsRoleRegistry : todosRegistry),
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      ...testStoreAcknowledgment(),
+      precreatedPglite: makePglite(),
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+    });
+    hosts.push(host);
+
+    const { port2 } = connectRaw(host);
+    let refusal: unknown;
+    try {
+      const client = await attachSyncClient({
+        registry: todosRegistry,
+        port: port2 as unknown as never,
+        role: "member",
+        getToken: async () => ({ accessToken: "t", expiresAt: Date.now() + 3_600_000 }),
+      });
+      await client.ready;
+    } catch (error) {
+      refusal = error;
+    }
+    expect((refusal as Error | undefined)?.message).toMatch(/backend/);
   });
 });
 

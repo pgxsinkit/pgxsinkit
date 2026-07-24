@@ -32,6 +32,7 @@ import {
   type SyncWorkerHost,
 } from "../../packages/client/src/index";
 import { memoryStoreForTests, testStoreAcknowledgment } from "../../packages/client/src/testing";
+import { PLACEMENT_RESULT_KEY } from "../../packages/client/src/worker/define-sync-worker";
 import { drizzleOver } from "../support/drizzle";
 
 const todosRegistry = defineSyncRegistry({
@@ -251,6 +252,12 @@ describe("attach handshake (ADR-0032 decision 4)", () => {
       channels.push(channel);
       const onconnect = (globalThis as { onconnect?: (event: { ports: BridgePort[] }) => void }).onconnect;
       onconnect?.({ ports: [channel.port1 as unknown as BridgePort] });
+      let placementReplies = 0;
+      channel.port2.addEventListener("message", (event) => {
+        const data = event.data as Record<string, unknown> | null;
+        if (data?.[PLACEMENT_RESULT_KEY] !== undefined) placementReplies += 1;
+      });
+      channel.port2.start();
 
       // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a promise typed as void
       await expect(
@@ -260,6 +267,9 @@ describe("attach handshake (ADR-0032 decision 4)", () => {
           executionLimit: { maxDispatchMs: 1_000 },
         }),
       ).rejects.toThrow("unsupported for SharedWorker-direct placement");
+      // One authority owns placement on a bootstrapped SW-direct port. A second host-level reply carries a
+      // different identity and can make retirement send a stale teardown that the bootstrap correctly ignores.
+      expect(placementReplies).toBe(1);
       expect(createCalled).toBe(false);
     } finally {
       if (savedScope === undefined)

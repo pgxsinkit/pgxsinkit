@@ -71,3 +71,14 @@ _Avoid_: chatroom, room, thread.
 A single post in a Channel, ordered by creation time. Authored optimistically and
 converged like any other write.
 _Avoid_: chat, comment (a comment would belong to an Issue, not a Channel).
+
+**Obsolete stores**:
+The board-registry list of exact store paths a storage-preference "Apply & reload"
+dropped (ADR-0050): a store's declaration is immutable, so Apply obsoletes the
+current bindings and the next boot mints fresh stores. Each boot retries a
+best-effort background destruction of every listed path; a path a live worker
+still holds stays listed — the list is the retry state. Board vocabulary only:
+the toolkit sees a bare path handed to `destroyStoreArtifacts`, never a list.
+_Avoid_: "orphans" (orphan GC is the separate idb sweep for unbound store ids);
+"retired workers" (nothing talks to the old worker at all — that machinery is
+gone).

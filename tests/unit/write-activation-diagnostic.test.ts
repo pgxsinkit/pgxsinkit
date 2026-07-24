@@ -134,6 +134,7 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
           flush: async () => undefined,
           reconcile: async () => undefined,
           retryFailed: async () => undefined,
+          abortInFlight: () => undefined,
           discardConflict: async () => undefined,
           readMutationDetails: async () => [],
           readMutationStats: async () => ({

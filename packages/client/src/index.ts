@@ -15,6 +15,7 @@ import type {
   SyncRuntimeStatus,
   SyncTableCreateInput,
   SyncTableEntry,
+  SyncStorageDeclaration,
   SyncTableName,
   SyncTableRegistry,
   SyncTableUpdateInput,
@@ -26,6 +27,7 @@ import {
   getSyncRegistrySchema,
   getSyncRegistryStorage,
   isClaimsDependentRowFilter,
+  resolveStorageDeclaration,
 } from "@pgxsinkit/contracts";
 // Type-only import (erased at runtime): the opfs-repacked factory's option/return types for the `opfs://`
 // branch. The factory VALUE is loaded lazily via dynamic `import()` inside that branch so a Bun unit test
@@ -168,9 +170,14 @@ export {
 } from "./adoption";
 export { createLifecycleSlot, LifecycleBusyError, type LifecycleSlot } from "./lifecycle-slot";
 export {
+  destroyStoreArtifacts,
   type ElectedEngineWorker,
   ElectedEngineUnconstructibleError,
+  quiesceStoreWorker,
   StoreDestroyRefusedError,
+  type StoreDestructionRetryOptions,
+  type StoreWorkerQuiesceOptions,
+  type StoreWorkerQuiesceOutcome,
   wrapEngineWorker,
 } from "./worker/attach-sync-client";
 export {
@@ -210,8 +217,6 @@ export {
   attachSyncClient,
   type AttachSyncClientOptions,
   provisionSyncWorker,
-  retireSyncWorkerHost,
-  type RetireSyncWorkerHostOptions,
 } from "./worker/attach-sync-client";
 export { defineSyncWorker, type DefineSyncWorkerOptions, type SyncWorkerHost } from "./worker/define-sync-worker";
 export {
@@ -1179,6 +1184,15 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    */
   storePath?: string;
   /**
+   * @internal Toolkit-internal WIRE-declaration carrier (ADR-0050), NOT a public per-boot knob. The worker
+   * host threads the store's BOUND storage declaration (registry static + the first payload's wire
+   * declaration + defaults) in here, and this boot's single storage resolution point folds it with the
+   * registry's own static declaration — an explicit disagreement is a typed
+   * `StorageDeclarationRefusedError` (the worker handlers refuse conflicts before this ever throws).
+   * In-process consumers never set it: their registry IS the declaration.
+   */
+  storage?: SyncStorageDeclaration;
+  /**
    * ADR-0049 D1: the placement probe's OPFS-sync-access grant, threaded from the SharedWorker's engine home
    * (`defineSyncWorker`'s SW-direct bootstrap) into this boot so the client-owned create opens the OPFS-repacked
    * backend. Absent/false is the honest IDBFS home — the declared `backend: "idbfs"` mode or a capability-absence
@@ -1595,6 +1609,14 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
   ready: Promise<void>;
   status: SyncRuntimeStatus;
   start: () => Promise<void>;
+  /**
+   * Synchronously abort all sync/write activity (in-flight write fetches, shape-stream long-polls, convergence
+   * scheduling) without awaiting. Idempotent. The first action of every teardown path — stop()/destroy() call it,
+   * and the SharedWorker host calls it before draining subscribes / disposing live queries so no teardown step
+   * races a still-live engine. Not a substitute for stop()/destroy(): the awaited teardown (unsubscribe, dispose,
+   * pglite.close) still follows. Callers rarely invoke it directly.
+   */
+  haltActivity: () => void;
   stop: () => Promise<void>;
   /**
    * Wipe the entire local store (synced cache + overlay + journal) and close the handle
@@ -2050,11 +2072,17 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // once the adoption + fresh phase machine has settled (never on a plain idb boot, where `probeGranted` is false).
   const probeGranted = options.hasOpfsSyncAccess === true;
   let storageFallbackReason: string | undefined;
-  // Durability (ADR-0047 D2): resolve the registry's declared mode ONCE here — this is the single resolution
-  // point — and thread it into every client-owned mint (its own boot create and the precreated-reject fallback)
-  // via the internal carrier on `createClientPGlite`. `storage.durability ?? "relaxed"` is the toolkit default;
-  // no open site takes a durability option, so no mint can contradict the data contract.
-  const resolvedDurability: StorageDurability = getSyncRegistryStorage(options.registry)?.durability ?? "relaxed";
+  // Durability (ADR-0047 D2 + ADR-0050): resolve the store's declared mode ONCE here — this is the single
+  // resolution point — from the registry's static declaration folded with the worker-threaded wire
+  // declaration (`options.storage`, the ADR-0050 internal carrier; absent for in-process consumers). An
+  // explicit disagreement is a typed refusal (the worker handlers refuse conflicts before this throws).
+  // The resolved mode threads into every client-owned mint (its own boot create and the precreated-reject
+  // fallback) via the internal carrier on `createClientPGlite`; no open site takes a durability option, so
+  // no mint can contradict the data contract.
+  const resolvedDurability: StorageDurability = resolveStorageDeclaration(
+    getSyncRegistryStorage(options.registry),
+    options.storage,
+  ).durability;
   const createClientOptions: CreateClientPGliteOptions = {
     ...(options.pgliteBootAssets ? { bootAssets: options.pgliteBootAssets } : {}),
     ...(backendOverride ? { backendOverride } : {}),
@@ -2615,6 +2643,21 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     rejectReady(disposedError);
     resolveSyncWired();
     await bootSettled.catch(() => undefined);
+  };
+
+  // Synchronously halt ALL sync/write ACTIVITY without awaiting anything — the first action of every teardown
+  // entry point (stop()/destroy() here, and the SharedWorker host's closeHost, which calls this before it drains
+  // pending subscribes or disposes live queries). Abort the mutation runtime's in-flight write fetches + any
+  // stalled auth resolve, abort every shape-stream long-poll (engine.close's AbortControllers fire synchronously),
+  // and stop convergence scheduling (the in-flight pass then settles fast — its fetch is aborted). Idempotent.
+  // Without this, a teardown step that runs BEFORE the streams are aborted (live-query dispose, pending-subscribe
+  // drain) races an engine still committing shape data and never settles. The full AWAITED teardown still runs
+  // after; this only guarantees the network + scheduling are already dead when it does.
+  const haltActivity = (): void => {
+    disposed = true;
+    mutationRuntime.abortInFlight();
+    void engine.close();
+    void convergenceDriver?.stop();
   };
 
   // The write/sync activation tail (ADR-0041 decision 3). On a NORMAL boot this runs in the BACKGROUND after
@@ -3178,7 +3221,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     start: async () => {
       await ready;
     },
+    haltActivity,
     stop: async () => {
+      // Halt all activity FIRST (see haltActivity) — before any await.
+      haltActivity();
       // ADR-0041: quiesce the background boot tail FIRST — flag disposal (so it never starts sync after this)
       // and await its settlement — so no shape stream is left running and nothing execs against the closing
       // PGlite. Any sync the tail started before disposal is now in `sync` for the unsubscribe below.
@@ -3204,6 +3250,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // LifecycleBusyError fires in both directions. The refuse-if-owed guard stays EXACTLY as it was, now
       // inside the slot run.
       lifecycleSlot.run("destroy", async () => {
+        // Halt all activity FIRST (see haltActivity) — before any await.
+        haltActivity();
         // ADR-0041: quiesce the background boot tail BEFORE the owed-mutations read and the wipe, so neither
         // races the tail's recovery journal updates / sync start (BLOCKER 2). After this the tail has settled.
         await quiesceTailForTeardown();

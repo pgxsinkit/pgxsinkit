@@ -10,6 +10,7 @@ import { describe, expect, it } from "bun:test";
 
 import {
   bootstrapWorkerScope,
+  DECLARATION_KEY,
   DESTROY_QUERY_KEY,
   DESTROY_VERDICT_KEY,
   PLACEMENT_QUERY_KEY,
@@ -81,6 +82,13 @@ const grantedPlacement = (): Promise<SwPlacementResult> =>
 const deniedPlacement = (): Promise<SwPlacementResult> =>
   Promise.resolve({ engineHome: "elected-worker", swInstanceId: "sw-test", probeError: "NotAllowedError: denied" });
 
+// ADR-0050: the SharedWorker bootstrap defers its placement decision until the store's storage declaration is
+// known, and routes a port to the engine only after that port declares. Every tab in these placement tests is a
+// conforming client: it posts an EMPTY declaration (`{}` — "no opinion", capability defaults) right after
+// connecting, exactly as the attach client does before its placement query. The declaration-specific matrix
+// (deferral, binding, conflicts, violations) lives in sw-declaration-bootstrap.test.ts.
+const emptyDeclaration = { [DECLARATION_KEY]: {} };
+
 // ─── 1. The pure decision ────────────────────────────────────────────────────
 
 describe("decideSwPlacement — the pure engine-home decision (ADR-0049 D1)", () => {
@@ -120,6 +128,7 @@ describe("bootstrap — granted placement connects ports to the engine host (SW-
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
 
     // The host received the port (SW-direct engine home in-scope).
@@ -149,6 +158,7 @@ describe("bootstrap — granted placement connects ports to the engine host (SW-
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
 
     tab.emit(envelope({ type: "control-ping", identity: ID, pingId: 7 }));
@@ -170,6 +180,8 @@ describe("bootstrap — granted placement connects ports to the engine host (SW-
     const tabB = makeFakePort();
     connect(tabA.port);
     connect(tabB.port);
+    tabA.emit(emptyDeclaration);
+    tabB.emit(emptyDeclaration);
     await settle();
 
     tabA.emit({ [DESTROY_QUERY_KEY]: true });
@@ -193,6 +205,7 @@ describe("bootstrap — denied placement is router-only; the engine host is neve
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
 
     expect(hostConnects).toBe(0); // the engine host is NEVER booted in router-only mode
@@ -218,6 +231,7 @@ describe("bootstrap — denied placement is router-only; the engine host is neve
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
 
     // The tab's coordinator announces its freshly-spawned engine: engine-announce carries the ROUTER-END control
@@ -262,6 +276,7 @@ describe("bootstrap — default ALWAYS probes; declared idbfs never probes (ADR-
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
 
     expect(hostConnects).toBe(0); // router-only — the in-scope host is never booted on a denied probe
@@ -273,7 +288,7 @@ describe("bootstrap — default ALWAYS probes; declared idbfs never probes (ADR-
     });
   });
 
-  it("declaredIdbfs: NEVER probes — binds the in-SW host on idbfs, electionRequired:false, no OPFS grant", async () => {
+  it("a static idbfs declaration: NEVER probes — binds the in-SW host on idbfs, electionRequired:false, no OPFS grant", async () => {
     const connected: BridgePort[] = [];
     const outcomes: { engineHome: SwPlacementResult["engineHome"] | undefined; opfsGranted: boolean }[] = [];
     const { scope, connect } = makeFakeSharedScope();
@@ -281,8 +296,8 @@ describe("bootstrap — default ALWAYS probes; declared idbfs never probes (ADR-
     bootstrapWorkerScope({
       connect: (port) => connected.push(port),
       peerCount: () => connected.length,
-      declaredIdbfs: true,
-      // The injected decision would flip router-only IF consulted — declaredIdbfs must ignore it (no probe runs).
+      staticStorage: { backend: "idbfs" },
+      // The injected decision would flip router-only IF consulted — declared idbfs must ignore it (no probe runs).
       decidePlacement: () => {
         probed = true;
         return deniedPlacement();
@@ -293,6 +308,7 @@ describe("bootstrap — default ALWAYS probes; declared idbfs never probes (ADR-
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
 
     expect(probed).toBe(false); // the declared-idbfs mode never runs the probe
@@ -342,6 +358,7 @@ describe("bootstrap — capability-absence fallback boots in-SW idbfs with a rea
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
 
     // The engine host boots in-scope (idbfs), never router-only.
@@ -378,6 +395,7 @@ describe("bootstrap — capability-absence fallback boots in-SW idbfs with a rea
 
     const tab = makeFakePort();
     connect(tab.port);
+    tab.emit(emptyDeclaration);
     await settle();
     expect(connected).toHaveLength(0); // router-only — no in-scope host yet
 

@@ -7,6 +7,7 @@ import { AuthProvider, useAuth } from "./auth/auth";
 import { BoardClientProvider } from "./board/board-client-provider";
 import { applyPendingLocalDataWipe } from "./board/local-data";
 import { prewarmMappedStoreForSession } from "./board/store-prewarm";
+import { boardStoreRegistry } from "./board/store-registry-default";
 import { router } from "./router";
 import { theme } from "./theme";
 
@@ -45,10 +46,17 @@ const navigateToLogin = () => router.navigate({ to: "/login" });
 
 void (async () => {
   // A requested "Delete local data" wipe runs HERE, before anything below constructs a worker or opens a
-  // store: the previous document's reload released every store this page held (a tab cannot terminate a
-  // SharedWorker — the reload is what kills it), so this is the one moment the stores are deletable. A
-  // no-wipe boot returns immediately; a wipe is timeout-clamped per target, so boot can never hang on it.
+  // store: this is the one moment THIS document holds nothing. The reload does not free the stores outright —
+  // the board's workers are `extendedLifetime: true` and survive their document for a grace period — so the
+  // wipe waits through blocked deletes under a per-target deadline and retains anything still held on the
+  // registry's Obsolete list for `destroyObsoleteStores` to retry each boot (see local-data.ts). A no-wipe
+  // boot returns immediately; a wipe is timeout-clamped per target, so boot can never hang on it.
   await applyPendingLocalDataWipe();
+
+  // Obsolete-store cleanup (ADR-0050): destroy the store paths a past "Apply & reload" dropped —
+  // fire-and-forget in the background, NEVER awaited on the boot path. A path a live extended-lifetime
+  // worker still holds fails its delete and simply stays listed for the next boot's retry.
+  void boardStoreRegistry.destroyObsoleteStores();
 
   // Eager mapped-store open (board cold-boot optimisation B, reload path). On a signed-in reload the
   // user's PGlite store open otherwise doesn't start until BoardClientProvider mounts — its ~1.9s initdb

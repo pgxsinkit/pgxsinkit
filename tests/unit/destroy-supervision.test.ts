@@ -15,12 +15,12 @@ import type { DestructionEffects } from "../../packages/client/src/store-lifecyc
 import {
   attachSyncClient,
   createStoreDestructionEffects,
-  retireSyncWorkerHost,
   runStoreDestruction,
   StoreDestroyRefusedError,
 } from "../../packages/client/src/worker/attach-sync-client";
 import {
   bootstrapWorkerScope,
+  DECLARATION_KEY,
   DESTROY_QUERY_KEY,
   DESTROY_VERDICT_KEY,
   PLACEMENT_QUERY_KEY,
@@ -76,13 +76,13 @@ function recordingEffects(overrides?: Partial<DestructionEffects>): { effects: D
 
 /** Deterministic manual timers (the router-test pattern) so the destroy peer-count query never auto-times-out. */
 function makeTimers() {
-  const scheduled: { fn: () => void; handle: number }[] = [];
+  const scheduled: { fn: () => void; handle: number; ms: number }[] = [];
   let seq = 0;
   return {
     timers: {
-      setTimeout(fn: () => void) {
+      setTimeout(fn: () => void, ms = 0) {
         const handle = seq++;
-        scheduled.push({ fn, handle });
+        scheduled.push({ fn, handle, ms });
         return handle;
       },
       clearTimeout(handle: unknown) {
@@ -90,6 +90,7 @@ function makeTimers() {
         if (i >= 0) scheduled.splice(i, 1);
       },
     },
+    pendingDelays: () => scheduled.map(({ ms }) => ms),
   };
 }
 
@@ -99,10 +100,12 @@ function makeTimers() {
  */
 function makeSwPort(
   peers: number,
-  options?: { swDirect?: boolean; order?: string[]; teardownError?: string },
-): { port: BridgePort; received: { type: string }[] } {
+  options?: { swDirect?: boolean; order?: string[]; teardownError?: string; holdProvisionAck?: boolean },
+): { port: BridgePort; received: { type: string }[]; placementQueries: () => number; ackProvision: () => void } {
   const listeners = new Set<(event: { data: unknown }) => void>();
   const received: { type: string }[] = [];
+  let placementQueries = 0;
+  let pendingProvisionAck: (() => void) | undefined;
   const emit = (data: unknown) => {
     for (const l of [...listeners]) l({ data });
   };
@@ -114,11 +117,13 @@ function makeSwPort(
   const port: BridgePort = {
     postMessage: (message: unknown) => {
       if (
-        options?.swDirect === true &&
         typeof message === "object" &&
         message !== null &&
         (message as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
       ) {
+        // Every real transport answers the placement query, and the attach flow awaits the reply before its
+        // handshake (ADR-0050) — so this fixture answers unconditionally, as SW-direct.
+        placementQueries += 1;
         emit({
           [PLACEMENT_RESULT_KEY]: {
             engineHome: "shared-worker",
@@ -143,22 +148,28 @@ function makeSwPort(
               ENGINE_CONTROL_ENVELOPE_KEY
             ]
           : undefined;
-      if (options?.swDirect === true && control?.type === "engine-teardown") {
-        options.order?.push("teardown");
+      // Placement is answered SW-direct above, so the destroy supervisor always runs the teardown handshake —
+      // ack it unconditionally (order recording stays opt-in via `options.order`).
+      if (control?.type === "engine-teardown") {
+        options?.order?.push("teardown");
         emit({
           [ENGINE_CONTROL_ENVELOPE_KEY]: {
             type: "control-ack",
             identity: control.identity,
             pingId: -1,
-            ...(options.teardownError ? { error: { message: options.teardownError } } : {}),
+            ...(options?.teardownError ? { error: { message: options.teardownError } } : {}),
           },
         });
         return;
       }
       if (!isBridgeEnvelope(message)) return;
       received.push({ type: message.type });
-      if (message.type === "detach") options?.order?.push("detach");
-      if (message.type === "attach") {
+      if (message.type === "provision") {
+        const ack = () => postBridgeMessage(emitPort, identityCodec, "provision-ack", { ok: true });
+        if (options?.holdProvisionAck) pendingProvisionAck = ack;
+        else queueMicrotask(ack);
+      } else if (message.type === "detach") options?.order?.push("detach");
+      else if (message.type === "attach") {
         queueMicrotask(() => {
           postBridgeMessage(emitPort, identityCodec, "attach-ack", { alreadyBooted: false });
           postBridgeMessage(emitPort, identityCodec, "event", {
@@ -197,7 +208,16 @@ function makeSwPort(
     start: () => undefined,
     close: () => undefined,
   };
-  return { port, received };
+  return {
+    port,
+    received,
+    placementQueries: () => placementQueries,
+    ackProvision: () => {
+      const ack = pendingProvisionAck;
+      pendingProvisionAck = undefined;
+      ack?.();
+    },
+  };
 }
 
 // ─── 1. The shared destruction helper — effect order + bounded ownership retry ───
@@ -340,26 +360,6 @@ describe("createStoreDestructionEffects — the backend-agnostic real effects (f
 // ─── 3. Attached facade destroy — peer refusal + single-tab supervision ──────────
 
 describe("attached destroy() — peer refusal FIRST, then detach + destruction (ADR-0049 D8)", () => {
-  it("retires a provisioned SW-direct host before its construction identity changes", async () => {
-    const order: string[] = [];
-    const sw = makeSwPort(1, { swDirect: true, order });
-
-    await retireSyncWorkerHost({ port: sw.port, timers: makeTimers().timers });
-
-    expect(order).toEqual(["teardown"]);
-  });
-
-  it("refuses SW-direct host retirement while a peer tab remains attached", async () => {
-    const order: string[] = [];
-    const sw = makeSwPort(2, { swDirect: true, order });
-
-    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a promise typed as void
-    await expect(retireSyncWorkerHost({ port: sw.port, timers: makeTimers().timers })).rejects.toThrow(
-      "2 attached tabs",
-    );
-    expect(order).toEqual([]);
-  });
-
   it("SW-direct teardown closes the in-scope host before acknowledging and closes the worker scope", async () => {
     const order: string[] = [];
     const scope: {
@@ -386,6 +386,9 @@ describe("attached destroy() — peer refusal FIRST, then detach + destruction (
     openChannels.push(channel);
     scope.onconnect?.({ ports: [channel.port2 as unknown as BridgePort] });
     channel.port1.start();
+    // ADR-0050: declare first — a registry-silent bootstrap defers placement (and all control handling) until
+    // the first declaration message arrives.
+    channel.port1.postMessage({ [DECLARATION_KEY]: {} });
     const ack = new Promise<void>((resolve) => {
       channel.port1.addEventListener("message", (event) => {
         const envelope = (event.data as { [ENGINE_CONTROL_ENVELOPE_KEY]?: { type?: string; pingId?: number } })[
@@ -438,6 +441,7 @@ describe("attached destroy() — peer refusal FIRST, then detach + destruction (
     openChannels.push(channel);
     scope.onconnect?.({ ports: [channel.port2 as unknown as BridgePort] });
     channel.port1.start();
+    channel.port1.postMessage({ [DECLARATION_KEY]: {} }); // ADR-0050: declaration unblocks the deferred placement
     const failure = new Promise<string>((resolve) => {
       channel.port1.addEventListener("message", (event) => {
         const envelope = (
@@ -694,12 +698,36 @@ describe("attached destroy() — peer refusal FIRST, then detach + destruction (
     };
     const port: BridgePort = {
       postMessage: (message: unknown) => {
+        // Answer the placement query (the attach flow awaits the reply, ADR-0050) — SW-direct, like a plain host.
+        if (
+          typeof message === "object" &&
+          message !== null &&
+          (message as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+        ) {
+          emit({
+            [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-owed" },
+          });
+          return;
+        }
         if (
           typeof message === "object" &&
           message !== null &&
           (message as Record<string, unknown>)[DESTROY_QUERY_KEY] === true
         ) {
           emit({ [DESTROY_VERDICT_KEY]: { peers: 1 } });
+          return;
+        }
+        // SW-direct destroy runs the teardown handshake — ack it so a `force` destroy can complete.
+        const teardown =
+          typeof message === "object" && message !== null
+            ? (message as { [ENGINE_CONTROL_ENVELOPE_KEY]?: { type?: string; identity?: unknown } })[
+                ENGINE_CONTROL_ENVELOPE_KEY
+              ]
+            : undefined;
+        if (teardown?.type === "engine-teardown") {
+          emit({
+            [ENGINE_CONTROL_ENVELOPE_KEY]: { type: "control-ack", identity: teardown.identity, pingId: -1 },
+          });
           return;
         }
         if (!isBridgeEnvelope(message)) return;

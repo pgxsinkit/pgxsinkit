@@ -148,6 +148,7 @@ describe("worker live-query lifecycle races (ADR-0040 fix round)", () => {
         flush: async () => undefined,
         reconcile: async () => undefined,
         retryFailed: async () => undefined,
+        abortInFlight: () => undefined,
         discardConflict: async () => undefined,
         readMutationDetails: async () => [],
         readMutationStats: async () => ({

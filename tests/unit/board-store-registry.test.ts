@@ -6,6 +6,7 @@ import {
   createStoreRegistry,
   idbNameForStore,
   fallbackStorePathForUser,
+  retainObsoletePaths,
   storePathForStore,
   type StoreRegistryAdapters,
   type StoreRegistryState,
@@ -20,13 +21,16 @@ interface HarnessOptions {
   storageThrows?: boolean;
   databases?: readonly string[] | null; // null → indexedDB.databases() unavailable (GC skipped)
   rejectStorePaths?: readonly string[]; // store paths for which createStore rejects (corrupt-spare simulation)
+  rejectDestroyPaths?: readonly string[]; // store paths whose destroyStore rejects (a live worker still holds them)
 }
 
 function makeHarness(options: HarnessOptions = {}) {
   let stored: string | null = options.initial != null ? JSON.stringify(options.initial) : null;
   const createdStorePaths: string[] = [];
   const deletedDatabases: string[] = [];
+  const destroyedStorePaths: string[] = [];
   const rejectStorePaths = new Set(options.rejectStorePaths ?? []);
+  const rejectDestroyPaths = new Set(options.rejectDestroyPaths ?? []);
   let counter = 0;
 
   const adapters: StoreRegistryAdapters = {
@@ -47,6 +51,10 @@ function makeHarness(options: HarnessOptions = {}) {
       if (rejectStorePaths.has(storePath)) throw new Error(`corrupt store at ${storePath}`);
       return { __store: storePath } as unknown as ClientPGlite;
     },
+    destroyStore: async (storePath) => {
+      if (rejectDestroyPaths.has(storePath)) throw new Error(`store held at ${storePath}`);
+      destroyedStorePaths.push(storePath);
+    },
     randomId: () => `gen-${++counter}`,
     // Tests exercise the pure decision logic; the lock is a straight pass-through here.
     withLock: (fn) => fn(),
@@ -56,6 +64,7 @@ function makeHarness(options: HarnessOptions = {}) {
     adapters,
     createdStorePaths,
     deletedDatabases,
+    destroyedStorePaths,
     state: (): StoreRegistryState | null => (stored != null ? (JSON.parse(stored) as StoreRegistryState) : null),
   };
 }
@@ -256,5 +265,154 @@ describe("board spare-store registry", () => {
     expect(opened.fresh).toBe(false);
     // No eager create happened on the failed path.
     expect(harness.createdStorePaths).toEqual([]);
+  });
+});
+
+// ─── Obsolete stores (ADR-0050): Apply drops bindings to the list; boots destroy it best-effort ──────
+
+describe("obsoleteAllStores — Apply atomically drops every binding onto the Obsolete-stores list", () => {
+  it("records every mapped store and the spare as exact paths, clears map+spare, and keeps prior entries", async () => {
+    const harness = makeHarness({
+      initial: {
+        version: 1,
+        map: { "user-1": "store-a", "user-2": "store-b" },
+        spare: "spare-1",
+        obsolete: [storePathForStore("old-x")],
+      },
+    });
+    const registry = createStoreRegistry(harness.adapters);
+
+    const dropped = await registry.obsoleteAllStores();
+
+    expect(new Set(dropped)).toEqual(
+      new Set([
+        storePathForStore("old-x"),
+        storePathForStore("store-a"),
+        storePathForStore("store-b"),
+        storePathForStore("spare-1"),
+      ]),
+    );
+    const state = harness.state();
+    expect(state?.map).toEqual({});
+    expect(state?.spare).toBeUndefined();
+    expect(new Set(state?.obsolete)).toEqual(new Set(dropped));
+  });
+
+  it("a subsequent openUserStore mints a FRESH store — never a just-obsoleted path", async () => {
+    const harness = makeHarness({
+      initial: { version: 1, map: { "user-1": "store-a" }, spare: "spare-1" },
+    });
+    const registry = createStoreRegistry(harness.adapters);
+
+    await registry.obsoleteAllStores();
+    const opened = await registry.openUserStore("user-1");
+
+    expect(opened.storeId).toBe("gen-1"); // freshly minted, not the obsoleted store-a / spare-1
+    expect(opened.fresh).toBe(true);
+  });
+
+  it("GC keeps obsolete stores' idb out of the orphan sweep (full destruction owns them)", async () => {
+    const obsoletePath = storePathForStore("old-x");
+    const harness = makeHarness({
+      initial: { version: 1, map: {}, obsolete: [obsoletePath] },
+      databases: [idbNameForStore("old-x"), idbNameForStore("orphan")],
+    });
+    const registry = createStoreRegistry(harness.adapters);
+
+    await registry.ensureSpare();
+
+    expect(harness.deletedDatabases).toContain(idbNameForStore("orphan"));
+    expect(harness.deletedDatabases).not.toContain(idbNameForStore("old-x"));
+  });
+});
+
+describe("destroyObsoleteStores — best-effort boot-time destruction with retry-next-boot", () => {
+  it("destroys each listed path and removes it from the list", async () => {
+    const pathA = storePathForStore("old-a");
+    const pathB = storePathForStore("old-b");
+    const harness = makeHarness({ initial: { version: 1, map: {}, obsolete: [pathA, pathB] } });
+    const registry = createStoreRegistry(harness.adapters);
+
+    await registry.destroyObsoleteStores();
+
+    expect(harness.destroyedStorePaths).toEqual([pathA, pathB]);
+    expect(harness.state()?.obsolete).toBeUndefined();
+  });
+
+  it("a failed destruction (a live worker still holds the store) KEEPS the path listed and never throws", async () => {
+    const held = storePathForStore("held");
+    const free = storePathForStore("free");
+    const harness = makeHarness({
+      initial: { version: 1, map: { "user-1": "live" }, obsolete: [held, free] },
+      rejectDestroyPaths: [held],
+    });
+    const registry = createStoreRegistry(harness.adapters);
+
+    await registry.destroyObsoleteStores(); // resolves despite the held path
+
+    expect(harness.destroyedStorePaths).toEqual([free]);
+    const state = harness.state();
+    expect(state?.obsolete).toEqual([held]); // retry state for the next boot
+    expect(state?.map).toEqual({ "user-1": "live" }); // live bindings untouched
+  });
+});
+
+// ─── retainObsoletePaths (the "Delete local data" wipe's partial-failure retry state) ──────────────────
+
+describe("retainObsoletePaths — a partial wipe hands failed paths to the Obsolete-stores list", () => {
+  it("merges the given paths onto the existing obsolete list AND collapses map + spare", async () => {
+    const existing = storePathForStore("old-x");
+    const harness = makeHarness({
+      initial: { version: 1, map: { "user-1": "store-a" }, spare: "spare-1", obsolete: [existing] },
+    });
+    const failed = [storePathForStore("held-1"), storePathForStore("held-2")];
+
+    await retainObsoletePaths(harness.adapters, failed);
+
+    const state = harness.state();
+    // Bindings and the spare are cleared — no binding may survive pointing at a now-deleted store.
+    expect(state?.map).toEqual({});
+    expect(state?.spare).toBeUndefined();
+    // Existing obsolete entries are preserved and the failed paths merged in (the same list shape Apply uses).
+    expect(new Set(state?.obsolete)).toEqual(new Set([existing, ...failed]));
+    // The registry key is NOT removed — it is the only record of these paths (OPFS dirs included).
+    expect(harness.state()).not.toBeNull();
+  });
+
+  it("dedupes a path already listed (a previously-obsolete path that failed again stays once)", async () => {
+    const held = storePathForStore("held");
+    const harness = makeHarness({ initial: { version: 1, map: {}, obsolete: [held] } });
+
+    await retainObsoletePaths(harness.adapters, [held]);
+
+    expect(harness.state()?.obsolete).toEqual([held]);
+  });
+
+  it("no failed paths + no prior obsolete writes a clean empty state (no obsolete key)", async () => {
+    const harness = makeHarness({ initial: { version: 1, map: { "user-1": "store-a" }, spare: "spare-1" } });
+
+    await retainObsoletePaths(harness.adapters, []);
+
+    const state = harness.state();
+    expect(state?.map).toEqual({});
+    expect(state?.spare).toBeUndefined();
+    expect(state?.obsolete).toBeUndefined();
+  });
+
+  it("runs its mutation under the cross-tab lock (consistent with obsoleteAllStores/destroyObsoleteStores)", async () => {
+    const harness = makeHarness();
+    let lockCalls = 0;
+    const adapters: StoreRegistryAdapters = {
+      ...harness.adapters,
+      withLock: async (fn) => {
+        lockCalls += 1;
+        return fn();
+      },
+    };
+
+    await retainObsoletePaths(adapters, [storePathForStore("held")]);
+
+    expect(lockCalls).toBe(1);
+    expect(harness.state()?.obsolete).toEqual([storePathForStore("held")]);
   });
 });

@@ -62,5 +62,6 @@ complete as ADRs are added.
 - [ADR-0047 — Relaxed durability is the default for the local store, declared on the registry](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0047-relaxed-durability-default.md)
 - [ADR-0048 — `opfs-repacked` — a packed, recreate-only OPFS VFS for PGlite](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0048-opfs-repacked-vfs.md)
 - [ADR-0049 — Capability-driven engine placement: opfs-repacked on every platform](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0049-capability-driven-engine-placement.md)
+- [ADR-0050 — Storage declaration transport and path-addressed store teardown](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0050-storage-declaration-transport.md)
 
 <!-- adr:list:end -->

@@ -379,6 +379,12 @@ export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
    */
   flushUnit: (unitId: string) => Promise<{ acks: MutationAck[] }>;
   reconcile: (table?: SyncTableName<TRegistry>) => Promise<void>;
+  /**
+   * Fire the runtime's dispose signal: abort every in-flight write-path fetch AND unblock any await parked on
+   * a stalled getAuthToken(). Called FIRST by the client's stop()/destroy() so teardown halts all write-network
+   * activity before it awaits the convergence pass. Idempotent; a disposed runtime performs no further network.
+   */
+  abortInFlight: () => void;
   retryFailed: (table?: SyncTableName<TRegistry>) => Promise<void>;
   recoverSending: (table?: SyncTableName<TRegistry>) => Promise<void>;
   /**
@@ -507,6 +513,24 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   const flushBatchSize = options.flushBatchSize ?? DEFAULT_FLUSH_BATCH_SIZE;
   const registryVersion = options.registryVersion ?? fingerprintRegistry(options.registry);
   let flushQueue = Promise.resolve();
+
+  // Teardown halt (see stop()/destroy()): a disposed runtime stops ALL activity at once. The signal is
+  // fired once by abortInFlight() and never reset. Every write-path fetch rides it (aborting an in-flight
+  // POST), and every getAuthToken() await is raced against it — the board's getAuthToken calls
+  // supabase.auth.getSession(), which can stall on token refresh (see flushBatch), so a fetch signal alone
+  // would not release teardown. On abort, flush()/flushUnit() reject promptly and the convergence pass settles.
+  const disposeController = new AbortController();
+  // Reject a pending await the instant the runtime is disposed. Cleans up its listener so per-flush use never leaks.
+  const untilAborted = <T>(work: Promise<T>): Promise<T> => {
+    if (disposeController.signal.aborted) {
+      return Promise.reject(new DOMException("Mutation runtime disposed", "AbortError"));
+    }
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(new DOMException("Mutation runtime disposed", "AbortError"));
+      disposeController.signal.addEventListener("abort", onAbort, { once: true });
+      work.then(resolve, reject).finally(() => disposeController.signal.removeEventListener("abort", onAbort));
+    });
+  };
 
   // Whether pgxsinkit owns the local schema (and the `pgxsinkit_local_meta` table the durable
   // recovery-required marker lives in). A caller-owned PGlite boot sets this false, so the marker is never
@@ -995,6 +1019,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         options.requestHeaders,
         ensureRecoveryMarker,
         markSendingScope,
+        disposeController.signal,
       );
 
       processedCount = batchResult.processedCount;
@@ -1117,6 +1142,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       flushQueue = nextFlush.catch(() => undefined);
       await nextFlush;
     },
+    abortInFlight: () => disposeController.abort(),
     flushUnit: async (unitId) => {
       const contexts = Object.values(tableContexts).filter((context): context is TableContext => context != null);
       const unitRows = await readUnitPendingRows(options.db, contexts, unitId);
@@ -1200,18 +1226,21 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       let acksByMutationId: Map<string, BatchMutationAck["acks"][number]>;
 
       try {
-        const authToken = await options.getAuthToken?.();
+        const authToken = await untilAborted(Promise.resolve(options.getAuthToken?.()));
         let response = await fetch(url, {
           method: "POST",
           headers: buildRequestHeaders(authToken, options.requestHeaders),
           body: jsonStringifyPayload({ writeUnit: unitId, mutations }),
+          signal: disposeController.signal,
         });
 
         if ([401, 403].includes(response.status) && options.getAuthToken) {
+          const retryToken = await untilAborted(Promise.resolve(options.getAuthToken()));
           response = await fetch(url, {
             method: "POST",
-            headers: buildRequestHeaders(await options.getAuthToken(), options.requestHeaders),
+            headers: buildRequestHeaders(retryToken, options.requestHeaders),
             body: jsonStringifyPayload({ writeUnit: unitId, mutations }),
+            signal: disposeController.signal,
           });
         }
 
@@ -2546,6 +2575,18 @@ async function readUnitPendingRows(
   return result.rows;
 }
 
+// Race a promise against an AbortSignal so a disposed runtime's teardown never parks on it (mirrors
+// createMutationRuntime's untilAborted; used by the module-level flushBatch). A missing signal is a passthrough.
+function raceAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(new DOMException("Mutation runtime disposed", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Mutation runtime disposed", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 async function flushBatch(
   db: MutationDb,
   tableContexts: Record<string, TableContext>,
@@ -2557,6 +2598,7 @@ async function flushBatch(
   requestHeaders?: Record<string, string>,
   ensureRecoveryMarker?: () => Promise<void>,
   markSendingScope?: MarkSendingScope,
+  signal?: AbortSignal,
 ): Promise<FlushBatchResult> {
   const contexts = filterContexts(tableContexts, tableFilter);
   const nowUs = nowMicroseconds();
@@ -2671,7 +2713,7 @@ async function flushBatch(
     // `supabase.auth.getSession()` per send, which can itself stall (token refresh) and would otherwise
     // be invisibly folded into "the write was slow".
     const authStart = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const authToken = await getAuthToken?.();
+    const authToken = await raceAbort(getAuthToken?.() ?? Promise.resolve(undefined), signal);
     const fetchStart = typeof performance !== "undefined" ? performance.now() : Date.now();
     syncDebug("board-write auth token resolved", { ms: Math.round(fetchStart - authStart) });
 
@@ -2679,13 +2721,15 @@ async function flushBatch(
       method: "POST",
       headers: buildRequestHeaders(authToken, requestHeaders),
       body: jsonStringifyPayload({ mutations }),
+      signal: signal ?? null,
     });
 
     if ([401, 403].includes(response.status) && getAuthToken) {
       response = await fetch(batchMutationUrl, {
         method: "POST",
-        headers: buildRequestHeaders(await getAuthToken(), requestHeaders),
+        headers: buildRequestHeaders(await raceAbort(getAuthToken(), signal), requestHeaders),
         body: jsonStringifyPayload({ mutations }),
+        signal: signal ?? null,
       });
     }
 

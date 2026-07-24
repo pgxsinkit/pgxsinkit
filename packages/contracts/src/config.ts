@@ -154,6 +154,91 @@ export interface SyncStorageDeclaration {
 }
 
 /**
+ * A {@link SyncStorageDeclaration} with every field resolved (ADR-0050) — the store's BOUND declaration.
+ * Produced once per store by {@link resolveStorageDeclaration} and immutable for the store's lifetime: a
+ * preference change mints a fresh store under a fresh path, never rebinds an existing one.
+ */
+export interface ResolvedStorageDeclaration {
+  backend: StorageBackend;
+  durability: StorageDurability;
+}
+
+/**
+ * A storage declaration was refused (ADR-0050): two sources explicitly disagree on a field, or a later
+ * declaration explicitly contradicts the store's bound declaration. Never resolved silently — the store's
+ * storage contract has exactly one value per field, and a disagreement means one side is wrong. The stable
+ * `name` survives bridge serialization (`BridgeErrorWire.name`), so a tab can detect the refusal typed.
+ */
+export class StorageDeclarationRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StorageDeclarationRefusedError";
+  }
+}
+
+/** One field's resolution: explicit-vs-explicit disagreement refuses; otherwise the explicit value, else the default. */
+function resolveDeclarationField<TValue>(
+  field: keyof SyncStorageDeclaration,
+  staticValue: TValue | undefined,
+  wireValue: TValue | undefined,
+  defaultValue: TValue,
+): TValue {
+  if (staticValue !== undefined && wireValue !== undefined && staticValue !== wireValue) {
+    throw new StorageDeclarationRefusedError(
+      `storage declaration disagreement on "${field}": the registry-attached declaration says ` +
+        `"${String(staticValue)}" but the wire declaration says "${String(wireValue)}" — a store's storage ` +
+        `contract has one value per field; fix the declaring side (a preference change mints a fresh store, ` +
+        `it never redeclares an existing one)`,
+    );
+  }
+  return staticValue ?? wireValue ?? defaultValue;
+}
+
+/**
+ * Resolve a store's storage declaration from its two sources (ADR-0050): the registry-attached STATIC
+ * declaration (authoritative) and the tab's WIRE declaration (honoured only where the registry is silent).
+ * Per field: an unset field is "no opinion" and can never conflict; both explicit and disagreeing is a
+ * {@link StorageDeclarationRefusedError}; unresolved fields take the capability defaults
+ * (`backend: "opfs"`, `durability: "relaxed"`).
+ */
+export function resolveStorageDeclaration(
+  staticDeclaration: SyncStorageDeclaration | undefined,
+  wireDeclaration: SyncStorageDeclaration | undefined,
+): ResolvedStorageDeclaration {
+  return {
+    backend: resolveDeclarationField("backend", staticDeclaration?.backend, wireDeclaration?.backend, "opfs"),
+    durability: resolveDeclarationField(
+      "durability",
+      staticDeclaration?.durability,
+      wireDeclaration?.durability,
+      "relaxed",
+    ),
+  };
+}
+
+/**
+ * Check a LATER declaration against a store's bound resolution (ADR-0050): an unset or equal field is
+ * idempotent; an explicit field disagreeing with the bound value is a {@link StorageDeclarationRefusedError}.
+ * The bound declaration is immutable — first arrival binds, later arrivals only confirm.
+ */
+export function assertStorageDeclarationCompatible(
+  bound: ResolvedStorageDeclaration,
+  incoming: SyncStorageDeclaration | undefined,
+): void {
+  if (incoming === undefined) return;
+  for (const field of ["backend", "durability"] as const) {
+    const value = incoming[field];
+    if (value !== undefined && value !== bound[field]) {
+      throw new StorageDeclarationRefusedError(
+        `storage declaration disagreement on "${field}": the store is bound to "${bound[field]}" but a later ` +
+          `declaration says "${value}" — a store's declaration is immutable; a preference change mints a ` +
+          `fresh store under a fresh path`,
+      );
+    }
+  }
+}
+
+/**
  * Minimal verified-JWT claim shape the sync layer understands. Providers may
  * attach arbitrary extra claims; those stay reachable through index access and
  * ownership claim paths (e.g. "app_metadata.person_id"). Parse decoded JWT

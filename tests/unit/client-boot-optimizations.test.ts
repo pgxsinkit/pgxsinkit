@@ -100,6 +100,7 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
           flush: async () => undefined,
           reconcile: async () => undefined,
           retryFailed: async () => undefined,
+          abortInFlight: () => undefined,
           discardConflict: async () => undefined,
           readMutationDetails: async () => [],
           readMutationStats: async () => ({

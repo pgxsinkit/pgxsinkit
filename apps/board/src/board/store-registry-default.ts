@@ -2,13 +2,14 @@ import {
   type BridgePort,
   type ClientPGlite,
   createClientPGlite,
+  destroyStoreArtifacts,
   provisionSyncWorker,
-  retireSyncWorkerHost,
+  quiesceStoreWorker,
 } from "@pgxsinkit/client";
 
 import { boardWorkerMode } from "./engine-host";
 import { warmPgliteBootAssets } from "./pglite-warm";
-import { readBackendPreference, readDurabilityPreference, workerNameForStore } from "./storage-preference";
+import { boardStorageDeclaration, readBackendPreference, readDurabilityPreference } from "./storage-preference";
 import {
   createStoreRegistry,
   REGISTRY_KEY,
@@ -34,41 +35,25 @@ import {
 // the shared-worker host.
 export { boardWorkerMode };
 
-// One SharedWorker instance per store name PER TAB — the provision (in `createStore`) and the later attach
+// One SharedWorker instance per store PER TAB — the provision (in `createStore`) and the later attach
 // (board-client) must share the SAME instance/port so their messages stay ordered (provision boots the
-// store before attach's engine adopts it). The browser additionally dedupes this name across tabs onto one
+// store before attach's engine adopts it). The browser additionally dedupes the name across tabs onto one
 // shared engine. Named by the store path (unique + stable per store).
-const workersByName = new Map<string, SharedWorker>();
+const workersByStorePath = new Map<string, SharedWorker>();
 
-/**
- * Quiesce every worker this tab constructed before a construction preference changes its SharedWorker name.
- * `extendedLifetime` can retain the old name after reload; awaiting the host barrier releases its IDB handle so
- * the replacement worker can open the same store under the new durability preference.
- */
-export async function retireBoardWorkers(): Promise<void> {
-  const workers = [...workersByName.entries()];
-  await Promise.all(
-    workers.map(async ([name, worker]) => {
-      await retireSyncWorkerHost({ port: worker.port as unknown as BridgePort });
-      workersByName.delete(name);
-    }),
-  );
+/** The board's current wire storage declaration (ADR-0050) — read fresh from localStorage per send. */
+function currentStorageDeclaration() {
+  return boardStorageDeclaration(readDurabilityPreference(), readBackendPreference());
 }
 
 /** The per-store SharedWorker, lazily constructed + cached (the inline `new URL` is Vite's worker-bundling cue). */
 export function getBoardWorkerForStore(storePath: string): SharedWorker {
-  // Both storage preferences ride in the worker NAME (`<storePath>?durability=<dur>&backend=<backend>`), NOT the
-  // URL: Vite bundles the worker chunk only when the `new URL(...)` literal sits INLINE in the
-  // `new SharedWorker(...)` call below — hoisting it out to append a query param degrades the reference to a
-  // plain asset emit (the raw TS source, unloadable) in the build. The name is equally part of the SharedWorker
-  // dedup identity, so a different value still yields a DIFFERENT worker; the worker reads them back off
-  // `globalThis.name` (storage-preference's `durabilityPreferenceFromWorkerName` / `backendPreferenceFromWorkerName`).
-  // They are read from localStorage ONCE, here at construction time; changing either first retires this tab's
-  // constructed workers, then writes localStorage and reloads (`retireBoardWorkers` + `applyStoragePreferences`),
-  // so an extended-lifetime worker under the old name cannot retain the database handle. The name still embeds the
-  // store path, so the browser dedupes N tabs onto ONE engine per store (ADR-0032 decision 2).
-  const name = workerNameForStore(storePath, readDurabilityPreference(), readBackendPreference());
-  let worker = workersByName.get(name);
+  // The worker NAME is the store path — nothing else, ever (ADR-0050). The storage preferences travel as the
+  // wire declaration on the port (provision/attach send it), never in the name: configuration in the dedup
+  // identity is what made a preference change replace the worker under a live extended-lifetime predecessor.
+  // A preference change instead obsoletes the current store paths and reloads; fresh stores mint under fresh
+  // paths, so this name never needs to change for a live store.
+  let worker = workersByStorePath.get(storePath);
   if (worker == null) {
     // `type: "module"` so Vite serves an ES-module worker in dev (the chunk `import`s the registry as
     // code) and bundles a module SharedWorker in the build. The whole `new SharedWorker(new URL(...))`
@@ -79,12 +64,56 @@ export function getBoardWorkerForStore(storePath: string): SharedWorker {
     // same instance. The option is an unknown dictionary member on Firefox/WebKit — ignored, never an error.
     worker = new SharedWorker(new URL("./board-sync.worker.ts", import.meta.url), {
       type: "module",
-      name,
+      name: storePath,
       extendedLifetime: true,
     } as WorkerOptions & { name: string; extendedLifetime: boolean });
-    workersByName.set(name, worker);
+    workersByStorePath.set(storePath, worker);
   }
   return worker;
+}
+
+/**
+ * A store's SharedWorker for a one-shot TEARDOWN by name (ADR-0050), constructed fresh and NOT cached in
+ * {@link workersByStorePath} — `quiesceStoreWorker` closes it, so it must never be handed out as a live store
+ * worker. Connecting by the store's name reaches the LIVE (extendedLifetime) worker if one survives, else spawns
+ * a throwaway the teardown immediately closes.
+ *
+ * The options here MUST MATCH the live worker's (`getBoardWorkerForStore`) — same `type`, same `name`, and
+ * crucially `extendedLifetime: true`. A named SharedWorker is deduped by the browser onto ONE instance, but
+ * Chromium (148+, where `extendedLifetime` is honoured) treats a second `new SharedWorker(name, …)` whose
+ * options DISAGREE with the live instance's as a conflict and FAILS the connection (an `error` event, no
+ * `onconnect`) — so the teardown port would exchange zero messages and time out. Omitting `extendedLifetime`
+ * here (on the theory that the throwaway should not outlive) was exactly that bug: it does not shorten this
+ * worker's life (the teardown handshake's `closeHost` + `scope.close()` ends it regardless), it only breaks the
+ * dedup match. The `new SharedWorker(new URL(...))` stays inline + statically analyzable for Vite's worker
+ * bundling (as above).
+ */
+function quiesceWorkerForStore(storePath: string): SharedWorker {
+  return new SharedWorker(new URL("./board-sync.worker.ts", import.meta.url), {
+    type: "module",
+    name: storePath,
+    extendedLifetime: true,
+  } as WorkerOptions & { name: string; extendedLifetime: boolean });
+}
+
+/**
+ * Release a store's backend connection before a path-addressed destroy (ADR-0050): tear down its SharedWorker
+ * host so an `extendedLifetime` idbfs worker surviving a reload stops holding its IndexedDB connection (else
+ * `deleteDatabase` blocks forever). Best-effort — a quiesce failure (timeout, or the worker already gone) is
+ * swallowed; `destroyStoreArtifacts` then runs regardless, its own ownership-lag retry reporting honestly and
+ * leaving the path re-runnable. `storage` is deliberately omitted (no opinion) so a live worker bound to an
+ * older declaration is never refused. Not called in the in-process fallback (no worker to tear down).
+ */
+async function quiesceThenDestroyStore(storePath: string): Promise<void> {
+  if (boardWorkerMode) {
+    // Best-effort: release the store's SharedWorker host so its idbfs connection frees before the delete
+    // (ADR-0050). A quiesce failure (timeout, or the worker already gone) is swallowed; destroyStoreArtifacts
+    // then runs regardless and reports honestly, leaving the path re-runnable.
+    await quiesceStoreWorker(() => quiesceWorkerForStore(storePath) as unknown as { port: BridgePort }).catch(
+      () => undefined,
+    );
+  }
+  await destroyStoreArtifacts(storePath);
 }
 
 /**
@@ -145,7 +174,9 @@ export function createBoardStoreAdapters(): StoreRegistryAdapters {
     createStore: (storePath) =>
       boardWorkerMode
         ? getBoardEnginePort(storePath)
-            .then((port) => provisionSyncWorker({ port, storePath }))
+            // The wire storage declaration (ADR-0050) rides the provision: it unblocks the worker's deferred
+            // placement decision (idbfs must skip the probe) and binds the mint's durability.
+            .then((port) => provisionSyncWorker({ port, storePath, storage: currentStorageDeclaration() }))
             .then(() => WORKER_STORE_PLACEHOLDER)
         : // In-process fallback: the durability preference is baked into the store at CREATE time (board-client
           // later adopts this store via `precreatedPglite`, so the create must carry it). The BACKEND preference
@@ -159,6 +190,11 @@ export function createBoardStoreAdapters(): StoreRegistryAdapters {
             bootAssets: warmPgliteBootAssets(),
             durability: readDurabilityPreference(),
           }),
+    // Full artifact destruction for a store (ADR-0050): first TEAR DOWN its SharedWorker host so an
+    // extendedLifetime idbfs worker surviving a reload releases its IndexedDB connection (else the delete
+    // blocks forever), then destroy every artifact (OPFS directory + sentinel + meta + idb) via the library's
+    // own machinery — never an idb-only sweep that leaks the OPFS arena.
+    destroyStore: (storePath) => quiesceThenDestroyStore(storePath),
     randomId: () => globalThis.crypto.randomUUID(),
     withLock: async (fn) => {
       const locks = (globalThis.navigator as Navigator & { locks?: LockManager }).locks;

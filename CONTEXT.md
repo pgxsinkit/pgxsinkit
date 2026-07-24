@@ -279,8 +279,20 @@ The registry-owned storage contract for a browser store (ADR-0049/0047): `storag
 `strict`). It lives on the registry, not on any minting surface, worker entry, or attach site,
 because both properties follow the data: one declaration binds every open of every store minted from
 that registry. It scopes the BROWSER store only — Node mints stay filesystem, export clones stay
-memory. _Avoid_: calling it a placement mode (where the engine runs is a runtime decision, never
-declared); a per-open, per-tab, or minting-surface option.
+memory. A store's declaration is immutable: a preference change mints a fresh store under a fresh
+path, never redeclares an existing one. _Avoid_: calling it a placement mode (where the engine runs
+is a runtime decision, never declared); a per-open, per-tab, or minting-surface option.
+
+**Declaration message**:
+The wire transport for a Storage declaration (ADR-0050), for consumers whose declaration is dynamic
+and whose registry is therefore storage-silent. The tab posts it on every worker port before the
+placement query — always, even empty (`{}` = "no opinion") — and a registry-silent worker defers
+its placement decision until the first one arrives; the first arrival binds. Registry-static
+declarations remain authoritative: comparison is per-field on explicit values only, and an explicit
+disagreement (or engine-bound traffic on an undeclared port) is a typed refusal
+(`StorageDeclarationRefusedError`). _Avoid_: "construction message" (it rides every port, not just
+the constructing one); carrying any configuration in the worker NAME (the name is the store path,
+nothing else — the fault ADR-0050 removed).
 
 **Durability**:
 The registry-declared property (`storage.durability`, ADR-0047) of whether a local write may be
@@ -467,8 +479,46 @@ survives engine shutdown, and refuses while other tabs hold claims. Required
 because commitment authority lives outside the store directory: deleting only
 the directory would leave a committed marker and fail every fresh creation
 closed.
+The SUPERVISED path is for a store a client is still attached to. Its
+path-addressed COMPANION is `destroyStoreArtifacts(storePath)` (ADR-0050) — the
+SAME deletion machine (OPFS directory + sentinel + meta + idb), run on a store
+**nobody is attached to**, addressed by path. It is NOT unsupervised destruction
+of a live store: its precondition (the store is not running) is DOCUMENTED, not
+probed; called on a path a live engine still holds, the delete throws the
+ownership error after the bounded retry — loud, and safely re-runnable (the
+sequence is idempotent + phase-recorded). Used for obsolete paths a storage
+preference change left behind and for wipe flows enumerating known paths; the
+caller keeps failed paths on its own retry list (the board's Obsolete-stores
+list) and retries next boot. When a live store's worker still holds the path, the
+caller brings it to the not-running precondition FIRST with `quiesceStoreWorker`
+(ADR-0050) — the path-addressed teardown that closes an `extendedLifetime`
+SW-direct host so idbfs releases its IndexedDB connection — then destroys;
+`destroyStoreArtifacts` itself keeps its no-probe precondition (it never
+constructs or speaks to a worker).
 _Avoid_: destroy as an ordinary RPC whose responder closes itself; auto-deleting
-a corrupt activated store.
+a corrupt activated store; reading `destroyStoreArtifacts` as a supervision
+bypass — it is the dead-store branch, not an unsupervised live destroy.
+
+**Store-worker quiescence**:
+The path-addressed teardown (`quiesceStoreWorker`, ADR-0050) that MAKES a store
+not-running on demand, so a `destroyStoreArtifacts` on the same path can win.
+Reaches the store's SharedWorker by name (a factory of the attach-client shape,
+so the library stays DOM-free), posts the ADR-0050 declaration, queries
+placement, and for an SW-direct home (idbfs, real-Safari opfs) sends the reused
+`engine-teardown` and AWAITS its reserved ack (engine stopped, backend connection
+released, host scope closed → `toreDown: true`); an elected home is a no-op
+(`toreDown: false` — the elected dedicated engine dies with its owning tab).
+Needed because the board's workers are `extendedLifetime` and idbfs holds its
+IndexedDB connection for the engine's whole life, so a predecessor surviving a
+reload keeps `deleteDatabase` blocked; opfs releases handles on idle and never
+had the problem. Composed as
+`await quiesceStoreWorker(f).catch(() => {}); await destroyStoreArtifacts(path)` —
+a timeout REJECTS (not proof of teardown) and must not abort the destroy;
+declaration omitted (no opinion) so a worker on an older preference is never
+refused; idempotent and safe on an already-dead store.
+_Avoid_: folding it into `destroyStoreArtifacts` (that re-opens the grilled
+no-probe contract); reviving a retirement/coordination protocol; terminating a
+SharedWorker from a tab (no such API — teardown must be cooperative + acked).
 
 **Drain predicate**:
 In the journal's canonical status terms: rows in `pending`, `sending`, `failed`,

@@ -34,6 +34,7 @@ const PLATFORM = "00000000-0000-4000-8000-0000000000a1";
 // client (worker-attached or in-process) and, ONLY in in-process mode, the PGlite query profiler.
 interface BoardDevWindow {
   __boardClient?: {
+    bootReport: () => Promise<unknown>;
     mutate: { create: (table: string, input: Record<string, unknown>) => Promise<void> };
     stop: () => Promise<void>;
   };
@@ -87,6 +88,21 @@ async function createIssue(page: Page, teamId: string): Promise<string> {
   return title;
 }
 
+/** A safe read used as the elected-engine succession barrier after the leader tab closes. */
+async function workerClientResponds(page: Page): Promise<boolean> {
+  return page.evaluate(async () => {
+    const client = (window as unknown as BoardDevWindow).__boardClient;
+    if (client == null) return false;
+    try {
+      await client.bootReport();
+      return true;
+    } catch {
+      // Reads may be rejected as not-dispatched while the old pipe is replaced; retrying them is safe.
+      return false;
+    }
+  });
+}
+
 /**
  * Select the durability preference on the login screen and apply it (persists it to localStorage + reloads).
  * The SegmentedControl renders a `radiogroup`; it is disambiguated by the `aria-label` of its wrapping Stack,
@@ -103,8 +119,17 @@ async function applyDurability(page: Page, durability: "relaxed" | "strict"): Pr
     .click();
   // Applying surfaces the "Apply & reload" button (the selection differs from the persisted value); clicking it
   // persists the choice and reloads.
+  const reloaded = page.waitForEvent("domcontentloaded");
   await page.getByRole("button", { name: "Apply & reload" }).click();
+  await reloaded;
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("board:durability-preference"))).toBe(durability);
   await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
+  await expect(
+    page
+      .locator('[aria-label="Durability preference"]')
+      .getByRole("radiogroup")
+      .locator(`input[value="${durability}"]`),
+  ).toBeChecked();
 }
 
 // ─── Context A: the SharedWorker engine on IndexedDB ───────────────────────────────────────────────────────
@@ -172,7 +197,13 @@ test("(b) second tab attaches the same SharedWorker; a write in tab A appears in
 test("(c) tab A closes; tab B keeps working (the SharedWorker outlives the tab)", async () => {
   await idbTabA.close();
 
-  // With tab A gone, the engine still lives in the SharedWorker: a write issued from tab B lands and renders locally.
+  // Chromium elects a tab-owned dedicated engine, so closing its leader relocates the engine even though the
+  // SharedWorker router survives. Wait for a SAFE read to answer from the successor before issuing a mutation:
+  // a mutation dispatched during that handoff has an intentionally honest UNKNOWN outcome and must never be
+  // blindly retried. This is a protocol-state barrier, not a timing delay.
+  await expect.poll(() => workerClientResponds(idbTabB), { timeout: 15_000 }).toBe(true);
+
+  // The successor engine is serving tab B: a write lands and renders locally.
   const title = await createIssue(idbTabB, PLATFORM);
   await expect(idbTabB.getByText(title)).toBeVisible();
 });
@@ -308,10 +339,22 @@ test("(E) strict durability selected → the board boots and writes still work",
   test.setTimeout(150_000);
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
+  const consoleLines: string[] = [];
+  page.on("console", (message) => consoleLines.push(message.text()));
   try {
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
+    // Model a human-paced preference change: the login screen's elected spare has finished provisioning before
+    // the user clicks Apply. This is the lifecycle boundary the old immediate-click lane skipped entirely.
+    await expect
+      .poll(() => consoleLines.some((line) => line.includes("worker store provisioned")), { timeout: 60_000 })
+      .toBe(true);
+    const provisionsBeforeReload = consoleLines.filter((line) => line.includes("worker store provisioned")).length;
     await applyDurability(page, "strict");
+    // The reloaded page reads the persisted Strict selection before constructing its newly named spare worker.
+    await expect
+      .poll(() => consoleLines.filter((line) => line.includes("worker store provisioned")).length)
+      .toBeGreaterThan(provisionsBeforeReload);
 
     await signIn(page, ALICE);
     await expect(teamNav(page).getByText("Growth", { exact: true })).toBeVisible();
@@ -359,6 +402,146 @@ test("(F) sign-in after the spare provision completes adopts the provisioned sto
     await waitForBoardReady(page);
     const title = await createIssue(page, PLATFORM);
     await expect(page.getByText(title)).toBeVisible();
+  } finally {
+    await ctx.close();
+  }
+});
+
+/** Select BOTH storage axes on the login screen and apply them in one reload. Mirrors {@link applyDurability}
+ * but drives the backend SegmentedControl too (disambiguated by its wrapping Stack's aria-label), so the
+ * idbfs-forced + strict combination the wipe repro needs is set before sign-in. */
+async function applyStoragePreferences(
+  page: Page,
+  backend: "opfs" | "idbfs",
+  durability: "relaxed" | "strict",
+): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
+  await page
+    .locator('[aria-label="Storage backend preference"]')
+    .getByRole("radiogroup")
+    .getByText(backend === "idbfs" ? "Force idbfs" : "OPFS (default)", { exact: true })
+    .click();
+  await page
+    .locator('[aria-label="Durability preference"]')
+    .getByRole("radiogroup")
+    .getByText(durability === "strict" ? "Strict" : "Relaxed", { exact: true })
+    .click();
+  const reloaded = page.waitForEvent("domcontentloaded");
+  await page.getByRole("button", { name: "Apply & reload" }).click();
+  await reloaded;
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("board:backend-preference"))).toBe(backend);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("board:durability-preference"))).toBe(durability);
+  await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
+}
+
+/** The `/pglite/*` IndexedDB database names present now (the board's PGlite stores live under this prefix). */
+function pgliteDbNames(page: Page): Promise<string[]> {
+  return page.evaluate(async () => {
+    const infos = await indexedDB.databases();
+    return infos
+      .map((info) => info.name)
+      .filter((name): name is string => typeof name === "string" && name.startsWith("/pglite/"));
+  });
+}
+
+test("(H) idbfs + strict: Delete local data converges via retained obsolete stores across reloads", async ({
+  browser,
+}) => {
+  // The exact user-reported repro. Forcing idbfs pins the engine to IndexedDB (so the store IS a `/pglite/*`
+  // db) and strict durability is the demo's slow combination; sign in to materialise the store, then wipe. The
+  // signed-in store's SharedWorker is `extendedLifetime` and SURVIVES the wipe reload, so its idb delete first
+  // BLOCKS — the wipe must report it as retained-for-retry (NOT strand it by clearing the registry) and the
+  // boot-time `destroyObsoleteStores` must drain it on a later boot once the worker's grace period elapses.
+  // Convergence here means the RETAINED old stores are gone: the pre-wipe idbfs databases no longer exist AND
+  // the registry lists no remaining obsolete paths. (A fresh spare the post-wipe login screen mints is a new,
+  // legitimate `/pglite/*` db and is deliberately NOT part of this assertion — see the note below.)
+  test.setTimeout(180_000);
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  try {
+    await page.goto("/");
+    await applyStoragePreferences(page, "idbfs", "strict");
+
+    await signIn(page, ALICE);
+    // The idbfs store now exists as a `/pglite/*` IndexedDB database — capture the pre-wipe set so convergence
+    // can prove exactly these retained stores are destroyed (independent of any fresh spare minted afterwards).
+    const preWipeDbs = await pgliteDbNames(page);
+    expect(preWipeDbs.length).toBeGreaterThan(0);
+
+    // Sign out (the store's extendedLifetime worker keeps holding it), then run the wipe-on-boot flow.
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
+    await page.getByRole("button", { name: "Delete local data…" }).click();
+    await page.getByRole("button", { name: "Delete local data", exact: true }).click();
+
+    // After the wipe reload the login screen reports EITHER a clean wipe OR retained-for-retry failures — both
+    // are valid outcomes of a single boot (the worker may or may not have exited within the deadline yet).
+    const cleanAlert = page.getByText("Local data deleted", { exact: true });
+    const retainedAlert = page.getByText("Some stores are still in use", { exact: true });
+    await expect(cleanAlert.or(retainedAlert)).toBeVisible();
+
+    // Convergence: `destroyObsoleteStores` (main.tsx, every boot) QUIESCES the surviving idbfs worker — tearing
+    // its SW-direct host down so the IndexedDB connection releases (ADR-0050) — then destroys the artifacts, in
+    // the BACKGROUND (fire-and-forget, off the sign-in path). It is not awaited, so it needs uninterrupted time
+    // on ONE boot to finish the teardown + delete. So after a reload, POLL for convergence WITHOUT reloading
+    // again (a reload would interrupt the in-flight cleanup); only reload a couple more times as a fallback.
+    // Converged = none of the pre-wipe idbfs databases remain AND the registry lists no remaining obsolete path
+    // (a fresh spare the post-wipe login screen mints is a new, legitimate db and is not part of this).
+    const checkConverged = (pre: string[]): Promise<boolean> =>
+      page.evaluate(async (names: string[]) => {
+        const infos = await indexedDB.databases();
+        const present = infos.map((info) => info.name).filter((name): name is string => typeof name === "string");
+        const oldRemaining = names.filter((name) => present.includes(name));
+        const raw = localStorage.getItem("pgxsinkit-board-stores");
+        const parsed = raw == null ? {} : (JSON.parse(raw) as { obsolete?: string[] });
+        const obsolete = parsed.obsolete ?? [];
+        return oldRemaining.length === 0 && obsolete.length === 0;
+      }, pre);
+
+    // Poll convergence for up to `steps` × 750ms WITHOUT reloading (a reload interrupts the in-flight background
+    // cleanup), so one boot's quiesce + destroy has a few uninterrupted seconds to finish.
+    const pollConverged = async (steps: number): Promise<boolean> => {
+      for (let i = 0; i < steps; i++) {
+        if (await checkConverged(preWipeDbs)) return true;
+        await page.waitForTimeout(750);
+      }
+      return checkConverged(preWipeDbs);
+    };
+
+    const MAX_RELOADS = 3;
+    let converged = await checkConverged(preWipeDbs);
+    for (let attempt = 0; attempt < MAX_RELOADS && !converged; attempt++) {
+      await page.reload();
+      await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
+      // The background quiesce of a live-syncing idbfs store's host (stop sync + close engine) can take up to
+      // ~20s; poll past that so a single boot's uninterrupted cleanup can finish before a fallback reload.
+      converged = await pollConverged(40);
+    }
+
+    expect(converged, `Delete local data never converged after ${MAX_RELOADS} reloads.`).toBe(true);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("(G) Strict + OPFS applied while spare provisioning is in flight reloads cleanly", async ({ browser }) => {
+  test.setTimeout(150_000);
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  const consoleLines: string[] = [];
+  page.on("console", (message) => consoleLines.push(message.text()));
+  try {
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
+    // The spare id exists, so ensureSpare has constructed/provisioned its worker; deliberately do NOT wait for
+    // `worker store provisioned`. Real Safari can spend >5s finishing that OPFS boot before processing teardown.
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("pgxsinkit-board-stores") != null)).toBe(true);
+    await applyDurability(page, "strict");
+
+    await expect(page.getByText("[pgxsinkit] timed out while retiring the SW-direct sync host.")).toHaveCount(0);
+    await expect
+      .poll(() => consoleLines.some((line) => line.includes("worker store provisioned")), { timeout: 60_000 })
+      .toBe(true);
   } finally {
     await ctx.close();
   }

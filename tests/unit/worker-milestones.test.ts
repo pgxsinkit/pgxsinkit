@@ -25,6 +25,7 @@ import {
   type SyncWorkerHost,
 } from "../../packages/client/src/index";
 import { memoryStoreForTests } from "../../packages/client/src/testing";
+import { PLACEMENT_QUERY_KEY, PLACEMENT_RESULT_KEY } from "../../packages/client/src/worker/define-sync-worker";
 import { drizzleOver } from "../support/drizzle";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
@@ -62,6 +63,17 @@ describe("ADR-0041 stage 2: milestones fold into a late attach's ack", () => {
     const worker = channel.port1;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       // A LATE attach: the engine already crossed both background stages before this tab connected, so the
       // ack carries the fold — there is no milestone broadcast to catch.
@@ -95,6 +107,17 @@ describe("ADR-0041 stage 2: milestone broadcasts resolve the stages after attach
     const worker = channel.port1;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       // The FIRST (booting) attach: ack at localReadReady, NO milestone fold — they broadcast as the tail crosses.
       if (data.type === "attach") {
@@ -129,6 +152,17 @@ describe("ADR-0041 stage 2: a tail failure rejects the downstream stages, not th
     const worker = channel.port1;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       if (data.type === "attach") {
         postBridgeMessage(worker as never, identityCodec, "attach-ack", { alreadyBooted: false });

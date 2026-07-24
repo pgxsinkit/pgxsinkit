@@ -17,7 +17,7 @@ import {
   readBackendPreference,
   readDurabilityPreference,
 } from "../board/storage-preference";
-import { boardStoreRegistry, retireBoardWorkers } from "../board/store-registry-default";
+import { boardStoreRegistry } from "../board/store-registry-default";
 
 // The seeded demo identities (scripts/seed-board.ts). Each signs in with a real GoTrue password; the
 // note is the membership the read path will scope them to — handy for eyeballing the fan-out.
@@ -39,12 +39,13 @@ export function LoginRoute() {
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // The storage preferences (durability + backend). The PERSISTED values are read exactly once at mount (the
-  // worker identity is keyed on the worker name, which embeds `?durability=<dur>&backend=<backend>`, so the spare
-  // already ensured above was constructed with them — see ./board/storage-preference); the `selected*` values are
-  // the pending UI choices. A choice differing from the persisted value is applied by retiring this tab's workers
-  // before writing localStorage + reloading, so an extended-lifetime worker under the old name cannot retain the
-  // store while the replacement opens it. One "Apply & reload" button covers BOTH axes.
+  // The storage preferences (durability + backend). The PERSISTED values are read exactly once at mount; the
+  // `selected*` values are the pending UI choices. A store's declaration is immutable (ADR-0050), so Apply
+  // never re-homes an existing store: it first OBSOLETES every current binding (paths recorded for
+  // best-effort background destruction at later boots), then writes localStorage and reloads — the fresh
+  // boot mints new stores under the new declaration. That order is interruption-safe: a crash between the
+  // two leaves dropped bindings under the OLD preferences, never old paths bound under NEW ones. One
+  // "Apply & reload" button covers BOTH axes.
   const [persistedDurability] = useState<DurabilityPreference>(() => readDurabilityPreference());
   const [selectedDurability, setSelectedDurability] = useState<DurabilityPreference>(persistedDurability);
   const [persistedBackend] = useState<BackendPreference>(() => readBackendPreference());
@@ -56,7 +57,7 @@ export function LoginRoute() {
     setApplyingPreferences(true);
     setError(null);
     try {
-      await retireBoardWorkers();
+      await boardStoreRegistry.obsoleteAllStores();
       applyStoragePreferences(selectedDurability, selectedBackend);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -66,9 +67,11 @@ export function LoginRoute() {
 
   // "Delete local data" confirm flow — WIPE-ON-BOOT (see local-data.ts): this page's own spare
   // SharedWorker holds the stores and a tab cannot terminate a SharedWorker, so an in-place wipe can only
-  // hang. Confirming flags the wipe and reloads; the reload kills this page's workers, the wipe runs at
-  // the next boot before any worker exists, and the outcome lands back here via sessionStorage — read
-  // once at mount, and surfaced (success note or per-target failures) so nothing is silently swallowed.
+  // hang. Confirming flags the wipe and reloads; the wipe then runs at the next boot before this page
+  // constructs any worker. The board's workers are extendedLifetime and outlive the reload for a grace
+  // period, so the wipe waits through blocked deletes and retains anything still held for automatic retry at
+  // later boots. The outcome lands back here via sessionStorage — read once at mount, and surfaced (success
+  // note or per-target "retained for retry" failures) so nothing is silently swallowed.
   const [deleteModalOpen, deleteModal] = useDisclosure(false);
   const [deleting, setDeleting] = useState(false);
   const [wipeOutcome] = useState<DeleteLocalDataOutcome | null>(() => readLocalDataWipeOutcome());
@@ -235,7 +238,7 @@ export function LoginRoute() {
               </Alert>
             )}
             {wipeFailures.length > 0 && (
-              <Alert color="red" title="Some data could not be deleted" variant="light">
+              <Alert color="orange" title="Some stores are still in use" variant="light">
                 <List size="xs" spacing={4}>
                   {wipeFailures.map((failure) => (
                     <List.Item key={failure.target}>
@@ -245,7 +248,9 @@ export function LoginRoute() {
                   ))}
                 </List>
                 <Text size="xs" mt={4}>
-                  Close other board tabs and try again.
+                  These stores are still held by another tab or a worker that has not yet shut down. They are kept and
+                  retried automatically each time you open the board — no action needed. Closing other board tabs
+                  releases them sooner.
                 </Text>
               </Alert>
             )}
@@ -260,9 +265,10 @@ export function LoginRoute() {
             and the board's stored bindings. <strong>Unflushed writes are lost.</strong>
           </Text>
           <Text size="sm">
-            The page reloads first — that releases the stores this page's own engine is holding — and the deletion runs
-            as the app restarts. Close any other open board tabs: their engines still hold their stores, and anything
-            that could not be deleted is reported here after the reload.
+            The page reloads first and the deletion runs as the app restarts. A store still held by a background worker
+            or another tab is kept and retried automatically on each later launch until it is free — anything not
+            deleted right away is reported here after the reload. Close any other open board tabs to release them
+            sooner.
           </Text>
 
           <Stack gap="xs">

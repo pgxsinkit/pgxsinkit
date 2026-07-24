@@ -20,7 +20,11 @@ import {
   ElectedEngineUnconstructibleError,
   type ElectedEngineWorker,
 } from "../../packages/client/src/worker/attach-sync-client";
-import { PLACEMENT_QUERY_KEY, PLACEMENT_RESULT_KEY } from "../../packages/client/src/worker/define-sync-worker";
+import {
+  DECLARATION_KEY,
+  PLACEMENT_QUERY_KEY,
+  PLACEMENT_RESULT_KEY,
+} from "../../packages/client/src/worker/define-sync-worker";
 import type { CoordinatorDeps } from "../../packages/client/src/worker/election-coordinator";
 import {
   type EngineControlMessage,
@@ -86,6 +90,14 @@ function engineOn(
   const p = port as unknown as BridgePort;
   port.addEventListener("message", (event) => {
     const data = (event as MessageEvent).data;
+    // Answer the placement query as the in-scope engine (every real host does; the attach flow awaits the
+    // reply before its handshake, ADR-0050) — the plain-host `connect` listener's behavior.
+    if (typeof data === "object" && data !== null && (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true) {
+      p.postMessage({
+        [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-real" },
+      });
+      return;
+    }
     if (!isBridgeEnvelope(data)) return;
     received.push({ type: data.type, id: data.id, payload: identityCodec.decode(data.payload) });
     if (data.type === "attach") {
@@ -131,6 +143,21 @@ function makeSwPort(): {
   };
   const port: BridgePort = {
     postMessage: (message) => {
+      // Every REAL transport answers the placement query (the SW bootstrap's meta listener, the plain host's
+      // connect listener), and the attach flow now AWAITS that reply before its handshake (ADR-0050) — so this
+      // fixture answers as SW-direct, exactly like a plain in-scope host.
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        queueMicrotask(() =>
+          emit({
+            [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fake" },
+          }),
+        );
+        return;
+      }
       if (isBridgeEnvelope(message)) {
         received.push({ type: message.type, id: message.id, payload: identityCodec.decode(message.payload) });
         if (message.type === "attach") {
@@ -430,6 +457,10 @@ describe("the bridge-silence deadline reconnects once via the worker factory (D5
 
     const reconnectChannel = track(new MessageChannel());
     const reEngine = engineOn(reconnectChannel.port1, { autoAnswerRpc: true });
+    // Raw order capture (ADR-0050): the reconstructed port's FIRST message must be the storage declaration —
+    // a fresh SharedWorker bootstrap refuses engine-bound traffic on an undeclared port.
+    const rawSeen: unknown[] = [];
+    reconnectChannel.port1.addEventListener("message", (event) => rawSeen.push((event as MessageEvent).data));
     let createCount = 0;
     const createWorker = () => {
       createCount++;
@@ -457,6 +488,13 @@ describe("the bridge-silence deadline reconnects once via the worker factory (D5
 
     expect(createCount).toBe(1);
     expect(reEngine.received.some((m) => m.type === "attach")).toBe(true);
+    // Declaration precedes the attach on the reconstructed port (ADR-0050 "declaration first, then anything").
+    const declarationIndex = rawSeen.findIndex(
+      (data) => (data as Record<string, unknown>)[DECLARATION_KEY] !== undefined,
+    );
+    const attachIndex = rawSeen.findIndex((data) => (data as { type?: string }).type === "attach");
+    expect(declarationIndex).toBeGreaterThanOrEqual(0);
+    expect(attachIndex).toBeGreaterThan(declarationIndex);
 
     await client.stop();
     await inflight;
@@ -497,6 +535,17 @@ describe("a relocation error crossing the bridge reconstructs as EngineRelocated
     const p = channel.port1 as unknown as BridgePort;
     channel.port1.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query as the in-scope engine (the attach flow awaits the reply, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        p.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-d10" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       if (data.type === "attach") {
         postBridgeMessage(p, identityCodec, "attach-ack", { alreadyBooted: false });
@@ -769,6 +818,20 @@ function makeControlRecordingSwPort(): {
       const control = (message as { [k: string]: unknown } | null)?.[KEY];
       if (control && typeof control === "object" && "type" in (control as object)) {
         controlPosts.push(control as EngineControlMessage);
+      }
+      // Answer the placement query as SW-direct (every real transport answers it; the attach flow awaits the
+      // reply before its handshake, ADR-0050) — mirroring makeSwPort.
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        queueMicrotask(() =>
+          emit({
+            [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fake" },
+          }),
+        );
+        return;
       }
       if (isBridgeEnvelope(message) && message.type === "attach") {
         queueMicrotask(() => {

@@ -119,6 +119,10 @@ export async function createBoardSyncClient(
       port: await getBoardEnginePort(store.storePath),
       storeId: store.storeId,
       storePath: store.storePath,
+      // The wire storage declaration (ADR-0050): posted pre-placement on the port and bound by the engine.
+      // The board's registries are storage-silent (the preferences are a dynamic demo toggle), so this wire
+      // declaration is what decides backend (probe vs declared idbfs) and durability.
+      storage: boardStorageDeclaration(readDurabilityPreference(), readBackendPreference()),
       // The worker bakes both registries and selects by role at boot (the spare was provisioned before
       // the role was known); the tab additionally builds its OWN write handles from `registry` above.
       role,
@@ -145,11 +149,12 @@ export async function createBoardSyncClient(
   }
 
   // ── In-process fallback (no SharedWorker, ADR-0032 decision 2): today's main-thread engine, intact. ──
-  // Storage (durability + backend) is registry-declared (ADR-0047; ADR-0049 decision 1): stamp the boot-read demo
-  // preferences onto the registry so `createSyncClient`'s single mint seam resolves them — the SAME shape the
-  // worker stamps (`boardStorageDeclaration`: `durability` always, `backend: "idbfs"` only when forced). The
-  // precreate the store registry baked is already idb-only (createClientPGlite runs no opfs probe), so the backend
-  // stamp only records the declared contract here — it does not re-home this already-created store.
+  // In-process there is no worker port and therefore no wire declaration (ADR-0050) — the registry object
+  // lives in this one scope, so stamping the boot-read demo preferences onto it IS the static declaration
+  // `createSyncClient`'s single mint seam resolves. Same shape as the wire declaration
+  // (`boardStorageDeclaration`: `durability` always, `backend: "idbfs"` only when forced). The precreate the
+  // store registry baked is already idb-only (createClientPGlite runs no opfs probe), so the backend stamp
+  // only records the declared contract here — it does not re-home this already-created store.
   attachSyncRegistryStorage(registry, boardStorageDeclaration(readDurabilityPreference(), readBackendPreference()));
   const offline = createOfflineControl();
   const client = await createSyncClient({

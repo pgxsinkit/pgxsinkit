@@ -23,6 +23,7 @@ import {
   isBridgeEnvelope,
   postBridgeMessage,
 } from "../../packages/client/src/index";
+import { PLACEMENT_QUERY_KEY, PLACEMENT_RESULT_KEY } from "../../packages/client/src/worker/define-sync-worker";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
@@ -55,6 +56,13 @@ function manualWorker(port: MessagePort): { received: Array<{ type: string; payl
   const received: Array<{ type: string; payload: unknown }> = [];
   port.addEventListener("message", (event) => {
     const data = (event as MessageEvent).data;
+    // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+    if (typeof data === "object" && data !== null && (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true) {
+      port.postMessage({
+        [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+      });
+      return;
+    }
     if (!isBridgeEnvelope(data)) return;
     received.push({ type: data.type, payload: identityCodec.decode(data.payload) });
     if (data.type === "attach") {
@@ -158,6 +166,17 @@ describe("attach-client detach settles pending operations (ADR-0040 P2 FIX 2)", 
     const port = channel.port1;
     port.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        port.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       if (data.type === "attach") {
         postBridgeMessage(port as never, identityCodec, "attach-ack", { alreadyBooted: false });
@@ -217,6 +236,17 @@ describe("attach-client installs page cleanup BEFORE the handshake (ADR-0040 P2 
     const received: string[] = [];
     channel.port1.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        channel.port1.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (isBridgeEnvelope(data)) received.push(data.type);
     });
     channel.port1.start?.();

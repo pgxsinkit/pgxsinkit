@@ -118,6 +118,7 @@ describe("createSyncClient subscription reset", () => {
         flush: async () => undefined,
         reconcile: async () => undefined,
         retryFailed: async () => undefined,
+        abortInFlight: () => undefined,
         readMutationDetails: async () => [],
         readMutationStats: async () => ({
           pendingCount: 0,

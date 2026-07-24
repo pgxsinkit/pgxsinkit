@@ -9,8 +9,22 @@
 
 import { type ParserOptions, type QueryOptions, types } from "@electric-sql/pglite";
 
-import type { SyncRuntimeStatus, SyncTableName, SyncTableRegistry, WriteMode } from "@pgxsinkit/contracts";
-import { getSyncRegistryStorage } from "@pgxsinkit/contracts";
+import type {
+  ResolvedStorageDeclaration,
+  SyncRuntimeStatus,
+  SyncStorageDeclaration,
+  SyncTableName,
+  SyncTableRegistry,
+  WriteMode,
+} from "@pgxsinkit/contracts";
+import {
+  assertStorageDeclarationCompatible,
+  getSyncRegistryStorage,
+  isStorageBackend,
+  isStorageDurability,
+  resolveStorageDeclaration,
+  StorageDeclarationRefusedError,
+} from "@pgxsinkit/contracts";
 
 import { type ConvergenceTrigger, createIntervalConvergenceTrigger } from "../convergence";
 import { setSyncDebugSink, syncDebug } from "../debug";
@@ -277,17 +291,30 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   const placementGate = new Promise<void>((resolve) => {
     openPlacementGate = resolve;
   });
-  // Durability (ADR-0047) is registry-declared. The provision/spare mint does not run through
-  // `createSyncClient` (which resolves it for the boot create), so resolve it here off the DEFAULT registry —
-  // provision is role-agnostic (the role is settled only at claim/attach), and durability binds every store
-  // this worker mints regardless of role — and thread the resolved mode into the internal carrier.
-  const provisionDurability = getSyncRegistryStorage(options.registry)?.durability ?? "relaxed";
+  // ─── The store's BOUND storage declaration (ADR-0050) ────────────────────────────────────────────
+  // Bound at the FIRST provision/attach payload: the registry-attached static declaration is authoritative,
+  // the payload's wire declaration fills the silent fields, capability defaults close the rest. Immutable for
+  // the engine's lifetime — a later payload whose explicit field disagrees is refused typed (the handlers ack
+  // the `StorageDeclarationRefusedError` through `serializeError`, so the tab rebuilds it by name).
+  let engineStorage: ResolvedStorageDeclaration | undefined;
+  const bindEngineStorage = (wire: SyncStorageDeclaration | undefined): void => {
+    if (engineStorage === undefined) {
+      engineStorage = resolveStorageDeclaration(getSyncRegistryStorage(options.registry), wire);
+    } else {
+      assertStorageDeclarationCompatible(engineStorage, wire);
+    }
+  };
+  // Durability (ADR-0047) comes from the bound declaration. The provision/spare mint does not run through
+  // `createSyncClient` (which resolves it for the boot create), so resolve it here — AT MINT TIME, after the
+  // provision payload bound the declaration (a construction-time constant could never see a wire declaration).
+  const currentDurability = () =>
+    engineStorage?.durability ?? getSyncRegistryStorage(options.registry)?.durability ?? "relaxed";
   const createPglite =
     options.createPglite ??
     ((storePath: string, backendOverride?: "memory") =>
       createClientPGlite(storePath, {
         ...(backendOverride ? { backendOverride } : {}),
-        durability: provisionDurability,
+        durability: currentDurability(),
         // SW-direct placement grant (ADR-0049 D1): a spare minted in-scope opens OPFS-repacked, matching the boot.
         ...(placementOpfsAccess ? { hasOpfsSyncAccess: true } : {}),
       }));
@@ -502,6 +529,17 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     // Resolve the registry from the attach's role (ADR-0032 S3): a single worker file bakes both variants
     // and the claim/attach settles which one boots — the spare was provisioned before the role was known.
     const registry = options.resolveRegistry?.(attach.config?.role) ?? options.registry;
+    // ADR-0050: placement and engine binding were resolved against `options.registry`'s static declaration —
+    // the spare was placed before any role existed, so a role-selected registry cannot re-home the store. A
+    // role registry whose static declaration EXPLICITLY conflicts with that bound resolution is refused typed
+    // here (the attach fails), never silently booted under the wrong placement. Role variants sharing one
+    // worker must agree on storage.
+    if (registry !== options.registry) {
+      assertStorageDeclarationCompatible(
+        engineStorage ?? resolveStorageDeclaration(getSyncRegistryStorage(options.registry), undefined),
+        getSyncRegistryStorage(registry) ?? {},
+      );
+    }
     // storePath-first, matching the `provision` handler's resolution (below): the board sends BOTH a bare
     // `storeId` (SharedWorker naming, tab-side) AND the real `storePath` (`pgxsinkit-board-<id>`), and the
     // PGlite store lives at `storePath` — so the provisioned store's path must be what we adopt on.
@@ -566,8 +604,11 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       // the in-process client. Worker-entry options, not attach options: functions cannot cross the bridge.
       ...(options.prepareLocalDbBeforeSchema ? { prepareLocalDbBeforeSchema: options.prepareLocalDbBeforeSchema } : {}),
       ...(options.prepareLocalDbAfterSchema ? { prepareLocalDbAfterSchema: options.prepareLocalDbAfterSchema } : {}),
-      // Durability (ADR-0047) is registry-declared: `createSyncClient` resolves it from `registry` at its own
-      // mint seam, so this boot needs no durability forward — the same `registry` decides the boot create's mode.
+      // Durability (ADR-0047/ADR-0050): thread the store's BOUND declaration (registry static + first wire
+      // declaration + defaults, bound in the attach handler above) into `createSyncClient`'s single storage
+      // resolution point. Registry-only stores pass their own static values back — a no-op; wire-declared
+      // stores are how the board's toggle reaches the mint. Conflicts were already refused at the handler.
+      ...(engineStorage ? { storage: engineStorage } : {}),
       // SW-direct placement grant (ADR-0049 D1): thread a GRANTED probe's grant into the boot create so the engine
       // home in this SharedWorker scope opens the OPFS-repacked backend. Absent (false) is the honest IDBFS home —
       // the declared `backend: "idbfs"` mode or a capability-absence fallback. `createSyncClient` forwards it to
@@ -899,6 +940,18 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         // The testing memory-backend override rides as an explicit wire field (ADR-0036) — a symbol does not
         // survive structured clone, so the store's backend selection travels here and is passed to createPglite.
         const backendOverride = provision.testStoreBackend;
+        // ADR-0050: bind (or confirm) the store's storage declaration BEFORE the mint — the mint's durability
+        // comes from it. An explicit disagreement with the bound declaration refuses THIS provision typed.
+        try {
+          bindEngineStorage(provision.storage);
+        } catch (error) {
+          postBridgeMessage(port, codec, "provision-ack", {
+            ok: false,
+            error: serializeError(error),
+            ...(provision.storeId ? { storeId: provision.storeId } : {}),
+          });
+          break;
+        }
         if (bootPromise != null || provisioned != null || provisionAttempt != null) {
           postBridgeMessage(port, codec, "provision-ack", {
             ok: true,
@@ -979,6 +1032,16 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         // attach's boot runs, so the boot's own lines (streamed live) are not doubled.
         replayRailBufferTo(port);
         const alreadyBooted = bootPromise !== null;
+        // ADR-0050: bind (or confirm) the store's storage declaration BEFORE anything boots or joins. An
+        // explicit disagreement — with the registry-attached declaration, or with what an earlier
+        // provision/attach bound — refuses THIS attach typed (`StorageDeclarationRefusedError` by name);
+        // the engine keeps running its bound mode. Never a silently different storage mode.
+        try {
+          bindEngineStorage(attach.storage);
+        } catch (error) {
+          postBridgeMessage(port, codec, "attach-ack", { alreadyBooted, error: serializeError(error) });
+          break;
+        }
         // Restore rides the FIRST (boot) attach only (ADR-0035 decision 6): a restore attach that arrives once
         // the engine has already booted CANNOT be honoured — `loadDataDir` is a create-time seed and the store
         // is already live. Reject THIS attach with a typed error rather than silently ignoring the backup, so
@@ -1157,24 +1220,25 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
 
   // The host's own placement identity for DIRECT connections (no bootstrapWorkerScope): minted once per host.
   const hostInstanceId = crypto.randomUUID();
-  const connect = (port: BridgePort) => {
+  const connect = (port: BridgePort, connection?: { placementQueriesHandled?: boolean }) => {
     ports.add(port);
     const listener = (event: { data: unknown }) => {
       // A DIRECTLY-connected host IS the in-scope engine home, so it answers the placement query itself —
       // `electionRequired: false`, exactly what `bootstrapWorkerScope`'s meta listener reports for SW-direct.
       // This makes "every host answers the placement query" true on EVERY transport (including plain test
       // ports), which a restore-bearing attach RELIES on: it awaits the reply to route the one-shot restore
-      // artifact to the port that reaches the engine. In a real SW-direct scope both this and the meta
-      // listener answer; the tab's placement decision is single-shot and the meta reply (registered first)
-      // wins — the duplicate is ignored.
+      // artifact to the port that reaches the engine. The real SharedWorker bootstrap owns this query on
+      // bootstrapped ports; answering here as well minted a second, unrelated identity and could poison teardown.
       if (isPlacementQuery(event.data)) {
-        port.postMessage({
-          [PLACEMENT_RESULT_KEY]: {
-            engineHome: "shared-worker",
-            electionRequired: false,
-            swInstanceId: hostInstanceId,
-          } satisfies PlacementQueryResult,
-        });
+        if (connection?.placementQueriesHandled !== true) {
+          port.postMessage({
+            [PLACEMENT_RESULT_KEY]: {
+              engineHome: "shared-worker",
+              electionRequired: false,
+              swInstanceId: hostInstanceId,
+            } satisfies PlacementQueryResult,
+          });
+        }
         return;
       }
       if (isBridgeEnvelope(event.data) && event.data.type === "detach") {
@@ -1189,35 +1253,71 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   };
 
   const closeHost = async (): Promise<void> => {
-    // Quiesce pending subscribes FIRST (ADR-0040 decision 1 — the pending-before-manager race): flip
-    // `closing`, mark every mid-await subscribe cancelled, and await every in-flight `handleSubscribe` task.
-    // This guarantees the manager exists (if any subscribe created one) BEFORE `dispose()` runs, and that no
-    // subscribe can create a registration afterwards — each resumes into the `closing` early-bail instead.
-    closing = true;
-    for (const pending of pendingSubscribes.values()) pending.cancelled = true;
-    await Promise.allSettled([...inFlightSubscribes]);
-    // Dispose the manager BEFORE `active.stop()` (ADR-0040 decision 1): it tears down every remaining live
-    // registration and awaits ALL teardowns, so no fire-and-forget unsubscribe is still in flight when the
-    // engine closes (the close-vs-unsubscribe hang). No-op when nothing ever subscribed.
-    liveSubs.clear();
-    await liveManager?.dispose();
-    ports.clear();
-    setSyncDebugSink(undefined);
-    const active = client ?? (bootPromise ? await bootPromise.catch(() => null) : null);
-    await active?.stop();
+    const closeStartedAt = nowStamp();
+    const retirementPhase = (phase: string, data?: Record<string, unknown>): void =>
+      syncDebug("worker retirement phase", {
+        phase,
+        workerElapsedMs: Math.max(0, nowStamp() - closeStartedAt),
+        ...(data ?? {}),
+      });
+    retirementPhase("host-close-started", {
+      pendingSubscribes: inFlightSubscribes.size,
+      liveSubscriptions: liveSubs.size,
+      hasBoot: bootPromise !== null,
+      hasProvisionedStore: provisioned !== null,
+    });
+    try {
+      // Halt ALL engine activity BEFORE draining subscribes or disposing live queries (ADR-0040 + the halt-first
+      // teardown rule): abort the shape-stream long-polls, the write fetches, and convergence NOW. Otherwise those
+      // two steps below race an engine still committing shape data into the live queries they are trying to tear
+      // down, and never settle — closeHost then parks before it ever reaches active.stop(). The awaited teardown is
+      // unchanged; active.stop() below (idempotent halt inside) still runs the full close.
+      const active = client ?? (bootPromise ? await bootPromise.catch(() => null) : null);
+      active?.haltActivity();
+      retirementPhase("activity-halted", { activeClient: active !== null });
+      // Quiesce pending subscribes FIRST (ADR-0040 decision 1 — the pending-before-manager race): flip
+      // `closing`, mark every mid-await subscribe cancelled, and await every in-flight `handleSubscribe` task.
+      // This guarantees the manager exists (if any subscribe created one) BEFORE `dispose()` runs, and that no
+      // subscribe can create a registration afterwards — each resumes into the `closing` early-bail instead.
+      closing = true;
+      for (const pending of pendingSubscribes.values()) pending.cancelled = true;
+      retirementPhase("pending-subscriptions-wait-started", { count: inFlightSubscribes.size });
+      await Promise.allSettled([...inFlightSubscribes]);
+      retirementPhase("pending-subscriptions-wait-completed");
+      // Dispose the manager BEFORE `active.stop()` (ADR-0040 decision 1): it tears down every remaining live
+      // registration and awaits ALL teardowns, so no fire-and-forget unsubscribe is still in flight when the
+      // engine closes (the close-vs-unsubscribe hang). No-op when nothing ever subscribed.
+      liveSubs.clear();
+      retirementPhase("live-query-disposal-started");
+      await liveManager?.dispose();
+      retirementPhase("live-query-disposal-completed");
+      retirementPhase("active-client-stop-started", { activeClient: active !== null });
+      await active?.stop();
+      retirementPhase("active-client-stop-completed");
+      retirementPhase("host-close-completed");
+    } catch (error) {
+      retirementPhase("host-close-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    } finally {
+      ports.clear();
+      setSyncDebugSink(undefined);
+    }
   };
 
   // ─── Global-scope auto-binding (real worker only; tests inject ports via connect) ─────────────────
-  // ADR-0049 D1: a SharedWorker scope routes through the PLACEMENT bootstrap — it decides its engine home once at
-  // startup (an UNCONDITIONAL probe) and gates every `onconnect` port on that decision (SW-direct host connect vs
-  // router-only `attachTab`). The ONE exception is a registry that DECLARES `backend: "idbfs"` (read below): no
-  // probe runs and the engine boots in-SharedWorker on idbfs — the declared mode, not a fallback. A dedicated
-  // engine worker still delegates to `bindGlobalScope` (the step-9 control plane); a plain test/Node scope is a no-op.
+  // ADR-0049 D1 + ADR-0050: a SharedWorker scope routes through the PLACEMENT bootstrap — it decides its engine
+  // home once and gates every `onconnect` port on that decision (SW-direct host connect vs router-only
+  // `attachTab`). WHEN the decision runs is the storage declaration's call (ADR-0050): a registry-attached
+  // STATIC declaration is authoritative and decides at scope startup; a registry-silent scope DEFERS the
+  // decision until the first port's declaration message arrives, because `backend: "idbfs"` selects SW-direct
+  // and skips the probe — the declaration must be known before the probe can be (not) run. A dedicated engine
+  // worker still delegates to `bindGlobalScope` (the step-9 control plane); a plain test/Node scope is a no-op.
   //
-  // The declared backend is read off the DEFAULT registry (placement is decided once at startup, before any
-  // attach settles a role) — the same seam `provisionDurability` above reads. Storage is a data-contract property,
-  // so role variants baked into one worker file share it.
-  const declaredIdbfs = getSyncRegistryStorage(options.registry)?.backend === "idbfs";
+  // The static declaration is read off the DEFAULT registry (placement is decided before any attach settles a
+  // role) — storage is a data-contract property, so role variants baked into one worker file share it.
+  const staticStorage = getSyncRegistryStorage(options.registry);
   if (options.installGlobal === false) {
     // No global bootstrap runs (a plain host driven via `connect` in tests) — open the placement gate at once so
     // the first boot proceeds with no OPFS grant and no engine home (a plain scope has no browser placement).
@@ -1227,8 +1327,9 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       connect,
       closeHost,
       peerCount: () => ports.size,
-      // ADR-0049 D1: `backend: "idbfs"` is the one declared opt-out — no probe, no election, in-SW idbfs engine.
-      declaredIdbfs,
+      // ADR-0050: the registry-attached static declaration, when present, decides placement at startup —
+      // `backend: "idbfs"` means no probe, no election, in-SW idbfs engine (ADR-0049 D1's declared opt-out).
+      ...(staticStorage ? { staticStorage } : {}),
       ...(options.executionLimit ? { executionLimit: options.executionLimit } : {}),
       onPlacement: (outcome) => {
         // The resolved OPFS grant + engine home for THIS scope: the SharedWorker placement decision (`shared-worker`
@@ -1477,6 +1578,29 @@ export const PLACEMENT_RESULT_KEY = "pgx0049PlacementResult" as const;
 export const DESTROY_QUERY_KEY = "pgx0049DestroyQuery" as const;
 /** The reply to a {@link DESTROY_QUERY_KEY} query — the attached-tab count (querying tab included). */
 export const DESTROY_VERDICT_KEY = "pgx0049DestroyVerdict" as const;
+/**
+ * The DECLARATION-MESSAGE envelope key (ADR-0050): the tab posts `{ [DECLARATION_KEY]: SyncStorageDeclaration }`
+ * on EVERY worker port BEFORE its placement query — always, even when the app declared nothing (an empty `{}`
+ * meaning "no opinion: capability defaults"). The bootstrap defers its placement decision until the first one
+ * arrives (a registry-attached static declaration decides at startup instead), binds the first arrival for the
+ * worker/store lifetime, and refuses explicit conflicts. The worker NAME carries the store path only — never
+ * configuration; that was the fault this key replaces.
+ */
+export const DECLARATION_KEY = "pgx0050Declaration" as const;
+/**
+ * The reply when a declaration (or an engine-bound message on an undeclared port) is REFUSED (ADR-0050):
+ * `{ [DECLARATION_REFUSED_KEY]: { message, name } }`. `name` is the stable typed-error name
+ * (`StorageDeclarationRefusedError`) so the tab rebuilds the refusal typed and fails its boot loudly —
+ * never a silent old value, never a hang.
+ */
+export const DECLARATION_REFUSED_KEY = "pgx0050DeclarationRefused" as const;
+
+/** The {@link DECLARATION_REFUSED_KEY} reply payload. */
+export interface DeclarationRefusedWire {
+  message: string;
+  /** The stable typed-error name (`StorageDeclarationRefusedError`) for the tab-side rebuild. */
+  name: string;
+}
 
 /** The placement a tab learns from the SharedWorker (the reply payload under {@link PLACEMENT_RESULT_KEY}). */
 export interface PlacementQueryResult {
@@ -1497,7 +1621,7 @@ export interface PlacementQueryResult {
 /** The SharedWorker placement bootstrap's dependencies (all injected so it is unit-testable off-worker). */
 export interface SharedWorkerBootstrapDeps {
   /** The engine host `connect` — used in SW-direct (`shared-worker`) placement to pipe a port to the in-scope engine. */
-  connect: (port: BridgePort) => void;
+  connect: (port: BridgePort, connection?: { placementQueriesHandled?: boolean }) => void;
   /** Quiesce and close the in-scope host before SW-direct destruction acknowledges handle release. */
   closeHost?: () => Promise<void>;
   /** Current attached-tab count for the DESTROY verdict in SW-direct mode (the host's own port set). */
@@ -1505,13 +1629,14 @@ export interface SharedWorkerBootstrapDeps {
   /** The opt-in execution limit, threaded into the router in `elected-worker` (router-only) placement. */
   executionLimit?: ExecutionLimitConfig;
   /**
-   * The registry declared `backend: "idbfs"` (ADR-0049 D1) — the ONE opt-out. TRUE: skip the probe entirely and
-   * bind the in-SharedWorker engine host on the idbfs backend (the declared mode, not a fallback; the placement
-   * query answers `electionRequired: false`). FALSE (the default, `backend: "opfs"`): run the UNCONDITIONAL
-   * placement probe — a granted verdict boots the engine in-scope on OPFS-repacked, a denied one goes router-only
-   * and each tab elects a dedicated engine worker.
+   * The registry-attached STATIC storage declaration (ADR-0050) — authoritative when present: it binds the
+   * store's declaration and decides placement AT SCOPE STARTUP (no wait for a declaration message).
+   * `backend: "idbfs"` skips the probe entirely and binds the in-SharedWorker engine host on idbfs (ADR-0049
+   * D1's declared opt-out — the declared mode, not a fallback); any other resolution runs the UNCONDITIONAL
+   * placement probe. Absent: the scope is registry-silent and DEFERS its placement decision until the first
+   * port's declaration message arrives (whose explicit fields then bind).
    */
-  declaredIdbfs?: boolean;
+  staticStorage?: SyncStorageDeclaration;
   /** Test seam: inject the placement decision (a fake probe result) instead of the real {@link decideSwPlacement}. */
   decidePlacement?: () => Promise<SwPlacementResult>;
   /** Defaults to `globalThis`; tests inject a fake SharedWorker scope. */
@@ -1561,6 +1686,25 @@ function isDestroyQuery(data: unknown): boolean {
   );
 }
 
+/** Narrow a raw `{ [DECLARATION_KEY]: SyncStorageDeclaration }` declaration message, or `undefined` for foreign traffic. */
+function readDeclarationMessage(data: unknown): SyncStorageDeclaration | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const raw = (data as { [DECLARATION_KEY]?: unknown })[DECLARATION_KEY];
+  if (typeof raw !== "object" || raw === null) return undefined;
+  return raw as SyncStorageDeclaration;
+}
+
+/** A declared field with a value outside the contract's vocabulary — refused loudly, never ignored (ADR-0050). */
+function invalidDeclarationField(declaration: SyncStorageDeclaration): string | undefined {
+  if (declaration.backend !== undefined && !isStorageBackend(declaration.backend)) {
+    return `backend "${String(declaration.backend)}"`;
+  }
+  if (declaration.durability !== undefined && !isStorageDurability(declaration.durability)) {
+    return `durability "${String(declaration.durability)}"`;
+  }
+  return undefined;
+}
+
 /**
  * Bootstrap the running worker scope for ADR-0049 placement. A SharedWorker scope runs the placement decision
  * and gates every `onconnect` port on it ({@link wireSharedWorkerPlacement}); any other scope (the dedicated
@@ -1572,25 +1716,11 @@ export function bootstrapWorkerScope(deps: SharedWorkerBootstrapDeps): void {
   const hasSharedWorkerScope =
     typeof (globalScope as { SharedWorkerGlobalScope?: unknown }).SharedWorkerGlobalScope !== "undefined";
   if (hasSharedWorkerScope) {
-    if (deps.declaredIdbfs) {
-      // ADR-0049 D1 declared opt-out (`backend: "idbfs"`): NEVER probe, NEVER go router-only — bind the in-SW
-      // engine host on the idbfs backend (no OPFS grant). This is the store's DECLARED mode, not a fallback, so it
-      // carries no `storageFallbackReason`. The meta listener answers the placement query `electionRequired: false`,
-      // so a tab keeps the SW-port attach path.
-      wireSharedWorkerPlacement(
-        {
-          ...deps,
-          decidePlacement: () => Promise.resolve({ engineHome: "shared-worker", swInstanceId: crypto.randomUUID() }),
-        },
-        globalScope,
-        false,
-      );
-    } else {
-      // ADR-0049 D1 default (`backend: "opfs"`): run the UNCONDITIONAL placement probe. A granted probe boots the
-      // engine in-SW on OPFS-repacked (SW-direct); a denied one goes router-only + election; a capability-absence
-      // decision (`shared-worker` carrying `storageFallbackReason`) boots the in-SW idbfs fallback.
-      wireSharedWorkerPlacement(deps, globalScope, true);
-    }
+    // ADR-0050: the storage declaration decides HOW placement runs. A registry-attached static declaration
+    // binds and decides at startup; a registry-silent scope defers to the first port's declaration message.
+    // Either way, `backend: "idbfs"` never probes (ADR-0049 D1's declared opt-out — SW-direct on idbfs, the
+    // declared mode, not a fallback) and any other resolution runs the UNCONDITIONAL placement probe.
+    wireSharedWorkerPlacement(deps, globalScope);
     return;
   }
   const hasDedicatedWorkerScope =
@@ -1629,21 +1759,31 @@ export function bootstrapWorkerScope(deps: SharedWorkerBootstrapDeps): void {
   deps.onPlacement?.({ engineHome: undefined, opfsGranted: false });
 }
 
+/** Per-port bootstrap state (ADR-0050): declared gates engine routing; queries queue until placement resolves. */
+interface BootstrapPortState {
+  /** This port's declaration message arrived (and was compatible) — the routing gate (contract point 3). */
+  declared: boolean;
+  /** The port was handed to the engine host / router (exactly once). */
+  routed: boolean;
+  /** Placement/destroy queries that arrived before the placement decision — answered on resolve, in order. */
+  queuedQueries: unknown[];
+  /** A DECLARED port's engine-bound/control traffic that arrived while placement was still pending — redelivered
+      in arrival order after routing (the sender contract is "declaration first, then anything", ADR-0050). */
+  queuedTraffic: Array<{ data: unknown; ports?: readonly ControlPortLike[] }>;
+}
+
 /**
- * Wire the SharedWorker arm for placement (ADR-0049 D1). Decides the engine home ONCE, then per `onconnect` port:
- * installs a meta listener answering the placement + destroy-peer queries (and, on SW-direct, the `pgx0049`
- * keepalive ping), and routes the port to the engine host (`shared-worker`) or the router (`elected-worker`).
- * Ports that connect BEFORE the (async) decision resolves are buffered and drained on resolve — the engine host is
- * never touched in `elected-worker` mode until (and unless) the capability-absence fallback flips it to SW-direct.
+ * Wire the SharedWorker arm for placement (ADR-0049 D1 + ADR-0050). Every `onconnect` port is started
+ * immediately under a live meta listener; the placement decision runs when the store's storage declaration is
+ * KNOWN — at scope startup for a registry-attached static declaration, else on the FIRST port's declaration
+ * message (`backend: "idbfs"` never probes; anything else runs the unconditional probe). The first arrival
+ * binds the declaration for the worker lifetime; later explicit conflicts — and engine-bound traffic on a
+ * port that has not declared — are refused typed (`DECLARATION_REFUSED_KEY`), never silently honoured. A port
+ * is routed to the engine host (`shared-worker`) or the router (`elected-worker`) once it has declared AND
+ * placement is resolved; placement/destroy queries queue until the decision and are answered after routing,
+ * so a conforming tab's engine-bound follow-up always finds the engine listener installed.
  */
-function wireSharedWorkerPlacement(
-  deps: SharedWorkerBootstrapDeps,
-  globalScope: unknown,
-  /** Whether a GRANTED `shared-worker` home holds the OPFS grant — TRUE in the default probing mode (a granted
-      probe placed the engine in-scope on OPFS-repacked), FALSE in the declared `backend: "idbfs"` mode (no probe
-      ran). A capability-absence fallback (`shared-worker` carrying `storageFallbackReason`) is idbfs regardless. */
-  opfsGrantedForSharedHome: boolean,
-): void {
+function wireSharedWorkerPlacement(deps: SharedWorkerBootstrapDeps, globalScope: unknown): void {
   const scope = globalScope as WorkerGlobalScopeLike;
   const decide = deps.decidePlacement ?? (() => decideSwPlacement());
   // The SharedWorker's own script URL (ADR-0049 D5) — reported in the placement reply so the winning tab can
@@ -1652,15 +1792,100 @@ function wireSharedWorkerPlacement(
   const swScriptUrl = (globalScope as { location?: { href?: string } }).location?.href;
   let placement: SwPlacementResult | undefined;
   let router: EngineRouter | undefined;
-  const pendingPorts: BridgePort[] = [];
+  // Whether a `shared-worker` home holds the OPFS grant — true only on the PROBING path (a granted probe placed
+  // the engine in-scope on OPFS-repacked); false when `backend: "idbfs"` was declared (no probe ran). A
+  // capability-absence fallback (`storageFallbackReason`) is idbfs regardless.
+  let opfsGrantedForSharedHome = false;
+  // ADR-0050: the store's BOUND storage declaration — the registry-attached static declaration at wire time,
+  // else the first declaration message's resolution. Immutable once set; later arrivals only confirm.
+  let boundDeclaration: ResolvedStorageDeclaration | undefined;
+  let decisionStarted = false;
+  const portStates = new Map<BridgePort, BootstrapPortState>();
   let sharedHostTeardown: Promise<{ error?: BridgeErrorWire }> | undefined;
 
   const currentPeerCount = (): number =>
     placement?.engineHome === "elected-worker" ? (router?.tabCount() ?? 0) : deps.peerCount();
 
-  const attachPort = (port: BridgePort): void => {
-    const current = placement!;
-    // The meta listener answers the placement + destroy-peer queries on EVERY port (both modes) and, per mode:
+  /** Refuse a declaration (or a pre-declaration engine-bound message) TYPED on the offending port (ADR-0050). */
+  const refuseDeclaration = (port: BridgePort, error: unknown): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    port.postMessage({
+      [DECLARATION_REFUSED_KEY]: { message, name: "StorageDeclarationRefusedError" } satisfies DeclarationRefusedWire,
+    });
+  };
+
+  /** Answer a queued-or-live placement query on `port` from the RESOLVED placement. */
+  const answerPlacementQuery = (port: BridgePort): void => {
+    const live = placement!;
+    port.postMessage({
+      [PLACEMENT_RESULT_KEY]: {
+        engineHome: live.engineHome,
+        electionRequired: live.engineHome === "elected-worker",
+        swInstanceId: live.swInstanceId,
+        ...(swScriptUrl !== undefined ? { swScriptUrl } : {}),
+      } satisfies PlacementQueryResult,
+    });
+  };
+
+  /**
+   * Redeliver one queued traffic entry by re-dispatching a real `message` event on the port — EXACTLY
+   * equivalent to live delivery: every listener registered by then (the meta listener AND the routed engine
+   * host's / router's) sees it in registration order, each ignoring the other's traffic as they already do on
+   * a live routed port. Requires an EventTarget-backed port (every real MessagePort is; structural test ports
+   * must be too to exercise replay — without `dispatchEvent` the entry is dropped, the pre-queue behavior).
+   */
+  const redeliver = (port: BridgePort, entry: { data: unknown; ports?: readonly ControlPortLike[] }): void => {
+    const target = port as unknown as { dispatchEvent?: (event: unknown) => boolean };
+    if (typeof target.dispatchEvent !== "function" || typeof MessageEvent === "undefined") return;
+    target.dispatchEvent(
+      new MessageEvent("message", {
+        data: entry.data,
+        ...(entry.ports ? { ports: entry.ports as unknown as MessagePort[] } : {}),
+      }),
+    );
+  };
+
+  /** Hand a declared port to the resolved engine home — the host (SW-direct) or the router (elected). */
+  const routePort = (port: BridgePort, state: BootstrapPortState): void => {
+    if (state.routed) return;
+    state.routed = true;
+    if (placement!.engineHome === "shared-worker") {
+      deps.connect(port, { placementQueriesHandled: true });
+    } else {
+      router!.attachTab(port as unknown as RouterPort);
+    }
+  };
+
+  /** A port's declaration message: bind the first (start the decision), confirm-or-refuse the rest (ADR-0050). */
+  const handleDeclaration = (port: BridgePort, state: BootstrapPortState, wire: SyncStorageDeclaration): void => {
+    const invalid = invalidDeclarationField(wire);
+    if (invalid !== undefined) {
+      refuseDeclaration(port, new StorageDeclarationRefusedError(`storage declaration carries an unknown ${invalid}`));
+      return;
+    }
+    if (boundDeclaration === undefined) {
+      // First arrival binds (the registry-silent scope; a static declaration bound at wire time instead). A
+      // single wire source cannot conflict with an absent static one, so this resolution never throws here.
+      boundDeclaration = resolveStorageDeclaration(deps.staticStorage, wire);
+      state.declared = true;
+      startDecision(boundDeclaration.backend);
+    } else {
+      try {
+        assertStorageDeclarationCompatible(boundDeclaration, wire);
+      } catch (error) {
+        refuseDeclaration(port, error);
+        return;
+      }
+      state.declared = true;
+    }
+    if (placement !== undefined) routePort(port, state);
+  };
+
+  const installPortListener = (port: BridgePort, state: BootstrapPortState): void => {
+    // The meta listener is installed (and the port STARTED) at `onconnect`, before any placement exists — it
+    // must be, because the declaration message that UNBLOCKS the placement decision arrives on this port
+    // (ADR-0050). It answers the placement + destroy-peer queries on EVERY port (both modes, queued until the
+    // decision resolves) and, per mode:
     //   - SW-direct: the `pgx0049` keepalive control-ping (the router owns that in elected mode).
     //   - elected: the tab's `engine-announce` — the SW-side translation into `router.announceEngine`, handing
     //     the transferred router-end control port to the router so it stamps an identity + pipes the tabs (the
@@ -1668,27 +1893,48 @@ function wireSharedWorkerPlacement(
     // It coexists with the host's / router's own listener on the same port: each ignores the other's traffic.
     const metaListener = (event: { data: unknown; ports?: readonly ControlPortLike[] }): void => {
       const data = event.data;
-      if (isPlacementQuery(data)) {
-        // Read `placement` LIVE (not the captured `current`): a capability-absence fallback can flip a router-only
-        // scope to `shared-worker` after this port attached, and the reply must reflect the current home + carry
-        // the SharedWorker's own script URL (ADR-0049 D5) for the tab's engine auto-derivation.
-        const live = placement ?? current;
-        port.postMessage({
-          [PLACEMENT_RESULT_KEY]: {
-            engineHome: live.engineHome,
-            electionRequired: live.engineHome === "elected-worker",
-            swInstanceId: live.swInstanceId,
-            ...(swScriptUrl !== undefined ? { swScriptUrl } : {}),
-          } satisfies PlacementQueryResult,
-        });
+      const declaration = readDeclarationMessage(data);
+      if (declaration !== undefined) {
+        handleDeclaration(port, state, declaration);
         return;
       }
-      if (isDestroyQuery(data)) {
-        port.postMessage({ [DESTROY_VERDICT_KEY]: { peers: currentPeerCount() } });
+      if (isPlacementQuery(data) || isDestroyQuery(data)) {
+        // Meta queries: answerable the moment placement resolves (declaration-independent — a query is not
+        // engine-bound), queued in arrival order until then.
+        if (placement === undefined) {
+          state.queuedQueries.push(data);
+          return;
+        }
+        if (isPlacementQuery(data)) answerPlacementQuery(port);
+        else port.postMessage({ [DESTROY_VERDICT_KEY]: { peers: currentPeerCount() } });
+        return;
+      }
+      if (!state.declared && isBridgeEnvelope(data)) {
+        // Contract point 3 (ADR-0050): an engine-bound message (provision/attach/…) before this port's
+        // declaration is a protocol violation — refused typed, never buffered, never silently dropped. The
+        // port itself is not poisoned: a declaration may still arrive and route it.
+        refuseDeclaration(
+          port,
+          new StorageDeclarationRefusedError(
+            "engine-bound message received before the port's storage declaration — the declaration message " +
+              "must precede provision/attach on every worker port (ADR-0050)",
+          ),
+        );
+        return;
+      }
+      if (placement === undefined) {
+        // A DECLARED port's engine-bound/control traffic while the placement decision is still pending: the
+        // sender contract is "declaration first, then anything" (ADR-0050) — a bridge-silence reconnect or a
+        // keepalive SW reconstruction posts declaration + attach/announce back-to-back without awaiting a
+        // placement reply. QUEUE it and redeliver after routing (the drain), never drop it. Undeclared-port
+        // control traffic and non-protocol junk keep the drop (a conforming sender always declares first).
+        if (state.declared && (isBridgeEnvelope(data) || readControlEnvelope(data) !== undefined)) {
+          state.queuedTraffic.push({ data, ...(event.ports?.length ? { ports: event.ports } : {}) });
+        }
         return;
       }
       const control = readControlEnvelope(data);
-      if (current.engineHome === "shared-worker") {
+      if (placement.engineHome === "shared-worker") {
         if (control?.type === "control-ping") {
           port.postMessage(
             controlEnvelope({ type: "control-ack", identity: control.identity, pingId: control.pingId }),
@@ -1696,7 +1942,7 @@ function wireSharedWorkerPlacement(
           return;
         }
         if (control?.type === "engine-teardown") {
-          const sharedIdentity: EngineIdentity = { swInstanceId: current.swInstanceId, generation: 0 };
+          const sharedIdentity: EngineIdentity = { swInstanceId: placement.swInstanceId, generation: 0 };
           if (!shouldApplyControlMessage(sharedIdentity, control)) return;
           // SW-direct destruction is supervised by the tab, but the exclusive store handles live here. Close
           // the in-scope host first; only the reserved teardown ack proves that quiescence to the tab. The
@@ -1754,11 +2000,6 @@ function wireSharedWorkerPlacement(
     };
     port.addEventListener("message", metaListener);
     port.start?.();
-    if (current.engineHome === "shared-worker") {
-      deps.connect(port);
-    } else {
-      router!.attachTab(port as unknown as RouterPort);
-    }
   };
 
   // ADR-0049 D1: flip a router-only (`elected-worker`) scope to the in-SharedWorker IDBFS fallback when the elected
@@ -1771,35 +2012,75 @@ function wireSharedWorkerPlacement(
     fellBack = true;
     placement = { engineHome: "shared-worker", swInstanceId: placement?.swInstanceId ?? crypto.randomUUID() };
     deps.onPlacement?.({ engineHome: "shared-worker", opfsGranted: false, storageFallbackReason: reason });
-    deps.connect(reportingPort);
+    deps.connect(reportingPort, { placementQueriesHandled: true });
   };
 
-  void decide().then((result) => {
-    placement = result;
-    // `shared-worker` ⇒ the engine boots in-scope: holding OPFS access on a GRANTED probe, or on IDBFS with a
-    // `storageFallbackReason` when the decision is a capability-absence fallback. `elected-worker` ⇒ router-only, no
-    // in-scope grant (each tab's elected DEDICATED engine probes its own scope). Thread grant + home + fallback
-    // reason, open the boot gate. The fallback is idbfs regardless of `opfsGrantedForSharedHome`.
-    const isSharedFallback = result.engineHome === "shared-worker" && result.storageFallbackReason !== undefined;
-    deps.onPlacement?.({
-      engineHome: result.engineHome,
-      opfsGranted: result.engineHome === "shared-worker" && opfsGrantedForSharedHome && !isSharedFallback,
-      ...(isSharedFallback ? { storageFallbackReason: result.storageFallbackReason } : {}),
-    });
-    if (result.engineHome === "elected-worker") {
-      router = createEngineRouter({
-        swInstanceId: result.swInstanceId,
-        ...(deps.executionLimit ? { executionLimit: deps.executionLimit } : {}),
-      });
+  /**
+   * Run the placement decision for the BOUND backend (ADR-0050) — exactly once, the moment the declaration is
+   * known (scope startup for a static declaration, first declaration message otherwise). `idbfs` NEVER probes:
+   * the engine binds in-SharedWorker on idb, the declared mode, not a fallback (ADR-0049 D1). Anything else
+   * runs the unconditional probe.
+   */
+  function startDecision(backend: ResolvedStorageDeclaration["backend"]): void {
+    if (decisionStarted) return;
+    decisionStarted = true;
+    let decision: Promise<SwPlacementResult>;
+    if (backend === "idbfs") {
+      decision = Promise.resolve({ engineHome: "shared-worker", swInstanceId: crypto.randomUUID() });
+    } else {
+      opfsGrantedForSharedHome = true;
+      decision = decide();
     }
-    for (const port of pendingPorts) attachPort(port);
-    pendingPorts.length = 0;
-  });
+    void decision.then((result) => {
+      placement = result;
+      // `shared-worker` ⇒ the engine boots in-scope: holding OPFS access on a GRANTED probe, or on IDBFS with a
+      // `storageFallbackReason` when the decision is a capability-absence fallback (or the declared idbfs mode,
+      // no reason). `elected-worker` ⇒ router-only, no in-scope grant (each tab's elected DEDICATED engine
+      // probes its own scope). Thread grant + home + fallback reason, open the boot gate.
+      const isSharedFallback = result.engineHome === "shared-worker" && result.storageFallbackReason !== undefined;
+      deps.onPlacement?.({
+        engineHome: result.engineHome,
+        opfsGranted: result.engineHome === "shared-worker" && opfsGrantedForSharedHome && !isSharedFallback,
+        ...(isSharedFallback ? { storageFallbackReason: result.storageFallbackReason } : {}),
+      });
+      if (result.engineHome === "elected-worker") {
+        router = createEngineRouter({
+          swInstanceId: result.swInstanceId,
+          ...(deps.executionLimit ? { executionLimit: deps.executionLimit } : {}),
+        });
+      }
+      // Drain: route every DECLARED port first (the engine listener must exist before the tab's next message),
+      // THEN answer its queued meta queries — the conforming tab only sends engine-bound traffic after the
+      // placement reply, so this ordering closes the gap by construction. Queued declared-port traffic (a
+      // reconnect's attach, a reconstruction's announce) redelivers LAST, onto the fully-routed port.
+      for (const [port, state] of portStates) {
+        if (state.declared) routePort(port, state);
+        for (const queued of state.queuedQueries) {
+          if (isPlacementQuery(queued)) answerPlacementQuery(port);
+          else port.postMessage({ [DESTROY_VERDICT_KEY]: { peers: currentPeerCount() } });
+        }
+        state.queuedQueries.length = 0;
+        const traffic = state.queuedTraffic.splice(0);
+        for (const entry of traffic) redeliver(port, entry);
+      }
+    });
+  }
+
+  // ADR-0050: a registry-attached static declaration is authoritative — bind it and decide at scope startup,
+  // no wait. (A registry-silent scope binds off the first declaration message instead; see handleDeclaration.)
+  if (deps.staticStorage !== undefined) {
+    boundDeclaration = resolveStorageDeclaration(deps.staticStorage, undefined);
+    startDecision(boundDeclaration.backend);
+  }
 
   scope.onconnect = (event: SharedWorkerConnectEvent) => {
     const port = event.ports[0];
     if (!port) return;
-    if (placement === undefined) pendingPorts.push(port);
-    else attachPort(port);
+    // Start every port immediately under the live meta listener (ADR-0050): the declaration message that
+    // unblocks the deferred placement decision arrives here, so the old buffer-unstarted-until-placement gate
+    // is structurally impossible now. Engine routing is still gated — per port — on declared + resolved.
+    const state: BootstrapPortState = { declared: false, routed: false, queuedQueries: [], queuedTraffic: [] };
+    portStates.set(port, state);
+    installPortListener(port, state);
   };
 }

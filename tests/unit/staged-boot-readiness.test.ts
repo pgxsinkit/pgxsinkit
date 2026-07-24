@@ -168,6 +168,7 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
           retryFailed: async () => undefined,
           discardConflict: async () => undefined,
           readMutationDetails: async () => [],
+          abortInFlight: () => undefined,
           readMutationStats: async () => ({
             pendingCount: 0,
             sendingCount: 0,

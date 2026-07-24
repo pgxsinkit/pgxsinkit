@@ -13,9 +13,12 @@ import {
   type AttachSyncClientOptions,
   createClientPGlite,
   createSyncClient,
+  destroyStoreArtifacts,
   EngineRelocatedError,
   generateLocalSchemaSql,
   provisionSyncWorker,
+  quiesceStoreWorker,
+  type StoreWorkerQuiesceOutcome,
   wrapEngineWorker,
 } from "../../../packages/client/src/index";
 import { idbStoreExists, readStoreMetaRecord } from "../../../packages/client/src/store-meta";
@@ -144,6 +147,8 @@ export interface PlacementHarness {
     disableBridgeSilence?: boolean;
     /** Pass a BARE `worker` INSTANCE instead of a factory — reconstruction is then structurally unavailable (ADR-0049 D5). */
     omitCreateWorker?: boolean;
+    /** Send the ADR-0050 `storage: { backend: "idbfs" }` wire declaration — the SW-direct idbfs engine, no probe. */
+    forceIdbfs?: boolean;
     timeoutMs?: number;
   }): Promise<AttachResult>;
   /** Dispatch a long engine-blocking `rawExec` (a CPU-bound cross join) and DO NOT await it — the hang injector. */
@@ -229,6 +234,13 @@ export interface PlacementHarness {
   }>;
   /** Detach this tab (explicit stop). */
   stop(storePath: string): Promise<void>;
+  /** ADR-0050: tear down the store's SharedWorker host BY NAME (a fresh connection), reporting the outcome. */
+  quiesceByName(
+    name: string,
+    timeoutMs?: number,
+  ): Promise<{ ok: true; outcome: StoreWorkerQuiesceOutcome } | { ok: false; timedOut: boolean; error?: string }>;
+  /** ADR-0050: destroy a store's artifacts BY PATH (no attached client) — the path-addressed delete. */
+  destroyArtifacts(storePath: string, timeoutMs?: number): Promise<{ ok: boolean; timedOut: boolean; error?: string }>;
   /** The currently HELD leader Web Locks (`pgx-leader-*`), via `navigator.locks.query()`. */
   leaderLocks(): Promise<{ held: string[]; pending: string[] }>;
   /** The store meta record's phase, or `"absent"` / `"unavailable"`. */
@@ -276,6 +288,7 @@ const harness: PlacementHarness = {
     keepaliveMissThreshold,
     disableBridgeSilence,
     omitCreateWorker,
+    forceIdbfs,
     timeoutMs = 12_000,
   }) {
     const makeSharedWorker = executionLimitMs == null ? newSharedWorker : newExecutionLimitSharedWorker;
@@ -292,6 +305,7 @@ const harness: PlacementHarness = {
       worker: swInput,
       storePath,
       syncEnabled: false,
+      ...(forceIdbfs ? { storage: { backend: "idbfs" } } : {}),
       ...(executionLimitMs != null ? { executionLimit: { maxDispatchMs: executionLimitMs } } : {}),
       ...(keepaliveIntervalMs != null ? { keepaliveIntervalMs } : {}),
       ...(keepaliveMissThreshold != null ? { keepaliveMissThreshold } : {}),
@@ -596,6 +610,26 @@ const harness: PlacementHarness = {
     if (!client) return;
     await client.stop();
     clients.delete(storePath);
+  },
+
+  async quiesceByName(name, timeoutMs = 8_000) {
+    try {
+      const factory = (() => newSharedWorker(name)) as unknown as Parameters<typeof quiesceStoreWorker>[0];
+      const outcome = await quiesceStoreWorker(factory, { timeoutMs });
+      return { ok: true as const, outcome };
+    } catch (error) {
+      const message = describeError(error).message;
+      return { ok: false as const, timedOut: message.includes("timed out"), error: message };
+    }
+  },
+
+  async destroyArtifacts(storePath, timeoutMs = 10_000) {
+    try {
+      const { timedOut } = await withTimeout(destroyStoreArtifacts(storePath), timeoutMs, () => undefined);
+      return { ok: !timedOut, timedOut };
+    } catch (error) {
+      return { ok: false, timedOut: false, error: describeError(error).message };
+    }
   },
 
   async leaderLocks() {

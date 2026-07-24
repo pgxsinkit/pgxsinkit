@@ -10,6 +10,7 @@ import type { SyncConfigInput, SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { attachSyncClient, identityCodec, isBridgeEnvelope, postBridgeMessage } from "../../packages/client/src/index";
 import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { PLACEMENT_QUERY_KEY, PLACEMENT_RESULT_KEY } from "../../packages/client/src/worker/define-sync-worker";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
@@ -124,6 +125,17 @@ describe("attach client groupReady over the bridge (ADR-0032 decision 6/7)", () 
     const worker = channel.port1;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       if (data.type === "attach") {
         postBridgeMessage(worker as never, identityCodec, "attach-ack", { alreadyBooted: false });
@@ -161,6 +173,17 @@ describe("attach client `ready` contract over the bridge (ADR-0032 FIX 3)", () =
     const worker = channel.port1;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       // Ack the attach but send NO status yet — the test drives status phases by hand below.
       if (data.type === "attach") {
@@ -200,6 +223,17 @@ describe("attach client `ready` contract over the bridge (ADR-0032 FIX 3)", () =
     const worker = channel.port1;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       // A late attach: the engine's monotonic `ready` had already fired, so the ack carries engineReady.
       if (data.type === "attach") {
@@ -234,6 +268,17 @@ describe("failed subscribe rejects the tab waiter (ADR-0032 FIX 2)", () => {
     let capturedQueryId: string | undefined;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       if (data.type === "attach") {
         postBridgeMessage(worker as never, identityCodec, "attach-ack", { alreadyBooted: false });
@@ -295,6 +340,17 @@ describe("late tab merges status.groups from the attach snapshot (ADR-0032 FIX 4
     const worker = channel.port1;
     worker.addEventListener("message", (event) => {
       const data = (event as MessageEvent).data;
+      // Answer the placement query (the attach flow awaits the reply before its handshake, ADR-0050).
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as Record<string, unknown>)[PLACEMENT_QUERY_KEY] === true
+      ) {
+        worker.postMessage({
+          [PLACEMENT_RESULT_KEY]: { engineHome: "shared-worker", electionRequired: false, swInstanceId: "sw-fixture" },
+        });
+        return;
+      }
       if (!isBridgeEnvelope(data)) return;
       if (data.type === "attach") {
         // A LATE attach: the engine already fired ready and the group already reached its floor BEFORE this

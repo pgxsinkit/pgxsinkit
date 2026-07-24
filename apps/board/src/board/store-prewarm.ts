@@ -17,7 +17,7 @@ import { boardStoreRegistry } from "./store-registry-default";
 //     do moments later, so no behaviour change, just earlier.
 //   • Fresh anonymous visitor: no session → no-op → the login-screen spare flow is unchanged.
 //   • GC: a claim mutates the registry under the cross-tab lock BEFORE any ensureSpare GC could observe
-//     the store as unmapped (gcOrphans keeps every map value plus the spare), so GC can never delete a
+//     the store as unmapped (the orphan sweep keeps every map value plus the spare), so GC can never delete a
 //     store this prewarm just opened/claimed.
 export async function prewarmMappedStoreForSession(): Promise<void> {
   try {

@@ -180,7 +180,7 @@ function makeElectedEngine(rpcValue: unknown) {
       engineChan.port1.removeEventListener(type as "message", listener as unknown as EventListener),
     terminate: () => undefined,
   });
-  return { core, worker };
+  return { core, dedicated, worker };
 }
 
 describe("composed elected placement path — attach → placement query → election → pipe handshake (ADR-0049)", () => {

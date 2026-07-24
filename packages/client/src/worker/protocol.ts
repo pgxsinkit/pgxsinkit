@@ -8,7 +8,7 @@
 // never a real `Worker`/`SharedWorker` directly — which is exactly why the whole bridge is unit-testable
 // over bun's `MessageChannel` with no worker at all.
 
-import type { SyncRuntimeStatus } from "@pgxsinkit/contracts";
+import type { SyncRuntimeStatus, SyncStorageDeclaration } from "@pgxsinkit/contracts";
 
 import type { BootReport } from "../boot-report";
 import type { ExportReport } from "../export-store";
@@ -120,6 +120,13 @@ export interface ProvisionPayload {
    * lane (via the attaching helper); a browser worker never sends it.
    */
   testStoreBackend?: "memory";
+  /**
+   * The tab's WIRE storage declaration (ADR-0050) — the same declaration the pre-placement declaration
+   * message carried, repeated here so the ENGINE binds it (the mint's durability) wherever it runs. The
+   * first provision/attach binds the store's declaration; a later payload whose explicit field disagrees
+   * with the bound resolution is refused typed (`StorageDeclarationRefusedError`).
+   */
+  storage?: SyncStorageDeclaration;
 }
 
 /** worker → tab: the provision completed (or failed). Lets the login screen confirm the spare is warm. */
@@ -172,6 +179,13 @@ export interface AttachPayload {
    * this AFTER the engine has already booted is REFUSED (you cannot restore into a running store).
    */
   restore?: RestoreArtefactWire;
+  /**
+   * The tab's WIRE storage declaration (ADR-0050) — repeated from the pre-placement declaration message so
+   * the ENGINE binds it (durability included) wherever it runs, the elected dedicated engine included (whose
+   * scope never saw the SharedWorker's declaration message). First payload binds; a later explicit
+   * disagreement with the bound resolution is refused typed (`StorageDeclarationRefusedError`).
+   */
+  storage?: SyncStorageDeclaration;
   /** The tab's current auth token at attach time, or null when unauthenticated. */
   token: AuthTokenSnapshot | null;
   /**

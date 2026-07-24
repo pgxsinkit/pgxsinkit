@@ -4,7 +4,6 @@ import {
   ENGINE_RELOCATED_CODE,
   EngineRelocatedError,
   ExecutionLimitMismatchError,
-  retireSyncWorkerHost,
   StoreDestroyRefusedError,
   wrapEngineWorker,
   type ElectedEngineWorker,
@@ -27,7 +26,6 @@ describe("public engine-placement surface", () => {
     expect(new EngineRelocatedError(outcome).outcome).toBe(outcome);
     expect(new ExecutionLimitMismatchError(limit.maxDispatchMs, undefined)).toBeInstanceOf(Error);
     expect(new StoreDestroyRefusedError(2)).toBeInstanceOf(Error);
-    expect(typeof retireSyncWorkerHost).toBe("function");
     expect(typeof worker.terminate).toBe("function");
   });
 });
