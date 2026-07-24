@@ -104,14 +104,21 @@ function runShard(files: string[]): Promise<ShardResult> {
   });
 }
 
-async function main(): Promise<void> {
-  const requested = process.argv.slice(2).map((a) => a.replace(/^tests\/unit\//, "").replace(/\.test\.ts$/, ""));
-  const files =
-    requested.length > 0
-      ? requested
-      : readdirSync("tests/unit")
-          .filter((f) => f.endsWith(".test.ts"))
-          .map((f) => f.replace(/\.test\.ts$/, ""));
+const normalize = (arg: string) => arg.replace(/^tests\/unit\//, "").replace(/\.test\.ts$/, "");
+
+// Per-shard outcome for the selection layer's priming invariant: a file may be recorded green ONLY
+// when it ran in full inside a shard that exited 0 (see scripts/select-unit-tests.ts).
+export interface ShardOutcome {
+  files: string[];
+  exitCode: number;
+}
+
+// Shard and run the given unit-test files across the worker pool, returning each shard's whole-file
+// list and exit code. This is the raw sharder: it writes NO cache/registry entries — every cache write
+// lives in the selection layer, so a subset run here can never certify a file.
+export async function runUnitTests(requested: string[]): Promise<ShardOutcome[]> {
+  const files = requested.map(normalize);
+  if (files.length === 0) return [];
 
   const shards = buildShards(files);
   const startedAt = Date.now();
@@ -140,7 +147,19 @@ async function main(): Promise<void> {
   const totalPass = results.reduce((s, r) => s + r.pass, 0);
   const totalFail = results.reduce((s, r) => s + r.fail, 0);
   console.log(`\n[unit] ${totalPass} pass, ${totalFail} fail in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
-  process.exit(failed.length > 0 ? 1 : 0);
+
+  return results.map((r) => ({ files: r.files, exitCode: r.code }));
 }
 
-await main();
+if (import.meta.main) {
+  const requested = process.argv.slice(2);
+  const files =
+    requested.length > 0
+      ? requested
+      : readdirSync("tests/unit")
+          .filter((f) => f.endsWith(".test.ts"))
+          .map((f) => f.replace(/\.test\.ts$/, ""));
+
+  const outcomes = await runUnitTests(files);
+  process.exit(outcomes.some((o) => o.exitCode !== 0) ? 1 : 0);
+}

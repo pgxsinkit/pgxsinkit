@@ -22,12 +22,16 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 
 - **Scripts are check-default.** `bun run format` / `bun run lint` **check** (non-mutating); use
   `format:write` / `lint:fix` to change files. `bun run validate` (skill-pin coherence first, then format,
-  typecheck, lint, and the
-  **fast** unit subset `test:unit:fast`) is the **pre-commit** gate, auto-installed via the `prepare`
-  script — it skips the PGlite/WASM-backed unit tests so commits stay quick. `bun run validate:full`
-  (the **full** unit suite) is the **pre-push** gate and what CI runs; `bun run test` /
-  `bun run test:unit` remain the canonical full unit run. `test` is unit-only; container lanes are
-  `test:integration` (CI on release + on demand), never in the commit path.
+  typecheck, lint, and the unit suite) is the **pre-commit** gate, auto-installed via the `prepare`
+  script. It stays quick through a content-addressed cache (`.buildcache/`): each stage is skipped when
+  its inputs are unchanged since it last passed, and the unit stage runs only the tests a change can
+  affect (import-graph selection; anything ungraphable always runs) — see ADR-0051. `bun run validate:full`
+  is the **pre-push** gate and what CI runs; it adds the doc/sync-artifact checks and is cached the same
+  way. `bun run validate:refresh` (= `PGXSINKIT_FORCE=1 bun run validate:full`) ignores the cache, runs
+  everything, and refreshes the baseline — do this once before handing work back, since CI's full-uncached
+  run only fires on PRs and `push: main`. `bun run test` / `bun run test:unit` remain the canonical full
+  unit run. `test` is unit-only; container lanes are `test:integration` (CI on release and on demand),
+  never in the commit path.
 - **Versions are tag-derived, never hand-edited.** Every publishable `package.json` carries
   `"version": "0.0.0"` as a placeholder — the most recent semver tag is the _only_ version input,
   and CI derives the real dev/release version at publish time. There is no version-bump script.
@@ -100,7 +104,7 @@ vocabulary.
 
 ## Definition of done
 
-- `bun run validate` (the fast pre-commit gate: format, lint, typecheck, fast unit subset) must pass before any commit. Before handing back work — and before any push — run `bun run validate:full`, which adds the PGlite/WASM-backed unit tests; that is the gate CI enforces.
+- `bun run validate` (the pre-commit gate: skill-pin coherence, format, lint, typecheck, and the affected unit tests) must pass before any commit; it is cached and selection-scoped, so unchanged work re-runs almost nothing. Before handing back work, run `bun run validate:refresh` — the full, uncached suite CI enforces — since CI itself only runs on PRs and `push: main`, not on develop commits.
 
 Integration suites must run through the package scripts that launch isolated compose projects (`test:integration:contract`, `test:integration:implementation`, or `test:integration`). Do not rely on shared long-running infra for integration verification.
 

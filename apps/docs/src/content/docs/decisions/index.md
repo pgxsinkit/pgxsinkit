@@ -63,5 +63,6 @@ complete as ADRs are added.
 - [ADR-0048 — `opfs-repacked` — a packed, recreate-only OPFS VFS for PGlite](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0048-opfs-repacked-vfs.md)
 - [ADR-0049 — Capability-driven engine placement: opfs-repacked on every platform](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0049-capability-driven-engine-placement.md)
 - [ADR-0050 — Storage declaration transport and path-addressed store teardown](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0050-storage-declaration-transport.md)
+- [ADR-0051 — Content-addressed validate caching and per-file unit-test selection](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0051-content-addressed-test-selection.md)
 
 <!-- adr:list:end -->
