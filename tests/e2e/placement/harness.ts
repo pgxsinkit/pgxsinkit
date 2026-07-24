@@ -24,6 +24,7 @@ import {
 import { idbStoreExists, readStoreMetaRecord } from "../../../packages/client/src/store-meta";
 import { storeIdentityComponent } from "../../../packages/client/src/store-path";
 import {
+  DECLARATION_KEY,
   DESTROY_QUERY_KEY,
   DESTROY_VERDICT_KEY,
   PLACEMENT_QUERY_KEY,
@@ -272,6 +273,10 @@ const harness: PlacementHarness = {
         }
       };
       port.addEventListener("message", listener);
+      // ADR-0050: a registry-silent bootstrap DEFERS its placement decision until the first declaration arrives
+      // and QUEUES placement/destroy queries until then — so a raw probe must declare first (no opinion `{}`,
+      // always compatible) or the query hangs. `attach`/`provision`/`quiesceByName` post this internally.
+      port.postMessage({ [DECLARATION_KEY]: {} });
       port.postMessage({ [PLACEMENT_QUERY_KEY]: true });
     });
     const { value, timedOut } = await withTimeout(reply, timeoutMs, () => undefined as unknown as PlacementQueryResult);
@@ -289,7 +294,13 @@ const harness: PlacementHarness = {
     disableBridgeSilence,
     omitCreateWorker,
     forceIdbfs,
-    timeoutMs = 12_000,
+    // A COLD attach boots the engine on the main thread (initdb WASM ~2-3s) plus election + the OPFS probe.
+    // Near the tail of the serial lane, under CPU contention from prior lanes' surviving `extendedLifetime`
+    // workers, that legitimately runs long — test 41's first attach hit the old 12s bound intermittently. This
+    // guard exists only to stop a genuine HANG wedging the suite (a real attach FAILURE rejects fast, surfacing
+    // as `ok:false` + error, not a timeout), so a generous budget cannot hide a real failure — it just stops a
+    // slow-but-successful boot being misreported as a timeout.
+    timeoutMs = 30_000,
   }) {
     const makeSharedWorker = executionLimitMs == null ? newSharedWorker : newExecutionLimitSharedWorker;
     const makeEngineWorker = executionLimitMs == null ? newEngineWorker : newExecutionLimitEngineWorker;
@@ -466,6 +477,10 @@ const harness: PlacementHarness = {
     for (let i = 0; i < connections; i += 1) {
       const sw = newSharedWorker(name);
       sw.port.start();
+      // ADR-0050: each connection must DECLARE (no opinion `{}`) to resolve the deferred placement decision AND
+      // be routed as a router tab — `tabCount()` (the destroy peer-count verdict) only counts declared+routed
+      // ports. Without this the destroy query stays queued and the verdict never arrives.
+      sw.port.postMessage({ [DECLARATION_KEY]: {} });
       ports.push(sw.port);
     }
     const port = ports[0]!;
