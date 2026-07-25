@@ -137,3 +137,36 @@ open investigation items:
 2. Confirm the login page's storage-preference controls (durability + backend)
    tell the truth on mobile — an offered preference that silently can't engage on
    the device is a falsehood in the demo's own UI.
+
+### Device-verified results
+
+**Chrome for Android 150 (Android 16, real device) — both items answered; full
+desktop-Chromium parity.** Method: the local Vite client against the cloud
+backend, driven over adb (`adb reverse` for the dev server, DevTools protocol for
+the reads — driver kept at `tmp/agents/cdp-eval.ts`), reading each boot's
+`__boardBootReport`.
+
+- **Default (`opfs`) preference**: `mode: "worker"`, `engineHome:
+"elected-worker"` — the placement probe refuses sync-access handles in the
+  SharedWorker scope and elects a tab-spawned dedicated worker, exactly as on
+  desktop Chromium. The opfs-repacked VFS verifiably engaged: the store directory
+  under `pgxsinkit/stores/` carries the ADR-0048 whole-directory layout
+  (`arena.bin`, `metadata-a/b.bin`, `activation.bin`), and the only IndexedDB
+  database is the store-meta binding.
+- **Forced `idbfs` preference**: `storageBackend: "idbfs"`, `engineHome:
+"shared-worker"` — the forced engine runs in the SharedWorker with no
+  probe/election, as declared. Applied and reverted through the login page's real
+  Apply-&-reload flow, which behaved correctly both ways.
+- **Item 2 verdict**: the login copy is already truthful ("…probe for an Origin
+  Private File System home…, falling back to IndexedDB where the browser
+  cannot"), and on this browser both offered lanes genuinely engage. What's still
+  missing is _post-boot_ feedback — surfacing the engaged backend/engine home in
+  the Sync Inspector (note: on the board's BYO-PGlite mint the client omits
+  `storageBackend` from the boot report — `engineHome` plus the store artifacts
+  identify the backend; deriving it for BYO mints is a toolkit-side nicety).
+
+**Still to verify on hardware**: Safari on iOS (WebKit is expected to _grant_
+sync-access handles in the SharedWorker itself — `engineHome: "shared-worker"`
+with the opfs backend — the inverse placement of Chromium) and Firefox for
+Android (expected to match Chromium's elected-worker placement; its DevTools
+lane is manual).
