@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from "react";
+
 import { boardMemberRegistry, boardSyncRegistry } from "@pgxsinkit/board-schema";
 import {
   attachSyncClient,
@@ -54,21 +56,54 @@ async function currentTokenSnapshot(userId: string): Promise<AuthTokenSnapshot |
   return { accessToken: session.access_token, expiresAt: (session.expires_at ?? 0) * 1000 };
 }
 
-// Boot observability dogfood (pgxsinkit ADR-0034). One compact line on the board's existing `syncDebug`
-// rail (fires only under `globalThis.__pgxsinkitDebug`), plus the full report stashed on a dev-only global
-// beside `__boardClient` / `__boardProfiler` for console inspection. Idempotent per boot: the push
-// (`onBootReport`) and the late-attach pull (`bootReport()`) can both deliver the SAME report, so we key on
-// `startedAt` and log it once.
+// Boot observability dogfood (pgxsinkit ADR-0034). Every boot's report goes three places: one compact line
+// on the board's existing `syncDebug` rail (fires only under `globalThis.__pgxsinkitDebug`), the full report
+// on a dev-only global beside `__boardClient` / `__boardProfiler` for console inspection, and — for EVERY
+// visitor, dev build or not — the module-level observable below, which the Sync Inspector's Storage readout
+// renders. That readout is the post-boot half of the login screen's storage promise (docs/mobile.md Stage B
+// item 2: the offered preferences are truthful, what was missing is telling the user what actually engaged).
+// Idempotent per boot: the push (`onBootReport`) and the late-attach pull (`bootReport()`) can both deliver
+// the SAME report, so we key on `startedAt` and log/publish it once.
 let lastLoggedBootAt = -1;
+let latestBootReport: BootReport | null = null;
+const bootReportListeners = new Set<() => void>();
 
-/** Clear the de-dupe key (provider teardown — an identity switch boots a new store). */
+function publishBootReport(report: BootReport | null): void {
+  latestBootReport = report;
+  for (const listener of bootReportListeners) listener();
+}
+
+function subscribeBootReport(onChange: () => void): () => void {
+  bootReportListeners.add(onChange);
+  return () => {
+    bootReportListeners.delete(onChange);
+  };
+}
+
+/**
+ * The latest boot's {@link BootReport}, or `null` before one lands. A module-level external store rather
+ * than context: the report is produced OUTSIDE React (by `createBoardSyncClient`, and possibly by the
+ * late-attach pull well after first paint), there is exactly one live client per page, and a component that
+ * mounts long afterwards — the inspector drawer, opened minutes into a session — must still see it.
+ */
+export function useBootReport(): BootReport | null {
+  return useSyncExternalStore(
+    subscribeBootReport,
+    () => latestBootReport,
+    () => null,
+  );
+}
+
+/** Clear the de-dupe key + the published report (provider teardown — an identity switch boots a new store). */
 export function resetBoardBootReport(): void {
   lastLoggedBootAt = -1;
+  publishBootReport(null);
 }
 
 function reportBoot(report: BootReport): void {
   if (report.startedAt === lastLoggedBootAt) return;
   lastLoggedBootAt = report.startedAt;
+  publishBootReport(report);
   const rows = report.groups.reduce((sum, group) => sum + group.rows, 0);
   const requests = report.groups.reduce((sum, group) => sum + group.requests, 0);
   // fetchMs/applyMs are concurrent per-group segments, not a partition of totalMs — so the summary reports

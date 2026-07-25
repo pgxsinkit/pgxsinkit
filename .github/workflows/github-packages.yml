@@ -52,9 +52,11 @@ jobs:
           certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password
           mkcert -install
           certutil -d "sql:$HOME/.pki/nssdb" -L | grep -i mkcert
-      - name: Install Playwright Chromium (release only)
+      # WebKit joins Chromium for the board lane's `webkit-mobile` project (apps/board/docs/mobile.md's
+      # mobile surface smoke); the desktop worker scenarios still run on Chromium alone.
+      - name: Install Playwright Chromium + WebKit (release only)
         if: github.ref_type == 'tag'
-        run: bunx playwright install --with-deps chromium
+        run: bunx playwright install --with-deps chromium webkit
       # GH runners ship podman but never start its rootless API socket, and `podman compose` (which the
       # infra scripts use) delegates to the docker-compose provider OVER that socket — without it every
       # container-backed integration lane dies at its first compose call. Same fix as ci.yml's browser-lane.

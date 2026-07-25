@@ -117,6 +117,15 @@ and bottom-sheet decisions through `BoardColumns`.
 - **Emulation honesty**: Playwright's "mobile Safari" is desktop WebKit with an
   iPhone viewport/UA. Real iOS storage and eviction behavior only shows up on a
   physical device.
+- **Lane findings (implemented — `tests/e2e/board-mobile.e2e.test.ts`, projects
+  `chromium-mobile` = Pixel 7 and `webkit-mobile` = iPhone 17)**: both emulations
+  DO match the board's `(hover: none) and (pointer: coarse)` gate, and the spec
+  asserts that by name so an emulation regression fails loudly instead of
+  silently downgrading the touch assertions into a desktop run. Second finding:
+  **Playwright's WebKitGTK build has no OPFS at all** (`navigator.storage.getDirectory`
+  is undefined), so the webkit-mobile project exercises the declared-`idbfs` path
+  — one more reason its storage values say nothing about real iOS Safari, whose
+  expected shared-worker OPFS grant only hardware can confirm.
 - **Manual checklist** (Firefox Android — Playwright's Firefox has no
   `isMobile`/touch emulation — and real-device iOS): the same smoke flows,
   walked by hand, on current stable, before a release that touches the board.
@@ -159,11 +168,15 @@ the reads — driver kept at `tmp/agents/cdp-eval.ts`), reading each boot's
   Apply-&-reload flow, which behaved correctly both ways.
 - **Item 2 verdict**: the login copy is already truthful ("…probe for an Origin
   Private File System home…, falling back to IndexedDB where the browser
-  cannot"), and on this browser both offered lanes genuinely engage. What's still
-  missing is _post-boot_ feedback — surfacing the engaged backend/engine home in
-  the Sync Inspector (note: on the board's BYO-PGlite mint the client omits
-  `storageBackend` from the boot report — `engineHome` plus the store artifacts
-  identify the backend; deriving it for BYO mints is a toolkit-side nicety).
+  cannot"), and on this browser both offered lanes genuinely engage. The
+  _post-boot_ half is now shipped too: the Sync Inspector's **Storage readout**
+  shows the engaged engine home, backend, and boot kind/duration straight off
+  each boot's report. Where the report omits `storageBackend` (the board's
+  BYO-PGlite mint — the client can't derive a backend it didn't mint), the
+  readout derives `opfs-repacked` from the engine home and labels it `(derived)`:
+  an elected home exists only to hold the OPFS handles, and a shared-worker home
+  without a declared backend means the probe granted them there. Deriving it
+  properly for BYO mints remains a toolkit-side nicety.
 
 **Still to verify on hardware**: Safari on iOS (WebKit is expected to _grant_
 sync-access handles in the SharedWorker itself — `engineHome: "shared-worker"`

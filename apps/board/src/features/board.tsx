@@ -554,6 +554,11 @@ export function BoardColumns({
             <Stack
               key={status}
               gap="xs"
+              // The column's identity in the DOM (same role as `data-authenticated-shell` on the shell):
+              // "which column is this card in?" is otherwise only answerable by walking up from a header
+              // label, and the mobile smoke has to DERIVE a card's current Status rather than assume it —
+              // it runs after the desktop suite has already moved fixtures around.
+              data-status={status}
               // Viewport-relative on a phone so the next column peeks at the edge as the swipe
               // affordance; the desktop column keeps its exact 264px from `xs` up.
               miw={{ base: "min(80vw, 340px)", xs: 264 }}

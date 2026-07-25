@@ -50,7 +50,24 @@ export default defineConfig({
     trace: "retain-on-failure",
     ...(insecureTls ? { ignoreHTTPSErrors: true } : {}),
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // The mobile surface lane (apps/board/docs/mobile.md, "Verification"): ONE dedicated smoke spec runs in the
+  // two emulated-phone projects, and NOTHING else does — re-running the engine/worker scenarios on the same
+  // two engines under a smaller viewport would re-test the same engines for no new information. Conversely the
+  // desktop project IGNORES that spec: it asserts the touch/narrow branches, which a desktop viewport and a
+  // fine pointer never render. The global serial/one-worker posture is unchanged, so the three projects run
+  // one after another against the one seeded backend — the mobile spec therefore never assumes a fixture's
+  // state, it derives or creates it.
+  //
+  // EMULATION HONESTY: `webkit-mobile` is desktop WebKit (Playwright's WebKitGTK build) wearing an iPhone
+  // viewport, UA, and touch/coarse-pointer emulation — it is NOT iOS. It proves the layout and the capability
+  // gating; real iOS storage placement and eviction behaviour only show up on a physical device (which is what
+  // the doc's manual checklist is for). `chromium-mobile` is closer to its target — Chrome for Android is the
+  // same engine — but is still an emulated device profile.
+  projects: [
+    { name: "chromium", testIgnore: "**/board-mobile.e2e.test.ts", use: { ...devices["Desktop Chrome"] } },
+    { name: "chromium-mobile", testMatch: "**/board-mobile.e2e.test.ts", use: { ...devices["Pixel 7"] } },
+    { name: "webkit-mobile", testMatch: "**/board-mobile.e2e.test.ts", use: { ...devices["iPhone 17"] } },
+  ],
   // Build + serve the SPA (vite build → vite preview on 5173). The backend stack is brought up
   // separately by run-worker-lane.ts before Playwright starts. Never reuse an existing server: this lane
   // pins its backend URLs in the runner environment, so accepting a leftover preview can silently test a

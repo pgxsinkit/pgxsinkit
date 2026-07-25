@@ -2,9 +2,9 @@ import { Badge, Button, Drawer, Group, ScrollArea, Stack, Switch, Table, Text } 
 import { useMediaQuery } from "@mantine/hooks";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
-import type { LiveQueryDiagnostics, MutationDetail } from "@pgxsinkit/client";
+import type { BootReport, LiveQueryDiagnostics, MutationDetail } from "@pgxsinkit/client";
 
-import { useSyncClient } from "../board-client";
+import { useBootReport, useSyncClient } from "../board-client";
 import { useBoardOffline } from "./board-client-provider";
 import type { OfflineControl } from "./offline";
 
@@ -117,6 +117,42 @@ function shortKey(entityKey: Record<string, string>): string {
 }
 
 /**
+ * Which store backend this boot actually opened, for the Storage readout. `storageBackend` is
+ * AUTHORITATIVE whenever the report carries it (the client derives it at its own mint seam). The board
+ * does not always get one: it brings its OWN PGlite — the store registry mints the spare — and the client
+ * omits `storageBackend` for a BYO instance whose backend it cannot derive (docs/mobile.md, "Device-verified
+ * results": on the board's BYO-PGlite mint the client omits `storageBackend` from the boot report).
+ *
+ * For those boots the ENGINE HOME identifies it instead, because a home is only ever chosen for storage
+ * reasons (ADR-0049 decision 12): a tab-elected dedicated worker exists for exactly one purpose — to hold
+ * the OPFS sync-access handles the SharedWorker scope was denied (Chromium/Firefox) — and a shared-worker
+ * home reached WITHOUT a declared backend means the placement probe granted those handles right there
+ * (WebKit's inverse placement). Either way the store opened opfs-repacked. It is marked `(derived)` so the
+ * readout never passes an inference off as a declaration; an in-process or absent home derives nothing.
+ */
+function backendLabel(report: BootReport): string {
+  if (report.storageBackend != null) return report.storageBackend;
+  if (report.engineHome === "elected-worker" || report.engineHome === "shared-worker") {
+    return "opfs-repacked (derived)";
+  }
+  return "—";
+}
+
+/** One label/value line of the Storage readout — deliberately plain Text, so it stays scannable on a phone. */
+function StorageRow({ label, value }: { label: string; value: string }) {
+  return (
+    <Group justify="space-between" gap="sm" wrap="nowrap">
+      <Text size="xs" c="dimmed">
+        {label}
+      </Text>
+      <Text size="xs" ff="monospace" ta="right">
+        {value}
+      </Text>
+    </Group>
+  );
+}
+
+/**
  * The Sync Inspector (board Phase 8): an always-visible Offline toggle plus a collapsible drawer over
  * the local mutation journal and convergence counters. The default board stays clean — the guts are
  * one click away. Toggling Offline pauses the outbound convergence driver, so writes pile up here as
@@ -128,6 +164,7 @@ export function SyncInspector() {
   const [open, setOpen] = useState(false);
   const [flushing, setFlushing] = useState(false);
   const online = useOnline(offline);
+  const bootReport = useBootReport();
   const journal = useJournal(open);
   const liveQueries = sortLiveQueries(useLiveQueries(open));
   // Below `sm` the drawer takes the whole screen (docs/mobile.md) — a 440px panel on a 360px phone would
@@ -211,6 +248,28 @@ export function SyncInspector() {
               Flush now
             </Button>
           </Group>
+
+          {/*
+            Storage (ADR-0034 boot report; docs/mobile.md Stage B). The login screen OFFERS a backend and a
+            durability preference; this is the other half of that promise — what the engine ACTUALLY engaged
+            on the device in front of you, read straight off this boot's report. Deliberately NOT gated on
+            viewport or touch: "which backend did I really get, and where does the engine live?" is the same
+            question on a desktop as on a phone, and the phone is merely where the answer was hardest to get
+            (it took an adb/DevTools session to read `__boardBootReport` on a real Android device). Absent
+            until a report lands — the drawer can be opened during a boot that has not finalized yet.
+          */}
+          {bootReport != null && (
+            <Stack gap={4}>
+              <Text size="sm" fw={600}>
+                Storage
+              </Text>
+              {/* `engineHome` is omitted by boots that cannot derive it (a dedicated elected worker never ran
+                  the SharedWorker placement decision); `mode` is the coarser truth that always exists. */}
+              <StorageRow label="Engine home" value={bootReport.engineHome ?? bootReport.mode} />
+              <StorageRow label="Backend" value={backendLabel(bootReport)} />
+              <StorageRow label="Boot" value={`${bootReport.storeKind} · ${Math.round(bootReport.totalMs)}ms`} />
+            </Stack>
+          )}
 
           {journal.length === 0 ? (
             <Text size="sm" c="dimmed">
