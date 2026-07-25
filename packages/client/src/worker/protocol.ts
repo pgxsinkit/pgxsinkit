@@ -31,7 +31,14 @@ export type BridgeTransferable = unknown;
  * it, `Worker`/`self` do not); `close()` is optional (a dedicated `self` cannot be closed by the tab).
  */
 export interface BridgePort {
-  postMessage: (message: unknown, transfer?: BridgeTransferable[]) => void;
+  // `transfer` is typed `any` (not `BridgeTransferable[]`) SOLELY so a real DOM `MessagePort`/`Worker` is
+  // assignable to `BridgePort` without a cast: the library carries no DOM lib, and DOM's overloaded
+  // `postMessage(message, transfer: Transferable[])` is CONTRAVARIANTLY stricter than any DOM-lib-free array
+  // type we could name here (`unknown[] | undefined` is not assignable to `Transferable[]`). The list is opaque
+  // to the library — the identity codec never produces one — so widening the param loses nothing internal while
+  // letting consumers pass `SharedWorker.port` (and a `() => SharedWorker` factory) with no `as unknown` laundering.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DOM-postMessage contravariance escape hatch
+  postMessage: (message: unknown, transfer?: any) => void;
   addEventListener: (type: "message", listener: (event: { data: unknown }) => void) => void;
   removeEventListener: (type: "message", listener: (event: { data: unknown }) => void) => void;
   start?: () => void;

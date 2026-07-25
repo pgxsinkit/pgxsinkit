@@ -115,9 +115,15 @@ mode and the main-thread idb fallback where SharedWorker is missing.
 durability option (both are runtime/registry concerns); the registry is CODE, _imported_ by the worker
 file, never cloned/serialized in. Give each store a stable SharedWorker name and always pass
 `extendedLifetime: true` (Chromium 148+ grace period; ignore-safe elsewhere). The tab calls
-`attachSyncClient({ worker, registry, getToken })`, where `worker` is a **factory**
-(`worker: () => SharedWorker`), not an instance — a SharedWorker cannot be reconstructed from itself, and
-the factory is what makes SharedWorker-death recovery a guarantee. The elected engine worker needs no
+`attachSyncClient({ worker, registry, getToken })`. Prefer the **factory** form (`worker: () => SharedWorker`)
+over a bare instance or a raw `port` (`SharedWorker.port`) — a SharedWorker cannot be reconstructed from
+itself, so **in elected placement** (Chromium/Firefox) the factory is what arms SharedWorker(router)-death
+recovery: the election coordinator's keepalive reconstructs the router through it. A `port`/instance input
+stays fully functional — provision, attach, and the provision→attach handoff all work (the handoff is keyed
+by `storePath`, not the transport) — but **forfeits that reconstruction** (the coordinator detects the death
+and can only stop). In SW-direct placement (Safari/idbfs) the engine lives in the SharedWorker and there is
+no keepalive; neither form auto-recovers a dead SharedWorker (opt into `bridgeSilenceMs` + a factory for a
+bridge-silence reconnect there). The elected engine worker needs no
 consumer wiring: the SharedWorker reports its own script URL and the winning tab constructs the engine as
 `new Worker(reportedUrl, { type: "module" })`. Supply `createEngineWorker` ONLY as an override for entries
 that cannot be reconstructed from their URL as a module worker (classic-script workers, `blob:`/`data:`
@@ -165,7 +171,7 @@ so GoTrue refresh-token reuse detection can't be tripped by a second client.
 **Boot: spare-as-worker + internal prefetch overlap.** The spare store (see above) becomes a pre-spawned
 schemaless worker at the login screen (create + initdb off every thread that matters); the userId→storeId
 registry stays tab-side in localStorage so binding resolves before attach (SharedWorker naming needs it).
-Call `provisionSyncWorker` with the same `worker` factory as attach; an elected
+Call `provisionSyncWorker` with the same `worker` input as attach (the factory form, so elected-mode recovery is armed for provisioning too); an elected
 Chromium/Firefox pre-open shares the tab's one election coordinator and auto-derives the engine from the
 SharedWorker's own script URL (override with `createEngineWorker` only for non-module/underivable entries).
 Claim = bind id, attach, push config + token. On a PROVABLY-fresh claimed store, pass

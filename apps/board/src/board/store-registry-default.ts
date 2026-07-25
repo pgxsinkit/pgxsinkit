@@ -117,7 +117,7 @@ export function quiesceThenDestroyStore(storePath: string, opts?: QuiesceThenDes
   return quiesceThenDestroyStoreWith(
     {
       workerMode: boardWorkerMode,
-      quiesce: (path) => quiesceStoreWorker(() => quiesceWorkerForStore(path) as unknown as { port: BridgePort }),
+      quiesce: (path) => quiesceStoreWorker(() => quiesceWorkerForStore(path)),
       destroy: (path) => destroyStoreArtifacts(path),
     },
     storePath,
@@ -126,13 +126,14 @@ export function quiesceThenDestroyStore(storePath: string, opts?: QuiesceThenDes
 }
 
 /**
- * The store's SharedWorker port as the library's transport-agnostic {@link BridgePort}. The DOM `MessagePort`
- * IS a valid bridge port at runtime; the cast only bridges TS's DOM `postMessage` transfer-overload variance
- * (the library stays DOM-lib-free by design). `SharedWorker.port` is stable, so provision + attach in one tab
- * share ONE ordered port to the same engine.
+ * The store's SharedWorker port as the library's transport-agnostic {@link BridgePort}. A DOM `MessagePort`
+ * is directly assignable to `BridgePort` now that the library widened its `postMessage` transfer param to clear
+ * the DOM-`postMessage` transfer-overload variance (`BridgePort` in `protocol.ts`) — no `as unknown` cast, and
+ * no DOM lib in the library. `SharedWorker.port` is stable, so provision + attach in one tab share ONE ordered
+ * port to the same engine.
  */
 export function getBoardStorePort(storePath: string): BridgePort {
-  return getBoardWorkerForStore(storePath).port as unknown as BridgePort;
+  return getBoardWorkerForStore(storePath).port;
 }
 
 /**

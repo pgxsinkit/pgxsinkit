@@ -106,7 +106,11 @@ import {
 /** A `Worker`/`SharedWorker`-shaped handle: a dedicated `Worker` IS the port; a `SharedWorker` carries `.port`. */
 interface WorkerLike {
   port?: BridgePort;
-  postMessage?: (message: unknown, transfer?: BridgeTransferable[]) => void;
+  // `transfer: any` for the same reason `BridgePort.postMessage` uses it — so a DOM `Worker` (whose overloaded
+  // `postMessage(message, transfer: Transferable[])` is contravariantly stricter than any DOM-lib-free array
+  // type) is assignable to `WorkerLike` without a cast. See the note on `BridgePort` in `protocol.ts`.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DOM-postMessage contravariance escape hatch
+  postMessage?: (message: unknown, transfer?: any) => void;
   addEventListener?: (
     type: "message" | "error",
     listener: (event: { data?: unknown; message?: unknown }) => void,

@@ -19,6 +19,7 @@
     "apps/perf-lab/src/main.tsx",
     "apps/perf-lab/src/bench",
     "apps/docs",
-    "tests/e2e"
+    "tests/e2e",
+    "packages/client/type-tests"
   ]
 }

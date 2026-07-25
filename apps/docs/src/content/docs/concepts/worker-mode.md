@@ -54,8 +54,11 @@ import { attachSyncClient } from "@pgxsinkit/client";
 import { registry } from "./registry";
 
 const storePath = "my-app-store";
-// `worker` is a FACTORY, not an instance: a SharedWorker cannot be reconstructed from itself, and
-// the factory is what makes SharedWorker-death recovery a guarantee.
+// Prefer the FACTORY form over a bare instance or a raw `SharedWorker.port`: a SharedWorker cannot be
+// reconstructed from itself, so in ELECTED placement (Chromium/Firefox) the factory is what arms
+// router-SharedWorker-death recovery — the election coordinator's keepalive rebuilds the router through it.
+// A `port`/instance input still works everywhere (the provision→attach handoff is keyed by storePath, not
+// the transport) but forfeits that reconstruction; SW-direct (Safari/idbfs) has no keepalive either way.
 const worker = () =>
   new SharedWorker(new URL("./sync.worker.ts", import.meta.url), {
     type: "module",
@@ -376,10 +379,12 @@ another library's private storage — an auth provider's `localStorage` layout, 
 sooner. Resolve the store id from your own userId→storeId registry (the same tab-side binding the attach
 uses) and provision only once it is genuinely known.
 
-Pass the same `worker` factory as attach. On Chromium/Firefox, provisioning participates in the same
-election coordinator; the elected engine is auto-derived from the SharedWorker's own script URL just as
-in attach (supply `createEngineWorker` only for non-module/underivable entries). On Safari the engine
-runs in the SharedWorker directly and the `worker` factory remains the communication-centre recovery seam.
+Pass the same `worker` input as attach — the factory form, so elected-mode recovery is armed for
+provisioning too. On Chromium/Firefox, provisioning participates in the same election coordinator; the
+elected engine is auto-derived from the SharedWorker's own script URL just as in attach (supply
+`createEngineWorker` only for non-module/underivable entries). On Safari the engine runs in the SharedWorker
+directly; there is no keepalive there, so the factory only becomes a recovery seam if you also set
+`bridgeSilenceMs` (otherwise a dead SharedWorker is recovered by reload, not automatically).
 
 The overlap is measurable: an adopted store reports its pre-open in the `BootReport` `provision` block —
 `provision.initdbMs` is the create cost that ran off-thread before this boot, and
