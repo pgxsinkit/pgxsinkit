@@ -13,9 +13,15 @@ import { createSyncClientHooks } from "@pgxsinkit/react";
 import { createOfflineControl, createWorkerOfflineControl, type OfflineControl } from "./board/offline";
 import { warmPgliteBootAssets } from "./board/pglite-warm";
 import { boardStorageDeclaration, readBackendPreference, readDurabilityPreference } from "./board/storage-preference";
-import { boardStoreRegistry, boardWorkerMode, getBoardEnginePort } from "./board/store-registry-default";
+import { boardEngineWorkerFactory, boardStoreRegistry, boardWorkerMode } from "./board/store-registry-default";
 import { boardConfig } from "./config";
 import { supabase } from "./lib/supabase";
+
+// SharedWorker-death resilience (ADR-0049 D5): with the `worker` FACTORY form, a pending op left with NO bridge
+// traffic for this long triggers ONE reconnect that rebuilds the store's SharedWorker (via the factory) and
+// re-attaches. Long enough that a slow-but-live engine — which keeps emitting bridge traffic, re-arming the
+// timer — never false-triggers; short enough to recover a genuinely dead worker without a manual reload.
+const BOARD_BRIDGE_SILENCE_MS = 20_000;
 
 // One set of registry-typed hooks for the whole app (board ADR-0001 read path). Components read the
 // local PGlite store reactively via `useLiveRows` / `useLiveDrizzleRows`; the live data is whatever
@@ -111,12 +117,18 @@ export async function createBoardSyncClient(
   // returned `pglite` is the real precreated instance the library adopts.
   const store = await boardStoreRegistry.openUserStore(userId);
 
-  // ── Worker mode (ADR-0032 shared worker): the engine lives off the tab; attach a thin tab client over the
-  // store's engine port (the SAME `SharedWorker.port` `createStore` provisioned on). ──
+  // ── Worker mode (ADR-0032 shared worker): the engine lives off the tab; attach a thin tab client via the
+  // store's SharedWorker FACTORY (ADR-0049 D5) — a fresh connection that adopts the store `createStore`
+  // provisioned (by storePath, not by sharing its port), and that `bridgeSilenceMs` rebuilds on a dead worker. ──
   if (boardWorkerMode && store.storeId != null) {
     const client = await attachSyncClient({
       registry,
-      port: await getBoardEnginePort(store.storePath),
+      // The `worker` FACTORY form (not `port:`) arms SharedWorker-death recovery: paired with
+      // `bridgeSilenceMs`, a silent (presumed-dead) engine triggers ONE reconnect that rebuilds the store's
+      // SharedWorker through this factory and re-attaches (ADR-0049 D5). Provision minted on its own
+      // connection; this attach adopts that store by storePath — the handoff is port-agnostic.
+      worker: boardEngineWorkerFactory(store.storePath),
+      bridgeSilenceMs: BOARD_BRIDGE_SILENCE_MS,
       storeId: store.storeId,
       storePath: store.storePath,
       // The wire storage declaration (ADR-0050): posted pre-placement on the port and bound by the engine.

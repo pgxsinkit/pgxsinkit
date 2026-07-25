@@ -137,12 +137,35 @@ export function getBoardStorePort(storePath: string): BridgePort {
 }
 
 /**
- * The engine bridge port for a store. The shared-worker host returns today's `SharedWorker.port`, stable per
- * store within a tab, so provision (in `createStore`) and the later attach (board-client) share ONE ordered port
- * to the same engine. Never called in the in-process fallback (there is no worker port there).
+ * The engine bridge port for a store — used by the worker-mode `createStore` PROVISION (below). Returns today's
+ * `SharedWorker.port` off the cached instance, stable per store within a tab. Never called in the in-process
+ * fallback (there is no worker port there). Attach no longer shares this port: it passes the
+ * {@link boardEngineWorkerFactory} worker input instead and adopts the provisioned store by storePath.
  */
 export function getBoardEnginePort(storePath: string): Promise<BridgePort> {
   return Promise.resolve(getBoardStorePort(storePath));
+}
+
+/**
+ * A FRESH-constructing SharedWorker factory for a store's engine — the `worker` input `attachSyncClient` takes
+ * (ADR-0049 D5). Unlike {@link getBoardWorkerForStore} (which caches ONE instance for the provision's shared
+ * port), this builds a NEW `SharedWorker` connection on EVERY call, because the library re-invokes it to RECOVER
+ * a dead SharedWorker: the board's attach sets `bridgeSilenceMs`, so a pending op left with no bridge traffic
+ * past the deadline triggers ONE reconnect that rebuilds the store's SharedWorker through this factory and
+ * re-attaches — and a cached instance would hand back the DEAD one. The browser dedups the NAME onto one live
+ * engine, so a fresh connection reaches the store the provision minted (the provision→attach handoff is keyed by
+ * storePath, not the port); on a genuinely dead worker it spawns a fresh one. Options MUST be byte-identical to
+ * {@link getBoardWorkerForStore} — `type`, `name`, `extendedLifetime: true` — or Chromium 148+ fails the second
+ * connection on an options mismatch. The `new SharedWorker(new URL(...))` stays inline + statically analyzable
+ * for Vite's worker bundling.
+ */
+export function boardEngineWorkerFactory(storePath: string): () => SharedWorker {
+  return () =>
+    new SharedWorker(new URL("./board-sync.worker.ts", import.meta.url), {
+      type: "module",
+      name: storePath,
+      extendedLifetime: true,
+    } as WorkerOptions & { name: string; extendedLifetime: boolean });
 }
 
 // A placeholder the worker-mode `createStore` resolves to: in worker mode the raw store lives in the
