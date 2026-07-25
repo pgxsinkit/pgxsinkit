@@ -1,4 +1,5 @@
 import { Badge, Button, Drawer, Group, ScrollArea, Stack, Switch, Table, Text } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 import type { LiveQueryDiagnostics, MutationDetail } from "@pgxsinkit/client";
@@ -129,6 +130,9 @@ export function SyncInspector() {
   const online = useOnline(offline);
   const journal = useJournal(open);
   const liveQueries = sortLiveQueries(useLiveQueries(open));
+  // Below `sm` the drawer takes the whole screen (docs/mobile.md) — a 440px panel on a 360px phone would
+  // otherwise be a sliver of page behind it. Width, not touch capability, is the right question here.
+  const narrow = useMediaQuery("(max-width: 48em)", false, { getInitialValueInEffect: false });
 
   const pending = journal.filter((row) => PENDING_STATUSES.has(row.status)).length;
   const conflicted = journal.filter((row) => row.status === "conflicted").length;
@@ -148,6 +152,9 @@ export function SyncInspector() {
   return (
     <>
       <Group gap="sm" wrap="nowrap">
+        {/* On mobile the Offline switch demotes into the drawer, which already carries its own copy
+            (docs/mobile.md): glanceables stay at zero taps, controls nest at one. The Inspector button —
+            and its owed count — stays at every size. */}
         <Switch
           size="sm"
           checked={online}
@@ -155,6 +162,7 @@ export function SyncInspector() {
           onLabel="ON"
           offLabel="OFF"
           color="teal"
+          visibleFrom="xs"
           label={online ? "Online" : "Offline"}
           aria-label="Toggle simulated network"
         />
@@ -167,7 +175,7 @@ export function SyncInspector() {
         opened={open}
         onClose={() => setOpen(false)}
         position="right"
-        size="md"
+        size={narrow ? "100%" : "md"}
         title="Sync inspector"
         padding="md"
       >
@@ -210,7 +218,12 @@ export function SyncInspector() {
             </Text>
           ) : (
             <ScrollArea.Autosize mah="60vh">
-              <Table stickyHeader striped withTableBorder>
+              {/* No column is dropped on a narrow screen (docs/mobile.md) — this is an inspection surface,
+                  and scrolling truthful data beats hiding it. The min-width goes on the TABLE, not into a
+                  nested scroll container: the enclosing ScrollArea already scrolls both axes, and a second
+                  scrollport inside it would become the one `stickyHeader` sticks to — which never scrolls
+                  vertically, so the header would stop sticking. One scrollport, both axes. */}
+              <Table stickyHeader striped withTableBorder miw={480}>
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Table</Table.Th>
@@ -256,7 +269,9 @@ export function SyncInspector() {
             </Text>
           ) : (
             <ScrollArea.Autosize mah="40vh">
-              <Table stickyHeader striped withTableBorder>
+              {/* Seven columns — the widest surface in the drawer, and the one a phone would crush hardest.
+                  Same single-scrollport treatment as the journal above. */}
+              <Table stickyHeader striped withTableBorder miw={640}>
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Digest</Table.Th>

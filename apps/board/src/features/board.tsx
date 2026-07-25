@@ -1,5 +1,20 @@
-import { ActionIcon, Alert, Avatar, Badge, Box, Button, Card, Group, Menu, Stack, Text, Tooltip } from "@mantine/core";
-import { useRef, useState } from "react";
+import {
+  ActionIcon,
+  Alert,
+  Avatar,
+  Badge,
+  Box,
+  Button,
+  Card,
+  Drawer,
+  Group,
+  Menu,
+  NavLink,
+  Stack,
+  Text,
+  Tooltip,
+} from "@mantine/core";
+import { type KeyboardEvent, useRef, useState } from "react";
 
 import type { IssueActions } from "../board/use-issue-actions";
 import {
@@ -12,6 +27,9 @@ import {
   STATUS_LABEL,
   STATUS_ORDER,
 } from "../data";
+import { useIsTouch } from "../lib/use-touch";
+
+import classes from "./board.module.css";
 
 function initials(name: string): string {
   return name
@@ -156,6 +174,127 @@ function IssueMenu({
 }
 
 /**
+ * The touch twin of {@link IssueMenu} (docs/mobile.md): ONE bottom sheet shared by every card, opened by
+ * tapping the card whose actions it shows. Sections are deliberately FLAT — Mantine's `Menu.Sub` opens on
+ * hover, which is precisely the interaction a touch device does not have — and each row runs the same
+ * {@link IssueActions} write the kebab menu does, so touch and pointer share one write path. Touch drag is
+ * not rebuilt: drag's only capability is changing Status, which this sheet does in a single tap.
+ *
+ * `issue` is looked up from the live rows by the caller on every render (never copied into state), so an
+ * edit made here — or a remote change arriving while the sheet is open — is reflected immediately.
+ */
+function IssueSheet({
+  issue,
+  assignable,
+  moveTeams,
+  actions,
+  onClose,
+}: {
+  issue: IssueRow | null;
+  assignable: readonly ProfileRow[];
+  moveTeams: readonly TeamOption[];
+  actions: IssueActions;
+  onClose: () => void;
+}) {
+  // The selection clears the instant a row is tapped, but the Drawer keeps sliding out for another frame
+  // or two — so the body renders the last open selection through the close transition instead of
+  // collapsing into an empty sheet mid-animation. While the sheet is OPEN, `shown` is always the live row.
+  const lastOpen = useRef<{
+    issue: IssueRow;
+    assignable: readonly ProfileRow[];
+    moveTeams: readonly TeamOption[];
+  } | null>(null);
+  if (issue != null) lastOpen.current = { issue, assignable, moveTeams };
+  const shown = issue != null ? { issue, assignable, moveTeams } : lastOpen.current;
+
+  return (
+    <Drawer
+      opened={issue != null}
+      onClose={onClose}
+      position="bottom"
+      title={shown?.issue.title}
+      padding="md"
+      // A sheet hugs its content. Mantine's `size` sets a FIXED height for a bottom Drawer (and "auto"
+      // is not a size it understands), so the height is relaxed here and capped so a long list still
+      // scrolls inside the sheet instead of covering the board.
+      styles={{ content: { height: "auto", maxHeight: "85%" } }}
+    >
+      {shown != null && (
+        <Stack gap="lg">
+          <Stack gap={2}>
+            <Text size="xs" tt="uppercase" c="dimmed" fw={600}>
+              Status
+            </Text>
+            {STATUS_ORDER.map((status) => (
+              <NavLink
+                key={status}
+                label={STATUS_LABEL[status]}
+                active={shown.issue.status === status}
+                rightSection={shown.issue.status === status ? CHECK : null}
+                onClick={() => {
+                  void actions.setStatus(shown.issue.id, status);
+                  onClose();
+                }}
+              />
+            ))}
+          </Stack>
+
+          <Stack gap={2}>
+            <Text size="xs" tt="uppercase" c="dimmed" fw={600}>
+              Assignee
+            </Text>
+            <NavLink
+              label="Unassigned"
+              active={shown.issue.assigneeId == null}
+              rightSection={shown.issue.assigneeId == null ? CHECK : null}
+              onClick={() => {
+                void actions.setAssignee(shown.issue.id, null);
+                onClose();
+              }}
+            />
+            {shown.assignable.map((profile) => (
+              <NavLink
+                key={profile.id}
+                label={profile.displayName}
+                active={shown.issue.assigneeId === profile.id}
+                leftSection={
+                  <Avatar size={22} radius="xl" color={profile.avatarColor}>
+                    {initials(profile.displayName)}
+                  </Avatar>
+                }
+                rightSection={shown.issue.assigneeId === profile.id ? CHECK : null}
+                onClick={() => {
+                  void actions.setAssignee(shown.issue.id, profile.id);
+                  onClose();
+                }}
+              />
+            ))}
+          </Stack>
+
+          {shown.moveTeams.length > 0 && (
+            <Stack gap={2}>
+              <Text size="xs" tt="uppercase" c="dimmed" fw={600}>
+                Move to team
+              </Text>
+              {shown.moveTeams.map((team) => (
+                <NavLink
+                  key={team.id}
+                  label={team.name}
+                  onClick={() => {
+                    void actions.moveToTeam(shown.issue.id, team.id);
+                    onClose();
+                  }}
+                />
+              ))}
+            </Stack>
+          )}
+        </Stack>
+      )}
+    </Drawer>
+  );
+}
+
+/**
  * Inline reject-if-stale conflict surface (board Phase 6 / ADR-0015). The optimistic write was
  * declined because the row moved on the server; the toolkit KEEPS the optimistic overlay (never a
  * silent snap-back), so the card still shows the rejected value. This banner names the server's
@@ -203,20 +342,30 @@ function ConflictNotice({
             <>Your change wasn&apos;t applied — the issue moved on the server.</>
           )}
         </Text>
+        {/* Both resolutions stop the click here: on touch the whole card is the bottom sheet's target,
+            and resolving a conflict must never double as "open the actions sheet". */}
         <Group gap="xs">
           <Button
             size="compact-xs"
             color="orange"
-            onClick={() =>
+            onClick={(event) => {
+              event.stopPropagation();
               void actions.keepMine(issue.id, {
                 status: issue.status as IssueStatus,
                 assigneeId: issue.assigneeId,
-              })
-            }
+              });
+            }}
           >
             Keep mine
           </Button>
-          <Button size="compact-xs" variant="default" onClick={() => void actions.discardConflict(issue.id)}>
+          <Button
+            size="compact-xs"
+            variant="default"
+            onClick={(event) => {
+              event.stopPropagation();
+              void actions.discardConflict(issue.id);
+            }}
+          >
             Use server&apos;s
           </Button>
         </Group>
@@ -268,6 +417,7 @@ export function IssueCard({
   serverValue,
   onDragStart,
   onDragEnd,
+  onSelect,
 }: {
   issue: IssueRow;
   profiles: Map<string, ProfileRow>;
@@ -279,9 +429,31 @@ export function IssueCard({
   serverValue?: ServerIssueValue;
   onDragStart: () => void;
   onDragEnd: () => void;
+  /** Touch only (docs/mobile.md): when present the whole card opens the shared bottom sheet and the kebab
+   * menu is dropped. Absent on pointer devices, where drag + the kebab menu are unchanged. */
+  onSelect?: () => void;
 }) {
   const priority = PRIORITY_META[issue.priority] ?? PRIORITY_META["none"]!;
   const conflicted = convergence?.conflictState != null;
+  // Button semantics ride along so TalkBack/VoiceOver announce the card as actionable, and a hardware
+  // keyboard on a touch device can still reach it.
+  const selectProps =
+    onSelect != null
+      ? {
+          onClick: onSelect,
+          role: "button",
+          tabIndex: 0,
+          onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+            // The card only answers for ITSELF: an Enter/Space that activated a control inside it (the
+            // ConflictNotice buttons) bubbles up here, and resolving a conflict must not also open the sheet.
+            if (event.target !== event.currentTarget) return;
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onSelect();
+            }
+          },
+        }
+      : {};
   return (
     <Card
       withBorder
@@ -294,7 +466,8 @@ export function IssueCard({
         onDragStart();
       }}
       onDragEnd={onDragEnd}
-      style={{ cursor: "grab" }}
+      style={{ cursor: onSelect != null ? "pointer" : "grab" }}
+      {...selectProps}
     >
       <Stack gap={8}>
         <Group justify="space-between" gap="xs" wrap="nowrap" align="flex-start">
@@ -304,7 +477,9 @@ export function IssueCard({
               {issue.title}
             </Text>
           </Group>
-          <IssueMenu issue={issue} assignable={assignable} moveTeams={moveTeams} actions={actions} />
+          {onSelect == null && (
+            <IssueMenu issue={issue} assignable={assignable} moveTeams={moveTeams} actions={actions} />
+          )}
         </Group>
         <Group justify="space-between" gap="xs">
           <Group gap={6}>
@@ -355,6 +530,13 @@ export function BoardColumns({
   const dragged = useRef<IssueRow | null>(null);
   const [overStatus, setOverStatus] = useState<IssueStatus | null>(null);
 
+  // Touch (docs/mobile.md): no drag, no kebab — a tap opens one shared bottom sheet. Only the id is held
+  // in state; the row itself is re-read from `issues` every render so the open sheet tracks live updates
+  // (its own writes and remote ones alike) and closes itself if the Issue leaves the view.
+  const isTouch = useIsTouch();
+  const [sheetIssueId, setSheetIssueId] = useState<string | null>(null);
+  const sheetIssue = sheetIssueId == null ? null : (issues.find((issue) => issue.id === sheetIssueId) ?? null);
+
   const handleDrop = (status: IssueStatus) => {
     const issue = dragged.current;
     dragged.current = null;
@@ -363,73 +545,88 @@ export function BoardColumns({
   };
 
   return (
-    <Group align="flex-start" gap="md" wrap="nowrap" style={{ overflowX: "auto" }}>
-      {STATUS_ORDER.map((status) => {
-        const columnIssues = issues.filter((issue) => issue.status === status);
-        const isOver = overStatus === status;
-        return (
-          <Stack
-            key={status}
-            gap="xs"
-            miw={264}
-            w={264}
-            p={4}
-            onDragOver={(event) => {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-              if (overStatus !== status) setOverStatus(status);
-            }}
-            onDrop={() => handleDrop(status)}
-            style={{
-              borderRadius: "var(--mantine-radius-md)",
-              outline: isOver ? "2px dashed var(--mantine-color-blue-5)" : "2px dashed transparent",
-              background: isOver ? "var(--mantine-color-blue-light)" : undefined,
-              transition: "background 120ms ease",
-            }}
-          >
-            <Group justify="space-between" px={4}>
-              <Text size="sm" fw={600}>
-                {STATUS_LABEL[status]}
-              </Text>
-              <Badge size="sm" variant="default">
-                {columnIssues.length}
-              </Badge>
-            </Group>
-            <Stack gap="xs" mih={40}>
-              {columnIssues.map((issue) => {
-                const teamName = teamNameById?.get(issue.teamId);
-                const convergence = convergenceById?.get(issue.id);
-                const serverValue = serverValueById?.get(issue.id);
-                return (
-                  <IssueCard
-                    key={issue.id}
-                    issue={issue}
-                    profiles={profiles}
-                    assignable={assignableByTeam.get(issue.teamId) ?? []}
-                    moveTeams={moveTeams.filter((team) => team.id !== issue.teamId)}
-                    actions={actions}
-                    onDragStart={() => {
-                      dragged.current = issue;
-                    }}
-                    onDragEnd={() => {
-                      dragged.current = null;
-                      setOverStatus(null);
-                    }}
-                    {...(teamName != null ? { teamName } : {})}
-                    {...(convergence != null ? { convergence } : {})}
-                    {...(serverValue != null ? { serverValue } : {})}
-                  />
-                );
-              })}
-              {columnIssues.length === 0 && (
-                <Text size="xs" c="dimmed" px={4}>
-                  No issues
+    <>
+      <Group align="flex-start" gap="md" wrap="nowrap" className={classes["columns"]} style={{ overflowX: "auto" }}>
+        {STATUS_ORDER.map((status) => {
+          const columnIssues = issues.filter((issue) => issue.status === status);
+          const isOver = overStatus === status;
+          return (
+            <Stack
+              key={status}
+              gap="xs"
+              // Viewport-relative on a phone so the next column peeks at the edge as the swipe
+              // affordance; the desktop column keeps its exact 264px from `xs` up.
+              miw={{ base: "min(80vw, 340px)", xs: 264 }}
+              w={{ base: "min(80vw, 340px)", xs: 264 }}
+              p={4}
+              className={classes["column"]}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                if (overStatus !== status) setOverStatus(status);
+              }}
+              onDrop={() => handleDrop(status)}
+              style={{
+                borderRadius: "var(--mantine-radius-md)",
+                outline: isOver ? "2px dashed var(--mantine-color-blue-5)" : "2px dashed transparent",
+                background: isOver ? "var(--mantine-color-blue-light)" : undefined,
+                transition: "background 120ms ease",
+              }}
+            >
+              <Group justify="space-between" px={4}>
+                <Text size="sm" fw={600}>
+                  {STATUS_LABEL[status]}
                 </Text>
-              )}
+                <Badge size="sm" variant="default">
+                  {columnIssues.length}
+                </Badge>
+              </Group>
+              <Stack gap="xs" mih={40}>
+                {columnIssues.map((issue) => {
+                  const teamName = teamNameById?.get(issue.teamId);
+                  const convergence = convergenceById?.get(issue.id);
+                  const serverValue = serverValueById?.get(issue.id);
+                  return (
+                    <IssueCard
+                      key={issue.id}
+                      issue={issue}
+                      profiles={profiles}
+                      assignable={assignableByTeam.get(issue.teamId) ?? []}
+                      moveTeams={moveTeams.filter((team) => team.id !== issue.teamId)}
+                      actions={actions}
+                      onDragStart={() => {
+                        dragged.current = issue;
+                      }}
+                      onDragEnd={() => {
+                        dragged.current = null;
+                        setOverStatus(null);
+                      }}
+                      {...(teamName != null ? { teamName } : {})}
+                      {...(convergence != null ? { convergence } : {})}
+                      {...(serverValue != null ? { serverValue } : {})}
+                      {...(isTouch ? { onSelect: () => setSheetIssueId(issue.id) } : {})}
+                    />
+                  );
+                })}
+                {columnIssues.length === 0 && (
+                  <Text size="xs" c="dimmed" px={4}>
+                    No issues
+                  </Text>
+                )}
+              </Stack>
             </Stack>
-          </Stack>
-        );
-      })}
-    </Group>
+          );
+        })}
+      </Group>
+      {isTouch && (
+        <IssueSheet
+          issue={sheetIssue}
+          assignable={sheetIssue != null ? (assignableByTeam.get(sheetIssue.teamId) ?? []) : []}
+          moveTeams={sheetIssue != null ? moveTeams.filter((team) => team.id !== sheetIssue.teamId) : []}
+          actions={actions}
+          onClose={() => setSheetIssueId(null)}
+        />
+      )}
+    </>
   );
 }

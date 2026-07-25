@@ -1,0 +1,16 @@
+/*
+  Phone-only snap scrolling for the status columns (docs/mobile.md). Below Mantine's `xs` breakpoint
+  (36em — hard-coded because the board has no postcss-preset-mantine, so `--mantine-breakpoint-xs` is
+  not available to a media query) the columns are viewport-relative with the next one peeking at the
+  edge: the peek IS the swipe affordance, and a remote cross-column move stays at least partially
+  visible. Above the breakpoint nothing here applies, so desktop scrolling is untouched.
+*/
+@media (max-width: 36em) {
+  .columns {
+    scroll-snap-type: x mandatory;
+  }
+
+  .column {
+    scroll-snap-align: start;
+  }
+}

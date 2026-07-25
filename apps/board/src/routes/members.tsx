@@ -95,7 +95,10 @@ function TeamMembersCard({
 
   return (
     <Card withBorder radius="md" padding="md">
-      <Group justify="space-between" mb="sm" wrap="nowrap">
+      {/* Wraps (no `wrap="nowrap"`): while renaming, the text input's intrinsic minimum plus Save/Cancel
+          plus the member-count badge exceed a 360px viewport, so the badge drops to its own line there.
+          Everything fits on one line at desktop widths, exactly as before. */}
+      <Group justify="space-between" mb="sm">
         {editing ? (
           <Group gap="xs" wrap="nowrap" flex={1}>
             <TextInput

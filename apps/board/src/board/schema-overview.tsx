@@ -281,36 +281,40 @@ export function SchemaOverview() {
               )}
             </Group>
 
-            <Table withTableBorder striped>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Object</Table.Th>
-                  <Table.Th>Kind</Table.Th>
-                  <Table.Th>Purpose</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {objects.map((object) => (
-                  <Table.Tr key={object.name}>
-                    <Table.Td>
-                      <Text ff="monospace" size="sm">
-                        {object.name}
-                      </Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge size="sm" variant="light" color={KIND_COLOR[object.kind]}>
-                        {object.kind}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm" c="dimmed">
-                        {object.purpose}
-                      </Text>
-                    </Table.Td>
+            {/* The object names are long and the purpose column is prose: on a phone this table would
+                crush to one word per line, so it scrolls horizontally instead (docs/mobile.md). */}
+            <Table.ScrollContainer minWidth={560} type="native">
+              <Table withTableBorder striped>
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Object</Table.Th>
+                    <Table.Th>Kind</Table.Th>
+                    <Table.Th>Purpose</Table.Th>
                   </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
+                </Table.Thead>
+                <Table.Tbody>
+                  {objects.map((object) => (
+                    <Table.Tr key={object.name}>
+                      <Table.Td>
+                        <Text ff="monospace" size="sm">
+                          {object.name}
+                        </Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge size="sm" variant="light" color={KIND_COLOR[object.kind]}>
+                          {object.kind}
+                        </Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="sm" c="dimmed">
+                          {object.purpose}
+                        </Text>
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Table.ScrollContainer>
 
             {selected.mode !== "readwrite" && (
               <Text size="xs" c="dimmed">

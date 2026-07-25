@@ -128,7 +128,9 @@ export function LoginRoute() {
     // 70vh would center it and OVERFLOW upward under the 56px AppShell header, covering the top identity button.
     // A min-height lets the container grow with the card (the page scrolls) instead, keeping every control clickable.
     <Center mih="70vh">
-      <Card withBorder w={440} padding="lg" radius="md">
+      {/* `w` + `maw` (not a fixed 440): on a 360px phone a fixed card overflows the viewport and the page
+          scrolls sideways. The cap keeps the desktop card at exactly its 440px. */}
+      <Card withBorder w="100%" maw={440} padding="lg" radius="md">
         <Stack>
           <div>
             <Title order={3}>Sign in to the board</Title>

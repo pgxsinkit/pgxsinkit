@@ -1,4 +1,16 @@
-import { Avatar, Badge, Button, Group, NavLink, Paper, ScrollArea, Stack, Text, Textarea } from "@mantine/core";
+import {
+  Avatar,
+  Badge,
+  Button,
+  Group,
+  NavLink,
+  Paper,
+  ScrollArea,
+  SegmentedControl,
+  Stack,
+  Text,
+  Textarea,
+} from "@mantine/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useMessageActions } from "../chat/use-message-actions";
@@ -83,8 +95,10 @@ function ChannelMessages({ channelId, profiles }: { channelId: string; profiles:
       </Text>
     );
   }
+  // `dvh` on mobile (docs/mobile.md): with a soft keyboard open the visual viewport shrinks, and a `vh`
+  // thread would keep its full height and push the composer off screen.
   return (
-    <ScrollArea.Autosize mah="56vh" viewportRef={viewportRef}>
+    <ScrollArea.Autosize mah={{ base: "50dvh", xs: "56vh" }} viewportRef={viewportRef}>
       <Stack gap="md" pr="sm">
         {messages.map((message) => (
           <MessageRowView
@@ -160,37 +174,61 @@ export function ChatView({ teamId }: { teamId: string }) {
   const activeChannel = visible.find((channel) => channel.id === active) ?? null;
 
   return (
-    <Group align="flex-start" gap="lg" wrap="nowrap">
-      <Stack gap={4} miw={200} w={200}>
-        <Text size="xs" tt="uppercase" c="dimmed" fw={600} px={4}>
-          Channels
-        </Text>
-        {visible.map((channel) => (
-          <NavLink
-            key={channel.id}
-            active={channel.id === active}
-            label={channel.name}
-            leftSection={
-              <Badge size="xs" variant="light" color={channel.kind === "global" ? "blue" : "grape"}>
-                {channel.kind === "global" ? "all" : "team"}
-              </Badge>
-            }
-            onClick={() => setActiveId(channel.id)}
-          />
-        ))}
-      </Stack>
-      <Paper withBorder p="md" radius="md" style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        {active != null && activeChannel != null ? (
-          <>
-            <ChannelMessages channelId={active} profiles={profiles} />
-            <MessageComposer key={active} channelId={active} channelName={activeChannel.name} />
-          </>
-        ) : (
-          <Text size="sm" c="dimmed">
-            {settled ? "No channels." : "Loading…"}
+    <Stack gap="sm">
+      {/* Mobile (docs/mobile.md): the 200px rail carries exactly two entries here (global + this Team), so
+          below `xs` it collapses into a full-width SegmentedControl — the same idiom as the Board/Chat
+          switch — and the thread + composer take the whole width. */}
+      {active != null && (
+        <SegmentedControl
+          hiddenFrom="xs"
+          fullWidth
+          value={active}
+          onChange={setActiveId}
+          data={visible.map((channel) => ({
+            value: channel.id,
+            label: (
+              <Group gap={6} justify="center" wrap="nowrap">
+                <Badge size="xs" variant="light" color={channel.kind === "global" ? "blue" : "grape"}>
+                  {channel.kind === "global" ? "all" : "team"}
+                </Badge>
+                {channel.name}
+              </Group>
+            ),
+          }))}
+        />
+      )}
+      <Group align="flex-start" gap="lg" wrap="nowrap">
+        <Stack gap={4} miw={200} w={200} visibleFrom="xs">
+          <Text size="xs" tt="uppercase" c="dimmed" fw={600} px={4}>
+            Channels
           </Text>
-        )}
-      </Paper>
-    </Group>
+          {visible.map((channel) => (
+            <NavLink
+              key={channel.id}
+              active={channel.id === active}
+              label={channel.name}
+              leftSection={
+                <Badge size="xs" variant="light" color={channel.kind === "global" ? "blue" : "grape"}>
+                  {channel.kind === "global" ? "all" : "team"}
+                </Badge>
+              }
+              onClick={() => setActiveId(channel.id)}
+            />
+          ))}
+        </Stack>
+        <Paper withBorder p="md" radius="md" style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          {active != null && activeChannel != null ? (
+            <>
+              <ChannelMessages channelId={active} profiles={profiles} />
+              <MessageComposer key={active} channelId={active} channelName={activeChannel.name} />
+            </>
+          ) : (
+            <Text size="sm" c="dimmed">
+              {settled ? "No channels." : "Loading…"}
+            </Text>
+          )}
+        </Paper>
+      </Group>
+    </Stack>
   );
 }
