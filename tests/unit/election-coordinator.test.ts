@@ -315,6 +315,32 @@ describe("claims (invariant 2) — one lock request, claim-counted", () => {
     expect(h.locks.reqs[0]!.signal?.aborted).toBe(true);
     expect(coordinator.isLeader()).toBe(false);
   });
+
+  it("handles the AbortError produced when a queued Web Lock request is cancelled", async () => {
+    const { deps } = makeHarness();
+    deps.locks = {
+      request(_name, options) {
+        return new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "AbortError"));
+          });
+        });
+      },
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const coordinator = createElectionCoordinator(deps, OPTIONS);
+      coordinator.claimForAttach()();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });
 
 // ─── 2. Grant duties: leader-granted BEFORE spawn; announce (transferred) AFTER ──

@@ -246,7 +246,12 @@ export function createElectionCoordinator(
         }
         onGranted();
       });
-    void deps.locks.request(lockName, { signal: controller.signal }, callback);
+    void deps.locks.request(lockName, { signal: controller.signal }, callback).catch((error: unknown) => {
+      // Cancelling a queued Web Locks request rejects its outer promise with AbortError. The cancellation is
+      // the expected last-claim release path; keep unexpected lock failures visible.
+      if (controller.signal.aborted && error instanceof Error && error.name === "AbortError") return;
+      throw error;
+    });
   }
 
   function settleGrant(): void {
