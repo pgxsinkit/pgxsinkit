@@ -18,6 +18,7 @@ import {
   readDurabilityPreference,
 } from "../board/storage-preference";
 import { boardStoreRegistry } from "../board/store-registry-default";
+import { SignInConnectionError } from "../connection-needed";
 
 // The seeded demo identities (scripts/seed-board.ts). Each signs in with a real GoTrue password; the
 // note is the membership the read path will scope them to — handy for eyeballing the fan-out.
@@ -38,6 +39,10 @@ export function LoginRoute() {
   const navigate = useNavigate();
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Connection-needed (board ADR-0010): the sign-in failure was the backend being unreachable, not a
+  // rejected credential — so the alert states that and drops the stack hint, which is advice for the
+  // other failure. `signInAs` decides this (it owns supabase's error vocabulary); this only renders it.
+  const [connectionNeeded, setConnectionNeeded] = useState(false);
 
   // The storage preferences (durability + backend). The PERSISTED values are read exactly once at mount; the
   // `selected*` values are the pending UI choices. A store's declaration is immutable (ADR-0050), so Apply
@@ -56,6 +61,7 @@ export function LoginRoute() {
   const handleApplyPreferences = async () => {
     setApplyingPreferences(true);
     setError(null);
+    setConnectionNeeded(false);
     try {
       await boardStoreRegistry.obsoleteAllStores();
       applyStoragePreferences(selectedDurability, selectedBackend);
@@ -115,10 +121,12 @@ export function LoginRoute() {
   const handleSignIn = async (email: string) => {
     setPending(email);
     setError(null);
+    setConnectionNeeded(false);
     try {
       await signInAs(email);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      setConnectionNeeded(cause instanceof SignInConnectionError);
       setPending(null);
     }
   };
@@ -141,11 +149,17 @@ export function LoginRoute() {
           </div>
 
           {error != null && (
-            <Alert color="red" title="Sign-in failed" variant="light">
+            <Alert
+              color={connectionNeeded ? "yellow" : "red"}
+              title={connectionNeeded ? "Connection needed" : "Sign-in failed"}
+              variant="light"
+            >
               {error}
-              <Text size="xs" mt={4}>
-                Is the stack up (`bun run infra:up`) and seeded (`bun run seed:board`)?
-              </Text>
+              {!connectionNeeded && (
+                <Text size="xs" mt={4}>
+                  Is the stack up (`bun run infra:up`) and seeded (`bun run seed:board`)?
+                </Text>
+              )}
             </Alert>
           )}
 

@@ -201,6 +201,14 @@ callback you pass to `createSyncClient`, and the runtime's `status` reports the 
 How it recovers depends on _why_ it degraded:
 
 - A **read-stream** error (a dropped shape connection) clears automatically on the next successful batch.
+  A read path that cannot reach the server **at all** — the client went offline — reports the same
+  `degraded` phase: the fetch is retried forever inside Electric's backoff, so the runtime detects it from
+  the failed attempts rather than from an error, and it clears the same way the moment a batch lands. A
+  connection that dies by **hanging** rather than failing (a pulled cable mid-long-poll) produces neither a
+  failed attempt nor a batch, so a runtime claiming `ready` is additionally held to a **read-silence
+  window** (`readSilenceMs`, default 45s — a healthy stream's long-poll always cycles well inside it):
+  silence past the window drops `ready` to the same self-recovering `degraded`. That is the phase to key an
+  offline/"connection needed" surface off; `navigator.onLine` is not a substitute.
 - A **commit** failure is **sticky** — fetching can keep succeeding while applies fail — so it clears only
   on the next commit that succeeds, _after_ you fix the underlying cause, or on a **client restart**.
   There is no separate reset call for this; `recoverSending` rebuilds the _write_ journal, not the read

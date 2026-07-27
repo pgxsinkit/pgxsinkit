@@ -26,6 +26,7 @@ import type {
 import { StorageDeclarationRefusedError } from "@pgxsinkit/contracts";
 
 import type { BootReport } from "../boot-report";
+import { syncDebug } from "../debug";
 import type { DataExportOptions, DataExportResult } from "../export-data";
 import type { DiagnosticExportOptions, DiagnosticExportResult } from "../export-dump";
 import type { StoreExportOptions, StoreExportResult } from "../export-store";
@@ -2069,6 +2070,9 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
       throw error;
     }
     const initialRows = materializer.seed(initial.rows as TRow[]);
+    // Tab-side receipt on the rail: pairs with the worker's "live-initial post" — if that line fires and
+    // this one never does, the loss is in the bridge; if both fire with 0 rows, the store was empty.
+    syncDebug("live-initial received", { rows: initialRows.length });
     // Register the live query for ADR-0049 re-subscribe: on a pipe swap, re-issue the SAME subscribe (same
     // queryId → diffs still route to the same materializer/handler) and re-seed the materializer off the fresh
     // snapshot. This is the re-attach re-establishment of live queries (ADR-0041 staged readiness); its

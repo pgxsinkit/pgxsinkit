@@ -82,3 +82,14 @@ the toolkit sees a bare path handed to `destroyStoreArtifacts`, never a list.
 _Avoid_: "orphans" (orphan GC is the separate idb sweep for unbound store ids);
 "retired workers" (nothing talks to the old worker at all — that machinery is
 gone).
+
+**Offline return**:
+A signed-in User closing the board and reopening it without connectivity, and
+landing on a usable board (ADR-0010): the app shell replays from the
+service-worker cache, and the data is whatever each table's declared retention
+kept locally — every eager table, plus the Admin's chat once activated; never the
+Member's chat, whose ephemeral lifecycle leaves no durable trace by design. The
+precondition is one full online session in that browser profile.
+_Avoid_: "offline mode" (ambiguous with the Offline toggle, which pauses the
+outbound half of a running session); "PWA" / "installable" (installability is an
+ADR-0010 non-goal).

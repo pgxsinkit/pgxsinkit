@@ -857,6 +857,9 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       {
         deliverInitial: (rows) => {
           // Initial snapshot verbatim (not a diff), correlated to the subscribe request so the tab resolves.
+          // Row COUNT on the rail: the register line proves the query ran, but only this line shows what the
+          // store actually held — a warm boot delivering 0 rows is the "empty store" diagnosis in one glance.
+          syncDebug("live-initial post", { rows: rows.length, hydrating: hydratingTables.length });
           postBridgeMessage(
             port,
             codec,

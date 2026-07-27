@@ -375,8 +375,10 @@ describe("createSyncClient subscription reset", () => {
 
   type DegradedSyncCallbacks = {
     onReadStreamError?: (error: Error) => void;
+    onReadStreamStalled?: () => void;
     onSyncActivity?: () => void;
     onSyncError?: (error: Error) => void;
+    onInitialSync?: () => void;
   };
 
   it("refreshes lastError on each new read-stream fault, then clears the stream-degraded status on recovery", async () => {
@@ -409,6 +411,65 @@ describe("createSyncClient subscription reset", () => {
     expect(client.status.phase).toBe("syncing");
   });
 
+  it("a stalled read stream degrades ONCE (never per retry), and a delivered batch clears it", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+
+    const emissions: string[] = [];
+    const client = await createSyncClient({
+      registry: degradedTestRegistry(),
+      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+      ...memoryStoreForTests("client-sync-reset-stream-stall"),
+      onStatusChange: (status) => emissions.push(status.phase),
+    });
+    await client.bootSettled;
+
+    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+    emissions.length = 0;
+
+    // Board ADR-0010: a shape fetch that keeps failing inside Electric's backoff never reaches
+    // `onError`, so this is the ONLY signal an outage produces. It must move the runtime off `syncing`.
+    input.onReadStreamStalled?.();
+    expect(client.status.phase).toBe("degraded");
+    expect(emissions).toEqual(["degraded"]);
+
+    // Electric retries forever (`maxRetries: Infinity`), so this fires on every attempt for as long as
+    // the outage lasts — the runtime must transition, not re-emit to every listener on each tick.
+    input.onReadStreamStalled?.();
+    input.onReadStreamStalled?.();
+    expect(client.status.phase).toBe("degraded");
+    expect(emissions).toEqual(["degraded"]);
+
+    // Recovery is unchanged and shared with every other stream-degraded flavour: the next delivered
+    // batch clears it (initial sync never completed here, so it returns to `syncing`, not `ready`).
+    input.onSyncActivity?.();
+    expect(client.status.phase).toBe("syncing");
+    expect(emissions).toEqual(["degraded", "syncing"]);
+  });
+
+  it("a stall never masks auth-needed, nor a sticky commit-failure degraded", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+
+    const client = await createSyncClient({
+      registry: degradedTestRegistry(),
+      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+      ...memoryStoreForTests("client-sync-reset-stall-precedence"),
+    });
+    await client.bootSettled;
+
+    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+
+    // A commit that exhausted its retries is the more serious cause: a stall must not overwrite its
+    // `lastError`, and the delivered-batch recovery must not lift it.
+    input.onSyncError?.(new Error("commit-dead"));
+    input.onReadStreamStalled?.();
+    expect(client.status.phase).toBe("degraded");
+    expect(client.status.lastError).toBe("commit-dead");
+    input.onSyncActivity?.();
+    expect(client.status.phase).toBe("degraded");
+  });
+
   it("a read-stream fault never overwrites a sticky commit-failure degraded status", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
 
@@ -434,5 +495,74 @@ describe("createSyncClient subscription reset", () => {
     input.onSyncActivity?.();
     expect(client.status.phase).toBe("degraded");
     expect(client.status.lastError).toBe("commit-dead");
+  });
+
+  it("ready falls to degraded when the read stream goes silent, and recovers on the next batch", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+
+    // The "Up to date offline" lie (maintainer-observed): a pulled cable HANGS the live long-poll, so
+    // nothing fails (the stall probe hears only settled attempts) and nothing delivers — a runtime that
+    // reached `ready` this session kept claiming it indefinitely. A healthy Electric stream is never
+    // silent (the long-poll cycles with at least a bare up-to-date), so silence past the window while
+    // claiming `ready` IS evidence, and the phase must drop to the shared stream-degraded state.
+    const emissions: string[] = [];
+    const client = await createSyncClient({
+      registry: degradedTestRegistry(),
+      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+      ...memoryStoreForTests("client-sync-reset-read-silence"),
+      readSilenceMs: 40,
+      onStatusChange: (status) => emissions.push(status.phase),
+    });
+    await client.bootSettled;
+    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+
+    input.onSyncActivity?.();
+    input.onInitialSync?.();
+    expect(client.status.phase).toBe("ready");
+
+    // Traffic inside every window keeps re-arming the watchdog: two windows with activity stay ready.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    input.onSyncActivity?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(client.status.phase).toBe("ready");
+
+    // Silence past the window → degraded, with a lastError that names the silence. Recovery is the
+    // shared stream-degraded path: the next delivered batch returns it to ready (initial sync completed
+    // this session), never a permanent wedge.
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(client.status.phase).toBe("degraded");
+    expect(client.status.lastError).toContain("silent");
+    input.onSyncActivity?.();
+    expect(client.status.phase).toBe("ready");
+    expect(emissions.at(-2)).toBe("degraded");
+    expect(emissions.at(-1)).toBe("ready");
+  });
+
+  it("stop clears the read-silence watchdog — no post-stop emission", async () => {
+    const { createSyncClient } = await import("../../packages/client/src/index");
+
+    const emissions: string[] = [];
+    const client = await createSyncClient({
+      registry: degradedTestRegistry(),
+      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+      ...memoryStoreForTests("client-sync-reset-read-silence-stop"),
+      readSilenceMs: 40,
+      onStatusChange: (status) => emissions.push(status.phase),
+    });
+    await client.bootSettled;
+    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+
+    input.onSyncActivity?.();
+    input.onInitialSync?.();
+    expect(client.status.phase).toBe("ready");
+
+    // Snapshot AFTER stop (stop may emit its own transition); the assertion is that the armed watchdog
+    // never fires past it — a cleared timer, not a suppressed emission.
+    await client.stop();
+    const emissionsAfterStop = emissions.length;
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(emissions.length).toBe(emissionsAfterStop);
   });
 });

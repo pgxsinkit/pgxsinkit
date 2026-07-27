@@ -13,7 +13,9 @@ import {
 } from "@mantine/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useBoardSyncStatus } from "../board/board-client-provider";
 import { useMessageActions } from "../chat/use-message-actions";
+import { CONNECTION_NEEDED_CHAT, isBackendUnreachable } from "../connection-needed";
 import { type ChannelRow, useChannelMessages, useChannels, useProfileMap, type ProfileRow } from "../data";
 
 function initials(name: string): string {
@@ -70,6 +72,7 @@ function MessageRowView({
 
 function ChannelMessages({ channelId, profiles }: { channelId: string; profiles: Map<string, ProfileRow> }) {
   const { messages, settled } = useChannelMessages(channelId);
+  const syncStatus = useBoardSyncStatus();
   const viewportRef = useRef<HTMLDivElement>(null);
 
   // Keep the thread pinned to the newest message — on initial load and whenever a message arrives
@@ -82,6 +85,19 @@ function ChannelMessages({ channelId, profiles }: { channelId: string; profiles:
   // Message is lazy: `settled` covers its activation + initial sync (data.ts convention), so "no
   // messages" is only ever claimed once the channel has genuinely synced empty.
   if (!settled && messages.length === 0) {
+    // Offline return (board ADR-0010): this window is unbounded when the shape can never sync — a
+    // Member's `lazy + ephemeral` chat has no durable local trace to serve, and an Admin chat never
+    // activated online has nothing to promote — so an indefinite "Loading…" would be a lie. Composed on
+    // top of `settled` rather than replacing it, and derived at render time with no latching: the moment
+    // the read path delivers a batch again the status leaves `degraded` and this reverts to the ordinary
+    // loading state on the same render.
+    if (isBackendUnreachable(syncStatus)) {
+      return (
+        <Text size="sm" c="dimmed" role="status">
+          {CONNECTION_NEEDED_CHAT}
+        </Text>
+      );
+    }
     return (
       <Text size="sm" c="dimmed">
         Loading…

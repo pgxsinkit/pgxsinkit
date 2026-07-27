@@ -106,6 +106,83 @@ The manual Chromium provision comparison is
 outside every aggregate and reports foreground attach-to-first-query timing for plain versus
 provision-ahead-of-attach samples.
 
+## Offline return (board ADR-0010)
+
+The board demo's app shell is served offline by a hand-rolled, runtime-capture service worker
+(`apps/board/public/sw.js`, plain un-bundled JavaScript copied verbatim to the build root). It is
+registered only from built output (`import.meta.env.PROD`) against `import.meta.env.BASE_URL`, so the one
+file scopes itself to `/` under `vite preview` and `/demo/` on GitHub Pages. Four behaviours are under
+test:
+
+- **Shell precache at install, first-session backfill once ready.** The install's one eager fetch is the
+  scope document, because the first navigation of a first visit completes before the worker exists. The
+  same blind spot covers the entry assets (the document's own script/style graph, requested during
+  parse), so once the worker is ready the page posts it the same-origin URLs the session has already
+  fetched and it backfills the ones runtime capture missed (`sw.js` `backfill`; still no manifest,
+  nothing a drive-by visitor didn't already download). Everything later is captured as the app fetches
+  it anyway. One online session must therefore be sufficient — the lane's cold-return scenario holds
+  that line.
+- **Two-branch fetch policy, same-origin GET only.** Navigations are network-first with a fallback to
+  the cached exact URL and then to the cached scope document (the SPA fallback the worker lane needs,
+  since that lane builds with path routing while the Pages build uses hash routing). Every other
+  same-origin GET — hashed bundles, the PGlite wasm/data blobs, the worker scripts — is cache-first with
+  background fill. Only full same-origin 200s are stored (`response.type === "basic"`), never partials,
+  opaque responses or errors; range requests and cross-origin traffic (Supabase auth, Electric, the write
+  API) are left to the network so an offline failure stays honest. There is no cache pruning:
+  superseded content-hashed entries are accepted garbage, never wrong answers.
+- **The connection-needed pattern** (`apps/board/src/connection-needed.ts`). Where data cannot exist
+  offline the surface says so instead of showing an indefinite skeleton or a dead button. Chat composes
+  the existing `settled` convention with `isBackendUnreachable(useBoardSyncStatus())` — the signal is the
+  runtime phase `degraded`, which a network-level shape-stream failure reaches through
+  `backoffOptions.onFailedAttempt` (it never escapes Electric's retry wrapper, so it is not a stream
+  error and `onReadStreamError` never sees it), and which clears back to `syncing`/`ready` on the next
+  delivered batch, so the state is derived at render time and never latched. `navigator.onLine` is not
+  consulted, and the board's
+  Offline toggle pauses only the outbound convergence driver, so flipping it must NOT produce the state.
+  Sign-in renders outside the sync provider and therefore keys off the auth error's shape instead:
+  supabase-js reports a rejected `fetch` as `AuthRetryableFetchError` with status `0`, which
+  `signInAs` translates to a `SignInConnectionError`; a 5xx of the same class, and any `AuthApiError`
+  (a rejected credential), stay verbatim. This makes the auth-error vocabulary an upgrade gate — a
+  supabase-js bump that changes it must be re-pinned here.
+- **The outage signal the pattern keys off** (`packages/client/src/read-stream-stall.ts`). Electric
+  retries a failed shape fetch forever inside `createFetchWithBackoff` and only re-throws a non-retryable
+  4xx, so a network outage never reaches `ShapeStream.onError` at all; the client passes
+  `backoffOptions.onFailedAttempt` on every read shape and turns it into the existing `degraded` phase
+  (`degradedReason: "stream"`). Three things are pinned against the REAL `ShapeStream`: a rejecting fetch
+  and a 5xx report a stall while the stream's error channel stays silent; an escaping 4xx does NOT (401/
+  403/404/409 reach `createShapeErrorHandler`, which owns them with a real message, so the two seams
+  partition the failures); and a deliberate abort — teardown, hidden tab, live-request timeout, system
+  wake, live-tail nudge — is not a failure and must not report one. The runtime side pins the transition:
+  degrade ONCE however long the outage lasts (Electric calls back on every retry tick), never mask
+  `auth-needed` or a commit-failure degraded, and clear on the next delivered batch. Coverage:
+  `tests/unit/read-stream-stall.test.ts` (probe + `startConfiguredSync` wiring, including a lazy group
+  activated after boot) and `tests/unit/client-sync-reset.test.ts` (the status machine).
+- **The read-silence watchdog** (`readSilenceMs`, default 45s). The stall probe hears only SETTLED
+  attempts, so a connection that dies by HANGING (a physically pulled cable mid-long-poll) produces no
+  signal at all — and a runtime that reached `ready` this session kept claiming "up to date" for the whole
+  outage, broadcasting that claim to every attaching tab in worker mode. A healthy Electric stream is
+  never silent (the live long-poll cycles ~every 20-25s with at least a bare up-to-date, each firing
+  `onSyncActivity`), so silence past the window while claiming `ready` drops the phase to the same
+  self-recovering stream-degraded state. Pinned in `tests/unit/client-sync-reset.test.ts`: activity inside
+  every window holds `ready`; silence past it degrades with a lastError naming the silence; the next batch
+  returns `ready`; and `stop()` clears the armed timer (no post-stop emission).
+
+The proof lane is a chromium offline-return e2e in the existing worker harness (`test:integration:worker`,
+which serves the BUILT app): sign in online, boot fully, write, close the page, flip the same browser
+context offline (same profile = same store, session and caches), open a new page, and assert the
+navigation is service-worker-served, the board reaches interactive, eager tables render local rows, the
+role-split chat behaviour holds (Admin promoted history versus the Member's ephemeral chat taking the
+connection-needed state), and an offline write journals then converges after going online. The suite's
+cold-return scenario is the strictest form and the maintainer's manual repro verbatim: one online session
+with no reload anywhere, a wait past the SharedWorker's `extendedLifetime` grace so the engine is dead,
+then an offline reopen that must cold-boot the engine from the worker cache alone and still paint — the
+fast-reopen scenarios can be answered by a surviving worker, so only this one proves the first-session
+backfill and the dead-engine boot path. Its assertions are CONTENT-level — the landing redirect completing
+offline (`/team/…/board`) and the kanban columns rendering — because sidebar-only assertions once passed
+while the real board sat on an eternal spinner (the home route's redirect was gated on `settled`, which no
+offline boot can ever reach; local rows must drive navigation).
+`tests/e2e/board-offline-return.e2e.test.ts` is the owning suite; nothing else claims this coverage.
+
 ## Integration tests
 
 Integration tests are container-backed and require `infra/compose/docker-compose.yml`.

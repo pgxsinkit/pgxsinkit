@@ -34,6 +34,16 @@ Two things make the static build work under a subpath:
   keeps every route under `/demo/index.html`, so deep-links and refreshes always boot the SPA. Local dev and
   `board:cloud:dev` keep clean path URLs.
 
+## Offline return
+
+A signed-in visitor who closes the demo and reopens it without connectivity boots to a usable board. A
+small runtime-capture **service worker** (no precache — it caches only what that visitor's own boots
+already fetched) replays the app shell and the PGlite engine assets; the data is whatever each table's
+declared retention kept in the local store — every eager table, plus the Admin's chat once activated.
+The Member's chat is ephemeral by design and instead shows an explicit connection-needed state, as does
+sign-in itself — the capability is offline _return_, not first-visit offline. Board
+[ADR-0010](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0010-offline-return.md).
+
 ## Reset nightly (purge → migrate → reseed)
 
 The demo is **public and writable** — anyone can create and move issues and post chat. A separate workflow,

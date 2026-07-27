@@ -298,6 +298,12 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
                 return undefined;
               }
               subscription = registered;
+              // The initial render on the rail: "updated → re-render" covers only later diffs, so without
+              // this line a first snapshot — including an honest zero-row one — is invisible in a debug log.
+              syncDebug("live query initial → render", {
+                rows: registered.initialRows.length,
+                hydrating: registered.hydrated != null,
+              });
               setState((prev) => ({
                 rows: mapRows(registered.initialRows),
                 loading: false,

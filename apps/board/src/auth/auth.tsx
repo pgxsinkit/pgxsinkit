@@ -4,6 +4,7 @@ import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef, 
 import { timeAsync } from "@pgxsinkit/client";
 
 import { boardConfig } from "../config";
+import { isSignInConnectionFailure, SignInConnectionError } from "../connection-needed";
 import { supabase } from "../lib/supabase";
 import { createAuthTransitionCoordinator } from "./auth-transition";
 
@@ -83,7 +84,14 @@ export function AuthProvider({
       isAdmin: Boolean((session?.user.app_metadata?.["roles"] as string[] | undefined)?.includes("admin")),
       signInAs: async (email: string) => {
         const { error } = await supabase.auth.signInWithPassword({ email, password: boardConfig.seedPassword });
-        if (error) throw error;
+        if (error) {
+          // Connection-needed (board ADR-0010): a signed-out visitor has nothing offline by definition, so
+          // an unreachable GoTrue is a distinct, self-explaining outcome rather than a raw "Failed to
+          // fetch". Translated HERE — the one place that sees supabase's error vocabulary — and only for
+          // the network-failure shape; a rejected credential still surfaces verbatim.
+          if (isSignInConnectionFailure(error)) throw new SignInConnectionError({ cause: error });
+          throw error;
+        }
       },
       signOut: async () => {
         const { error } = await supabase.auth.signOut();

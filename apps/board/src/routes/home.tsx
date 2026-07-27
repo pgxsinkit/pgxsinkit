@@ -17,11 +17,19 @@ export function HomeRoute() {
       void navigate({ to: "/login" });
       return;
     }
-    if (!settled) return;
+    // Rows-first: redirect the moment ANY team row is present. Local rows are authoritative for
+    // navigation — gating the redirect on `settled` held a signed-in user on this spinner FOREVER when
+    // offline (ADR-0010): `hydrating` clears only when the initial catch-up completes, which a dead or
+    // unreachable network never does, while the store's rows were right here all along. `settled` keeps
+    // exactly one job — interpreting EMPTINESS (the convention it exists for): zero rows only means
+    // "no teams" once the catch-up has genuinely finished.
     const first = teams[0];
     if (first != null) {
       void navigate({ to: "/team/$teamId/board", params: { teamId: first.id } });
-    } else if (isAdmin) {
+      return;
+    }
+    if (!settled) return;
+    if (isAdmin) {
       void navigate({ to: "/all" });
     }
   }, [session, isAdmin, teams, settled, navigate]);

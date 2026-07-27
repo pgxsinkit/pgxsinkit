@@ -3,6 +3,8 @@ import { Center, Loader, MantineProvider } from "@mantine/core";
 import { RouterProvider } from "@tanstack/react-router";
 import ReactDOM from "react-dom/client";
 
+import { syncDebug } from "@pgxsinkit/client";
+
 import { AuthProvider, useAuth } from "./auth/auth";
 import { BoardClientProvider } from "./board/board-client-provider";
 import { applyPendingLocalDataWipe } from "./board/local-data";
@@ -52,6 +54,44 @@ void (async () => {
   // registry's Obsolete list for `destroyObsoleteStores` to retry each boot (see local-data.ts). A no-wipe
   // boot returns immediately; a wipe is timeout-clamped per target, so boot can never hang on it.
   await applyPendingLocalDataWipe();
+
+  // Offline return (board ADR-0010): register the runtime-capture service worker that lets a signed-in
+  // User reopen the board with no connectivity. `public/sw.js` is copied to the build root, so with base
+  // `/demo/` it serves at `/demo/sw.js` and its default scope is `/demo/` — the same file, correctly
+  // scoped, on both surfaces. PROD-gated: `vite dev` serves un-hashed modules a cached copy would shadow,
+  // and the dev boot must stay a straight line to the sources. The e2e lane runs the BUILT app under
+  // `vite preview`, so the worker IS active there — deliberately, since it is what the offline-return
+  // scenarios exercise. Never awaited and never allowed to throw: registration is a background capability,
+  // not a boot dependency.
+  if (import.meta.env.PROD && "serviceWorker" in navigator) {
+    void (async () => {
+      try {
+        await navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
+        const registration = await navigator.serviceWorker.ready;
+        // First-session backfill (ADR-0010): the entry assets — this document's own script/style graph —
+        // were fetched during parse, BEFORE the worker existed, so runtime capture structurally misses
+        // them and a single-session visitor would have no offline shell. Hand the worker the same-origin
+        // URLs this session already fetched (nothing a drive-by visitor didn't download anyway); it
+        // caches the ones it missed while we are still online, mostly straight from the HTTP cache.
+        // Deferred off the boot path — the capture window has no deadline while the session is up.
+        setTimeout(() => {
+          const urls = [
+            ...new Set(
+              performance
+                .getEntriesByType("resource")
+                .map((entry) => entry.name)
+                .filter((name) => name.startsWith(location.origin)),
+            ),
+          ];
+          registration.active?.postMessage({ type: "backfill", urls });
+        }, 3000);
+      } catch (cause: unknown) {
+        syncDebug(
+          `board service worker registration failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
+    })();
+  }
 
   // Obsolete-store cleanup (ADR-0050): destroy the store paths a past "Apply & reload" dropped —
   // fire-and-forget in the background, NEVER awaited on the boot path. A path a live extended-lifetime

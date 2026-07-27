@@ -402,6 +402,20 @@ const OPFS_OPEN_BACKOFF_MS = 100;
 /** The opfs-repacked store extent size (ADR-0049 step 10a). */
 const OPFS_STORE_EXTENT_SIZE = 65536;
 /**
+ * `status.lastError` for a read stream that cannot reach the server at all (board ADR-0010). Unlike every
+ * other `degraded` cause there is no Error to describe: Electric's `onFailedAttempt` carries no argument,
+ * because the failure never escaped its retry wrapper. The string says what is knowable and no more.
+ */
+const READ_STREAM_UNREACHABLE = "read stream unreachable: a shape fetch failed and is retrying with backoff";
+/**
+ * Default {@link CreateSyncClientOptions.readSilenceMs}. A healthy Electric read path is never silent —
+ * the live long-poll cycles roughly every 20-25s with at least a bare up-to-date, and every cycle fires
+ * `onSyncActivity` — so two full cycles of nothing while claiming `ready` is evidence, not caution.
+ */
+const READ_SILENCE_MS = 45_000;
+/** `status.lastError` for the read-silence watchdog: nothing failed — that is exactly the problem. */
+const READ_STREAM_SILENT = "read stream silent: no server response inside the silence window while reporting ready";
+/**
  * Non-enumerable brand stamped on an opfs-repacked instance {@link createClientPGlite} mints (ADR-0049): the
  * opfs-repacked VFS owns its store on a dedicated OPFS directory and reports NO `dataDir` (a custom VFS, the
  * field is honestly `undefined`), so the BYO "non-persistent" guard ({@link classifyNonPersistentDataDir},
@@ -880,6 +894,15 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    */
   writeRequestHeaders?: Record<string, string>;
   syncEnabled?: boolean;
+  /**
+   * The read-silence window (ms) after which a runtime claiming `ready` drops to `degraded` (reason
+   * "stream"). A pulled cable HANGS the live long-poll — nothing fails (the stall probe hears only settled
+   * attempts), nothing delivers — so without this a session that once reached `ready` would report
+   * "up to date" for as long as the outage lasts. A healthy stream is never silent (the long-poll cycles
+   * ~every 20-25s), so the default of 45s spans two full cycles. Self-recovering: the next delivered batch
+   * returns `ready`. Status honesty only — nothing is retired or torn down.
+   */
+  readSilenceMs?: number;
   /**
    * The local store's name (ADR-0036) — a PLAIN path/name, never a PGlite storage URL. The storage backend
    * is DERIVED from the engine home (capability-selected opfs-repacked with IndexedDB fallback in a browser,
@@ -2002,6 +2025,36 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // `onSyncActivity` must not clear it.
   let degradedReason: "stream" | "commit" | null = null;
 
+  // ─── Read-silence watchdog ───────────────────────────────────────────────────────────────────────
+  // The "up to date offline" lie: a pulled cable HANGS the live long-poll, so the stall probe (which hears
+  // only SETTLED attempts) stays quiet and no batch ever delivers — a runtime that reached `ready` this
+  // session would claim it for the whole outage, and in worker mode broadcast that claim to every attaching
+  // tab. Silence past the window while claiming `ready` is therefore itself the evidence, and the phase
+  // drops to the shared stream-degraded state, recovering exactly where every stream flavour does (the next
+  // delivered batch). This is timing-based STATUS honesty, not timing-based retirement — nothing is torn
+  // down or restarted (ADR-0049 D5 governs the latter). Armed on `ready` and re-armed on every activity;
+  // never armed with sync disabled (`ready` there means "boot complete", with no server to hear from).
+  const readSilenceMs = options.readSilenceMs ?? READ_SILENCE_MS;
+  let readSilenceTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearReadSilenceWatchdog = (): void => {
+    if (readSilenceTimer != null) {
+      clearTimeout(readSilenceTimer);
+      readSilenceTimer = null;
+    }
+  };
+  const armReadSilenceWatchdog = (): void => {
+    if (!syncEnabled) return;
+    clearReadSilenceWatchdog();
+    readSilenceTimer = setTimeout(() => {
+      readSilenceTimer = null;
+      if (disposed || status.phase !== "ready") return;
+      status.phase = "degraded";
+      degradedReason = "stream";
+      status.lastError = READ_STREAM_SILENT;
+      options.onStatusChange?.(status);
+    }, readSilenceMs);
+  };
+
   // ─── Fresh-store prefetch overlap (ADR-0032 S4 / backlog-0003) ─────────────────────────────────────
   // On a PROVABLY-FRESH store (the caller's `freshStore` hint — a claimed schemaless spare) the shape
   // catch-up needs none of the local boot phases, so start it NOW and gate its commits on `dbReady`, which
@@ -2060,6 +2113,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // finalize below never double-fires it.
       finalizeBootReport();
       resolveReady();
+      // `ready` is now a CLAIM the watchdog holds to account: silence past the window drops it back to
+      // degraded — the "up to date offline" lie a hung long-poll otherwise sustains.
+      armReadSilenceWatchdog();
     },
     onSyncError: (error) => {
       // A sync commit exhausted its retries (ADR-0009 decision 5): go degraded and surface it, rather than
@@ -2088,6 +2144,25 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       status.lastError = describeErrorChain(error);
       options.onStatusChange?.(status);
     },
+    // Board ADR-0010: a shape FETCH ATTEMPT failed and Electric is retrying it inside its own backoff
+    // wrapper. This is the only signal an outage produces — a rejected fetch is retryable, so it never
+    // escapes to `onError` and `onReadStreamError` above is never called (Electric retries forever:
+    // "clients may go offline and come back"). Without this the runtime reports `syncing` for as long as
+    // the machine is offline, and a consumer keying off the phase can never say "connection needed". The
+    // two seams partition the failures (see `read-stream-stall.ts`), so this can never pre-empt the
+    // richer classification: an auth 4xx escapes the wrapper and lands on `onAuthError`, not here.
+    //
+    // TRANSITION-only: Electric calls this on every retry tick for as long as the outage lasts, so
+    // re-entering `degraded` would re-emit to every status listener (and, in worker mode, re-broadcast to
+    // every attached tab) roughly once a second, forever. Precedence matches `onReadStreamError`: never
+    // mask `auth-needed` (more actionable) nor a commit-failure degraded (more serious).
+    onReadStreamStalled: () => {
+      if (status.phase === "auth-needed" || status.phase === "degraded") return;
+      status.phase = "degraded";
+      degradedReason = "stream";
+      status.lastError = READ_STREAM_UNREACHABLE;
+      options.onStatusChange?.(status);
+    },
     // Clear a recoverable status (auth-needed, or a read-stream degraded) the moment a batch is delivered
     // again. A commit-failure degraded is NOT cleared here — a fetch can succeed while applies keep failing,
     // so only `onSyncError` clearing (a clean commit) would lift it.
@@ -2097,6 +2172,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         status.phase = initialSyncCompleted ? "ready" : "syncing";
         options.onStatusChange?.(status);
       }
+      // Every delivered batch (including a bare up-to-date) is proof of life: re-arm the silence window.
+      // Harmless pre-`ready` — the watchdog's callback only ever acts on a runtime claiming `ready`.
+      armReadSilenceWatchdog();
     },
     // ADR-0013 Phase 3: surface a persistent read-path auth failure as a distinct `auth-needed` status (the
     // app prompts re-login) while the stream keeps retrying for a fresh token. Only wired when a token
@@ -2302,6 +2380,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // manage to start is assigned to `sync` by the time this resolves, for the caller's `sync?.unsubscribe()`.
   const quiesceTailForTeardown = async (): Promise<void> => {
     disposed = true;
+    // A disposed client must leave no pending timer behind (the close-hang discipline): the callback's
+    // `disposed` guard already suppresses a late fire, but the cleared handle is what lets the realm quiesce.
+    clearReadSilenceWatchdog();
     // FIX 2: a stopped client can never reach `writeReady` / `ready`, so reject them (idempotent — a race with
     // the tail's own resolve is settled first-wins; a normal stop AFTER boot is a no-op on the already-resolved
     // promises) so a parked mutation or an `await ready` / `start()` fails FAST rather than hanging past
@@ -2324,6 +2405,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // after; this only guarantees the network + scheduling are already dead when it does.
   const haltActivity = (): void => {
     disposed = true;
+    clearReadSilenceWatchdog();
     mutationRuntime.abortInFlight();
     void engine.close();
     void convergenceDriver?.stop();

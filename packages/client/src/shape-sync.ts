@@ -10,6 +10,7 @@ import {
 } from "@pgxsinkit/contracts";
 
 import type { BootStampCollector, GroupBootStamp } from "./boot-report";
+import { createReadStreamStallProbe } from "./read-stream-stall";
 import type { SyncNamespaceObj } from "./sync";
 import { createShapeErrorHandler } from "./sync-auth";
 
@@ -79,6 +80,15 @@ export interface StartConfiguredSyncOptions {
    * never silently believes the read path is live while it has actually stalled.
    */
   onReadStreamError?: (error: Error) => void;
+  /**
+   * Notified when a shape's fetch ATTEMPT failed and Electric is retrying it inside its own backoff
+   * wrapper (board ADR-0010): a rejected request (the offline case — no HTTP status at all), a 5xx, or a
+   * 429. The complement of {@link onReadStreamError}, which only ever fires for an error that ESCAPED that
+   * wrapper (any other 4xx) — which a network outage never does, since Electric retries it forever. Fires
+   * per attempt for as long as the outage lasts, so the runtime owns the transition; a deliberate abort
+   * (teardown, hidden tab, nudge refresh) is not a failure and is filtered out. See `read-stream-stall.ts`.
+   */
+  onReadStreamStalled?: () => void;
   /**
    * Notified when a shape successfully delivers a batch — i.e. a fetch just succeeded (ADR-0013
    * Phase 3). The runtime uses this to clear an `auth-needed`/`degraded` status once sync resumes.
@@ -310,6 +320,7 @@ export async function startConfiguredSync(
       ...(input.onSyncError ? { onSyncError: input.onSyncError } : {}),
       ...(input.onAuthError ? { onAuthError: input.onAuthError } : {}),
       ...(input.onReadStreamError ? { onReadStreamError: input.onReadStreamError } : {}),
+      ...(input.onReadStreamStalled ? { onReadStreamStalled: input.onReadStreamStalled } : {}),
       ...(input.onSyncActivity ? { onSyncActivity: input.onSyncActivity } : {}),
       onGroupInitialSync: () => {
         // The group is up-to-date as a unit; signal each member table, mark the group ready (per-group
@@ -419,6 +430,8 @@ interface StartGroupSyncOptions {
   onSyncError?: (error: Error) => void;
   onAuthError?: () => void;
   onReadStreamError?: (error: Error) => void;
+  /** A failed fetch ATTEMPT inside Electric's backoff loop; see {@link StartConfiguredSyncOptions.onReadStreamStalled}. */
+  onReadStreamStalled?: () => void;
   onSyncActivity?: () => void;
 }
 
@@ -438,22 +451,33 @@ export async function startGroupSync(pg: SyncEnginePGlite, input: StartGroupSync
     ...(input.onReadStreamError ? { onReadStreamError: input.onReadStreamError } : {}),
   });
 
+  // The failed-attempt probe is `onError`'s complement and the reason it exists: `onError` sees only the
+  // failures that ESCAPE Electric's retry wrapper, which a network outage never does — it is retried in
+  // there forever (board ADR-0010). The two PARTITION the failure space; neither masks the other. One probe
+  // per shape — each classifies its own in-flight request — and none at all when no consumer wants the
+  // signal, so the off-path keeps Electric's untouched fetch/backoff wiring.
+  const onReadStreamStalled = input.onReadStreamStalled;
+
   const shapes = Object.fromEntries(
-    input.specs.map((spec) => [
-      spec.key,
-      {
-        shape: {
-          // Ingress `table` = the unique `shapeKey` (proxy maps it to the physical table on egress).
-          url: buildShapeUrl(spec.electricUrl, spec.shapeKey),
-          ...(shapeHeaders ? { headers: shapeHeaders } : {}),
-          onError,
+    input.specs.map((spec) => {
+      const stallProbe = onReadStreamStalled ? createReadStreamStallProbe({ onStalled: onReadStreamStalled }) : null;
+      return [
+        spec.key,
+        {
+          shape: {
+            // Ingress `table` = the unique `shapeKey` (proxy maps it to the physical table on egress).
+            url: buildShapeUrl(spec.electricUrl, spec.shapeKey),
+            ...(shapeHeaders ? { headers: shapeHeaders } : {}),
+            onError,
+            ...(stallProbe ? { backoffOptions: stallProbe.backoffOptions, fetchClient: stallProbe.fetchClient } : {}),
+          },
+          // ADR-0029 D1: the registry table key is the engine's sole per-table spec — the local apply
+          // target, PKs, strategy, and column types all derive from `(registry, tableKey)`. The
+          // `syncConfig` table key IS the registry key, so the spec's `key` is the `tableKey`.
+          tableKey: spec.key,
         },
-        // ADR-0029 D1: the registry table key is the engine's sole per-table spec — the local apply
-        // target, PKs, strategy, and column types all derive from `(registry, tableKey)`. The
-        // `syncConfig` table key IS the registry key, so the spec's `key` is the `tableKey`.
-        tableKey: spec.key,
-      },
-    ]),
+      ];
+    }),
   );
 
   return getElectricNamespace(pg).syncShapesToTables({
