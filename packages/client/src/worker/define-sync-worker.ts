@@ -30,7 +30,6 @@ import { type ConvergenceTrigger, createIntervalConvergenceTrigger } from "../co
 import { setSyncDebugSink, syncDebug } from "../debug";
 import { describeErrorChain } from "../error-chain";
 import {
-  type AdoptionDeclaration,
   type ClientPGlite,
   createClientPGlite,
   type CreateSyncClientOptions,
@@ -44,8 +43,9 @@ import {
 } from "../index";
 import { wrapLiveQueryForMaterialization } from "../live-rows-sql";
 import type { LocalStoreVersionEvent } from "../local-store";
+import { createOpfsEffects } from "../opfs-effects";
 import { type PlacementProbeResult, probeOpfsSyncAccess } from "../placement-probe";
-import { META_STORE_UNAVAILABLE, readStoreMetaRecord } from "../store-meta";
+import { idbStoreExists, META_STORE_UNAVAILABLE, readStoreMetaRecord, writeStoreMetaRecord } from "../store-meta";
 import { readTestStoreMarker, TEST_STORE_BACKEND, type TestStoreMarker } from "../store-path";
 import {
   assertSameExecutionLimit,
@@ -133,17 +133,6 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    * Takes a plain store PATH (ADR-0036); the internal `backendOverride` is the test lane's memory selection.
    */
   createPglite?: (storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>;
-  /**
-   * ADR-0049 (capability-driven engine placement) decision 7, plan step 11b: the consumer's explicit
-   * reconstructibility DECLARATION authorizing AUTOMATIC adoption of an existing idb-authoritative store into a
-   * committed OPFS successor. A worker-ENTRY option (baked into the worker file as code, like
-   * {@link executionLimit}), NEVER an attach option — a tab cannot set it (adoption DELETES local-only data, so
-   * only the code author may authorize it). Forwarded verbatim to the {@link createSyncClient} boot below. DEFAULT
-   * OFF (`undefined`): hook absence is never authority — only `"server-reconstructible"` (or the manual
-   * `adoptStore` API) authorizes deleting the idb predecessor. Honoured only where the engine home grants OPFS
-   * access (SW-direct / elected placement); inert on the browser-idb fallback where there is no opfs successor.
-   */
-  adoption?: AdoptionDeclaration;
   electricUrl: string;
   batchWriteUrl: string;
   /** Static headers on every read + write request (e.g. a gateway `apikey`). See `createSyncClient`. */
@@ -618,10 +607,6 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       // engine boots IDBFS and stamps this verbatim reason into the BootReport's `storageFallbackReason`. Absent
       // on a granted opfs boot and on the declared-idbfs mode (which is the contract, not a fallback).
       ...(placementFallbackReason ? { storageFallbackReason: placementFallbackReason } : {}),
-      // Adoption declaration (ADR-0049 D7, step 11b): a worker-entry option (never attach-controlled). When the
-      // engine home grants OPFS access, an existing idb-authoritative store is migrated to a committed opfs
-      // successor at boot. Default off (absent) — nothing is ever deleted without this explicit declaration.
-      ...(options.adoption ? { adoption: options.adoption } : {}),
       // Fresh-store prefetch overlap (ADR-0032 S4): the tab's claim path proved this store a schemaless
       // spare and forwarded the hint in the attach config, so the shape catch-up overlaps schema exec +
       // journal recovery + registry reconciliation. Never inferred from "adopting a provisioned store": the board
@@ -965,19 +950,97 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         // holds access to, not idbfs, so the adopting boot backend matches its engine home. Opens the gate at
         // once for SW-direct / plain scopes (already settled before any port connects).
         const attempt = placementGate.then(async () => {
-          // Provision is only an accelerator, never an authority-recovery path. Read the meta record on EVERY
-          // persistent placement before minting. If deletion is live, decline the pre-mint and let the first
-          // attach run createSyncClient's full ordinary phase machine. This closes both granted and denied lanes:
-          // no replacement (and therefore no journal) can be created beneath a record a later boot must delete.
+          // Provision is only an accelerator, never an authority-recovery path: it proceeds ONLY on state the
+          // adopting boot would open IDENTICALLY, and DECLINES everything else, leaving the first attach's
+          // `createSyncClient` phase machine — the one recovery authority — to own it. The gate follows THIS
+          // scope's placement, because the two lanes consult the record differently:
+          //
+          // GRANTED lane (this scope holds OPFS handles — the full clean-state matrix):
+          //   - record `opfs-committed` → mint (the warm-reopen accelerator: the factory opens the committed store).
+          //   - NO record, the commitment namespace is a PROVABLE VIRGIN (no sentinel, no store directory), AND
+          //     no idb store exists at this path → record `opfs-candidate` BEFORE the mint creates the directory
+          //     (record-before-directory, invariant 12), then mint. The adopting boot's commitment barrier
+          //     promotes that candidate to `opfs-committed` pre-expose, so no store is ever left uncommitted.
+          //     The idb check is load-bearing: a store's backend is fixed at first mint, so a granted home over
+          //     an existing idb store opens it `idb-authoritative` — an OPFS candidate here would commit an
+          //     EMPTY store over the user's data.
+          //   - ANY other state — a live `deleting` authority, a torn `opfs-candidate`, an `idb-authoritative`
+          //     record, an existing idb store, or recordless residue in the commitment namespace — → DECLINE. No
+          //     replacement (and therefore no journal) may be created beneath state a later boot must resolve.
+          //
+          // NO-GRANT lane (the idb provision lane): decline on `deleting`, `opfs-candidate` and
+          // `opfs-committed`. A no-grant boot is RECORD-BLIND apart from those three — `resolveFreshBoot`
+          // short-circuits straight to idbfs without consulting the record further — so declining on
+          // `idb-authoritative` protects nothing the adopting boot would not do identically; it only forfeits
+          // the accelerator. The three it DOES honour, all via `resolveDeniedBootAuthority`: `deleting` (finish
+          // the handoff — no replacement minted beneath it), `opfs-candidate` (that boot RETIRES the unexposed
+          // candidate — sentinel, directory, then idb authority — so nothing may be minted beneath a record it
+          // has still to resolve), and `opfs-committed`, which that boot REFUSES typed
+          // (`CommittedStoreUnreachableError`) because this home cannot open the committed OPFS store. Minting
+          // the idb sibling here is the exact hazard the refusal exists to prevent — and it would be minted
+          // BEFORE the attach that refuses, so the accelerator must decline first. Nothing is recorded in this
+          // lane: it has no opfs commitment machinery to honour.
+          //
+          // Whether this provision owes the candidate record; written just before the mint, so losing the race
+          // below leaves no orphan record behind.
+          let recordCandidateBeforeMint = false;
           if (backendOverride !== "memory") {
             const record = await readStoreMetaRecord(storePath);
-            if (record !== META_STORE_UNAVAILABLE && record?.phase === "deleting") {
-              syncDebug("worker provision declined — deletion authority is live", { storePath });
+            const metaUnavailable = record === META_STORE_UNAVAILABLE;
+            const phase = metaUnavailable ? undefined : record?.phase;
+            if (phase === "opfs-committed" && !placementOpfsAccess) {
+              syncDebug(
+                "worker provision declined — the store is committed to OPFS and this home holds no sync access",
+                {
+                  storePath,
+                },
+              );
               return;
+            }
+            if (
+              phase !== undefined &&
+              phase !== "opfs-committed" &&
+              (placementOpfsAccess || phase === "deleting" || phase === "opfs-candidate")
+            ) {
+              syncDebug("worker provision declined — the store phase is owned elsewhere", { storePath, phase });
+              return;
+            }
+            if (phase === undefined && placementOpfsAccess) {
+              // A candidate is authoritative only once RECORDED, so a scope that cannot hold a record at all has
+              // no way to mint one.
+              if (metaUnavailable) {
+                syncDebug("worker provision declined — no meta store to record an opfs candidate", { storePath });
+                return;
+              }
+              const observation = await createOpfsEffects(storePath).observeCommitmentNamespace();
+              const virgin =
+                observation !== "unobservable" && !observation.sentinelPresent && !observation.storeDirectoryPresent;
+              if (!virgin) {
+                syncDebug("worker provision declined — the commitment namespace is not a provable virgin", {
+                  storePath,
+                  observation,
+                });
+                return;
+              }
+              // A pristine commitment namespace is NOT proof of a virgin STORE. A store's backend is fixed at
+              // first mint: a granted home meeting an existing idb store opens it `idb-authoritative` (boot
+              // classification 6, invariant 14), so minting an OPFS candidate here would commit an EMPTY store
+              // over the user's data. Same NON-CREATING check the boot classifier keys on.
+              if (await idbStoreExists(storePath)) {
+                syncDebug("worker provision declined — an idb store already exists at this path", { storePath });
+                return;
+              }
+              recordCandidateBeforeMint = true;
             }
           }
           // An attach or another completed provision may have won while the bounded read was in flight.
           if (bootPromise != null || provisioned != null) return;
+          // Record-before-directory (invariant 12): the mint's factory creates the store directory, so the
+          // `opfs-candidate` record goes in FIRST — a crash between them leaves a recorded candidate the next boot
+          // deletes and rebuilds, never an unrecorded directory that reads as residue.
+          if (recordCandidateBeforeMint) {
+            await writeStoreMetaRecord(storePath, { phase: "opfs-candidate", updatedAt: Date.now() });
+          }
 
           const provisionStartedAt = nowStamp();
           const pglite = Promise.resolve().then(() => createPglite(storePath, backendOverride));
@@ -1430,9 +1493,10 @@ function isControlPortDelivery(data: unknown): boolean {
  * - `assign-identity` → remember it (gates every subsequent tagged message) and reply `engine-ready`. That
  *   signals CONTROL-plane readiness, NOT engine boot — the engine still boots lazily on the FIRST attach, as
  *   today (the first `connect-port` pipe's traffic drives `boot`).
- * - `connect-port` (matching identity) + a transferred port → wrap it into a {@link BridgePort} (started if it
- *   exposes `start()`, exactly as the implicit scope port is wrapped) and feed it to the SAME `connect(...)`
- *   the entry already uses N times — dynamic per-tab pipe acceptance (ADR D4).
+ * - `connect-port` (matching identity) → reply `connect-port-ack` IMMEDIATELY (the router's engine-liveness
+ *   proof: a dead engine's realm answers nothing and the router retires it), then wrap the transferred port into
+ *   a {@link BridgePort} (started if it exposes `start()`, exactly as the implicit scope port is wrapped) and
+ *   feed it to the SAME `connect(...)` the entry already uses N times — dynamic per-tab pipe acceptance (ADR D4).
  * - `control-ping` → reply `control-ack` with the assigned identity (or the ping's, pre-assignment) and the
  *   SAME `pingId`. Answered on the event loop, so a WASM-blocked engine cannot answer — which is exactly the
  *   execution-limit's liveness signal.
@@ -1463,6 +1527,10 @@ function startEngineControlPlane(
         return;
       case "connect-port": {
         if (!shouldApplyControlMessage(assigned, message)) return; // stale → discard
+        // Answer the router's liveness question FIRST — before the pipe is touched at all. The ack proves only
+        // that this engine's realm still exists (the router's bounded window is armed on the delivery), and the
+        // identity is the assigned one: the gate above just proved they are equal.
+        post({ type: "connect-port-ack", identity: message.identity });
         const transferred = event.ports?.[0];
         if (!transferred) return;
         connect(wrapControlPortAsBridge(transferred));

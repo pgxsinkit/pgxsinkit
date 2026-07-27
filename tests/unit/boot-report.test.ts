@@ -226,13 +226,13 @@ describe("BootReport — engine-placement diagnostics (ADR-0049 decision 12)", (
   it("stamps engineHome from init and storageBackend/storageFallbackReason from the setters", () => {
     const builder = createBootReportBuilder({ ...baseInit, mode: "worker", engineHome: "elected-worker" });
     builder.setStorageBackend("idbfs");
-    builder.setStorageFallbackReason("adoption deferred (journal-owed)");
+    builder.setStorageFallbackReason("recordless idb store opened in place (invariant 14)");
     const report = builder.finalize();
 
     expect(report.reportVersion).toBe(1);
     expect(report.engineHome).toBe("elected-worker");
     expect(report.storageBackend).toBe("idbfs");
-    expect(report.storageFallbackReason).toBe("adoption deferred (journal-owed)");
+    expect(report.storageFallbackReason).toBe("recordless idb store opened in place (invariant 14)");
   });
 
   it("carries a `shared-worker` engine home + `opfs-repacked` backend with no fallback (the SW-direct boot)", () => {

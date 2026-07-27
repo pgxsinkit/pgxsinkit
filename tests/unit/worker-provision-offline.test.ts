@@ -22,7 +22,13 @@ import {
   provisionSyncWorker,
   type SyncWorkerHost,
 } from "../../packages/client/src/index";
-import { opfsCommitmentSentinelPath, storeIdentityComponent } from "../../packages/client/src/store-path";
+import { STORE_META_DATABASE } from "../../packages/client/src/store-meta";
+import {
+  opfsCommitmentSentinelPath,
+  opfsStoreDirectoryPath,
+  storeIdentityComponent,
+  storeIndexedDbDatabaseName,
+} from "../../packages/client/src/store-path";
 import { memoryStoreForTests, testStoreAcknowledgment } from "../../packages/client/src/testing";
 
 const todosRegistry = defineSyncRegistry({
@@ -157,6 +163,8 @@ class FakeMetaDatabase {
 
 class FakeAuthorityIdb {
   readonly store: FakeMetaStore;
+  /** PGlite's own idb databases (`/pglite/<storePath>`) this scope already holds — the `idbStoreExists` fact. */
+  readonly pgliteDatabases = new Set<string>();
   private readonly database: FakeMetaDatabase;
   private readonly order: string[];
   constructor(order: string[]) {
@@ -165,15 +173,34 @@ class FakeAuthorityIdb {
     this.database = new FakeMetaDatabase(this.store);
   }
 
-  open() {
+  /** Seed PGlite's idb database for a store, as a store minted on the idb backend leaves it. */
+  seedPgliteDb(storePath: string): void {
+    this.pgliteDatabases.add(storeIndexedDbDatabaseName(storePath));
+  }
+
+  open(name?: string) {
     const request = {
       result: this.database,
       error: null as unknown,
-      transaction: null,
+      transaction: null as { abort: () => void } | null,
       onupgradeneeded: null as ((event: unknown) => void) | null,
       onsuccess: null as (() => void) | null,
       onerror: null as (() => void) | null,
     };
+    // The meta database is opened WITH a version and is always present here; any other name is PGlite's own
+    // store database, opened version-less by the non-creating existence check (`idbStoreExists`).
+    if (name !== undefined && name !== STORE_META_DATABASE && !this.pgliteDatabases.has(name)) {
+      const transaction = { abort: () => undefined };
+      request.transaction = transaction;
+      queueMicrotask(() => {
+        // The database did NOT exist: `upgradeneeded` fires, the handler aborts the versionchange transaction
+        // so nothing persists, and the open then completes via `onerror` (the AbortError).
+        request.onupgradeneeded?.({ target: { transaction } });
+        request.error = new Error("AbortError");
+        request.onerror?.();
+      });
+      return request;
+    }
     queueMicrotask(() => request.onsuccess?.());
     return request;
   }
@@ -190,6 +217,34 @@ class FakeAuthorityIdb {
       request.onsuccess?.();
     });
     return request;
+  }
+}
+
+/** Install the GRANTED engine home: the meta idb, an OPFS root whose handles open, and a SharedWorker scope. */
+function installGrantedScope(idb: FakeAuthorityIdb, root: FakeOpfsDir): void {
+  Object.defineProperty(globalThis, "indexedDB", { value: idb, configurable: true, writable: true });
+  Object.defineProperty(globalThis, "navigator", {
+    value: { storage: { getDirectory: async () => root } },
+    configurable: true,
+    writable: true,
+  });
+  Object.defineProperty(globalThis, "SharedWorkerGlobalScope", { value: class {}, configurable: true, writable: true });
+}
+
+/** Install the DENIED (idb) lane: the meta idb and an OPFS root, but no SharedWorker placement runs at all. */
+function installDeniedScope(idb: FakeAuthorityIdb, root: FakeOpfsDir): void {
+  Object.defineProperty(globalThis, "indexedDB", { value: idb, configurable: true, writable: true });
+  Object.defineProperty(globalThis, "navigator", {
+    value: { storage: { getDirectory: async () => root } },
+    configurable: true,
+    writable: true,
+  });
+}
+
+async function seedStoreDirectory(root: FakeOpfsDir, storePath: string): Promise<void> {
+  let parent = root;
+  for (const segment of opfsStoreDirectoryPath(storePath)) {
+    parent = await parent.getDirectoryHandle(segment, { create: true });
   }
 }
 
@@ -230,6 +285,25 @@ function connectRaw(host: SyncWorkerHost<TodosRegistry>): {
   });
   channel.port2.start?.();
   return { port2: channel.port2, seen };
+}
+
+/** Attach a raw envelope listener to a port the caller connected itself (the granted-lane `onconnect` shape). */
+function listenRaw(port: MessagePort): BridgeEnvelope[] {
+  const seen: BridgeEnvelope[] = [];
+  port.addEventListener("message", (event) => {
+    if (isBridgeEnvelope((event as MessageEvent).data)) seen.push((event as MessageEvent).data as BridgeEnvelope);
+  });
+  port.start?.();
+  return seen;
+}
+
+/** The `worker provision declined — …` debug lines the worker broadcast over the bridge. */
+function declineLines(seen: BridgeEnvelope[]): string[] {
+  return seen
+    .filter((envelope) => envelope.type === "event")
+    .map((envelope) => identityCodec.decode(envelope.payload) as { kind: string; line?: string })
+    .filter((event) => event.kind === "debug" && event.line?.startsWith("worker provision declined"))
+    .map((event) => event.line!);
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
@@ -337,6 +411,317 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     expect(order).toEqual([]);
     expect(idb.store.records.get(storeIdentityComponent(storePath))).toMatchObject({ phase: "deleting" });
     expect(await sentinelPresent(root, storePath)).toBeTrue();
+  });
+
+  // The pre-mint clean-state gate. Provision proceeds ONLY on provably clean state: a committed store (the warm
+  // reopen) or, in a granted scope, a provable virgin — which it RECORDS as an `opfs-candidate` before the mint
+  // creates the directory (record-before-directory, invariant 12), so the adopting boot's commitment barrier can
+  // promote it. Every other state is declined, leaving the first attach's phase machine to own the recovery.
+  it("records the opfs candidate BEFORE the mint on a provably virgin granted provision (invariant 12)", async () => {
+    const storePath = "granted-provision-virgin";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    const root = new FakeOpfsDir(order);
+    installGrantedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      convergenceIntervalMs: 10_000_000,
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const channel = new MessageChannel();
+    channels.push(channel);
+    const onconnect = (globalThis as { onconnect?: (event: { ports: MessagePort[] }) => void }).onconnect;
+    onconnect!({ ports: [channel.port1] });
+    await provisionSyncWorker({ port: channel.port2 as unknown as never, storePath });
+
+    const recordAt = order.indexOf("record:opfs-candidate");
+    expect(recordAt).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("create")).toBeGreaterThan(recordAt);
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toMatchObject({ phase: "opfs-candidate" });
+    // The candidate is UNCOMMITTED: no sentinel until the adopting boot's barrier publishes one.
+    expect(await sentinelPresent(root, storePath)).toBeFalse();
+  });
+
+  it("declines a granted provision over an EXISTING idb store (a store's backend is fixed at first mint)", async () => {
+    const storePath = "granted-provision-existing-idb";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    // No meta record, a pristine commitment namespace — but PGlite's idb database for this store EXISTS.
+    idb.seedPgliteDb(storePath);
+    const root = new FakeOpfsDir(order);
+    installGrantedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      convergenceIntervalMs: 10_000_000,
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const channel = new MessageChannel();
+    channels.push(channel);
+    const seen = listenRaw(channel.port2);
+    const onconnect = (globalThis as { onconnect?: (event: { ports: MessagePort[] }) => void }).onconnect;
+    onconnect!({ ports: [channel.port1] });
+    await provisionSyncWorker({ port: channel.port2 as unknown as never, storePath });
+
+    // A granted home over an existing idb store opens it IDB-AUTHORITATIVE (the backend is fixed at first
+    // mint, forever). Minting an OPFS candidate here would commit an EMPTY store over the user's data.
+    expect(order).not.toContain("create");
+    expect(order.filter((step) => step.startsWith("record:"))).toEqual([]);
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toBeUndefined();
+    expect(await sentinelPresent(root, storePath)).toBeFalse();
+    expect(declineLines(seen)).toContain("worker provision declined — an idb store already exists at this path");
+  });
+
+  it("mints over a COMMITTED store without touching the record (the warm-reopen accelerator)", async () => {
+    const storePath = "granted-provision-committed";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    idb.store.records.set(storeIdentityComponent(storePath), { phase: "opfs-committed", updatedAt: 1 });
+    const root = new FakeOpfsDir(order);
+    await seedStoreDirectory(root, storePath);
+    await seedSentinel(root, storePath);
+    installGrantedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      convergenceIntervalMs: 10_000_000,
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const channel = new MessageChannel();
+    channels.push(channel);
+    const onconnect = (globalThis as { onconnect?: (event: { ports: MessagePort[] }) => void }).onconnect;
+    onconnect!({ ports: [channel.port1] });
+    await provisionSyncWorker({ port: channel.port2 as unknown as never, storePath });
+
+    expect(order).toContain("create");
+    expect(order.filter((step) => step.startsWith("record:"))).toEqual([]);
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toMatchObject({ phase: "opfs-committed" });
+    expect(await sentinelPresent(root, storePath)).toBeTrue();
+  });
+
+  it("declines a granted provision over a TORN candidate record (only the attach may rebuild it)", async () => {
+    const storePath = "granted-provision-torn-candidate";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    idb.store.records.set(storeIdentityComponent(storePath), { phase: "opfs-candidate", updatedAt: 1 });
+    const root = new FakeOpfsDir(order);
+    await seedStoreDirectory(root, storePath);
+    installGrantedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      convergenceIntervalMs: 10_000_000,
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const channel = new MessageChannel();
+    channels.push(channel);
+    const onconnect = (globalThis as { onconnect?: (event: { ports: MessagePort[] }) => void }).onconnect;
+    onconnect!({ ports: [channel.port1] });
+    await provisionSyncWorker({ port: channel.port2 as unknown as never, storePath });
+
+    expect(order).not.toContain("create");
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toMatchObject({ phase: "opfs-candidate" });
+  });
+
+  it("declines a granted provision over RECORDLESS directory residue (not a provable virgin)", async () => {
+    const storePath = "granted-provision-residue";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    const root = new FakeOpfsDir(order);
+    await seedStoreDirectory(root, storePath);
+    installGrantedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      convergenceIntervalMs: 10_000_000,
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const channel = new MessageChannel();
+    channels.push(channel);
+    const onconnect = (globalThis as { onconnect?: (event: { ports: MessagePort[] }) => void }).onconnect;
+    onconnect!({ ports: [channel.port1] });
+    await provisionSyncWorker({ port: channel.port2 as unknown as never, storePath });
+
+    expect(order).not.toContain("create");
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toBeUndefined();
+  });
+
+  it("mints a RECORDLESS idb-lane provision with no record at all (that lane has no opfs commitment machinery)", async () => {
+    const storePath = "denied-provision-recordless";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    const root = new FakeOpfsDir(order);
+    installDeniedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+      ...testStoreAcknowledgment(),
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const { port2 } = connectRaw(host);
+    await provisionSyncWorker({ port: port2 as unknown as never, storePath });
+
+    expect(order).toEqual(["create"]);
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toBeUndefined();
+  });
+
+  it("mints an idb-lane provision over an `idb-authoritative` record (a no-grant boot is record-blind but for deletion)", async () => {
+    const storePath = "denied-provision-idb-authoritative";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    idb.store.records.set(storeIdentityComponent(storePath), { phase: "idb-authoritative", updatedAt: 1 });
+    const root = new FakeOpfsDir(order);
+    installDeniedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+      ...testStoreAcknowledgment(),
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const { port2 } = connectRaw(host);
+    await provisionSyncWorker({ port: port2 as unknown as never, storePath });
+
+    // The adopting boot in this lane opens the idb store in place regardless of the record, so declining would
+    // forfeit the accelerator and protect nothing. The record is left exactly as it was.
+    expect(order).toEqual(["create"]);
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toMatchObject({ phase: "idb-authoritative" });
+  });
+
+  it("declines an idb-lane provision over an `opfs-committed` record (the boot it would accelerate now refuses)", async () => {
+    const storePath = "denied-provision-committed";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    idb.store.records.set(storeIdentityComponent(storePath), { phase: "opfs-committed", updatedAt: 1 });
+    const root = new FakeOpfsDir(order);
+    await seedStoreDirectory(root, storePath);
+    await seedSentinel(root, storePath);
+    installDeniedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+      ...testStoreAcknowledgment(),
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const { port2, seen } = connectRaw(host);
+    await provisionSyncWorker({ port: port2 as unknown as never, storePath });
+
+    // The store lives in OPFS and this home holds no sync access, so the adopting boot REFUSES it typed.
+    // Minting the idb sibling here is the exact hazard the refusal exists to prevent.
+    expect(order).toEqual([]);
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toMatchObject({ phase: "opfs-committed" });
+    expect(await sentinelPresent(root, storePath)).toBeTrue();
+    const declineLines = seen
+      .filter((envelope) => envelope.type === "event")
+      .map((envelope) => identityCodec.decode(envelope.payload) as { kind: string; line?: string })
+      .filter((event) => event.kind === "debug" && event.line?.startsWith("worker provision declined"));
+    expect(declineLines.map((event) => event.line)).toContain(
+      "worker provision declined — the store is committed to OPFS and this home holds no sync access",
+    );
+  });
+
+  it("declines an idb-lane provision over an `opfs-candidate` record (the adopting boot retires it first)", async () => {
+    const storePath = "denied-provision-candidate";
+    const order: string[] = [];
+    const idb = new FakeAuthorityIdb(order);
+    idb.store.records.set(storeIdentityComponent(storePath), { phase: "opfs-candidate", updatedAt: 1 });
+    const root = new FakeOpfsDir(order);
+    await seedStoreDirectory(root, storePath);
+    installDeniedScope(idb, root);
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+      ...testStoreAcknowledgment(),
+      createPglite: async () => {
+        order.push("create");
+        return makePglite();
+      },
+    });
+    hosts.push(host);
+
+    const { port2, seen } = connectRaw(host);
+    await provisionSyncWorker({ port: port2 as unknown as never, storePath });
+
+    // The adopting boot RETIRES the candidate (sentinel + directory) and publishes idb authority before it
+    // mints. A replacement minted here would sit beneath state that boot has still to resolve.
+    expect(order).toEqual([]);
+    expect(idb.store.records.get(storeIdentityComponent(storePath))).toMatchObject({ phase: "opfs-candidate" });
+    expect(declineLines(seen)).toContain("worker provision declined — the store phase is owned elsewhere");
   });
 
   it("pre-creates the store on `provision` and the first `attach` adopts it (no second create)", async () => {

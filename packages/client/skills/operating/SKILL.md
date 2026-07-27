@@ -9,12 +9,12 @@ description: >-
   budget, the edge worker timeout vs Electric's long-poll, globalThis.__pgxsinkitDebug + the BootReport,
   worker mode (defineSyncWorker/attachSyncClient — capability-driven Safari SharedWorker vs elected
   Chromium/Firefox engine placement, factories, relocation outcomes, diagnostics, and the forwarded rail),
-  and the store lifecycle surface: storePath naming, backend-specific durability, adoption, supervised
-  destruction, exportStore/exportDiagnostics/exportData (+ drain guard), and restoreFrom.
+  and the store lifecycle surface: storePath naming, backend-specific durability, backend permanence,
+  supervised destruction, exportStore/exportDiagnostics/exportData (+ drain guard), and restoreFrom.
 metadata:
   type: task
   library: "@pgxsinkit/client"
-  library_version: "0.2.2"
+  library_version: "0.2.3"
   source: https://pgxsinkit.github.io/start/operating-in-production/
 ---
 
@@ -81,6 +81,12 @@ best-effort: a rejected warm is caught to `undefined` and PGlite loads its own a
 fails the boot. The `boot pglite assets warm` rail stamp times it. (Board demo: `apps/board/src/board/
 pglite-warm.ts` shows the Vite `?url` asset-URL pattern PGlite's `exports` field otherwise blocks.)
 
+**In worker mode the engine loads PGlite's OWN assets — deliberately; do not pre-supply them.** The tab's
+warm still serves the engine, by priming the same-origin HTTP cache the worker fetches from. Handing the
+engine a pre-compiled `WebAssembly.Module` benched NET-NEGATIVE: it forces compile-to-completion before
+instantiate (forfeiting the pipelining PGlite gets from its own streaming load) and the engine realm has no
+overlap window longer than the placement/handshake gap, so the compile only competes for CPU at spawn.
+
 Pre-warming only hides the WASM fetch+compile; `PGlite.create` still spends ~1.9s on `initdb` + store open,
 and that can't start until the store id is known (usually the signed-in user). To hide it too, create the
 store EAGERLY under a generated id on the first screen and BIND it at auth. `createClientPGlite(storePath,
@@ -109,6 +115,17 @@ exercises the capability fallback to idb (declared durability kept, `storageBack
 `storageFallbackReason` on the BootReport). The one opt-out is `storage.backend: "idbfs"` on the registry:
 no probe, no election, the engine boots in the SharedWorker on idb. `createSyncClient` remains the bun/Node
 mode and the main-thread idb fallback where SharedWorker is missing.
+
+**A home with NO grant refuses a store already committed to OPFS.** A boot whose home holds no sync-access
+grant (a tab realm, the in-process fallback) over a store whose meta record says `opfs-committed` fails
+CLOSED with `CommittedStoreUnreachableError` — it cannot open that store, and `idb://<storePath>` would be an
+EMPTY sibling (app looks wiped, offline writes fork into a store no worker-mode boot opens). No override
+flag; the message names both exits — boot from a granted home, or destroy first with
+`destroyStoreArtifacts(storePath)`, the path-addressed destroy (the failed boot leaves you no client to call
+`destroy()` on) that deletes both backends plus the sentinel and the meta record and needs no grant; quiesce
+any live worker for the path first (`quiesceStoreWorker`). The error is `instanceof`-branchable on the tab
+side in worker mode too (it crosses the bridge as its class) and carries the refused `storePath`. A no-grant
+`provision` declines that store for the same reason rather than pre-minting the sibling.
 
 **Two-file pattern.** One worker entry, bundled for both SharedWorker and dedicated Worker, calls
 `defineSyncWorker({ registry, electricUrl, batchWriteUrl, … })` at module top level — no placement or
@@ -174,6 +191,15 @@ registry stays tab-side in localStorage so binding resolves before attach (Share
 Call `provisionSyncWorker` with the same `worker` input as attach (the factory form, so elected-mode recovery is armed for provisioning too); an elected
 Chromium/Firefox pre-open shares the tab's one election coordinator and auto-derives the engine from the
 SharedWorker's own script URL (override with `createEngineWorker` only for non-module/underivable entries).
+`provisionExpiryMs` (default 60000) is ONE deadline: it retires the abandoned elected claim AND settles the
+returned promise with the typed `ProvisionExpiredError` in both modes, so a provision behind a dead
+SharedWorker connection fails loudly rather than hanging. It bounds YOUR promise; the worker-side create
+attempt follows the placement. SW-direct: the attempt is left running — a later attach adopts that create if it
+completed and waits on it if it is stuck, and a retried provision re-acks the same attempt rather than starting
+a second open. Elected: the deadline also releases the provision claim, and a LAST-claim release retires and
+terminates the engine with that attempt inside it, so the next attach elects a fresh engine (an attach that
+adopted the coordinator earlier keeps its claim, and with it that engine).
+Fire-and-forget callers should `.catch()` it like any un-awaited promise.
 Claim = bind id, attach, push config + token. On a PROVABLY-fresh claimed store, pass
 `attachSyncClient({ freshStore: true })` (never for a mapped/returning store) and the worker overlaps the
 shape catch-up with schema/journal/store-version recovery — far-user boot bounded by `max(create+schema,
@@ -300,11 +326,17 @@ offline for inspection; a clean-journal restore may honor the normal online opti
 persisted store normally. Consumer docs:
 <https://pgxsinkit.github.io/concepts/export-and-restore/>.
 
-**Adoption.** An existing idb store is authoritative and is never silently replaced by a newly capable
-OPFS home. Automatic adoption is default-off and requires the worker-entry declaration
-`adoption: "server-reconstructible"`; only a drained journal, authorized online reconstruction, and a
-returned strict barrier permit the idb predecessor to be deleted. `adoptStore()` is the manual
-creation-path equivalent and refuses a live store with `StoreInUseError`.
+**Backend permanence.** A store's storage backend is FIXED at its first mint, for the store's whole
+life. An existing idb store is opened IN PLACE by a newly capable OPFS home — no candidate, no
+sentinel, nothing copied, nothing deleted (`storageBackend: "idbfs"` + a `storageFallbackReason` on the
+report); a no-grant home refuses a committed OPFS store instead (above). The ONE route to another
+backend is a deliberate destroy — `client.destroy()`, or `destroyStoreArtifacts(storePath)` for a store
+nobody holds — then a fresh boot that re-syncs from the server and mints on the then-best backend.
+Budget a full cold bootstrap, and expect local-only state (anything written via `rawExec`, un-flushed
+journal rows dropped by `force`) to be gone: the replacement is a NEW store, not a converted one. There
+is no migration API and no in-place conversion. For a storage-PREFERENCE change, mint under a FRESH path
+and destroy the obsolete one in the background — never delete-and-recreate the same path while a
+predecessor worker may still hold it.
 
 **Resetting and deleting stores (ADR-0050).** Three non-interchangeable levers — pick by what you keep
 and whether the store is running:

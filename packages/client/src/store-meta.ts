@@ -1,11 +1,15 @@
 // Store meta record — the first-use authority for browser-side engine placement (ADR-0049 decision 6,
 // invariants 12 & 14; CONTEXT.md § "Language — engine placement", entries "Store meta record" and
-// "Commitment marker"). Written at store CREATION for every backend and completed before the backend is
-// exposed, the meta record is a TOTAL phase machine — one of
-// `idb-authoritative | opfs-candidate | adopting | opfs-committed | deleting` — with `deleting` taking
-// precedence over EVERYTHING (a committed store mid-destruction resumes deletion, never the committed
-// verdict) and `adopting` over ordinary idb boot. It lives in a small dedicated IndexedDB database so it is
-// readable in every engine home (SharedWorker-direct or elected worker).
+// "Commitment marker"). A store minted under the opfs commitment machinery records at CREATION
+// (candidate-before-directory) and completes before that backend is exposed; a no-grant or registry-forced
+// idbfs mint is deliberately RECORDLESS — recordless-idb is a first-class state, recognised by boot
+// classification 6 — and gains its `idb-authoritative` record on the first pass that MUST write authority (a
+// granted classification-6 boot, a `deleting` handoff, a candidate retirement). The meta record is a TOTAL
+// phase machine — one of
+// `idb-authoritative | opfs-candidate | opfs-committed | deleting` — with `deleting` taking precedence over
+// EVERYTHING (a committed store mid-destruction resumes deletion, never the committed verdict). It lives in a
+// small dedicated IndexedDB database so it is readable in every engine home (SharedWorker-direct or elected
+// worker).
 //
 // This module SEPARATES the pure boot decision (part A — `classifyStoreBoot`, total and unit-testable) from
 // the IndexedDB IO (part B — the record's own database) and the recordless-idb detection (part C — a non-creating
@@ -21,11 +25,11 @@ import { storeIdentityComponent, storeIndexedDbDatabaseName } from "./store-path
 // =========================================================================================================
 
 /**
- * The one total phase of the store meta record (invariant 12). `deleting` has precedence over everything;
- * `adopting` over ordinary idb boot. There is deliberately NO boolean cross-product (`committed` +
- * `deletionIntent`) — that left precedence ambiguous; the phase is total (CONTEXT § "Store meta record").
+ * The one total phase of the store meta record (invariant 12). `deleting` has precedence over everything.
+ * There is deliberately NO boolean cross-product (`committed` + `deletionIntent`) — that left precedence
+ * ambiguous; the phase is total (CONTEXT § "Store meta record").
  */
-export type StoreMetaPhase = "idb-authoritative" | "opfs-candidate" | "adopting" | "opfs-committed" | "deleting";
+export type StoreMetaPhase = "idb-authoritative" | "opfs-candidate" | "opfs-committed" | "deleting";
 
 /** One store's meta record: its total {@link StoreMetaPhase} plus a last-write timestamp. */
 export interface StoreMetaRecord {
@@ -63,11 +67,9 @@ export interface StoreBootObservations {
 export type StoreBootVerdict =
   // phase `deleting` — highest precedence; resume the destructive lifecycle.
   | { action: "resume-deletion" }
-  // phase `adopting` — the adoption crash-recovery table (plan) owns the next steps.
-  | { action: "adoption-recovery" }
   // phase `opfs-committed`, or the sentinel repair path — open the committed store (hard-open handles failure).
   | { action: "open-committed" }
-  // no/older record but a commitment sentinel is present — repair the record, then open committed.
+  // no record but a commitment sentinel is present (record loss) — repair the record, then open committed.
   | { action: "repair-record-then-open-committed" }
   // phase `opfs-candidate`, or a recordless candidate directory — an unexposed candidate has no authority.
   | { action: "delete-candidate-and-rebuild" }
@@ -77,21 +79,21 @@ export type StoreBootVerdict =
   | { action: "virgin-create" };
 
 /**
- * The PURE boot classifier — plan boot classification 1–7 EXACTLY (invariant 12). Total over every phase and
+ * The PURE boot classifier — plan boot classification 1–6 EXACTLY (invariant 12). Total over every phase and
  * every observation combination; no IO. Precedence, in order:
  *
  * 1. `deleting` → `resume-deletion` (precedence over EVERYTHING, including a committed-looking OPFS).
- * 2. `adopting` → `adoption-recovery` (precedence over ordinary idb boot).
- * 3. `opfs-committed` → `open-committed` (opfs observations are IRRELEVANT here — the hard-open path handles
+ * 2. `opfs-committed` → `open-committed` (opfs observations are IRRELEVANT here — the hard-open path handles
  *    any failure, including an unreachable root; a committed store never re-derives its verdict from OPFS).
- * 4. `opfs-candidate` → `delete-candidate-and-rebuild` (an unexposed candidate has no authority).
- * 5. `idb-authoritative` → `boot-idb-authoritative`.
- * 6. record `undefined`, OPFS observable: `sentinelPresent` → `repair-record-then-open-committed` (sentinel
+ * 3. `opfs-candidate` → `delete-candidate-and-rebuild` (an unexposed candidate has no authority).
+ * 4. `idb-authoritative` → `boot-idb-authoritative`.
+ * 5. record `undefined`, OPFS observable: `sentinelPresent` → `repair-record-then-open-committed` (sentinel
  *    authority — a sentinel-without-record is a real crash state that reads as committed); else a candidate
- *    directory without a sentinel → `delete-candidate-and-rebuild`; neither → fall through to 7.
- * 7. record `undefined` and (OPFS unobservable OR nothing present): the RECORDLESS-IDB CHECK —
- *    `idbStoreExists` → `boot-idb-authoritative` (an existing recordless idb store — NEVER virgin; this arm
- *    is the entry point of the forward idbfs→opfs transition); else `virgin-create`.
+ *    directory without a sentinel → `delete-candidate-and-rebuild`; neither → fall through to 6.
+ * 6. record `undefined` and (OPFS unobservable OR nothing present): the RECORDLESS-IDB CHECK —
+ *    `idbStoreExists` → `boot-idb-authoritative` (an existing recordless idb store — NEVER virgin). This arm
+ *    is a TERMINUS: a store's storage backend is fixed at first mint, so an idb store stays idb-authoritative
+ *    for its whole life. The only route to a different backend is a deliberate destroy + a fresh boot.
  *
  * NOTE (the caller's nuance, not the classifier's): when OPFS is unobservable and the verdict is
  * `virgin-create`, the caller creates an IDB store (a main thread / no-handle scope cannot hold sync-access
@@ -106,8 +108,6 @@ export function classifyStoreBoot(obs: StoreBootObservations): StoreBootVerdict 
     switch (record.phase) {
       case "deleting":
         return { action: "resume-deletion" };
-      case "adopting":
-        return { action: "adoption-recovery" };
       case "opfs-committed":
         return { action: "open-committed" };
       case "opfs-candidate":
@@ -122,14 +122,14 @@ export function classifyStoreBoot(obs: StoreBootObservations): StoreBootVerdict 
     }
   }
 
-  // No record. Classification 6: OPFS observable → decide from the commitment namespace.
+  // No record. Classification 5: OPFS observable → decide from the commitment namespace.
   if (opfs !== "unobservable") {
     if (opfs.sentinelPresent) return { action: "repair-record-then-open-committed" };
     if (opfs.storeDirectoryPresent) return { action: "delete-candidate-and-rebuild" };
     // Nothing present in OPFS → fall through to the recordless-idb check.
   }
 
-  // Classification 7 (also when OPFS is NOT observable): the recordless-idb check.
+  // Classification 6 (also when OPFS is NOT observable): the recordless-idb check.
   return idbStoreExists ? { action: "boot-idb-authoritative" } : { action: "virgin-create" };
 }
 
@@ -251,7 +251,6 @@ function defaultDelay(ms: number): Promise<void> {
 const VALID_PHASES: ReadonlySet<string> = new Set<StoreMetaPhase>([
   "idb-authoritative",
   "opfs-candidate",
-  "adopting",
   "opfs-committed",
   "deleting",
 ]);
@@ -365,8 +364,9 @@ export async function readStoreMetaRecord(
 }
 
 /**
- * Write (create or overwrite) a store's meta record — done at CREATION for every backend, before exposure,
- * and at each phase transition (invariant 12). A no-IDB environment cannot hold a record, so this is a
+ * Write (create or overwrite) a store's meta record — written at CREATION for a store minted under the opfs
+ * commitment machinery, at the first pass that must write authority for a recordless idb store, and at each
+ * phase transition (invariant 12). A no-IDB environment cannot hold a record, so this is a
  * best-effort no-op there (consistent with {@link readStoreMetaRecord} returning {@link META_STORE_UNAVAILABLE}).
  */
 export async function writeStoreMetaRecord(
@@ -408,9 +408,9 @@ export async function deleteStoreMetaRecord(storePath: string, deps?: StoreMetaD
 
 /**
  * Does PGlite's idb database for this store ALREADY exist, WITHOUT creating it? The recordless-idb recognition
- * check (invariant 14): no meta record + an existing idb store → `idb-authoritative`, never virgin. This is
- * the entry point of the forward idbfs→opfs transition — an existing idb store's data is never overwritten by
- * a fresh opfs mint; it is opened in place (fixed/denied home) or migrated forward via adoption.
+ * check (invariant 14): no meta record + an existing idb store → `idb-authoritative`, never virgin. An
+ * existing idb store's data is never overwritten by a fresh opfs mint — it is opened IN PLACE, whatever the
+ * booting home's capabilities, because a store's storage backend is fixed at first mint.
  *
  * Technique (per ADR-0049 D6 — NEVER `indexedDB.databases()`, which is absent on some engines): open the
  * database with NO version. If `onupgradeneeded` fires, the database did NOT exist — flag it and ABORT the

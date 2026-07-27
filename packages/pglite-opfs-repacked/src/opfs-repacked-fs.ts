@@ -50,11 +50,19 @@ export abstract class OpfsRepackedFS extends BaseFilesystem {
 
   /** @internal Factory lifecycle cleanup after host initialization fails. */
   async cleanupFailedInit(): Promise<void> {
-    this.#vfs.cleanupFailedInit();
+    try {
+      this.#vfs.cleanupFailedInit();
+    } finally {
+      clearBootExitSentinel();
+    }
   }
 
   override async closeFs(): Promise<void> {
-    this.#vfs.close();
+    try {
+      this.#vfs.close();
+    } finally {
+      clearBootExitSentinel();
+    }
   }
 
   chmod(path: string, mode: number): void {
@@ -153,6 +161,23 @@ export async function openOpfsRepackedFsForPort(
     ...(options.extentSize === undefined ? {} : { extentSize: options.extentSize }),
   });
   return new ConcreteOpfsRepackedFS(vfs, durability);
+}
+
+// The engine boots Postgres in single mode, which signals success by calling `proc_exit(99)`; Emscripten
+// writes that sentinel onto the host `process.exitCode`. The upstream engine already tries to swallow it
+// (a save/restore of `process.exitCode` around init and each sync exec), and for the default/node
+// filesystems `close()`'s `_emscripten_force_exit(0)` incidentally overwrites it back to 0. This VFS's
+// teardown leaves the runtime already-exited, so that incidental reset never fires and the benign 99
+// survives to process exit — under bun that force-exits an otherwise-green run with code 99. We clear the
+// sentinel here (in the browser there is no `process`, so this is a no-op) to match every other backend.
+// Only the exact 99 sentinel is cleared, so a real host exit code is never clobbered. A robust fix belongs
+// upstream in the engine's exit-code save/restore, but is deliberately left there to avoid carrying a fork
+// patch across rebases (backlog).
+function clearBootExitSentinel(): void {
+  const proc = (globalThis as { process?: { exitCode?: number } }).process;
+  if (proc && proc.exitCode === 99) {
+    proc.exitCode = 0;
+  }
 }
 
 function nowMs(): bigint {

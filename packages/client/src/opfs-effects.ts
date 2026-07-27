@@ -1,5 +1,5 @@
 // The REAL OPFS effects for the store-boot wiring (ADR-0049 capability-driven engine placement, plan
-// step 10a). `store-lifecycle.ts` owns the PURE, effect-injected destruction/adoption/fresh-candidate
+// step 10a). `store-lifecycle.ts` owns the PURE, effect-injected destruction/fresh-candidate
 // machines; `store-boot.ts` assembles observations and executes their verdicts. This module is the concrete
 // OPFS side those verdicts drive: create/delete the commitment sentinel, delete the store directory, observe
 // the commitment namespace without creating anything, and hand the store directory handle to the
@@ -70,7 +70,7 @@ function resolveDefaultGetRoot(): (() => Promise<DirLike>) | null {
 /**
  * Construct the real OPFS effects for a store, all under `store-path.ts`'s disjoint namespaces. The returned
  * object's methods satisfy the idempotency contracts the `store-lifecycle.ts` machines require, so a boot that
- * resumes an interrupted destruction/candidate/adoption re-runs them safely.
+ * resumes an interrupted destruction/candidate re-runs them safely.
  */
 export function createOpfsEffects(storePath: string, deps?: OpfsEffectsDeps): OpfsEffects {
   const getRoot = deps?.getRoot ?? resolveDefaultGetRoot();

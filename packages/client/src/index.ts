@@ -34,15 +34,6 @@ import {
 // mocking `@electric-sql/pglite` never evaluates the factory's `class ... extends PGlite` module top level.
 import type { CreateOpfsRepackedPGliteOptions, OpfsRepackedPGlite } from "@pgxsinkit/pglite-opfs-repacked";
 
-import {
-  type AdoptionDeclaration,
-  type AdoptionEffects,
-  adoptionEligible,
-  type AdoptionOutcome,
-  buildAdoptionEffects,
-  runAdoptionTransition,
-  runManualAdoption,
-} from "./adoption";
 import { type BootReport, type BootReportBuilder, createBootReportBuilder } from "./boot-report";
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { syncDebug, timeAsync } from "./debug";
@@ -91,17 +82,18 @@ import {
 } from "./schema";
 import { startConfiguredSync } from "./shape-sync";
 import {
-  recoverDeniedBootDeletion,
+  resolveDeniedBootAuthority,
+  type ResolveStoreBootOptions,
   resolveStoreBoot,
   type ResolvedStorageBackend,
   type StoreBootResolution,
 } from "./store-boot";
 import { runCommitmentBarrier } from "./store-lifecycle";
 import {
-  idbStoreExists as defaultIdbStoreExists,
+  META_STORE_UNAVAILABLE,
+  readStoreMetaRecord,
   type StoreBootVerdict,
   type StoreMetaDeps,
-  type StoreMetaPhase,
   writeStoreMetaRecord,
 } from "./store-meta";
 import {
@@ -111,7 +103,6 @@ import {
   readTestStoreMarker,
   resolveStoreDataDir,
   RestoreTargetExistsError,
-  storeIndexedDbDatabaseName,
   storeTargetExists,
   type StorePathInput,
 } from "./store-path";
@@ -160,19 +151,12 @@ export {
   type StoreExportOptions,
   type StoreExportResult,
 } from "./export-store";
-export {
-  type AdoptionDeclaration,
-  type AdoptionEffects,
-  adoptionEligible,
-  type AdoptionOutcome,
-  runAdoptionTransition,
-  runManualAdoption,
-} from "./adoption";
 export { createLifecycleSlot, LifecycleBusyError, type LifecycleSlot } from "./lifecycle-slot";
 export {
   destroyStoreArtifacts,
   type ElectedEngineWorker,
   ElectedEngineUnconstructibleError,
+  ProvisionExpiredError,
   quiesceStoreWorker,
   StoreDestroyRefusedError,
   type StoreDestructionRetryOptions,
@@ -189,6 +173,10 @@ export {
 } from "./worker/engine-control";
 export { createOpfsEffects, type OpfsEffects, type OpfsEffectsDeps } from "./opfs-effects";
 export {
+  COMMITTED_STORE_UNREACHABLE_CODE,
+  CommittedStoreUnreachableError,
+  committedStoreUnreachableFromWire,
+  type CommittedStoreUnreachableWire,
   resolveStoreBoot,
   type ResolvedStorageBackend,
   type ResolveStoreBootOptions,
@@ -424,6 +412,15 @@ const OPFS_STORE_EXTENT_SIZE = 65536;
 const OPFS_REPACKED_PERSISTENT = Symbol.for("pgxsinkit.opfsRepackedPersistent");
 
 /**
+ * Was this instance minted by the opfs-repacked factory ({@link OPFS_REPACKED_PERSISTENT})? The brand is the
+ * ONLY proof available for an adopted instance: an opfs-repacked store reports no `dataDir`, so nothing else
+ * distinguishes it from a BYO idb/file/memory instance — which carries no OPFS commitment machinery at all.
+ */
+function isOpfsRepackedPersistent(instance: ClientPGlite): boolean {
+  return (instance as Record<symbol, unknown>)[OPFS_REPACKED_PERSISTENT] === true;
+}
+
+/**
  * Open the opfs-repacked factory with bounded retries (3) and a small linear backoff for transient failures,
  * then propagate the last error — a committed store's final failure is HARD, and an uncommitted candidate's
  * likewise propagates (the caller never exposes an unopened store). Kept simple: retry the whole factory call,
@@ -475,12 +472,15 @@ export async function createClientPGlite(
   const normalised = normaliseStorePathInput(store);
   const storePath = normalised.storePath;
   const backendOverride = options?.backendOverride ?? normalised.backendOverride;
-  // An eager precreate is itself a store mint. Before a denied browser home opens its replacement IDB store,
-  // settle any durable `deleting` authority exactly as the ordinary createSyncClient path does. Keeping this at
-  // the documented precreate factory protects callers outside defineSyncWorker; the worker provision handler
-  // carries the same guard separately because it permits a caller-supplied createPglite factory.
+  // An eager precreate is itself a store mint, so it passes the SAME pre-mint meta gate the ordinary
+  // createSyncClient path does before a denied browser home opens an IDB store: settle any durable `deleting`
+  // authority, retire an unexposed `opfs-candidate`, and REFUSE an `opfs-committed` store outright ({@link
+  // CommittedStoreUnreachableError}) — an eager tab-side precreate must never be the thing that mints an empty
+  // sibling over the committed store, nor one exposed beneath a record still claiming a candidate.
+  // Keeping this at the documented precreate factory protects callers outside defineSyncWorker; the worker
+  // provision handler carries the same guard separately because it permits a caller-supplied createPglite factory.
   if (options?.hasOpfsSyncAccess !== true && backendOverride !== "memory") {
-    await recoverDeniedBootDeletion(storePath);
+    await resolveDeniedBootAuthority(storePath);
   }
   // Derive the concrete PGlite dataDir URL (ADR-0036) — the single resolution point. Browser/worker → `idb://`,
   // Bun/Node → `file://`, the sanctioned test lane → `memory://`. A scheme-bearing/empty storePath throws here.
@@ -589,303 +589,21 @@ export async function createClientPGlite(
   return pglite;
 }
 
-// ─── ADR-0049 step 11b: adoption boot wiring (declaration-gated) ──────────────────────────────────────
-// The pure adoption orchestrator (`adoption.ts`, step 11a) is effect-injected; here we build the REAL effects
-// and CALL the transition at the right point in the boot. The transition runs BEFORE any engine is exposed
-// (invariant 3 — pre-expose exclusivity), consults the declaration FIRST (invariant 4 — default off), and
-// deletes the idb predecessor ONLY after the commitment barrier publishes (invariants 3/4).
-
-/**
- * A store is being actively held by a live in-process client. The manual {@link adoptStore} API is a
- * CREATION-PATH operation (like `restoreFrom`): it must be called INSTEAD of {@link createSyncClient}, never
- * against a store an open client already owns — an idb→opfs migration under a live engine would strand the
- * engine's writes. Detected via a module-level live-store registry (every {@link createSyncClient} that mints a
- * client-owned store registers its path and unregisters on `stop()`/`destroy()`).
- */
-export class StoreInUseError extends Error {
-  constructor(storePath: string) {
-    super(
-      `[pgxsinkit] adoptStore(${JSON.stringify(storePath)}) refused: a live client is currently holding this ` +
-        "store. Adoption is a creation-path migration — call it INSTEAD of createSyncClient, before any client " +
-        "opens the store (stop/destroy the existing client first).",
-    );
-    this.name = "StoreInUseError";
-  }
-}
-
-/** The paths of stores currently held by a live in-process client — the {@link adoptStore} live-store guard. */
-const liveStorePaths = new Set<string>();
-
-/** Internal-only marker for the live adoption executor's inner candidate boot. Never exported or consumer-set. */
-const ADOPTION_CANDIDATE_BUILD: unique symbol = Symbol("pgxsinkit.adoptionCandidateBuild");
-type AdoptionCandidateBuildOptions = { [ADOPTION_CANDIDATE_BUILD]?: true };
-/** Internal-only PGlite boundary used by the real adoption recursion test; never exported or consumer-set. */
-const INTERNAL_PGLITE_CREATE: unique symbol = Symbol("pgxsinkit.internalPgliteCreate");
-type InternalPgliteCreateOptions = { [INTERNAL_PGLITE_CREATE]?: typeof createClientPGlite };
-
-/**
- * @internal Injectable seams for the boot-time adoption decision (step 11b). Real defaults in production; unit
- * tests inject fakes so the wiring is exercised without real IndexedDB/OPFS/WASM. Shared by the automatic boot
- * path ({@link runBootAdoption}) and the manual {@link adoptStore} API.
- */
-export interface AdoptionWiringSeams {
-  /** Non-creating recordless idb existence check (adoption only ever migrates an EXISTING idb store). */
-  idbStoreExists?: (storePath: string) => Promise<boolean>;
-  /** The boot classifier + executor (`store-boot.ts`) — its verdict drives {@link adoptionEligible}. */
-  resolveStoreBoot?: (storePath: string) => Promise<StoreBootResolution>;
-  /** The real {@link AdoptionEffects} factory; injected in tests with recording fakes. */
-  buildEffects?: (storePath: string) => AdoptionEffects;
-  /** Diagnostics sink; defaults to the boot debug rail. */
-  log?: (message: string, data?: Record<string, unknown>) => void;
-  /** The store-meta IndexedDB seam (defaults to `globalThis.indexedDB`). */
-  meta?: StoreMetaDeps;
-  /** The OPFS root seam (defaults to `navigator.storage.getDirectory`). */
-  opfs?: OpfsEffectsDeps;
-  /** The external PGlite create boundary; the real adoption transition and inner createSyncClient remain intact. */
-  createPglite?: typeof createClientPGlite;
-  /** The live-store guard the manual {@link adoptStore} consults (defaults to the module-level registry). */
-  isStoreLive?: (storePath: string) => boolean;
-}
-
-/** The bootstrap context an adoption transition's real effects need (registry + endpoints + auth + gate). */
-interface AdoptionBootContext<TRegistry extends SyncTableRegistry> {
-  registry: TRegistry;
-  electricUrl: string;
-  batchWriteUrl: string;
-  getAuthToken?: () => Promise<string | undefined>;
-  requestHeaders?: Record<string, string>;
-  /** The effective app-level sync toggle — a `false` here fails the gate (adoption cannot reconstruct offline-by-config). */
-  syncEnabled: boolean;
-  /** Bounded wait for the eager Consistency groups' initial catch-up before the gate fails (offline/unauthorized). */
-  gateDeadlineMs?: number;
-  meta?: StoreMetaDeps;
-  opfs?: OpfsEffectsDeps;
-  createPglite?: typeof createClientPGlite;
-}
-
-/** Delete-if-present the store's PGlite idb database; only `onsuccess` proves completion. */
-function deleteAdoptionIdbPredecessor(storePath: string, meta?: StoreMetaDeps): Promise<void> {
-  const idb =
-    meta != null && "indexedDB" in meta
-      ? (meta.indexedDB as unknown as IdbDeleteLike | undefined)
-      : (globalThis as { indexedDB?: IdbDeleteLike }).indexedDB;
-  if (idb?.deleteDatabase == null) return Promise.resolve();
-  const name = storeIndexedDbDatabaseName(storePath);
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const finish = (error?: unknown) => {
-      if (settled) return;
-      settled = true;
-      if (timeout !== undefined) clearTimeout(timeout);
-      if (error === undefined) resolve();
-      else reject(error);
-    };
-    let request: {
-      error?: unknown;
-      onsuccess: (() => void) | null;
-      onerror: (() => void) | null;
-      onblocked?: (() => void) | null;
-    };
-    try {
-      request = idb.deleteDatabase(name);
-    } catch (error) {
-      finish(error);
-      return;
-    }
-    request.onsuccess = () => finish();
-    request.onerror = () => finish(request.error ?? new Error(`indexedDB deletion failed for ${name}`));
-    // `blocked` is nonterminal: the queued request may still succeed after the blocker closes. Do not lie to
-    // the adoption transition by reporting predecessor cleanup complete before `onsuccess`.
-    request.onblocked = () => undefined;
-    timeout = setTimeout(() => finish(new Error(`indexedDB deletion timed out while blocked for ${name}`)), 5_000);
-  });
-}
-
-/** The minimal structural `indexedDB.deleteDatabase` surface (no DOM lib) — mirrors `store-boot.ts`. */
-interface IdbDeleteLike {
-  deleteDatabase(name: string): {
-    error?: unknown;
-    onsuccess: (() => void) | null;
-    onerror: (() => void) | null;
-    onblocked?: (() => void) | null;
-  };
-}
-
-/**
- * Build the REAL {@link AdoptionEffects} the transition drives (step 11b). The idb engine is booted PRE-EXPOSE
- * (never surfaced) solely to read the drain journal; the opfs candidate is built via the normal server bootstrap
- * (`createSyncClient` with `syncEnabled: true`, `freshStore: true`, adoption OFF so it never recurses) and gated
- * on the eager Consistency groups' catch-up; the shared commitment barrier (`runCommitmentBarrier`) commits it;
- * only THEN is the idb predecessor deleted.
- */
-function buildRealAdoptionEffects<TRegistry extends SyncTableRegistry>(
-  storePath: string,
-  ctx: AdoptionBootContext<TRegistry>,
-): AdoptionEffects {
-  const opfs = createOpfsEffects(storePath, ctx.opfs);
-  const createPglite = ctx.createPglite ?? createClientPGlite;
-  const setPhase = (phase: StoreMetaPhase): Promise<void> =>
-    writeStoreMetaRecord(storePath, { phase, updatedAt: Date.now() }, ctx.meta);
-  return buildAdoptionEffects({
-    async readIdbJournal() {
-      // Open the idb engine PRE-EXPOSE (strict durability, no opfs grant → idb backend) solely to read the drain
-      // journal. Never surfaced to tabs (invariant 3). Because this is a READ-ONLY drain probe (no write ever
-      // reaches it), the engine is CLOSED here — releasing every idb handle so a deferred (`journal-owed`) boot
-      // can re-open the store cleanly, and so the drained path deletes the idb database with nothing holding it.
-      // `strictSyncAndCloseIdb` is therefore a no-op below: the "strict close" is trivially satisfied — an
-      // unwritten engine has nothing to flush, and the handle is already released.
-      const idbPglite = await createPglite(storePath, { durability: "strict" });
-      try {
-        const runtime = createMutationRuntime({
-          db: idbPglite,
-          registry: ctx.registry,
-          batchWriteUrl: ctx.batchWriteUrl,
-          ownsMetaTable: true,
-        });
-        const stats = await runtime.readMutationStats();
-        return {
-          pending: stats.pendingCount,
-          sending: stats.sendingCount,
-          acked: stats.ackedCount,
-          failed: stats.failedCount,
-          quarantined: stats.quarantinedCount,
-          conflicted: stats.conflictedCount,
-          rejected: stats.rejectedCount,
-        };
-      } finally {
-        await idbPglite.close();
-      }
-    },
-    setPhase,
-    async buildCandidate() {
-      // Adoption reconstructs from the server — a sync-disabled boot cannot: fail the gate BEFORE minting.
-      if (!ctx.syncEnabled) {
-        throw new Error(
-          "[pgxsinkit] adoption gate unmet: sync is disabled (`syncEnabled: false`), so the opfs successor " +
-            "cannot be reconstructed online. The idb store stays authoritative.",
-        );
-      }
-      // Build the opfs candidate via the NORMAL server bootstrap path (its own `createClientPGlite` mints the
-      // opfs store at the store directory). `freshStore: true` overlaps catch-up with the local phases; adoption
-      // is OFF so this never recurses; the phase stays `adopting` (set by the caller) for crash recovery.
-      const candidate = await createSyncClient<TRegistry>({
-        registry: ctx.registry,
-        electricUrl: ctx.electricUrl,
-        batchWriteUrl: ctx.batchWriteUrl,
-        storePath,
-        hasOpfsSyncAccess: true,
-        freshStore: true,
-        syncEnabled: true,
-        // Durability is registry-declared (ADR-0047): this candidate boot resolves it from `ctx.registry`, the
-        // SAME registry as the store it succeeds, so the opfs successor is minted under the declared mode.
-        [ADOPTION_CANDIDATE_BUILD]: true,
-        [INTERNAL_PGLITE_CREATE]: createPglite,
-        ...(ctx.getAuthToken ? { getAuthToken: ctx.getAuthToken } : {}),
-        ...(ctx.requestHeaders ? { requestHeaders: ctx.requestHeaders } : {}),
-      } as CreateSyncClientOptions<TRegistry> & AdoptionCandidateBuildOptions & InternalPgliteCreateOptions);
-      const strictSync = (candidate.pglite as unknown as { strictSync?: () => Promise<void> }).strictSync;
-      if (typeof strictSync !== "function") {
-        await candidate.stop().catch(() => undefined);
-        throw new Error(
-          "[pgxsinkit] adoption: the candidate store does not expose `strictSync()` — the commitment barrier " +
-            "requires an OPFS-repacked engine (data-before-authority, invariant 3).",
-        );
-      }
-      return {
-        ready: candidate.ready,
-        strictSync: () => strictSync.call(candidate.pglite),
-        close: () => candidate.stop(),
-      };
-    },
-    publishSentinel: () => opfs.publishSentinel(),
-    deleteSentinel: () => opfs.deleteSentinel(),
-    deleteStoreDirectory: () => opfs.deleteStoreDirectory(),
-    deleteIdbPredecessor: () => deleteAdoptionIdbPredecessor(storePath, ctx.meta),
-    ...(ctx.gateDeadlineMs != null ? { gateDeadlineMs: ctx.gateDeadlineMs } : {}),
-  });
-}
-
-/** The default real seams for the adoption boot decision (production wiring). */
-function realAdoptionSeams<TRegistry extends SyncTableRegistry>(
-  ctx: AdoptionBootContext<TRegistry>,
-  seams?: AdoptionWiringSeams,
-): Required<Pick<AdoptionWiringSeams, "idbStoreExists" | "resolveStoreBoot" | "buildEffects" | "log">> {
-  return {
-    idbStoreExists: seams?.idbStoreExists ?? ((sp: string) => defaultIdbStoreExists(sp, ctx.meta)),
-    resolveStoreBoot:
-      seams?.resolveStoreBoot ??
-      ((sp: string) =>
-        resolveStoreBoot(sp, {
-          hasOpfsSyncAccess: true,
-          ...(ctx.meta || ctx.opfs
-            ? { deps: { ...(ctx.meta ? { meta: ctx.meta } : {}), ...(ctx.opfs ? { opfs: ctx.opfs } : {}) } }
-            : {}),
-        })),
-    buildEffects: seams?.buildEffects ?? ((sp: string) => buildRealAdoptionEffects(sp, ctx)),
-    log: seams?.log ?? ((message, data) => syncDebug(message, data)),
-  };
-}
-
-/**
- * @internal The boot-time AUTOMATIC adoption decision (step 11b). Returns whether the subsequent client-owned
- * mint should open the OPFS backend (`bootHasOpfs`) after any adoption transition ran. Adoption ONLY ever
- * migrates an EXISTING idb store (a committed-opfs or virgin store has no idb predecessor), so a non-creating
- * idb existence check gates the whole path; then the boot classifier's verdict drives {@link adoptionEligible}.
- * On `adopted: true` the opfs successor is committed and the mint opens it; on any `adopted: false` (owed
- * journal / gate unmet / barrier failed) the idb store stays authoritative and the mint opens idb.
- */
-export async function runBootAdoption<TRegistry extends SyncTableRegistry>(
-  storePath: string,
-  declaration: AdoptionDeclaration,
-  ctx: AdoptionBootContext<TRegistry>,
-  seamsOverride?: AdoptionWiringSeams,
-): Promise<{ bootHasOpfs: boolean; outcome?: AdoptionOutcome }> {
-  const seams = realAdoptionSeams(ctx, seamsOverride);
-  // Adoption migrates an EXISTING idb store; nothing to adopt otherwise (committed-opfs / virgin have no idb).
-  if (!(await seams.idbStoreExists(storePath))) return { bootHasOpfs: true };
-  const resolution = await seams.resolveStoreBoot(storePath);
-  const verdict = resolution.verdict;
-  if (verdict === undefined || !adoptionEligible(declaration, verdict, true)) {
-    // The classifier already executed any recovery (e.g. an interrupted adoption). Honour its resolved backend.
-    const bootHasOpfs = resolution.storageBackend === "opfs-repacked";
-    seams.log("boot adoption not eligible — using the classifier's resolved backend", {
-      action: verdict?.action,
-      storageBackend: resolution.storageBackend,
-    });
-    return { bootHasOpfs };
-  }
-  const outcome = await runAdoptionTransition(declaration, seams.buildEffects(storePath));
-  if (outcome.adopted) {
-    seams.log("boot adoption committed the opfs successor; idb predecessor deleted", {
-      ...(outcome.predecessorCleanupPending ? { predecessorCleanupPending: outcome.predecessorCleanupPending } : {}),
-    });
-    return { bootHasOpfs: true, outcome };
-  }
-  seams.log("boot adoption deferred/failed — idb stays authoritative", {
-    reason: outcome.reason,
-    ...(outcome.error ? { error: outcome.error } : {}),
-  });
-  return { bootHasOpfs: false, outcome };
-}
-
 // ─── ADR-0049 step 11c: FRESH/RESTORE commitment boot wiring ───────────────────────────────────────────
-// Step 11b wired the DECLARATION-gated adoption transition; it left one gap (its own commit message names it):
-// a virgin (or restored) opfs boot minted `opfs://` straight through `resolveStoreDataDir` WITHOUT the phase
-// machine — no candidate record, no commitment barrier, no sentinel. That violated invariant 3 (an uncommitted
-// candidate is never exposed to writes; commitment precedes exposure — D7) and invariant 12 (record written at
-// creation, completed before exposure). This wiring closes it: EVERY browser opfs boot the client owns now
-// routes through the boot phase machine, and a fresh/restore candidate is committed by the shared barrier
-// BEFORE exposure. It COMPOSES with 11b — the declared-adoption-on-idb-store decision runs FIRST; this path
-// runs only when the opfs grant survives it (so an already-committed successor resolves `open-committed` with
-// no re-commit, and a deferred adoption's `false` grant short-circuits to idb).
+// A virgin (or restored) opfs boot must never mint `opfs://` straight through `resolveStoreDataDir` WITHOUT
+// the phase machine — no candidate record, no commitment barrier, no sentinel. That would violate invariant 3
+// (an uncommitted candidate is never exposed to writes; commitment precedes exposure — D7) and invariant 12
+// (record written at creation, completed before exposure). So EVERY browser opfs boot the client owns routes
+// through the boot phase machine, and a fresh/restore candidate is committed by the shared barrier BEFORE
+// exposure (an already-committed store resolves `open-committed` with no re-commit; a `false` grant
+// short-circuits to idb).
 
 /**
  * @internal Injectable seams for the FRESH/RESTORE commitment boot wiring (step 11c). Real defaults in
  * production (`globalThis.indexedDB` / `navigator.storage`); unit tests inject fakes so the phase machine and
- * the commitment barrier are exercised without real IndexedDB / OPFS / WASM. Mirrors {@link AdoptionWiringSeams}:
- * the IO surfaces are faked, the barrier runs over the REAL `resolveStoreBoot` / `createOpfsEffects` /
- * `writeStoreMetaRecord` so the record-before-directory ordering and the sentinel/phase writes are real.
+ * the commitment barrier are exercised without real IndexedDB / OPFS / WASM: the IO surfaces are faked, while
+ * the barrier runs over the REAL `resolveStoreBoot` / `createOpfsEffects` / `writeStoreMetaRecord` so the
+ * record-before-directory ordering and the sentinel/phase writes are real.
  */
 export interface FreshCommitmentSeams {
   /** The boot classifier + executor (`store-boot.ts`); its verdict decides whether a candidate needs the barrier. */
@@ -945,12 +663,12 @@ function verdictNeedsCommitmentBarrier(
 /**
  * @internal ADR-0049 step 11c — Phase 1 (PRE-MINT). Route a client-owned OPFS-home boot through the boot phase
  * machine ({@link resolveStoreBoot}) so: a virgin/restore boot stands up an UNCOMMITTED opfs candidate (record
- * BEFORE directory, invariant 12); a committed store resolves `open-committed` (no barrier re-run); a recordless
- * idb store (adoption not declared) downgrades to idb (invariant 14 — never a fresh opfs mint over an existing
- * idb store's data); and an interrupted destruction/adoption/candidate is recovered by the classifier itself. Returns
- * whether the mint opens opfs and whether the local-init milestone must run the commitment barrier. A `false`
- * `hasOpfsSyncAccess` SHORT-CIRCUITS (an idbfs/file home opens directly — the opfs commitment phase machine never
- * runs), which is also how this composes with 11b: a deferred/failed adoption flips the grant to `false`.
+ * BEFORE directory, invariant 12); a committed store resolves `open-committed` (no barrier re-run); an EXISTING
+ * recordless idb store downgrades to idb (invariant 14 — never a fresh opfs mint over an existing idb store's
+ * data; the backend is fixed at first mint); and an interrupted destruction/candidate is recovered by the
+ * classifier itself. Returns whether the mint opens opfs and whether the local-init milestone must run the
+ * commitment barrier. A `false` `hasOpfsSyncAccess` SHORT-CIRCUITS — an idbfs/file home opens directly, without
+ * the opfs commitment phase machine.
  */
 export async function resolveFreshBoot(
   storePath: string,
@@ -958,11 +676,22 @@ export async function resolveFreshBoot(
   backendOverride: "memory" | undefined,
   seams?: FreshCommitmentSeams,
 ): Promise<FreshBootResolution> {
+  // The injected IO seams, in the shape both arms below take them (unit tests fake the whole browser surface;
+  // production passes none and every default reads the real globals).
+  const bootDeps: NonNullable<ResolveStoreBootOptions["deps"]> = {
+    ...(seams?.meta ? { meta: seams.meta } : {}),
+    ...(seams?.opfs ? { opfs: seams.opfs } : {}),
+    ...(seams?.idbExists ? { idbExists: seams.idbExists } : {}),
+  };
   // Guard: only the browser opfs engine home routes through the phase machine. No grant (or the memory test
-  // lane, which has no meta machinery) → the idb/file/memory path is untouched except that a browser denied
-  // boot must finish an already-authorized `deleting` handoff before it creates a replacement IDB store.
+  // lane, which has no meta machinery) → the idb/file/memory path is untouched except for the denied boot's
+  // PRE-MINT meta gate: it must finish an already-authorized `deleting` handoff, RETIRE an unexposed
+  // `opfs-candidate` (nothing is exposed beneath a record still claiming one), and it REFUSES an
+  // `opfs-committed` store ({@link CommittedStoreUnreachableError} — this home cannot open the committed
+  // store, and the idb store at the same path would be an empty sibling). The memory test lane short-circuits
+  // BEFORE the gate: it has no meta record to honour at all.
   if (!hasOpfsSyncAccess || backendOverride === "memory") {
-    if (!hasOpfsSyncAccess && backendOverride !== "memory") await recoverDeniedBootDeletion(storePath);
+    if (!hasOpfsSyncAccess && backendOverride !== "memory") await resolveDeniedBootAuthority(storePath, bootDeps);
     return {
       bootHasOpfs: false,
       storageBackend: backendOverride === "memory" ? "memory" : "idbfs",
@@ -974,15 +703,7 @@ export async function resolveFreshBoot(
     ((sp: string) =>
       resolveStoreBoot(sp, {
         hasOpfsSyncAccess: true,
-        ...(seams?.meta || seams?.opfs || seams?.idbExists
-          ? {
-              deps: {
-                ...(seams?.meta ? { meta: seams.meta } : {}),
-                ...(seams?.opfs ? { opfs: seams.opfs } : {}),
-                ...(seams?.idbExists ? { idbExists: seams.idbExists } : {}),
-              },
-            }
-          : {}),
+        ...(seams?.meta || seams?.opfs || seams?.idbExists ? { deps: bootDeps } : {}),
       }));
   const resolution = await runResolve(storePath);
   const bootHasOpfs = resolution.storageBackend === "opfs-repacked";
@@ -1012,9 +733,9 @@ export async function resolveFreshBoot(
  * for unit tests via {@link FreshCommitmentSeams}.
  */
 /**
- * Extract the live engine's `strictSync()` from an opfs-repacked store for the commitment barrier (mirrors the
- * adoption path's `commitCandidate`). The commitment barrier requires it (data-before-authority, invariant 3);
- * a store that does not expose it is not an OPFS-repacked engine, which is a boot invariant violation.
+ * Extract the live engine's `strictSync()` from an opfs-repacked store for the commitment barrier. The barrier
+ * requires it (data-before-authority, invariant 3); a store that does not expose it is not an OPFS-repacked
+ * engine, which is a boot invariant violation.
  */
 function resolveEngineStrictSync(pglite: ClientPGlite): () => Promise<void> {
   const strictSync = (pglite as unknown as { strictSync?: () => Promise<void> }).strictSync;
@@ -1044,6 +765,39 @@ export async function runFreshCommitmentBarrier(
       storePath,
     },
   );
+}
+
+/**
+ * @internal The ADOPTED-boot commitment gate. A boot that ADOPTS an instance (`pgliteInstance` /
+ * `precreatedPglite` — the provision→adopt accelerator, ADR-0032 decision 5) never enters `openOwnedStore`, so
+ * {@link resolveFreshBoot} never runs and nothing flags the barrier. Left alone, an adopted OPFS store therefore
+ * stays UNCOMMITTED for its whole life: no sentinel, and a record still at `opfs-candidate` (or absent, when the
+ * adopted instance was built outside the mint seam — a BYO `pgliteInstance`). That state is INDISTINGUISHABLE
+ * from a torn candidate, so the next client-owned boot classifies `delete-candidate-and-rebuild` and DESTROYS a
+ * populated store — offline, with nothing to rebuild from. An adopted opfs boot therefore owes the SAME barrier
+ * ({@link runFreshCommitmentBarrier}) a fresh one does, pre-expose (invariant 3).
+ *
+ * Exactly two states are this gate's to own: RECORDLESS and `opfs-candidate`. `opfs-committed` needs nothing
+ * (the warm-reopen accelerator), and every other phase belongs to another authority — `deleting` to the
+ * deletion authority, `idb-authoritative` to the idb lane — which an adopted-boot barrier must not fight. A
+ * scope with no meta store has nowhere to record commitment, so it declines. An UNREADABLE record PROPAGATES:
+ * a failed meta read is an error, never "no record" (invariant 12).
+ */
+export async function resolveAdoptedCommitmentBarrier(
+  storePath: string,
+  seams?: FreshCommitmentSeams,
+): Promise<boolean> {
+  const metaResult = await readStoreMetaRecord(storePath, seams?.meta);
+  const metaUnavailable = metaResult === META_STORE_UNAVAILABLE;
+  const record = metaUnavailable ? undefined : metaResult;
+  const needsCommitmentBarrier = !metaUnavailable && (record === undefined || record.phase === "opfs-candidate");
+  (seams?.log ?? ((message, data) => syncDebug(message, data)))("boot adopted store commitment resolved", {
+    storePath,
+    phase: record?.phase ?? null,
+    ...(metaUnavailable ? { metaStoreUnavailable: true } : {}),
+    needsCommitmentBarrier,
+  });
+  return needsCommitmentBarrier;
 }
 
 /**
@@ -1078,12 +832,12 @@ function formatOpenFailureReason(error: unknown): string {
  *
  * STICKINESS (reconciling the plan's D6 "non-sticky, opfs retried next boot" verdict with the LATER phase
  * machine): the record is the first-use authority, and an idb fallback store IS a recorded idb store (boot
- * classification 7's caution / invariant 14 — the same as the no-handle virgin path, which already records
- * `idb-authoritative`). So the next boot classifies `boot-idb-authoritative` (classification 5) and boots idb;
- * it does NOT loop through virgin re-creation each boot. Retry-to-opfs is the DESIGNED non-destructive ADOPTION
- * re-entry (a declared consumer re-adopts to opfs on a later drained boot) — the phase machine's intended,
- * supervised re-entry — rather than a destructive per-boot re-probe. This keeps the fault row true ("record
- * written") and the fault-row semantics honest for the composition actually shipped.
+ * classification 6's caution / invariant 14 — the same as the no-handle virgin path, which already records
+ * `idb-authoritative`). So the next boot classifies `boot-idb-authoritative` (classification 4) and boots idb;
+ * it does NOT loop through virgin re-creation each boot, and it never re-probes destructively — a store's
+ * storage backend is fixed at first mint, and the only route to a different one is a deliberate
+ * `destroyStoreArtifacts()` / `client.destroy()` followed by a fresh boot on a fresh path. This keeps the fault
+ * row true ("record written") and the fault-row semantics honest for the composition actually shipped.
  */
 export async function fallbackVirginCandidateToIdb(
   storePath: string,
@@ -1100,53 +854,6 @@ export async function fallbackVirginCandidateToIdb(
     { storePath, reason },
   );
   return reason;
-}
-
-/** Options for the manual {@link adoptStore} API — the creation-path adoption trigger. */
-export interface AdoptStoreOptions<TRegistry extends SyncTableRegistry> {
-  registry: TRegistry;
-  electricUrl: string;
-  batchWriteUrl: string;
-  /** The store to adopt (a plain path/name; the idb predecessor is migrated to a committed OPFS successor). */
-  storePath?: string;
-  getAuthToken?: () => Promise<string | undefined>;
-  requestHeaders?: Record<string, string>;
-  syncEnabled?: boolean;
-  /** Bounded wait (ms) for the eager Consistency groups' catch-up before the gate fails closed. */
-  gateDeadlineMs?: number;
-  /** @internal test seams (fake effects / idb existence / meta+opfs IO). */
-  seams?: AdoptionWiringSeams;
-}
-
-/**
- * The MANUAL adoption API (ADR-0049 D7, plan step 11b): migrate an EXISTING idb-authoritative store into a
- * committed OPFS successor ON DEMAND, without the automatic {@link CreateSyncClientOptions.adoption} declaration
- * — the consumer's explicit call IS the authorization (they were told to export/migrate any local-only data
- * first). Like `restoreFrom` it is a CREATION-PATH operation: call it INSTEAD of {@link createSyncClient},
- * before any client opens the store — it REFUSES with {@link StoreInUseError} while a live in-process client
- * holds the store. The drain predicate still gates it (a store that owes the server work is not adoptable), and
- * every failure recovery is identical to the automatic path (idb stays authoritative; nothing strands).
- */
-export async function adoptStore<const TRegistry extends SyncTableRegistry>(
-  options: AdoptStoreOptions<TRegistry>,
-): Promise<AdoptionOutcome> {
-  const storePath = options.storePath ?? "pgxsinkit-overlay-v1";
-  const isStoreLive = options.seams?.isStoreLive ?? ((sp: string) => liveStorePaths.has(sp));
-  if (isStoreLive(storePath)) throw new StoreInUseError(storePath);
-  const ctx: AdoptionBootContext<TRegistry> = {
-    registry: options.registry,
-    electricUrl: options.electricUrl,
-    batchWriteUrl: options.batchWriteUrl,
-    ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
-    ...(options.requestHeaders ? { requestHeaders: options.requestHeaders } : {}),
-    syncEnabled: options.syncEnabled ?? true,
-    ...(options.gateDeadlineMs != null ? { gateDeadlineMs: options.gateDeadlineMs } : {}),
-    ...(options.seams?.meta ? { meta: options.seams.meta } : {}),
-    ...(options.seams?.opfs ? { opfs: options.seams.opfs } : {}),
-    ...(options.seams?.createPglite ? { createPglite: options.seams.createPglite } : {}),
-  };
-  const effects = options.seams?.buildEffects?.(storePath) ?? buildRealAdoptionEffects(storePath, ctx);
-  return runManualAdoption(effects);
 }
 
 export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
@@ -1200,20 +907,6 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * resolves the actual dataDir from it.
    */
   hasOpfsSyncAccess?: boolean;
-  /**
-   * ADR-0049 (capability-driven engine placement) decision 7, plan step 11b: the consumer's explicit
-   * reconstructibility DECLARATION authorizing AUTOMATIC adoption of an existing idb-authoritative store into a
-   * committed OPFS successor. DEFAULT OFF (`undefined`) — hook absence is NEVER authority (`rawExec` writes
-   * documented local-only state on any store), so only this explicit `"server-reconstructible"` value (or the
-   * manual {@link adoptStore} API) authorizes deleting the idb predecessor. Honoured ONLY on the browser
-   * OPFS-home boot path (when {@link hasOpfsSyncAccess} is granted and the client owns the create — never the
-   * BYO-instance / restore paths): a boot that finds an idb-authoritative store runs the pre-expose drain check,
-   * reconstructs the successor through the Adoption-bootstrap gate (authorized online reconstruction — the eager
-   * Consistency groups' initial catch-up), commits it via the strict barrier, and only then deletes the idb
-   * predecessor. Any deferral/failure (owed journal, gate unmet, barrier failed) leaves the idb store
-   * authoritative and boots it normally.
-   */
-  adoption?: AdoptionDeclaration;
   /**
    * Pre-warmed PGlite boot assets (the WASM modules + filesystem bundle), awaited and passed straight
    * into `PGlite.create`. The intent is to hide PGlite's ~2.5s cold `boot pglite.create` cost —
@@ -1378,7 +1071,7 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * @internal Capability-absence fallback reason stamped into the {@link BootReport} (ADR-0049 D1/D12). Threaded
    * by `defineSyncWorker` when the placement bootstrap opened the in-SharedWorker IDBFS engine because OPFS was
    * CAPABLE but no home could hold sync-access handles (every probe denied / the OPFS API absent). Unlike the
-   * client's own internal fallback reasons (adoption-deferred, recordless-idb — set only under a granted probe),
+   * client's own internal fallback reasons (recordless-idb, opfs-uncreatable — set only under a granted probe),
    * this externally-supplied reason is stamped verbatim on an idbfs boot. Absent on a granted opfs boot and on the
    * declared `backend: "idbfs"` mode (that is the data contract, not a fallback). Report-label only.
    */
@@ -1937,14 +1630,6 @@ export function replAdapter(
 export async function createSyncClient<const TRegistry extends SyncTableRegistry>(
   options: CreateSyncClientOptions<TRegistry>,
 ): Promise<SyncClient<TRegistry>> {
-  // The outer adoption transition owns the durable `adopting` phase and final commitment barrier. Its inner
-  // candidate boot must mint only candidate bytes; re-entering the ordinary phase machine would classify the
-  // live `adopting` record as crash recovery and tear the candidate down underneath itself.
-  const adoptionCandidateBuild =
-    (options as CreateSyncClientOptions<TRegistry> & AdoptionCandidateBuildOptions)[ADOPTION_CANDIDATE_BUILD] === true;
-  const createPglite =
-    (options as CreateSyncClientOptions<TRegistry> & InternalPgliteCreateOptions)[INTERNAL_PGLITE_CREATE] ??
-    createClientPGlite;
   // Fail fast on a bad keep-alive policy — before any PGlite boot work (ADR-0040 decision 4 — bounded).
   validateLiveQueryPolicy(options.liveQueries);
   const status: SyncRuntimeStatus = {
@@ -2057,10 +1742,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
 
   // Bind the create options once for the two client-owned create paths (fresh `storePath`, and the
   // `precreatedPglite` reject-fallback), so both consume the same pre-warm + resolve the same backend.
-  // ADR-0049 step 11b: the OPFS-home grant the client-owned mint opens under. Starts at the placement probe's
-  // value and is ADJUSTED DOWN to `false` by a deferred/failed adoption (the idb store stays authoritative), or
-  // kept `true` when adoption commits the opfs successor (the mint opens the now-committed store). Read at mint
-  // time by `timedCreate` below, so the adoption block can settle it before the create runs.
+  // ADR-0049 step 11c: the OPFS-home grant the client-owned mint opens under. Starts at the placement probe's
+  // value and is ADJUSTED DOWN to `false` by the pre-mint phase machine (an existing idb store is opened in
+  // place — the backend is fixed at first mint). Read at mint time by `timedCreate` below, so the phase machine
+  // can settle it before the create runs.
   let bootHasOpfsSyncAccess = options.hasOpfsSyncAccess === true;
   // ADR-0049 step 11c: set by the pre-mint fresh-boot phase machine when it stands up an UNCOMMITTED opfs
   // candidate (virgin/restore) that the shared commitment barrier must promote BEFORE exposure. Read at the
@@ -2069,7 +1754,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   let commitmentBarrierPending = false;
   // ADR-0049 decision 12 `storageFallbackReason`: the verbatim reason an opfs-CAPABLE boot (the probe granted)
   // nonetheless opened idb. `probeGranted` is the entering grant; a fallback is `probeGranted && !bootHasOpfs...`
-  // once the adoption + fresh phase machine has settled (never on a plain idb boot, where `probeGranted` is false).
+  // once the fresh phase machine has settled (never on a plain idb boot, where `probeGranted` is false).
   const probeGranted = options.hasOpfsSyncAccess === true;
   let storageFallbackReason: string | undefined;
   // Durability (ADR-0047 D2 + ADR-0050): resolve the store's declared mode ONCE here — this is the single
@@ -2112,16 +1797,16 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // caller-supplied) leaves it `null` (create ran elsewhere — see the provision block below).
   const timedCreate = async (): Promise<ClientPGlite> => {
     const startedAt = performance.now();
-    // ADR-0049 step 10b/11b: the OPFS-home grant is spread in at MINT time (not baked into `createClientOptions`),
-    // so a boot adoption that ran just above can settle `bootHasOpfsSyncAccess` first — opening the committed
-    // opfs successor (adopted) or the idb store (adoption deferred/failed). Default absent keeps today's backend.
+    // ADR-0049 step 10b/11c: the OPFS-home grant is spread in at MINT time (not baked into `createClientOptions`),
+    // so the pre-mint phase machine that ran just above can settle `bootHasOpfsSyncAccess` first — opening the
+    // committed opfs store or the existing idb store. Default absent keeps today's backend.
     // ADR-0049 decision 12: this is the SINGLE client-owned mint seam, so stamp `storageBackend` from the resolved
     // dataDir scheme here — the same resolution `createClientPGlite` performs, so the diagnostic never diverges
     // from the backend actually opened. Covers every client-owned mint (in-process, worker, precreated-fallback).
     const resolvedDataDir = bootHasOpfsSyncAccess
       ? resolveStoreDataDir(fallbackStorePath, backendOverride, { hasIndexedDb: true, hasOpfsSyncAccess: true })
       : resolveStoreDataDir(fallbackStorePath, backendOverride);
-    const created = await createPglite(fallbackStorePath, {
+    const created = await createClientPGlite(fallbackStorePath, {
       ...createClientOptions,
       ...(bootHasOpfsSyncAccess ? { hasOpfsSyncAccess: true } : {}),
     });
@@ -2137,30 +1822,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     return created;
   };
 
-  // ADR-0049 step 11b — AUTOMATIC adoption (declaration-gated, default off). Honoured ONLY on the client-owned
-  // storePath create in a browser OPFS engine home (`bootHasOpfsSyncAccess`), never the BYO / restore paths: a
-  // boot that finds an existing idb-authoritative store runs the pre-expose drain check, reconstructs the opfs
-  // successor through the Adoption-bootstrap gate, commits it, and deletes the idb predecessor. Any deferral or
-  // failure leaves the idb store authoritative — `bootHasOpfsSyncAccess` is flipped to false so the mint opens
-  // idb. Runs before the create, so `timedCreate` opens whichever backend the transition settled on.
-  const runBootAdoptionIfDeclared = async (): Promise<void> => {
-    if (!bootHasOpfsSyncAccess || options.adoption !== "server-reconstructible" || restoreBoot) return;
-    const { bootHasOpfs, outcome } = await runBootAdoption(fallbackStorePath, options.adoption, {
-      registry: options.registry,
-      electricUrl: options.electricUrl,
-      batchWriteUrl: options.batchWriteUrl,
-      ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
-      ...(options.requestHeaders ? { requestHeaders: options.requestHeaders } : {}),
-      syncEnabled: options.syncEnabled ?? true,
-    });
-    bootHasOpfsSyncAccess = bootHasOpfs;
-    // ADR-0049 decision 12: a declared adoption that DEFERRED/FAILED left idb authoritative — an opfs-capable boot
-    // that opened idb. Record the verbatim reason (the outcome's own classification) as the fallback reason.
-    if (!bootHasOpfs && outcome && outcome.adopted === false) {
-      storageFallbackReason = `adoption deferred (${outcome.reason})`;
-    }
-  };
-
   // Refuse a caller-owned instance that is PROVABLY non-persistent (ADR-0036 decision 4), unless a testing
   // acknowledgment is present. `classifyNonPersistentDataDir` inspects the instance's own dataDir (the
   // `ClientPGlite` interface hides it, so via a narrow cast) — the two provably-non-persistent shapes are
@@ -2172,7 +1833,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // An opfs-repacked instance is PROVABLY persistent (a dedicated OPFS directory) yet reports no `dataDir`
     // (custom VFS), so honour its brand before the dataDir classification — otherwise adopting a provisioned
     // opfs store (provision-then-attach, ADR-0049) would be wrongly refused as an in-memory default.
-    if ((instance as Record<symbol, unknown>)[OPFS_REPACKED_PERSISTENT] === true) return;
+    if (isOpfsRepackedPersistent(instance)) return;
     const observedDataDir = (instance as { dataDir?: string }).dataDir;
     // The two provably-non-persistent shapes: an undefined dataDir (a raw `new PGlite()` in-memory default)
     // and a `memory://` store. Every store the funnel mints carries a real `idb://`/`file://` dataDir string.
@@ -2181,41 +1842,30 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   };
 
   // The complete client-owned open path. Both an ordinary `storePath` boot and a rejected precreated
-  // accelerator MUST enter here: recovery/adoption/classification precede every persistent mint. Keeping the
-  // flow in one closure prevents a rejected eager create from bypassing live `deleting` authority or the OPFS
-  // commitment phase machine by jumping straight to `timedCreate()`.
+  // accelerator MUST enter here: recovery/classification precede every persistent mint. Keeping the flow in one
+  // closure prevents a rejected eager create from bypassing live `deleting` authority or the OPFS commitment
+  // phase machine by jumping straight to `timedCreate()`.
   const openOwnedStore = async (): Promise<ClientPGlite> => {
-    // A capability-denied browser may inherit an interrupted destroy from an earlier granted engine home.
-    // Resolve that authority before any replacement IDB store is minted; ordinary denied boots with no
-    // `deleting` record remain unchanged apart from the bounded meta read.
+    // A capability-denied browser may inherit an interrupted destroy or an unexposed candidate from an earlier
+    // granted engine home, and it may be looking at a store that lives in OPFS it cannot open at all. ONE
+    // bounded meta read settles all three before any replacement IDB store is minted: a `deleting` handoff
+    // completes, an `opfs-candidate` is retired (sentinel + directory, then idb authority), an `opfs-committed`
+    // store is REFUSED typed ({@link CommittedStoreUnreachableError} — never an empty idb sibling minted over
+    // it), and every other state (including no meta store at all) proceeds exactly as before.
     if (!bootHasOpfsSyncAccess && backendOverride !== "memory") {
-      await recoverDeniedBootDeletion(fallbackStorePath);
+      await resolveDeniedBootAuthority(fallbackStorePath);
     }
-    // ADR-0049 step 11b: run the declaration-gated automatic adoption BEFORE the client-owned mint, so the mint
-    // opens the committed opfs successor (adopted) or the still-authoritative idb store (deferred/failed). This
-    // COMPOSES with step 11c below: adoption (declared, on an existing idb store) settles `bootHasOpfsSyncAccess`
-    // FIRST; only then does the fresh/restore phase machine run.
-    if (!adoptionCandidateBuild) await runBootAdoptionIfDeclared();
-    // ADR-0049 step 11c: when the opfs grant survives adoption, route the client-owned mint through the boot
-    // PHASE MACHINE (invariants 3/12/14). A virgin/restore boot stands up an UNCOMMITTED opfs candidate (record
-    // BEFORE directory) and flags the commitment barrier for the local-init milestone; a committed store resolves
-    // `open-committed` (no re-run — composes with an adoption that just committed); a recordless idb store (adoption
-    // not declared) downgrades to idb (never a fresh opfs mint over an existing idb store's data). A `false` grant (probe denied
-    // OR adoption deferred/failed) SHORT-CIRCUITS — the idbfs home opens directly, without the opfs commitment phase machine.
-    if (adoptionCandidateBuild) {
-      // The predecessor remains authoritative and its journal was proven drained before the outer transition
-      // entered `adopting`. Remove any sentinel-less residue from an earlier authorized destruction, then create
-      // the directory the candidate factory will open. No meta write and no commitment here: the outer adoption
-      // transition owns both.
-      const opfs = createOpfsEffects(fallbackStorePath);
-      await opfs.deleteSentinel();
-      await opfs.deleteStoreDirectory();
-      await opfs.getStoreDirectoryHandle();
-    } else if (bootHasOpfsSyncAccess) {
+    // ADR-0049 step 11c: route the client-owned mint through the boot PHASE MACHINE (invariants 3/12/14). A
+    // virgin/restore boot stands up an UNCOMMITTED opfs candidate (record BEFORE directory) and flags the
+    // commitment barrier for the local-init milestone; a committed store resolves `open-committed` (no re-run);
+    // an EXISTING recordless idb store downgrades to idb (never a fresh opfs mint over an existing idb store's
+    // data — the backend is fixed at first mint). A `false` grant (probe denied) SHORT-CIRCUITS: the idbfs home
+    // opens directly, without the opfs commitment phase machine.
+    if (bootHasOpfsSyncAccess) {
       const fresh = await resolveFreshBoot(fallbackStorePath, bootHasOpfsSyncAccess, backendOverride);
       // ADR-0049 decision 12: the phase machine downgraded a granted opfs boot to idb (invariant 14 — an existing
       // idb store is opened in place, never overwritten by a fresh opfs mint). That is an opfs-capable-boot-on-idb
-      // fallback; record its verbatim verdict as the reason (only when adoption did not already set one).
+      // fallback; record its verbatim verdict as the reason.
       if (!fresh.bootHasOpfs && storageFallbackReason == null) {
         storageFallbackReason = `recordless idb store opened in place (invariant 14; verdict ${fresh.verdict?.action ?? "unknown"})`;
       }
@@ -2279,7 +1929,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     pglite = await openOwnedStore();
   }
   // ADR-0049 decision 12: stamp the fallback reason once the mint's backend is settled. Guarded on `probeGranted`
-  // (an opfs-capable boot) — a plain idb boot never enters the adoption/fresh phase machine, so it never sets one.
+  // (an opfs-capable boot) — a plain idb boot never enters the fresh phase machine, so it never sets one.
   if (probeGranted && !bootHasOpfsSyncAccess && backendOverride !== "memory" && storageFallbackReason != null) {
     bootReportBuilder.setStorageFallbackReason(storageFallbackReason);
   }
@@ -2300,11 +1950,24 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       bootReportBuilder.setStorageBackend(byoBackend);
     }
   }
-  // ADR-0049 step 11b: register the client-owned store path in the live-store guard so the manual `adoptStore`
-  // API refuses to migrate a store an open client already holds (`StoreInUseError`). BYO instances the caller
-  // owns are not registered (the caller manages their lifecycle). Unregistered on `stop()`/`destroy()` below.
+  // An ADOPTED opfs store owes the SAME commitment barrier a fresh one does ({@link resolveAdoptedCommitmentBarrier}):
+  // the adopt paths skip `openOwnedStore`, so the pre-mint phase machine never ran and `commitmentBarrierPending` is
+  // still false — leaving a provision-adopted store uncommitted, which the NEXT client-owned boot reads as a torn
+  // candidate and destroys. Gated on the opfs-repacked brand: an idb/file BYO instance has no commitment machinery to
+  // run, and the memory test lane has no meta machinery at all. The bounded meta read is kicked off HERE and folded
+  // into `commitmentBarrierPending` at the milestone below, so it overlaps schema exec instead of preceding it.
+  const adoptedCommitmentGate =
+    (options.pgliteInstance != null || adoptedPrecreated) &&
+    backendOverride !== "memory" &&
+    isOpfsRepackedPersistent(pglite)
+      ? resolveAdoptedCommitmentBarrier(fallbackStorePath)
+      : null;
+  // The gate's rejection is observed at the milestone (fail closed, invariant 12); this only keeps an unrelated
+  // earlier boot failure from surfacing it as an unhandled rejection in the meantime.
+  if (adoptedCommitmentGate) void adoptedCommitmentGate.catch(() => undefined);
+  // Whether THIS client owns the store's lifecycle (so `destroy()` may run the supervised destruction machine
+  // over it). A BYO `pgliteInstance` is the caller's to dispose of; every other provenance is ours.
   const ownsStoreLifecycle = !options.pgliteInstance;
-  if (ownsStoreLifecycle) liveStorePaths.add(fallbackStorePath);
 
   // Provision block (ADR-0034): when the boot adopted a pre-provisioned store and the provisioner stamped
   // its create timing, report the spare's initdb cost + how long it sat ready, and leave `pgliteCreateMs`
@@ -2485,9 +2148,18 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
 
       if (storedFingerprint === currentFingerprint) {
         // (4a) Match → SKIP the durable replay entirely; the persisted durable schema is already current.
+        // Named on the rail: whether a warm boot took the fast path is the first thing a latency reading needs,
+        // and the BootReport only surfaces it after finalize (too late to read against the phase timings).
+        syncDebug("boot local schema fingerprint match — durable exec skipped");
         bootReportBuilder.setSchemaFastPath({ skipped: true, fingerprintMatch: true });
       } else {
         // (4b) Absent/mismatch → replay the durable schema, then stamp the fingerprint after success.
+        // `hadStored` separates the two very different causes: no stored fingerprint at all (a fresh/rebuilt
+        // store — a replay is expected) versus a stored one that DISAGREES (a registry shape change, or an
+        // unexpected fingerprint drift worth investigating).
+        syncDebug("boot local schema fingerprint mismatch — replaying durable schema", {
+          hadStored: storedFingerprint != null,
+        });
         await pglite.exec(generateDurableLocalSchemaSql(options.registry));
         await writeStoredLocalSchemaFingerprint(pglite, options.registry, currentFingerprint);
         bootReportBuilder.setSchemaFastPath({ skipped: false, fingerprintMatch: false });
@@ -2630,9 +2302,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // manage to start is assigned to `sync` by the time this resolves, for the caller's `sync?.unsubscribe()`.
   const quiesceTailForTeardown = async (): Promise<void> => {
     disposed = true;
-    // ADR-0049 step 11b: release the live-store guard so a later manual `adoptStore` on this path is permitted
-    // once this client is torn down (delete-if-present; a BYO-instance boot never registered, so it is a no-op).
-    liveStorePaths.delete(fallbackStorePath);
     // FIX 2: a stopped client can never reach `writeReady` / `ready`, so reject them (idempotent — a race with
     // the tail's own resolve is settled first-wins; a normal stop AFTER boot is a no-op on the already-resolved
     // promises) so a parked mutation or an `await ready` / `start()` fails FAST rather than hanging past
@@ -3550,6 +3219,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // does — see `localReadReady`'s no-reject-binding rationale above): the returned promise rejects, the client
   // is NEVER exposed, nothing is published, the `opfs-candidate` record survives, and the next boot's classifier
   // tears the candidate down and rebuilds (invariant 3 — an uncommitted candidate is never exposed to writes).
+  // An ADOPTED boot arrives here with the same debt: fold its gate in (kicked off back at the adopt branch, so the
+  // meta read overlapped the phases above). Plain assignment, not `||=`: the adopt paths never enter
+  // `openOwnedStore`, so the fresh flag is necessarily false whenever the gate ran.
+  if (adoptedCommitmentGate) commitmentBarrierPending = await adoptedCommitmentGate;
   if (commitmentBarrierPending) {
     await runFreshCommitmentBarrier(fallbackStorePath, resolveEngineStrictSync(pglite));
   }

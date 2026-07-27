@@ -1,10 +1,24 @@
 // The ROUTER (ADR-0049 step 6): the SharedWorker-side placement machinery — the "communication centre"
 // (CONTEXT.md § "Language — engine placement"). This module runs INSIDE the SharedWorker and is the single
-// role that never moves whatever the engine's home is. It owns exactly four things:
+// role that never moves whatever the engine's home is. It owns exactly five things:
 //   - the ATTACH REGISTRY (every tab's bridge port),
 //   - the CURRENT engine identity + the engine CONTROL CHANNEL,
-//   - relocation-notice FAN-OUT to every tab, and
-//   - execution-limit PROBE FORWARDING (tab-reported overdue dispatch → control-channel pings → verdict).
+//   - relocation-notice FAN-OUT to every tab,
+//   - execution-limit PROBE FORWARDING (tab-reported overdue dispatch → control-channel pings → verdict), and
+//   - ENGINE LIVENESS: a registered engine must stay PROVEN LIVE. The router state can outlive an engine —
+//     `extendedLifetime` keeps the SharedWorker (and this module's state) alive past the last tab, while an
+//     elected DEDICATED engine dies with the tab that spawned it — so a registration is never trusted on age.
+//     On the DEFAULT configuration the retirement signals are the ones that carry actual EVIDENCE of death:
+//     the engine control port's `close` event (MessagePort `close` is Baseline, so this covers every current
+//     browser), the reported paths owned above this module (worker `error`, spawn failure, tab death), and
+//     the teardown handshake. SILENCE IS NEVER A VERDICT HERE (ADR-0049 D5): PGlite's synchronous WASM work
+//     blocks the engine's event loop, so a legitimate long import stalls the control channel exactly as a
+//     corpse does. Timing therefore lives entirely behind the OPT-IN execution limit — with it enabled, an
+//     unacked `connect-port` and a tab-reported overdue dispatch both hand the question to the probe loop,
+//     which lands on the SAME `retireCurrentEngine` path. RESIDUAL, stated honestly: on a hypothetical
+//     platform with no MessagePort `close` event AND the limit disabled, a silently-dead piped engine is not
+//     detected by this module — that is the ADR's posture ("the limit is never claimed as death evidence"),
+//     not an oversight.
 //
 // It deliberately does NOT: spawn workers, decide leadership, or ever inspect RPC payloads. Per attached tab
 // it mints a proxy pipe and TRANSFERS one end to the engine and the other to the tab; from then on that tab's
@@ -20,6 +34,7 @@
 // `ch`/`v` and is ignored by the bridge router. Step 7's attach client speaks this SAME envelope.
 
 import {
+  engineIdentityEquals,
   mintEngineIdentity,
   readControlEnvelope,
   shouldApplyControlMessage,
@@ -59,12 +74,19 @@ export interface EngineRouterOptions {
   /** The opaque id of THIS SharedWorker instance — scopes every minted {@link EngineIdentity}'s generation. */
   swInstanceId: string;
   /**
-   * Engine-construction execution limit (`undefined`/absent `maxDispatchMs` = DISABLED, ADR D5). The router
-   * only FORWARDS tab-reported overdue dispatches into control-channel probes when enabled; the verdict
-   * threshold is {@link probeMissThreshold}. Disabled → overdue reports are ignored entirely.
+   * Engine-construction execution limit (`undefined`/absent `maxDispatchMs` = DISABLED, ADR D5). This one
+   * option gates ALL of the router's timing machinery: tab-reported overdue dispatches are forwarded into
+   * control-channel probes, and delivered pipes are covered by the {@link connectAckTimeoutMs} window, only
+   * when it is enabled. Disabled (the default) → overdue reports are ignored, no window is armed, and no
+   * amount of engine silence ever produces a verdict.
    */
   executionLimit?: ExecutionLimitConfig;
-  /** Consecutive unanswered probe pings before an engine-loss verdict (default 3). */
+  /**
+   * Probe pings that each went a FULL {@link probeIntervalMs} unanswered before an engine-loss verdict
+   * (default 3). Counting is per-ping, never per-tick: the threshold-th ping owns its own whole interval, so
+   * the effective silence before a verdict is `probeMissThreshold × probeIntervalMs` (plus the ack window
+   * where the probe started there).
+   */
   probeMissThreshold?: number;
   /** Injectable pipe factory (default `() => new MessageChannel()`) so tests can observe both minted ends. */
   createPipe?: () => { port1: RouterPort; port2: RouterPort };
@@ -72,6 +94,14 @@ export interface EngineRouterOptions {
   timers?: RouterTimers;
   /** Milliseconds between probe pings once a dispatch is reported overdue (default 2000). */
   probeIntervalMs?: number;
+  /**
+   * Milliseconds a delivered `connect-port` may go unacknowledged by the engine before its liveness is
+   * QUESTIONED (default 3000). ONLY armed when {@link executionLimit} is enabled — silence is not evidence of
+   * death (ADR-0049 D5), so the default configuration never starts this clock. Where it is armed, expiry is
+   * still not a verdict: it starts the {@link probeMissThreshold} probe loop, so a live-but-busy engine
+   * answers a ping and survives while a corpse is retired.
+   */
+  connectAckTimeoutMs?: number;
 }
 
 export interface EngineRouter {
@@ -84,7 +114,8 @@ export interface EngineRouter {
    * tab→SW: the leader coordinator announces a fresh engine control channel. Stamps the next
    * {@link EngineIdentity} ({@link mintEngineIdentity}), stores the control channel, and returns the identity.
    * On the engine's `engine-ready` for THIS identity it pipes every attached tab. Any prior engine's control
-   * listener/probe is cleared first (this does not itself fan a notice).
+   * listener/probe is cleared first (this does not itself fan a notice). The announced port is also WATCHED for
+   * liveness from here on: its `close` (where the platform has that event) retires this engine.
    */
   announceEngine(controlPort: RouterPort): EngineIdentity;
   /**
@@ -117,6 +148,7 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
   const { swInstanceId, executionLimit } = options;
   const probeMissThreshold = options.probeMissThreshold ?? 3;
   const probeIntervalMs = options.probeIntervalMs ?? 2000;
+  const connectAckTimeoutMs = options.connectAckTimeoutMs ?? 3000;
   const createPipe =
     options.createPipe ?? (() => new MessageChannel() as unknown as { port1: RouterPort; port2: RouterPort });
   const timers: RouterTimers = options.timers ?? {
@@ -132,7 +164,20 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
   let lastMinted: EngineIdentity | undefined;
   let controlPort: RouterPort | undefined;
   let controlListener: ((event: { data: unknown }) => void) | undefined;
+  /** A `close`-event listener on the CONTROL port, present only where the platform has that event (as for tabs). */
+  let controlCloseListener: (() => void) | undefined;
   let engineReady = false;
+
+  // Engine liveness. `teardownForwarded` remembers the identity whose `engine-teardown` this router relayed: the
+  // engine acks that and SELF-CLOSES its control end, so that one close is EXPECTED and must stay silent — the
+  // coordinator that asked for the teardown owns the retirement. `connectAckHandle` is ONE router-wide window
+  // that exists only under the opt-in execution limit (`undefined` on the default configuration); its
+  // per-engine — deliberately NOT per-delivery — contract is spelled out on `armConnectAckWindow`.
+  let teardownForwarded: EngineIdentity | undefined;
+  let connectAckHandle: unknown;
+
+  /** ADR-0049 D5: every timing-based path in this module (ack window + probe loop) is gated on this opt-in. */
+  const executionLimitEnabled = executionLimit?.maxDispatchMs !== undefined;
 
   // Execution-limit probe loop (one timer at a time; the whole loop keys on `currentIdentity`).
   let probeRunning = false;
@@ -147,12 +192,61 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
     }
   }
 
-  /** Mint a fresh proxy pipe: engine end → the control channel, tab end → the tab (both TRANSFERRED). */
+  /**
+   * Mint a fresh proxy pipe: engine end → the control channel, tab end → the tab (both TRANSFERRED). The
+   * bounded liveness window over this delivery is armed ONLY under the opt-in execution limit (ADR-0049 D5);
+   * with the limit disabled a delivery starts no clock, so a blocked-but-healthy engine is never condemned by
+   * a second tab attaching mid-import. The engine still posts `connect-port-ack` either way — harmless, and
+   * the handler simply clears a window that was never armed.
+   */
   function deliverPipe(tab: TabEntry): void {
     if (currentIdentity === undefined || controlPort === undefined) return;
     const { port1, port2 } = createPipe();
     controlPort.postMessage(envelope({ type: "connect-port", identity: currentIdentity }), [port1]);
     tab.port.postMessage(envelope({ type: "connect-port", identity: currentIdentity }), [port2]);
+    if (executionLimitEnabled) armConnectAckWindow(currentIdentity);
+  }
+
+  function clearConnectAckWindow(): void {
+    if (connectAckHandle !== undefined) {
+      timers.clearTimeout(connectAckHandle);
+      connectAckHandle = undefined;
+    }
+  }
+
+  /**
+   * Arm (or RE-arm) the bounded `connect-port-ack` window — reached ONLY under the opt-in execution limit
+   * (ADR-0049 D5; the caller gates it). A delivered pipe is the router's one chance to hear from the engine's
+   * realm: a live engine acks it immediately, a corpse says nothing — but so does an engine whose event loop
+   * is blocked by a long synchronous query, which is exactly why this is not a default-configuration signal.
+   * Expiry is deliberately NOT a verdict either — it hands the question to {@link startProbe}, so a
+   * live-but-busy engine answers a ping and keeps its registration while a dead one misses
+   * `probeMissThreshold` pings and is retired through the same recovery path.
+   *
+   * ONE WINDOW PER ROUTER, NOT PER DELIVERED PIPE — the deliberate contract (maintainer ruling, review
+   * 2026-07-27), which is why re-arming (an `engine-ready` fan-out to N tabs arms it N times, last wins) and
+   * an identity-only ack are correct rather than sloppy:
+   *   - The question this window asks is per-ENGINE — "is that realm processing its control port?" — not
+   *     per-pipe, so ANY identity-matched `connect-port-ack` answers it and no per-delivery correlation id is
+   *     carried.
+   *   - Cross-delivery clearing is SOUND because every `connect-port` rides ONE ordered control port: an
+   *     engine that acked delivery N is, at that instant, processing a queue that already contains delivery
+   *     N+1 — the ack is evidence for the whole queued batch, not just its own message.
+   *   - ACCEPTED RESIDUAL: the engine realm dying SILENTLY (no worker `error`, no MessagePort `close`) in the
+   *     instants BETWEEN processing consecutive queued deliveries, on a platform without the `close` event,
+   *     with the execution limit enabled — the later tab then rides a dead pipe with no armed window. That
+   *     window is vanishingly narrow, the primary wedge (an ALREADY-dead engine being piped — no ack ever
+   *     arrives, so this window expires and the probe loop retires it) is fully covered, and per-delivery
+   *     correlation was judged not worth the machinery.
+   */
+  function armConnectAckWindow(armedFor: EngineIdentity): void {
+    clearConnectAckWindow();
+    connectAckHandle = timers.setTimeout(() => {
+      connectAckHandle = undefined;
+      // The engine went away or was superseded between arming and expiry — the question is already answered.
+      if (currentIdentity === undefined || !engineIdentityEquals(currentIdentity, armedFor)) return;
+      startProbe();
+    }, connectAckTimeoutMs);
   }
 
   function resetProbe(): void {
@@ -165,14 +259,22 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
     }
   }
 
-  /** Detach the engine control channel + probe state WITHOUT fanning any notice (used by announce/handoff). */
+  /** Detach the engine control channel + probe/liveness state WITHOUT fanning any notice (announce/handoff/death). */
   function clearEngine(): void {
     resetProbe();
-    if (controlPort !== undefined && controlListener !== undefined) {
-      controlPort.removeEventListener("message", controlListener);
+    clearConnectAckWindow();
+    if (controlPort !== undefined) {
+      if (controlListener !== undefined) controlPort.removeEventListener("message", controlListener);
+      // Symmetric with the message listener: an announce replaces this port, so leaving its `close` listener
+      // attached would leak one per announce AND let a superseded port's close speak for its successor.
+      if (controlCloseListener !== undefined) {
+        (controlPort as unknown as ClosableRouterPort).removeEventListener?.("close", controlCloseListener);
+      }
     }
     controlPort = undefined;
     controlListener = undefined;
+    controlCloseListener = undefined;
+    teardownForwarded = undefined;
     currentIdentity = undefined;
     engineReady = false;
   }
@@ -186,6 +288,13 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
     }
   }
 
+  /**
+   * One tick of the probe loop (execution-limit paths only). A MISS is "a ping that was already posted went a
+   * FULL `probeIntervalMs` unanswered" — counted at the START of the tick that finds it outstanding, never in
+   * the same tick that posts it. So the first tick posts ping 1 and counts nothing, and the threshold-th ping
+   * gets its own whole interval to be answered before the tick that condemns it. `control-ack` for
+   * {@link pendingPingId} stops the loop through {@link resetProbe} at any point in between.
+   */
   function scheduleProbe(): void {
     probeHandle = timers.setTimeout(() => {
       probeHandle = undefined;
@@ -194,26 +303,52 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
         resetProbe();
         return;
       }
+      if (pendingPingId !== undefined) {
+        missCount += 1;
+        if (missCount >= probeMissThreshold) {
+          // Threshold pings, each unanswered for a full interval → ENGINE-LOSS VERDICT. No further ping is
+          // posted (the router never terminates anything; the leader coordinator reacts to `engine-retiring`).
+          resetProbe();
+          retireCurrentEngine();
+          return;
+        }
+      }
       const pingId = ++pingSeq;
       pendingPingId = pingId;
       controlPort.postMessage(envelope({ type: "control-ping", identity: currentIdentity, pingId }));
-      missCount += 1;
-      if (missCount >= probeMissThreshold) {
-        // Threshold consecutive unanswered pings → ENGINE-LOSS VERDICT (the router never terminates anything;
-        // the leader coordinator reacts to the fanned `engine-retiring`).
-        resetProbe();
-        retireCurrentEngine();
-      } else {
-        scheduleProbe();
-      }
+      scheduleProbe();
     }, probeIntervalMs);
   }
 
+  /**
+   * Start the probe loop. BOTH of its entry points — a tab-reported `overdue-dispatch` and the expiry of the
+   * `connect-port-ack` window — exist only while the opt-in execution limit is enabled (ADR-0049 D5), so this
+   * is unreachable on the default configuration. Idempotent while a loop is already running.
+   */
   function startProbe(): void {
     if (probeRunning) return;
     probeRunning = true;
     missCount = 0;
+    pendingPingId = undefined; // no ping is outstanding at the start of a loop — the first tick counts no miss
     scheduleProbe();
+  }
+
+  /**
+   * The engine control port CLOSED. For the CURRENT engine that is DEATH: the control channel's far end lives in
+   * the engine's realm, so its close means that realm is gone (the dedicated engine died with its spawning tab
+   * while this SharedWorker survived it). Retire, so the coordinators recover and no new connection is ever piped
+   * into the corpse. Two closes are NOT death and must stay silent: one for a port a later announce already
+   * SUPERSEDED (identity/port checked, never assumed), and the engine's own close after the teardown handshake
+   * this router forwarded — that retirement belongs to the coordinator that asked for it.
+   */
+  function onControlPortClose(port: RouterPort, announced: EngineIdentity): void {
+    if (controlPort !== port) return; // superseded: a later announce owns the registration now
+    if (currentIdentity === undefined || !engineIdentityEquals(currentIdentity, announced)) return;
+    if (teardownForwarded !== undefined && engineIdentityEquals(teardownForwarded, announced)) {
+      clearEngine();
+      return;
+    }
+    retireCurrentEngine();
   }
 
   // ─── Engine control-channel inbound ──────────────────────────────────────────
@@ -227,6 +362,12 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
           engineReady = true;
           for (const tab of tabs) deliverPipe(tab);
         }
+        return;
+      case "connect-port-ack":
+        // The engine's realm answered for the pipe it was just handed — the liveness question is settled until
+        // the next delivery. Identity-gated: a stale generation's ack never speaks for the current engine. With
+        // the execution limit disabled no window was ever armed, so this is simply a no-op.
+        if (shouldApplyControlMessage(currentIdentity, message)) clearConnectAckWindow();
         return;
       case "control-ack":
         // A live-but-slow engine answered the PROBE: reset the miss count and STOP the loop (below-threshold
@@ -267,6 +408,9 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
         // The coordinator's teardown handshake (ADR-0049 step 9): forward it VERBATIM to the engine's control
         // channel for the CURRENT identity, so the engine acks + self-closes. A stale teardown is discarded.
         if (!shouldApplyControlMessage(currentIdentity, message)) return;
+        // Remember it: the self-close that follows is the EXPECTED end of this handshake, not engine death, so
+        // the close listener clears the registration silently instead of fanning a retirement notice.
+        teardownForwarded = message.identity;
         controlPort?.postMessage(envelope(message));
         return;
       case "tab-detach":
@@ -326,6 +470,17 @@ export function createEngineRouter(options: EngineRouterOptions): EngineRouter {
     controlPort = port;
     controlListener = (event) => onControlMessage(event.data);
     port.addEventListener("message", controlListener);
+    // Engine-death detection, feature-detected exactly as `attachTab` does for a tab port: this end's far side
+    // lives in the engine's realm, so its `close` is the platform telling us that realm is gone. This is the
+    // load-bearing signal (MessagePort `close` is Baseline across current browsers). RESIDUAL: where the event
+    // is UNSUPPORTED, the `connect-port-ack` window covers a silently-dead engine only if the opt-in execution
+    // limit is enabled — with it disabled, silence is deliberately not read as death (ADR-0049 D5).
+    const closable = port as unknown as ClosableRouterPort;
+    if ("onclose" in closable) {
+      const closeListener = () => onControlPortClose(port, minted);
+      controlCloseListener = closeListener;
+      closable.addEventListener("close", closeListener);
+    }
     port.start?.();
     engineReady = false;
     // ADR-0049 step 9: hand the freshly-minted identity to the engine's control plane FIRST — before any

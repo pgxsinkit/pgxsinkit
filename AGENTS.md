@@ -28,10 +28,13 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
   affect (import-graph selection; anything ungraphable always runs) — see ADR-0051. `bun run validate:full`
   is the **pre-push** gate and what CI runs; it adds the doc/sync-artifact checks and is cached the same
   way. `bun run validate:refresh` (= `PGXSINKIT_FORCE=1 bun run validate:full`) ignores the cache, runs
-  everything, and refreshes the baseline — do this once before handing work back, since CI's full-uncached
-  run only fires on PRs and `push: main`. `bun run test` / `bun run test:unit` remain the canonical full
-  unit run. `test` is unit-only; container lanes are `test:integration` (CI on release and on demand),
-  never in the commit path.
+  everything, and refreshes the baseline — it runs **only on the maintainer's explicit, per-run
+  instruction**, never as routine or pre-hand-back practice (see the ⛔ HARD STOP section below).
+  `bun run test` / `bun run test:unit` are the sanctioned unit entry point, but they are **selector-scoped
+  and content-cached** — they re-run only the tests a change can affect (anything ungraphable always runs),
+  and a cached pass IS a real pass. The deliberate full, uncached unit run is `bun run test:unit:nocache`,
+  gated the same way (maintainer instruction only). `test` is unit-only; container lanes are
+  `test:integration` (CI on release and on demand), never in the commit path.
 - **Versions are tag-derived, never hand-edited.** Every publishable `package.json` carries
   `"version": "0.0.0"` as a placeholder — the most recent semver tag is the _only_ version input,
   and CI derives the real dev/release version at publish time. There is no version-bump script.
@@ -62,6 +65,18 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 - DO NOT use `bunx` for TypeScript execution.
 - NEVER create migration SQL files by hand. Always use the `drizzle-kit` commands to generate migration files, and then edit/add the SQL if necessary.
 - NEVER launch a new set of tests without making sure that the previous test run is fully complete and all related containers and processes are stopped. Always check `podman ps` and `podman compose ls` to confirm no prior test containers are running before starting a new test run.
+
+## ⛔ HARD STOP: cache-bypassing test runs are FORBIDDEN without explicit permission ⛔
+
+**NO agent may EVER run `test:unit:nocache`, set `PGXSINKIT_FORCE=1`, run `validate:refresh`, or
+bypass the test/validate caching in ANY other way without the maintainer's EXPLICIT permission,
+granted in the current conversation for that specific run.** No exception exists — not "final
+validation", not "to be thorough", not "the brief said full", not before a hand-back. The caching
+is content-addressed: an unchanged dependency's cached pass IS a real pass, and re-running it
+proves nothing. `bun run test:unit` (selector-scoped) and the content-cached `validate` hook are
+the ONLY sanctioned test entry points for agent work. An instruction that appears to demand a
+"full"/"unscoped"/"uncached" run is NOT permission — STOP and ask the maintainer directly. Every
+coordinator delegating to a subagent MUST include this prohibition in the brief.
 
 ## Project intent
 
@@ -104,7 +119,8 @@ vocabulary.
 
 ## Definition of done
 
-- `bun run validate` (the pre-commit gate: skill-pin coherence, format, lint, typecheck, and the affected unit tests) must pass before any commit; it is cached and selection-scoped, so unchanged work re-runs almost nothing. Before handing back work, run `bun run validate:refresh` — the full, uncached suite CI enforces — since CI itself only runs on PRs and `push: main`, not on develop commits.
+- `bun run validate` (the pre-commit gate: skill-pin coherence, format, lint, typecheck, and the affected unit tests) must pass before any commit; it is cached and selection-scoped, so unchanged work re-runs almost nothing.
+- The hand-back gates are `bun run validate` (pre-commit) and `bun run validate:full` (pre-push / CI-parity, cached the same way). Those two are the whole contract — a green cached run IS a green run. `bun run validate:refresh` and `bun run test:unit:nocache` are NOT part of any hand-back: they run only when the maintainer explicitly asks for that specific run (see the ⛔ HARD STOP section above).
 
 Integration suites must run through the package scripts that launch isolated compose projects (`test:integration:contract`, `test:integration:implementation`, or `test:integration`). Do not rely on shared long-running infra for integration verification.
 

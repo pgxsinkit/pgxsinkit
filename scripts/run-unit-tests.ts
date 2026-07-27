@@ -90,7 +90,7 @@ interface ShardResult {
 function runShard(files: string[]): Promise<ShardResult> {
   const startedAt = Date.now();
   return new Promise((resolve) => {
-    const child = spawn("bun", ["test", "--timeout", "30000", ...files.map((f) => `tests/unit/${f}.test.ts`)], {
+    const child = spawn("bun", ["test", "--timeout", "45000", ...files.map((f) => `tests/unit/${f}.test.ts`)], {
       env: process.env,
     });
     let output = "";

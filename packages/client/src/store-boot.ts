@@ -1,25 +1,33 @@
 // Store boot resolution — assemble the boot observations and EXECUTE the classifier's verdict with real
 // effects (ADR-0049 capability-driven engine placement, plan step 10a). `store-meta.ts` owns the PURE
-// classifier ({@link classifyStoreBoot}, boot classification 1–7) and the meta-record IO; `store-lifecycle.ts`
-// owns the PURE, effect-injected destruction/adoption/fresh-candidate machines; `opfs-effects.ts` owns the
-// concrete OPFS side. This module is the WIRING that reads the meta record, observes the commitment namespace
-// and the recordless idb fact, classifies, and then runs the destructive/candidate/adoption effects BEFORE
-// returning the resolved `dataDir` + `storageBackend` a caller opens the store at.
+// classifier ({@link classifyStoreBoot}, boot classification 1–6) and the meta-record IO; `store-lifecycle.ts`
+// owns the PURE, effect-injected destruction/fresh-candidate machines; `opfs-effects.ts` owns the concrete
+// OPFS side. This module is the WIRING that reads the meta record, observes the commitment namespace and the
+// recordless idb fact, classifies, and then runs the destructive/candidate effects BEFORE returning the
+// resolved `dataDir` + `storageBackend` a caller opens the store at.
+//
+// It also owns the OTHER browser boot arm: {@link resolveDeniedBootAuthority}, the one bounded meta read a
+// probe-DENIED (no OPFS sync access) boot performs before it may mint an IDB store. That arm never runs the
+// phase machine — it is record-blind by design — but it still owes the record three things: finish an
+// authorized `deleting` handoff, RETIRE an unexposed `opfs-candidate` (nothing may be exposed beneath a record
+// that still claims one), and REFUSE an `opfs-committed` store outright
+// ({@link CommittedStoreUnreachableError}), because a home without handles cannot open it and would
+// otherwise mint an empty idb sibling at the same path.
 //
 // It never assembles a storage URL itself — every `dataDir` comes from `store-path.ts`'s
 // {@link resolveStoreDataDir}, which stays the toolkit's only URL assembler. It carries no DOM lib dependency
 // and takes injectable deps (meta IO, OPFS root, the recordless idb existence check) so Bun unit tests fake the
 // whole surface with no real IndexedDB / OPFS / WASM.
 //
-// THE COMMITMENT BARRIER IS NOT HERE. When the verdict stands up a fresh opfs CANDIDATE (`virgin-create` /
-// `delete-candidate-and-rebuild` with opfs access), this function returns with the candidate's record at
-// `opfs-candidate` and its directory created but UNCOMMITTED. The strict-sync → sentinel → `opfs-committed`
-// barrier that promotes it (invariant 3 — an uncommitted candidate is never exposed to writes) is the mint
-// seam's post-open work, wired in plan step 10b/11. The returned {@link StoreBootResolution.verdict} tells the
-// caller a candidate is uncommitted and needs that barrier.
+// THE COMMITMENT BARRIER IS NOT HERE. When the verdict stands up a fresh opfs CANDIDATE (`virgin-create` with
+// opfs access), this function returns with the candidate's record at `opfs-candidate` and its directory created
+// but UNCOMMITTED. The strict-sync → sentinel → `opfs-committed` barrier that promotes it (invariant 3 — an
+// uncommitted candidate is never exposed to writes) is the mint seam's post-open work, wired in plan step
+// 10b/11. The returned {@link StoreBootResolution.verdict} tells the caller a candidate is uncommitted and
+// needs that barrier.
 
 import { createOpfsEffects, type OpfsEffectsDeps } from "./opfs-effects";
-import { beginFreshCandidate, classifyAdoptionRecovery, completeAdoption, resumeDeletion } from "./store-lifecycle";
+import { beginFreshCandidate, resumeDeletion } from "./store-lifecycle";
 import {
   classifyStoreBoot,
   deleteStoreMetaRecord,
@@ -48,10 +56,11 @@ export interface StoreBootResolution {
   /** The resolved backend, for diagnostics. */
   storageBackend: ResolvedStorageBackend;
   /**
-   * The executed boot verdict. Absent on the passthrough backends (`memory` / `filesystem`), which have NO
-   * meta machinery. Present on every browser classification — in particular it is the signal that an opfs
-   * CANDIDATE was stood up UNCOMMITTED (`virgin-create` / `delete-candidate-and-rebuild`): the mint seam must
-   * run the commitment barrier before exposing that store to writes (plan step 10b/11).
+   * The executed boot verdict — always a TERMINAL one (the record-clearing verdicts re-classify rather than
+   * return). Absent on the passthrough backends (`memory` / `filesystem`), which have NO meta machinery.
+   * Present on every browser classification — in particular it is the signal that an opfs CANDIDATE was stood
+   * up UNCOMMITTED (`virgin-create`): the mint seam must run the commitment barrier before exposing that store
+   * to writes (plan step 10b/11).
    */
   verdict?: StoreBootVerdict;
 }
@@ -74,10 +83,12 @@ export interface ResolveStoreBootOptions {
 }
 
 /**
- * Bounded re-classification budget. Only `resume-deletion` re-runs the loop: it completes the destructive
- * lifecycle (delete sentinel → backend store → meta record), which leaves a CLEAN state whose next
- * classification is necessarily terminal (`virgin-create` or, if an idb store somehow lingers, an idb boot).
- * One resume is enough; the small budget is a guard against an unexpected non-terminating cycle.
+ * Bounded re-classification budget. Two verdicts re-run the loop, and both end by DELETING the meta record:
+ * `resume-deletion` (the destructive lifecycle — sentinel → backend store → record) and
+ * `delete-candidate-and-rebuild` (retiring an unexposed candidate — sentinel → directory → record). Each
+ * leaves a RECORDLESS state whose next classification is necessarily terminal (`boot-idb-authoritative` when
+ * an idb store exists at the path, otherwise `virgin-create`). One re-run is enough; the small budget is a
+ * guard against an unexpected non-terminating cycle.
  */
 const MAX_DELETION_RECLASSIFY = 4;
 
@@ -141,39 +152,137 @@ function resolveHasIndexedDb(meta?: StoreMetaDeps): boolean {
   return typeof (globalThis as { indexedDB?: unknown }).indexedDB !== "undefined";
 }
 
+/** The `detail` tag {@link CommittedStoreUnreachableError} travels under across the worker bridge. */
+export const COMMITTED_STORE_UNREACHABLE_CODE = "committed-store-unreachable";
+
 /**
- * A probe-denied browser still has to honour an existing `deleting` phase before it may create a replacement
- * IDB store. The old cache is already explicitly destructible; the only authority handoff required is to
- * remove the OPFS commitment sentinel, then publish `idb-authoritative` before the replacement is exposed.
- * Any sentinel-less directory is disposable residue and is removed before a later OPFS candidate is minted.
+ * The clone-safe wire form of a {@link CommittedStoreUnreachableError}, carried in the EXISTING bridge error
+ * `detail` field (the `{ message, name, detail }` shape `serializeError` produces) — no new protocol field.
+ * The attach side calls {@link committedStoreUnreachableFromWire} on every bridge error `detail`, so a refusal
+ * raised in an engine home reaches the tab as the CLASS, not a name-tagged plain `Error`.
  */
-export async function recoverDeniedBootDeletion(
+export interface CommittedStoreUnreachableWire {
+  code: typeof COMMITTED_STORE_UNREACHABLE_CODE;
+  storePath: string;
+}
+
+/**
+ * Thrown when a boot whose engine home holds NO OPFS sync-access grant meets a store whose meta record says
+ * `opfs-committed` — the user's real store lives in the OPFS backend, which this home cannot open. Left
+ * unguarded that boot opens `idb://<storePath>` instead and MINTS AN EMPTY SIBLING at the same path: the app
+ * looks wiped, and any offline writes fork into a store no OPFS-capable boot ever opens. So the boot fails
+ * CLOSED, matching the ADR-0050 posture (never a silently different storage mode) and the
+ * {@link NonPersistentStoreError} / `StorageDeclarationRefusedError` precedents. There is deliberately no
+ * override: a committed store is only reachable from a home that can hold handles.
+ *
+ * A distinct type — not a bare `Error` — so a caller can `instanceof`-branch it from a genuine boot failure,
+ * and it survives the worker bridge AS THAT TYPE: the instance carries the clone-safe {@link
+ * CommittedStoreUnreachableWire} `detail` the bridge forwards, and the tab side reconstructs it through
+ * {@link committedStoreUnreachableFromWire} (the same tagged-detail pair the execution-limit and relocation
+ * errors use). `storePath` is on the instance too, because the remedy is path-addressed. The message names
+ * BOTH exits, because a consumer meeting this has to choose between them.
+ */
+export class CommittedStoreUnreachableError extends Error {
+  readonly code = COMMITTED_STORE_UNREACHABLE_CODE;
+  readonly storePath: string;
+  readonly detail: CommittedStoreUnreachableWire;
+
+  constructor(storePath: string) {
+    super(
+      `[pgxsinkit] refusing to boot ${JSON.stringify(storePath)} here: its store meta record says the store is ` +
+        "COMMITTED to the OPFS backend, and this boot's engine home holds no OPFS sync-access grant — so it " +
+        "cannot open that store. Booting the IndexedDB store at the same path would mint an EMPTY sibling: the " +
+        "app would look wiped and offline writes would fork into a store no OPFS-capable boot ever opens. " +
+        "Either boot from an engine home that HOLDS a grant (worker mode's elected engine worker, or the " +
+        "SharedWorker-direct home), or destroy the store first — call " +
+        `\`destroyStoreArtifacts(${JSON.stringify(storePath)})\` (exported from \`@pgxsinkit/client\`), which is ` +
+        "path-addressed and needs no grant: it deletes BOTH backends plus the commitment sentinel and the meta " +
+        "record (quiesce any live worker for the path first, `quiesceStoreWorker`) — and let the next boot " +
+        "rebuild it (ADR-0049 invariant 3; ADR-0050 never a silently different storage mode).",
+    );
+    this.name = "CommittedStoreUnreachableError";
+    this.storePath = storePath;
+    this.detail = { code: COMMITTED_STORE_UNREACHABLE_CODE, storePath };
+  }
+}
+
+/**
+ * Reconstruct a typed {@link CommittedStoreUnreachableError} from a bridge error's `detail`. STRICT shape
+ * check: returns `undefined` for anything that is not exactly the `{ code: "committed-store-unreachable",
+ * storePath }` wire form (a foreign/absent detail, a wrong code, a missing/non-string path, a non-object), so a
+ * different failure is never misclassified as this refusal. The single source of truth for the decoding —
+ * every bridge seam calls THIS, never its own shape sniff.
+ */
+export function committedStoreUnreachableFromWire(detail: unknown): CommittedStoreUnreachableError | undefined {
+  if (typeof detail !== "object" || detail === null) return undefined;
+  const candidate = detail as { code?: unknown; storePath?: unknown };
+  if (candidate.code !== COMMITTED_STORE_UNREACHABLE_CODE) return undefined;
+  if (typeof candidate.storePath !== "string") return undefined;
+  return new CommittedStoreUnreachableError(candidate.storePath);
+}
+
+/**
+ * The PRE-MINT meta gate every probe-denied (no OPFS sync access) browser boot passes through — one bounded
+ * meta read serving both of the record's claims such a boot must honour, before any replacement IDB store is
+ * created:
+ *
+ * - **`opfs-committed` → REFUSE** ({@link CommittedStoreUnreachableError}). This home cannot open the
+ *   committed store, and minting the idb sibling at the same path would publish an empty store over a
+ *   populated one. Fail closed; the remedy is a deliberate `destroy()` or a granted engine home.
+ * - **`deleting` → complete the handoff.** The old cache is already explicitly destructible; the authority
+ *   handoff required is to remove the OPFS commitment sentinel and the store directory, then publish
+ *   `idb-authoritative` before the replacement is exposed. The directory goes NOW, with the rest: the
+ *   replacement is an idb store for life (the backend is fixed at first mint), so no later OPFS candidate
+ *   would ever sweep it. Returns `true`.
+ * - **`opfs-candidate` → retire the candidate.** An unexposed candidate has no authority (the classifier's own
+ *   rule), and this home cannot open OPFS at all — so it is retired rather than left standing over the idb
+ *   store about to be minted: delete the commitment sentinel (a barrier-gap crash can have published one) and
+ *   the store directory — async OPFS deletion needs no sync-access grant — then publish `idb-authoritative`.
+ *   Returns `true`.
+ * - **Everything else** (no record, `idb-authoritative`, or no meta store at all) → proceed untouched. A
+ *   no-grant boot is otherwise record-blind by design: the opfs commitment phase machine belongs to the
+ *   granted lane, and {@link META_STORE_UNAVAILABLE} (no IndexedDB — the Bun/Node filesystem lane) cannot hold
+ *   a record at all, so there is nothing there to be blind to.
+ *
+ * An UNREADABLE record propagates ({@link StoreMetaUnreadableError}) — a failed meta read is an error, never
+ * "no record" (invariant 12).
+ */
+export async function resolveDeniedBootAuthority(
   storePath: string,
   deps?: ResolveStoreBootOptions["deps"],
 ): Promise<boolean> {
   const meta = deps?.meta;
   const record = await readStoreMetaRecord(storePath, meta);
-  if (record === META_STORE_UNAVAILABLE || record?.phase !== "deleting") return false;
+  if (record === META_STORE_UNAVAILABLE) return false;
+  // The committed refusal rides THIS read — a no-grant boot never gets a second look at the record, and the
+  // hazard (an empty idb sibling minted over a committed store) is decided by exactly this phase.
+  const phase = record?.phase;
+  if (phase === "opfs-committed") throw new CommittedStoreUnreachableError(storePath);
+  if (phase !== "deleting" && phase !== "opfs-candidate") return false;
 
   const effects = createOpfsEffects(storePath, deps?.opfs);
-  // If the namespace cannot be observed, sentinel deletion cannot be confirmed. Keep `deleting` authoritative
-  // and fail closed rather than publish a conflicting replacement.
+  // Both arms end by publishing idb authority over the commitment namespace, so both need it OBSERVABLE: if it
+  // cannot be observed, sentinel deletion cannot be confirmed. Keep the recorded phase authoritative and fail
+  // closed rather than publish a conflicting replacement.
   if ((await effects.observeCommitmentNamespace()) === "unobservable") {
     throw new Error(
-      `[pgxsinkit] cannot resume deletion for ${JSON.stringify(storePath)}: the OPFS commitment namespace is ` +
-        "unobservable in this scope, so sentinel removal cannot be confirmed.",
+      `[pgxsinkit] cannot settle ${JSON.stringify(storePath)} for an IDB boot (record phase ` +
+        `${JSON.stringify(phase)}): the OPFS commitment namespace is unobservable in this scope, so sentinel ` +
+        "removal cannot be confirmed.",
     );
   }
-  await deleteIdbDatabase(storePath, meta);
+  // The idb database is deleted only on the `deleting` arm — that is the destruction this boot inherited and
+  // completes. A candidate's retirement destroys the CANDIDATE, never a store at the path it did not mint.
+  if (phase === "deleting") await deleteIdbDatabase(storePath, meta);
   await effects.deleteSentinel();
+  await effects.deleteStoreDirectory();
   await writeStoreMetaRecord(storePath, { phase: "idb-authoritative", updatedAt: Date.now() }, meta);
   return true;
 }
 
 /**
- * Resolve where a store boots and finish any destructive/candidate/adoption work the verdict demands, then
- * return the `dataDir` + `storageBackend` the mint seam opens at. The full plan boot classification 1–7,
- * EXECUTED:
+ * Resolve where a store boots and finish any destructive/candidate work the verdict demands, then return the
+ * `dataDir` + `storageBackend` the mint seam opens at. The full plan boot classification 1–6, EXECUTED:
  *
  * - **memory override** → `memory://` passthrough, no classification (the sanctioned test/ephemeral lane has
  *   no meta machinery).
@@ -186,15 +295,17 @@ export async function recoverDeniedBootDeletion(
  *   - `resume-deletion` → complete the destructive lifecycle, then RE-CLASSIFY from the now-clean state
  *     (bounded by {@link MAX_DELETION_RECLASSIFY}).
  *   - `delete-candidate-and-rebuild` → delete the stale sentinel AND the candidate directory (a barrier-gap
- *     crash's sentinel must never survive), then rebuild per placement (the virgin path).
+ *     crash's sentinel must never survive) AND the record, then RE-CLASSIFY from the now-recordless state — so
+ *     an idb store at this path is opened in place rather than shadowed by the rebuild.
  *   - `repair-record-then-open-committed` → write `opfs-committed`, then open committed.
  *   - `open-committed` → open the committed opfs store (open failures are HARD at mint time; the bounded
- *     retries for transient UnknownError-class failures live in the mint seam's factory-call wrapper).
+ *     retries for transient UnknownError-class failures live in the mint seam's factory-call wrapper). A record
+ *     already at `opfs-committed` takes the WARM FAST PATH: it is classified straight off the record, so neither
+ *     the commitment-namespace observation nor the recordless-idb probe runs at all (both are irrelevant to
+ *     classification 2).
  *   - `boot-idb-authoritative` → write `idb-authoritative` FIRST when there is no record yet (recordless idb), then
- *     `idb://`.
- *   - `adoption-recovery` → {@link classifyAdoptionRecovery}: `complete-adoption` finishes the barrier
- *     (`opfs-committed` + delete the idb predecessor) → `opfs://`; `teardown-and-restart` tears the candidate
- *     down, sets `idb-authoritative`, and boots `idb://` (adoption re-runs later, plan step 11).
+ *     `idb://`. TERMINAL: a store's backend is fixed at first mint, so an idb store stays idb whatever this
+ *     boot's capabilities are — the only route to another backend is a deliberate destroy + a fresh boot.
  *   - `virgin-create` → with opfs access, {@link beginFreshCandidate} (record `opfs-candidate` BEFORE the
  *     directory) → `opfs://` UNCOMMITTED (barrier is step 10b/11); without opfs access, `idb-authoritative` →
  *     `idb://`.
@@ -229,7 +340,8 @@ export async function resolveStoreBoot(storePath: string, opts: ResolveStoreBoot
   const writePhase = (phase: StoreMetaPhase): Promise<void> =>
     writeStoreMetaRecord(storePath, { phase, updatedAt: Date.now() }, meta);
 
-  // The virgin creation path — reused by `virgin-create` and by `delete-candidate-and-rebuild`'s rebuild.
+  // The virgin creation path — the one place this module mints a store (a retired candidate's rebuild reaches
+  // it through re-classification, like any other virgin state).
   const finishVirginCreate = async (verdict: StoreBootVerdict): Promise<StoreBootResolution> => {
     if (opts.hasOpfsSyncAccess) {
       // Record-first authority (invariant 12): the `opfs-candidate` record is written BEFORE the directory, so
@@ -248,7 +360,7 @@ export async function resolveStoreBoot(storePath: string, opts: ResolveStoreBoot
     return { dataDir: idbDataDir, storageBackend: "idbfs", verdict };
   };
 
-  // Only `resume-deletion` loops; every other verdict returns. Deletion → clean state → a terminal verdict.
+  // The two record-clearing verdicts loop; every other verdict returns. Cleared record → a terminal verdict.
   for (let iteration = 0; iteration < MAX_DELETION_RECLASSIFY; iteration += 1) {
     // A failed meta read is an ERROR, never "no record" (invariant 12): StoreMetaUnreadableError propagates
     // here and fails the boot closed.
@@ -258,6 +370,24 @@ export async function resolveStoreBoot(storePath: string, opts: ResolveStoreBoot
     // false). Faithful to store-meta's documented mapping.
     const metaUnavailable = metaResult === META_STORE_UNAVAILABLE;
     const record = metaUnavailable ? undefined : metaResult;
+
+    // WARM COMMITTED FAST PATH. A record at `opfs-committed` DETERMINES the verdict: classification 2 says the
+    // OPFS observations are IRRELEVANT on that arm (a committed store never re-derives its verdict from OPFS),
+    // and the classifier consults `idbStoreExists` only on the recordless arm (classification 6). So on the
+    // warmest and by far most frequent boot, NEITHER of the two remaining probes is a boot dependency: the
+    // ~8-handle commitment-namespace observation and the IndexedDB open→onupgradeneeded→abort existence cycle
+    // both come OFF the critical path. The verdict is still derived by the classifier — store-meta owns
+    // classification, this module never hardcodes one — with the observations it documents as irrelevant here;
+    // if it ever answered anything but `open-committed` for this phase, the guard below falls through to the
+    // full observe-then-classify path unchanged.
+    const committedFastVerdict =
+      record?.phase === "opfs-committed"
+        ? classifyStoreBoot({ record, opfs: "unobservable", idbStoreExists: false })
+        : undefined;
+    if (committedFastVerdict?.action === "open-committed") {
+      return { dataDir: opfsDataDir, storageBackend: "opfs-repacked", verdict: committedFastVerdict };
+    }
+
     const opfsObservation = await effects.observeCommitmentNamespace();
     const idbPresent = metaUnavailable ? false : await idbExists(storePath);
     const verdict = classifyStoreBoot({ record, opfs: opfsObservation, idbStoreExists: idbPresent });
@@ -279,51 +409,33 @@ export async function resolveStoreBoot(storePath: string, opts: ResolveStoreBoot
         continue;
 
       case "delete-candidate-and-rebuild":
-        // An unexposed candidate has no authority. The stale sentinel MUST go alongside the directory — a
-        // barrier-gap crash's published sentinel must never survive into the rebuilt candidate's lifetime
-        // (plan fresh/restore crash table). Then rebuild per placement.
+        // An unexposed candidate has no authority, so RETIRE it: the stale sentinel MUST go alongside the
+        // directory — a barrier-gap crash's published sentinel must never survive into the rebuilt candidate's
+        // lifetime (plan fresh/restore crash table) — and the record goes with them. Then re-classify from the
+        // now-recordless state, exactly as `resume-deletion` does. That re-read is what keeps the rebuild
+        // honest: a store's backend is fixed at first mint, so an existing idb store at this path lands on
+        // classification 6 and is opened IN PLACE, never shadowed by a fresh opfs mint. A truly clean state
+        // reaches `virgin-create` and rebuilds.
         await effects.deleteSentinel();
         await effects.deleteStoreDirectory();
-        return finishVirginCreate(verdict);
+        await deleteStoreMetaRecord(storePath, meta);
+        continue;
 
       case "repair-record-then-open-committed":
         // Sentinel present without a record (record loss): the sentinel is committed authority. Repair the
         // record, then open committed.
         await writePhase("opfs-committed");
-        if (idbPresent) await deleteIdbDatabase(storePath, meta);
         return { dataDir: opfsDataDir, storageBackend: "opfs-repacked", verdict };
 
       case "open-committed":
-        // Adoption may have committed before its predecessor deletion completed. Finish that cleanup
-        // idempotently before publishing the committed store to this boot.
-        if (idbPresent) await deleteIdbDatabase(storePath, meta);
+        // The record is already the authority for a committed store: open it, write nothing, touch nothing.
         return { dataDir: opfsDataDir, storageBackend: "opfs-repacked", verdict };
 
       case "boot-idb-authoritative":
         // Recordless idb store (no record yet, an existing idb store): write the record FIRST (invariant 14). A
-        // present `idb-authoritative` record is left as-is.
+        // present `idb-authoritative` record is left as-is. TERMINAL — the backend is fixed at first mint.
         if (record == null) await writePhase("idb-authoritative");
         return { dataDir: idbDataDir, storageBackend: "idbfs", verdict };
-
-      case "adoption-recovery": {
-        // Disambiguate purely from the sentinel (plan adoption crash rows). "unobservable" ⇒ no sentinel.
-        const sentinelPresent = opfsObservation !== "unobservable" && opfsObservation.sentinelPresent;
-        const recovery = classifyAdoptionRecovery({ sentinelPresent });
-        if (recovery.action === "complete-adoption") {
-          // The barrier had published before the crash: set `opfs-committed`, delete the idb predecessor.
-          await completeAdoption({
-            setPhase: writePhase,
-            deleteIdbPredecessor: () => deleteIdbDatabase(storePath, meta),
-          });
-          return { dataDir: opfsDataDir, storageBackend: "opfs-repacked", verdict };
-        }
-        // Nothing committed: tear the candidate down and fall back to the still-authoritative idb store.
-        // Adoption re-runs later from step 1 (plan step 11).
-        await effects.deleteSentinel();
-        await effects.deleteStoreDirectory();
-        await writePhase("idb-authoritative");
-        return { dataDir: idbDataDir, storageBackend: "idbfs", verdict };
-      }
 
       case "virgin-create":
         return finishVirginCreate(verdict);

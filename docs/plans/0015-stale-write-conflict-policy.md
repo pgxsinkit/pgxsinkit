@@ -138,5 +138,5 @@ overlay-state asserted quarantine) — updated to `failed`/`conflicted` per the 
 integration-test envelopes must use COLUMN names in the payload (`author_id`, not `authorId`) — the
 applier reads `x.p->>'<column>'`.
 
-Anton's steps: apply the regenerated sync-function migration to the dev DB
+The maintainer's steps: apply the regenerated sync-function migration to the dev DB
 (`bun run db:migrate`); the Podman lane already applied it to fresh containers.

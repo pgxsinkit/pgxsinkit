@@ -45,6 +45,7 @@ import {
 } from "../index";
 import type { LocalStoreVersionEvent } from "../local-store";
 import { createOpfsEffects, type OpfsEffectsDeps } from "../opfs-effects";
+import { committedStoreUnreachableFromWire } from "../store-boot";
 import { type DestructionEffects, runDestruction } from "../store-lifecycle";
 import { deleteStoreMetaRecord, type StoreMetaDeps, writeStoreMetaRecord } from "../store-meta";
 import { storeIndexedDbDatabaseName } from "../store-path";
@@ -210,6 +211,51 @@ export class ElectedEngineUnconstructibleError extends Error {
         `capability fallback — the platform can hold sync-access handles here.`,
     );
     this.name = "ElectedEngineUnconstructibleError";
+  }
+}
+
+/**
+ * A {@link provisionSyncWorker} that never settled inside its bounded window (`provisionExpiryMs`, default 60000).
+ * The provision's three ordinary outcomes all depend on the SharedWorker connection being alive — the
+ * `provision-ack`, a storage-declaration refusal, an unconstructible elected engine — so a connection that DIES
+ * before any of them (the SharedWorker crashed, its port was never serviced, the elected engine never came up)
+ * would otherwise leave the caller pending FOREVER. The deadline settles it loudly instead.
+ *
+ * The guarantee is narrow, deliberately: it bounds THIS CALLER'S promise. What becomes of the worker-side create
+ * attempt is decided by PLACEMENT, and the two homes differ:
+ *
+ * - **SW-direct.** The attempt lives in the SharedWorker and is left running (an in-flight store open cannot be
+ *   safely abandoned — a second open against the same store is an ownership conflict). A later
+ *   {@link attachSyncClient} ADOPTS it if it completed and WAITS on it if it is genuinely stuck; a retried
+ *   provision re-acks against the SAME attempt, so a second open never starts. A stuck storage open blocks that
+ *   store whether or not it was ever provisioned, and expiring this promise neither causes nor cures that.
+ * - **Elected.** This deadline is ALSO the provision claim's expiry, so the claim releases here too. When it is
+ *   the LAST claim on the store's coordinator, that release runs last-claim retirement (`engine-retiring` →
+ *   `engine-teardown` → terminate), taking the elected engine and the attempt inside it — agent termination
+ *   releases the VFS ownership — and the next attach elects a FRESH engine that opens the store again. An attach
+ *   that adopted the coordinator BEFORE the expiry holds its own claim, which keeps the engine (and its attempt)
+ *   alive: the SW-direct adopt-or-wait shape then applies here too.
+ *
+ * `[pgxsinkit]`-prefixed like the repo's other typed errors so a consumer can `instanceof`-branch it.
+ */
+export class ProvisionExpiredError extends Error {
+  /** The store whose provision expired — the `storePath` the call was made for. */
+  readonly storePath: string;
+  /** The window that elapsed without a settlement, in ms (the effective `provisionExpiryMs`). */
+  readonly expiryMs: number;
+  constructor(storePath: string, expiryMs: number) {
+    super(
+      `[pgxsinkit] provisionSyncWorker("${storePath}"): the provision did not settle within ${expiryMs}ms — the ` +
+        `SharedWorker connection may be dead or the elected engine never came up. The deadline bounds THIS ` +
+        `promise; the worker-side create attempt follows the placement. SW-direct: the attempt is left running, ` +
+        `so a later attach adopts it if it completed and waits on it if it is stuck, and a retry re-acks the ` +
+        `same attempt rather than starting a second open. Elected: this deadline also releases the provision ` +
+        `claim, and a LAST-claim release retires and terminates the engine, so the next attach elects a fresh ` +
+        `one. Retrying is safe either way.`,
+    );
+    this.name = "ProvisionExpiredError";
+    this.storePath = storePath;
+    this.expiryMs = expiryMs;
   }
 }
 
@@ -809,19 +855,39 @@ const sharedCoordinators = new Map<
     releaseProvision?: () => void;
     /**
      * The provision's live engine pipe, held for HANDOVER (ADR-0049 step 8). The router mints exactly ONE proxy
-     * pipe per SW connection; when provision and attach share one port (the documented ordered-messages contract,
-     * e.g. the board), that pipe is delivered during provisioning — so the adopting attach must receive THIS pipe
-     * rather than wait for a `connect-port` that will never be re-sent. Cleared on take; closed if never taken.
+     * pipe per SW connection PER ENGINE GENERATION; when provision and attach share one port (the documented
+     * ordered-messages contract, e.g. the board), that pipe is delivered during provisioning — so the adopting
+     * attach must receive THIS pipe rather than wait for a `connect-port` that may never be re-sent. Always the
+     * NEWEST pipe the provision was handed (ADR-0053 R3 — a later `connect-port` supersedes, never a corpse).
+     * Cleared on take; closed if never taken.
      */
     provisionPipe?: { pipe: BridgePort; identity: EngineIdentity };
   }
 >();
+
+/**
+ * Provision pipes delivered BEFORE their store's coordinator entry exists (ADR-0053 R3). A SharedWorker that
+ * survived its last tab (Chromium `extendedLifetime`) keeps an engine registered, so the router pipes a fresh
+ * connection the moment it is routed — i.e. on the DECLARATION, one task AHEAD of the placement reply that
+ * registers the coordinator. A stash that requires a registered entry drops exactly those pipes, and that pipe IS
+ * the handover an adopting attach on this port waits for (no `connect-port` re-send is owed to an already-piped
+ * connection). Held here until {@link adoptOrRegisterCoordinator} folds them into the entry it creates; closed
+ * with the entry so an unadopted provision leaks nothing.
+ */
+const pendingProvisionPipes = new Map<string, { pipe: BridgePort; identity: EngineIdentity }>();
 
 /** Adopt an existing per-store coordinator (incrementing its ref), or register a freshly-built one. */
 function adoptOrRegisterCoordinator(storePath: string, build: () => ElectionCoordinator): ElectionCoordinator {
   let entry = sharedCoordinators.get(storePath);
   if (entry === undefined) {
     entry = { coordinator: build(), refs: 0 };
+    // Fold any pre-registry stash into the entry the placement reply is creating right now — from here on the
+    // entry is the single home of the handover pipe (one slot, so `takeProvisionPipe` can never see two).
+    const pending = pendingProvisionPipes.get(storePath);
+    if (pending !== undefined) {
+      pendingProvisionPipes.delete(storePath);
+      entry.provisionPipe = pending;
+    }
     sharedCoordinators.set(storePath, entry);
   }
   entry.refs += 1;
@@ -847,21 +913,62 @@ function releaseSharedCoordinator(storePath: string): void {
   if (entry.refs <= 0) {
     entry.provisionPipe?.pipe.close?.();
     sharedCoordinators.delete(storePath);
+    // Invariant: no stash for this store may outlive its coordinator entry. The fold at registration normally
+    // empties the pre-registry map, so this sweep is belt-and-braces — but it is the ONLY lifecycle hook a
+    // never-adopted provision (expiry retirement) passes through, so an unclaimed pipe is closed here or nowhere.
+    const pending = pendingProvisionPipes.get(storePath);
+    if (pending !== undefined) {
+      pendingProvisionPipes.delete(storePath);
+      pending.pipe.close?.();
+    }
   }
 }
 
-/** Stash the provision's engine pipe for the adopting attach's handover; no-op when no entry is registered. */
+/**
+ * Stash the provision's engine pipe for the adopting attach's handover — into the registered coordinator entry
+ * when one exists, else into {@link pendingProvisionPipes} (the pipe can legitimately arrive BEFORE the placement
+ * reply registers the entry, ADR-0053 R3).
+ *
+ * NEWEST WINS for the SLOT, but closing the superseded pipe is gated on the ENGINE IDENTITY, not on pipe
+ * identity. A second pipe is not proof of a new engine: the router mints one pipe per CONNECTION, so two
+ * concurrent {@link provisionSyncWorker} calls for the same store (React StrictMode double-effects firing a warm
+ * twice, two eager warms) are piped separately for the SAME generation.
+ *
+ * - **Same identity** → the previous pipe stays OPEN. Both pipes are equivalent conduits to one live engine, and
+ *   the un-stashed one is still the only route its own caller's `provision-ack` can ride; closing it strands that
+ *   provision promise forever (the claim expiry retires the claim, it does not settle the promise). It carries
+ *   that one ack and then settles idle — bounded, and the price of never stranding a caller.
+ * - **Changed identity** → the previous pipe's engine is gone or being replaced, so nothing may ride it again:
+ *   close it, as before.
+ *
+ * A pipe already HANDED OVER is no longer in the slot (take clears it), so this never closes the pipe an attach is
+ * running on: that pipe's owner closes it on its own swap.
+ */
 function stashProvisionPipe(storePath: string, pipe: BridgePort, identity: EngineIdentity): void {
   const entry = sharedCoordinators.get(storePath);
+  const previous = entry !== undefined ? entry.provisionPipe : pendingProvisionPipes.get(storePath);
+  if (previous !== undefined && previous.pipe !== pipe && !engineIdentityEquals(previous.identity, identity)) {
+    previous.pipe.close?.();
+  }
   if (entry !== undefined) entry.provisionPipe = { pipe, identity };
+  else pendingProvisionPipes.set(storePath, { pipe, identity });
 }
 
-/** Take (and clear) the stashed provision pipe — exactly one adopting attach may consume it. */
+/**
+ * Take (and clear) the stashed provision pipe — exactly one adopting attach may consume it. Consults the
+ * registered entry first, then the pre-registry stash: an attach can adopt a coordinator whose entry was created
+ * by a path that never folded (or before the fold), and the handover must still find the pipe.
+ */
 function takeProvisionPipe(storePath: string): { pipe: BridgePort; identity: EngineIdentity } | undefined {
   const entry = sharedCoordinators.get(storePath);
-  const stashed = entry?.provisionPipe;
-  if (entry !== undefined) delete entry.provisionPipe;
-  return stashed;
+  if (entry?.provisionPipe !== undefined) {
+    const stashed = entry.provisionPipe;
+    delete entry.provisionPipe;
+    return stashed;
+  }
+  const pending = pendingProvisionPipes.get(storePath);
+  if (pending !== undefined) pendingProvisionPipes.delete(storePath);
+  return pending;
 }
 
 /** Record the provision claim's explicit release companion on its shared coordinator entry. */
@@ -2349,10 +2456,21 @@ export type ProvisionSyncWorkerOptions<TRegistry extends SyncTableRegistry> = Pi
   | "timers"
 > & {
   /**
-   * How long (ms) the elected-mode provision claim (and its shared-coordinator ref) is held before an abandoned
-   * warmed provision auto-retires (ADR-0049 step 8, "abandoned warmed provision → claim expiry"). Default 60000.
+   * The provision's ONE bounded window (ms), default 60000. It governs two things at the same deadline:
+   *
+   * - **The returned promise, in BOTH modes.** A provision that has not settled by then rejects with the typed
+   *   {@link ProvisionExpiredError} — never a promise that hangs forever behind a dead SharedWorker connection.
+   *   It bounds the PROMISE; the worker-side create attempt follows the placement split (see
+   *   {@link ProvisionExpiredError}).
+   * - **The elected-mode claim** (and its shared-coordinator ref): an abandoned warmed provision auto-retires
+   *   (ADR-0049 step 8, "abandoned warmed provision → claim expiry"). Releasing the LAST claim runs last-claim
+   *   retirement — notice, teardown, terminate — so the elected engine, and any create still open inside it, goes
+   *   with the claim. Inert on SW-direct, which elects nothing.
+   *
    * A later {@link attachSyncClient} on the same store ADOPTS the grant within this window (adding its own claim,
-   * so the engine outlives the expiry). Inert on SW-direct.
+   * so the engine outlives the expiry). After an expiry that attach meets what the placement left it: an
+   * SW-direct attempt is still there to adopt or wait on — expiring the promise never frees a stuck store —
+   * while a retired elected engine is replaced by a fresh election that opens the store again.
    */
   provisionExpiryMs?: number;
 };
@@ -2361,8 +2479,12 @@ export type ProvisionSyncWorkerOptions<TRegistry extends SyncTableRegistry> = Pi
  * Pre-spawn a worker's store WITHOUT attaching (ADR-0032 decision 5). Sent at the board's login screen against a
  * freshly-named spare `SharedWorker`: the worker runs PGlite `create`/initdb only and holds the raw store idle
  * until the real {@link attachSyncClient} claim adopts it. Resolves when the worker acks the provision (its initdb
- * settled); rejects only if the worker reports the create failed — the caller treats either outcome as best-effort,
- * since attach falls back to a fresh create regardless.
+ * settled); rejects if the worker reports the create failed, if it refuses the storage declaration, if the elected
+ * engine is unconstructible, or — bounding the whole thing — with {@link ProvisionExpiredError} once
+ * `provisionExpiryMs` (default 60000) elapses without any of those. The caller treats every outcome as
+ * best-effort: a provision that fails or expires costs the accelerator, not the boot — the attach that follows
+ * meets whatever the worker actually opened (an expiry bounds THIS promise; the worker-side create attempt is
+ * kept or retired by the placement — see {@link ProvisionExpiredError}).
  *
  * Routed through the SAME placement-query-first flow as {@link attachSyncClient} (ADR-0049 step 8): a SW-direct
  * (or declared-idbfs) SharedWorker takes the `provision` bridge envelope on the SW port; a
@@ -2382,6 +2504,8 @@ export function provisionSyncWorker<const TRegistry extends SyncTableRegistry>(
     clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof globalThis.setTimeout>),
   };
   const storePath = options.storePath ?? options.storeId ?? "pgxsinkit-overlay-v1";
+  // ONE deadline, read once and shared by the two timers armed below (settlement window + elected claim expiry).
+  const expiryMs = options.provisionExpiryMs ?? 60_000;
   // The testing memory-backend override travels as an explicit wire field (a symbol does not survive structured
   // clone, ADR-0036) — read it off the spread helper's options and forward it to the worker.
   const memoryOverride = readTestStoreMarker(options) === "memory";
@@ -2398,6 +2522,8 @@ export function provisionSyncWorker<const TRegistry extends SyncTableRegistry>(
   const provision = new Promise<void>((resolve, reject) => {
     let settled = false;
     const ackRemovers: Array<() => void> = [];
+    /** The settlement-window handle (armed below, cleared by {@link settle}). */
+    let settlementHandle: unknown;
     const controlListener = (event: { data: unknown; ports?: readonly BridgePort[] }): void => {
       const placement = readPlacementResult(event.data);
       if (placement !== undefined) {
@@ -2419,8 +2545,31 @@ export function provisionSyncWorker<const TRegistry extends SyncTableRegistry>(
       settled = true;
       port.removeEventListener("message", controlListener);
       for (const remove of ackRemovers) remove();
+      timers.clearTimeout(settlementHandle);
       fn();
     };
+
+    // THE SETTLEMENT WINDOW — one bounded deadline for this promise in BOTH modes. Every ordinary outcome (the
+    // `provision-ack`, a declaration refusal, an unconstructible elected engine) needs a LIVE SharedWorker
+    // connection, so a connection that dies before any of them arrive (the SW crashed, the port was never
+    // serviced, the elected engine never came up) would leave the caller pending FOREVER. Armed HERE — ahead of
+    // the declaration and the placement query — so even a port nothing ever answers is bounded.
+    //
+    // It bounds the PROMISE; the worker-side attempt is placement-dependent. SW-DIRECT: the create is left
+    // running (an in-flight store open cannot be safely abandoned), so a later attach adopts it if it completes
+    // and waits on it if it is stuck. ELECTED: this deadline's twin below releases the provision claim, and a
+    // LAST-claim release retires and terminates the elected engine with that attempt inside it, so the next
+    // attach elects a fresh engine and opens the store again.
+    //
+    // Deliberately SEPARATE from the elected path's claim expiry (`onPlacement` below). The two share this
+    // deadline by default but own different things: the claim expiry is CONTRACT CLEANUP (release the provision
+    // claim and the shared-coordinator ref so an abandoned warmed provision never pins the leader lock, ADR-0049
+    // step 8), this one is the CALLER'S SETTLEMENT. Merging them would tie settlement to the elected path, which
+    // SW-direct never takes. A `provision-ack` or `connect-port` arriving after expiry is already inert — `settle`
+    // removed every listener and the `settled` guard holds — so a late engine can never re-settle this promise.
+    settlementHandle = timers.setTimeout(() => {
+      settle(() => reject(new ProvisionExpiredError(storePath, expiryMs)));
+    }, expiryMs);
 
     // Await `provision-ack` on whichever port carries it: the SW port (SW-direct) or the elected engine's pipe.
     // In elected mode the SW-port `provision` is dropped by the router, so its ack never comes — the pipe's does.
@@ -2440,14 +2589,25 @@ export function provisionSyncWorker<const TRegistry extends SyncTableRegistry>(
     };
 
     let placementDecided = false;
-    let piped = false;
     const onProvisionPipe = (pipe: BridgePort | undefined, identity: EngineIdentity): void => {
-      if (piped || pipe === undefined) return;
-      piped = true;
+      // Settled → INERT. `settle` already removed this control listener, so a post-settlement `connect-port` is
+      // structurally unseen; the flag states the invariant rather than relying on that (a re-post after the ack
+      // would double-provision an engine, and re-stashing a pipe nothing awaits would leak it).
+      if (settled || pipe === undefined) return;
       // The router piped this provision connection to the elected engine — deliver the `provision` over the pipe,
-      // and STASH the pipe on the shared coordinator entry: the router mints one pipe per SW connection, so when a
-      // later attach adopts this grant on the SAME port (the board's ordered-messages contract) it must receive
-      // THIS pipe by handover — no second `connect-port` will ever arrive for an already-piped tab.
+      // and STASH it for the adopting attach's handover (the board's ordered-messages contract: provision and
+      // attach share one port, and the pipe minted during provisioning is the one the attach must ride).
+      //
+      // NEWEST PIPE WINS (ADR-0053 R3). The router mints exactly one pipe per connection PER ENGINE GENERATION, so
+      // a SECOND `connect-port` means the previous pipe's engine is gone or being replaced — it is never a
+      // duplicate to ignore. Latching on the FIRST pipe forfeits the warm-boot accelerator on every reopen under a
+      // SURVIVING SharedWorker (Chromium `extendedLifetime`): its still-registered DEAD engine is piped ahead of
+      // the placement reply and swallows the envelope, so refusing the election's fresh pipe leaves the provision
+      // promise pending forever and the adopting boot degrades to a plain create. So supersede: stash the new pipe
+      // (closing the replaced one) and post the `provision` again on it. Re-posting is SAFE by the
+      // engine's contract — its provision handler acks `ok` immediately when a boot/provision is already in flight
+      // or done — and the FIRST ack from ANY posted pipe settles this promise (a late ack from a superseded but
+      // still-live engine is benign; `settle` removes every ack listener at once).
       stashProvisionPipe(storePath, pipe, identity);
       postProvisionOn(pipe);
     };
@@ -2495,8 +2655,16 @@ export function provisionSyncWorker<const TRegistry extends SyncTableRegistry>(
       // The PROVISION CLAIM elects → the coordinator spawns the engine + announces; the router pipes this
       // connection (→ `onProvisionPipe`). Bound by expiry: an abandoned warmed provision auto-retires (its claim
       // AND its shared-coordinator ref release together), so a store nobody adopts never pins the leader lock.
+      // When this was the LAST claim the coordinator runs the retirement (notice → teardown → terminate), so the
+      // elected engine and any create still open inside it go with the claim; an attach that adopted the
+      // coordinator first holds its own claim and keeps both alive.
+      //
+      // This is the CLAIM half of the deadline, and it stays independent of the settlement window armed at the top
+      // of this executor: both fire at `expiryMs`, but this one owns the ELECTION CONTRACT (claim + coordinator
+      // ref) and that one owns the PROMISE. They are kept apart because their scopes differ — the settlement
+      // window also covers SW-direct, which never reaches this branch, and an ADOPTED provision releases this
+      // claim early (`releaseProvision`) long after its promise resolved.
       const releaseProvisionClaim = coordinator.claimForProvision();
-      const expiryMs = options.provisionExpiryMs ?? 60_000;
       let released = false;
       const expiryHandle = timers.setTimeout(() => {
         if (released) return;
@@ -2584,12 +2752,17 @@ function deriveEngineWorkerFactory(swScriptUrl: string | undefined): (() => Elec
 /**
  * Rebuild an Error from the bridge's serialized {@link BridgeErrorWire} shape, carrying `name` and `detail`
  * through. Restoring `name` is what keeps a typed worker-side failure (e.g. a restore refused with
- * `RestoreTargetExistsError`) detectable by the consumer without message matching.
+ * `RestoreTargetExistsError`) detectable by the consumer without message matching; a tagged `detail` does
+ * better still — it rebuilds the CLASS, so `instanceof` holds on the tab side too.
  */
 function rebuildError(error: RpcResultPayload["error"]): Error {
   if (error && "detail" in error) {
     const mismatch = executionLimitMismatchFromWire(error.detail);
     if (mismatch !== undefined) return mismatch;
+    // A no-grant engine home refusing an `opfs-committed` store: the consumer branches on the TYPE to offer
+    // the destroy-then-rebuild exit, so it must cross the bridge as the class, not a name-tagged plain Error.
+    const unreachable = committedStoreUnreachableFromWire(error.detail);
+    if (unreachable !== undefined) return unreachable;
   }
   const rebuilt = new Error(error?.message ?? "worker rpc failed");
   if (error?.name !== undefined) {

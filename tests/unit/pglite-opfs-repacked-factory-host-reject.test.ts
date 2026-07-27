@@ -1,6 +1,8 @@
 /* oxlint-disable typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return real promises typed as void */
 import { describe, expect, test } from "bun:test";
 
+import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
+
 import { createOpfsRepackedPGlite } from "../../packages/pglite-opfs-repacked/src/pglite-factory";
 import { MemoryOpfsDirectory } from "../../packages/pglite-opfs-repacked/test/support/memory-opfs";
 
@@ -14,6 +16,7 @@ describe("opfs-repacked PGlite post-startup rejection cleanup", () => {
         directory,
         extentSize: 8192,
         pglite: {
+          loadDataDir: await prepopulatedDataDir(),
           extensions: {
             failAfterStartup: {
               name: "fail-after-startup",

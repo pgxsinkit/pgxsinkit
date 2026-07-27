@@ -56,6 +56,58 @@ function makePort(): RecordingPort {
   return rec;
 }
 
+/**
+ * A recording port that ALSO exposes the optional MessagePort `close` event (the `onclose` feature-detection
+ * surface). The engine control port is the one that matters: when the elected engine's realm dies with its
+ * spawning tab, the platform closes this end and the router must read that as ENGINE DEATH. `capture()` hands
+ * back the listener reference so a close arriving for an ALREADY-SUPERSEDED port can be replayed after the
+ * router detached it.
+ */
+interface ClosableRecordingPort extends RecordingPort {
+  fireClose: () => void;
+  capture: () => (() => void) | undefined;
+  hasCloseListener: () => boolean;
+}
+
+function makeClosablePort(): ClosableRecordingPort {
+  const sent: SentRecord[] = [];
+  let messageListener: ((event: { data: unknown }) => void) | undefined;
+  let closeListener: (() => void) | undefined;
+  const rec: ClosableRecordingPort = {
+    sent,
+    removed: false,
+    emit: () => {},
+    fireClose: () => closeListener?.(),
+    capture: () => closeListener,
+    hasCloseListener: () => closeListener !== undefined,
+    port: {} as RouterPort,
+  };
+  rec.port = {
+    // The presence of `onclose` is the router's feature detection (never called).
+    onclose: null,
+    postMessage(message: unknown, transfer?: unknown[]) {
+      sent.push({ message: message as SentRecord["message"], transfer });
+    },
+    addEventListener(type: string, l: (event: { data: unknown }) => void) {
+      if (type === "close") closeListener = l as unknown as () => void;
+      else messageListener = l;
+    },
+    removeEventListener(type: string, l: (event: { data: unknown }) => void) {
+      if (type === "close") {
+        if (closeListener === (l as unknown as () => void)) closeListener = undefined;
+        return;
+      }
+      if (messageListener === l) {
+        messageListener = undefined;
+        rec.removed = true;
+      }
+    },
+    start() {},
+  } as unknown as RouterPort;
+  rec.emit = (data: unknown) => messageListener?.({ data });
+  return rec;
+}
+
 let pipeSeq = 0;
 interface FakePipeFactory {
   create: () => { port1: RouterPort; port2: RouterPort };
@@ -114,6 +166,14 @@ const ofType = (sent: SentRecord[], type: EngineControlMessage["type"]) =>
   sent.filter((s) => controlOf(s).type === type);
 const lastControl = (sent: SentRecord[]): EngineControlMessage => controlOf(sent[sent.length - 1]!);
 const envelope = (message: EngineControlMessage) => ({ [KEY]: message });
+
+/**
+ * What a LIVE engine does the moment a pipe is delivered: acknowledge it, which closes the router's bounded
+ * liveness window. Any scenario about something OTHER than liveness uses this, so the only timer the fake clock
+ * holds is the one that scenario is about (the probe loop) — an unacked pipe is a DEAD engine, never the default.
+ */
+const ackPipes = (engine: RecordingPort, identity: EngineIdentity): void =>
+  engine.emit(envelope({ type: "connect-port-ack", identity }));
 
 // ─── 1. Grant fan-out: attach → announce → engine-ready → per-tab pipes ─────────
 
@@ -282,6 +342,7 @@ describe("router execution-limit probe forwarding (ADR D5, opt-in)", () => {
     router.attachTab(tabB.port);
     const id = router.announceEngine(engine.port);
     engine.emit(envelope({ type: "engine-ready", identity: id }));
+    ackPipes(engine, id); // a LIVE engine: these scenarios are about the probe loop, not liveness
     return { tabA, tabB, engine, clock, router, id };
   }
 
@@ -306,13 +367,15 @@ describe("router execution-limit probe forwarding (ADR D5, opt-in)", () => {
     expect(router.currentIdentity()).toEqual(id);
   });
 
-  it("threshold consecutive unanswered pings → engine-loss verdict: engine-retiring to all tabs + cleared", () => {
+  it("threshold pings each unanswered for a FULL interval → engine-loss verdict: engine-retiring + cleared", () => {
     const { tabA, tabB, engine, clock, router, id } = bootLimited(3);
     tabA.emit(envelope({ type: "overdue-dispatch", identity: id, elapsedMs: 9000 }));
 
     clock.tick(); // ping 1
-    clock.tick(); // ping 2
-    clock.tick(); // ping 3 → verdict
+    clock.tick(); // ping 1 missed → ping 2
+    clock.tick(); // ping 2 missed → ping 3
+    expect(router.currentIdentity()).toEqual(id); // ping 3 still owns its interval — no verdict yet
+    clock.tick(); // ping 3 missed → verdict (no fourth ping is posted)
 
     expect(ofType(engine.sent, "control-ping")).toHaveLength(3);
     for (const tab of [tabA, tabB]) {
@@ -336,6 +399,7 @@ describe("router execution-limit probe forwarding (ADR D5, opt-in)", () => {
     router.attachTab(tabA.port);
     const id = router.announceEngine(engine.port);
     engine.emit(envelope({ type: "engine-ready", identity: id }));
+    ackPipes(engine, id);
 
     tabA.emit(envelope({ type: "overdue-dispatch", identity: id, elapsedMs: 9000 }));
     clock.tick();
@@ -436,6 +500,7 @@ describe("router control-plane forwarding (ADR-0049 step 9 — engine-entry cont
     router.attachTab(tabA.port);
     const id = router.announceEngine(engine.port);
     engine.emit(envelope({ type: "engine-ready", identity: id }));
+    ackPipes(engine, id);
 
     tabA.emit(envelope({ type: "overdue-dispatch", identity: id, elapsedMs: 9000 }));
     clock.tick(); // ping 1
@@ -524,5 +589,266 @@ describe("router tab-detach — a detaching tab is unregistered so tabCount fall
     // The tab's agent is destroyed → the platform fires `close` → the router drops the crashed tab.
     closeListener!();
     expect(router.tabCount()).toBe(1);
+  });
+});
+
+// ─── Gap B1: engine liveness — the control port's `close` IS engine death (ADR-0053 R1) ──
+
+describe("router engine death — the engine control port's `close` retires the engine (R1)", () => {
+  function bootClosableEngine() {
+    const tabA = makePort();
+    const tabB = makePort();
+    const engine = makeClosablePort();
+    const clock = makeTimers();
+    const router = createEngineRouter({
+      swInstanceId: "sw-1",
+      timers: clock.timers,
+      createPipe: makePipeFactory().create,
+    });
+    router.attachTab(tabA.port);
+    router.attachTab(tabB.port);
+    const id = router.announceEngine(engine.port);
+    engine.emit(envelope({ type: "engine-ready", identity: id }));
+    return { tabA, tabB, engine, clock, router, id };
+  }
+
+  it("fans engine-retiring to EVERY tab, clears the identity, and never pipes a late joiner into the corpse", () => {
+    // Under `extendedLifetime` the SharedWorker (and this router's state) OUTLIVES the last tab, while the
+    // elected DEDICATED engine dies with the tab that spawned it. Without this contract the router keeps the
+    // dead engine registered and pipes every new connection into a corpse.
+    const { tabA, tabB, engine, router, id } = bootClosableEngine();
+    expect(engine.hasCloseListener()).toBe(true); // the router feature-detected `close` on the control port
+    expect(ofType(engine.sent, "connect-port")).toHaveLength(2);
+
+    engine.fireClose();
+
+    for (const tab of [tabA, tabB]) {
+      expect(lastControl(tab.sent)).toEqual({ type: "engine-retiring", identity: id });
+    }
+    expect(router.currentIdentity()).toBeUndefined();
+
+    // The late-joiner arm must find NO current engine: a tab attaching after the death is not piped at all.
+    const tabC = makePort();
+    router.attachTab(tabC.port);
+    expect(ofType(tabC.sent, "connect-port")).toHaveLength(0);
+    expect(ofType(engine.sent, "connect-port")).toHaveLength(2); // still only the two pre-death pipes
+  });
+
+  it("SUPPRESSES the notice when the close follows a forwarded engine-teardown (the coordinator owns that retirement)", () => {
+    const { tabA, engine, router, id } = bootClosableEngine();
+    tabA.emit(envelope({ type: "engine-teardown", identity: id }));
+    expect(ofType(engine.sent, "engine-teardown")).toHaveLength(1);
+    const fanBefore = tabA.sent.length;
+
+    // The engine acked and SELF-CLOSED its control end: an EXPECTED close, not death.
+    engine.fireClose();
+
+    expect(ofType(tabA.sent, "engine-retiring")).toHaveLength(0);
+    expect(tabA.sent.length).toBe(fanBefore); // nothing fanned at all
+    expect(router.currentIdentity()).toBeUndefined(); // state still cleared, just silently
+  });
+
+  it("is INERT for a SUPERSEDED port: a close racing in after the successor announce leaves the new engine alone", () => {
+    const { tabA, engine: engineA, router } = bootClosableEngine();
+    const staleClose = engineA.capture();
+    expect(staleClose).toBeDefined();
+
+    const engineB = makeClosablePort();
+    const idB = router.announceEngine(engineB.port);
+    engineB.emit(envelope({ type: "engine-ready", identity: idB }));
+    // The supersede detached A's close listener symmetrically with its message listener (no listener leak).
+    expect(engineA.hasCloseListener()).toBe(false);
+    const fanBefore = tabA.sent.length;
+
+    staleClose!(); // the already-queued close event for the dead predecessor's port
+
+    expect(router.currentIdentity()).toEqual(idB);
+    expect(tabA.sent.length).toBe(fanBefore); // nothing fanned
+    // B's registration is untouched: a late joiner is still piped to B.
+    const tabC = makePort();
+    router.attachTab(tabC.port);
+    expect(ofType(tabC.sent, "connect-port")).toHaveLength(1);
+    expect(ofType(engineB.sent, "connect-port")).toHaveLength(3);
+  });
+});
+
+// ─── Gap B2: engine liveness — the connect-port ack window (ADR-0053 R2) ──────────
+
+describe("router connect-port ack window — the liveness fallback where `close` is unsupported (R2)", () => {
+  // NOTE: `executionLimit` is ENABLED in every case below, because the whole connect-ack window + probe loop
+  // is gated on that opt-in limit (ADR-0049 D5): with the limit disabled — the default — SILENCE IS NEVER A
+  // RETIREMENT VERDICT, so no window is armed at all (see the default-config suite below).
+  function bootAckWindow() {
+    const tabA = makePort();
+    const engine = makePort();
+    const clock = makeTimers();
+    const router = createEngineRouter({
+      swInstanceId: "sw-1",
+      executionLimit: { maxDispatchMs: 5000 },
+      timers: clock.timers,
+      createPipe: makePipeFactory().create,
+      connectAckTimeoutMs: 3000,
+      probeMissThreshold: 3,
+    });
+    router.attachTab(tabA.port);
+    const id = router.announceEngine(engine.port);
+    engine.emit(envelope({ type: "engine-ready", identity: id }));
+    return { tabA, engine, clock, router, id };
+  }
+
+  const lastPingId = (sent: SentRecord[]): number => {
+    const pings = ofType(sent, "control-ping");
+    const ping = controlOf(pings[pings.length - 1]!);
+    return ping.type === "control-ping" ? ping.pingId : -1;
+  };
+
+  it("an UNACKED pipe expires the window → probe pings → threshold misses → engine-retiring, then a fresh engine re-pipes", () => {
+    const { tabA, engine, clock, router, id } = bootAckWindow();
+    expect(ofType(tabA.sent, "connect-port")).toHaveLength(1);
+    expect(clock.pendingCount()).toBe(1); // the ack window covering the delivery
+
+    clock.tick(); // the window EXPIRES — the verdict runs through the probe machinery, never directly
+    expect(ofType(engine.sent, "control-ping")).toHaveLength(0);
+
+    clock.tick(); // ping 1
+    clock.tick(); // ping 1 missed → ping 2
+    clock.tick(); // ping 2 missed → ping 3
+    clock.tick(); // ping 3 missed → engine-loss verdict
+    expect(ofType(engine.sent, "control-ping")).toHaveLength(3);
+    expect(lastControl(tabA.sent)).toEqual({ type: "engine-retiring", identity: id });
+    expect(router.currentIdentity()).toBeUndefined();
+
+    // RECOVERY: the coordinator reacts to the notice, elects a fresh engine, and the announce + engine-ready
+    // re-pipes EVERY still-attached tab (the existing fan-out — the surviving tab is served again).
+    const engine2 = makePort();
+    const id2 = router.announceEngine(engine2.port);
+    engine2.emit(envelope({ type: "engine-ready", identity: id2 }));
+    const connects = ofType(tabA.sent, "connect-port");
+    expect(connects).toHaveLength(2);
+    const fresh = controlOf(connects[1]!);
+    expect(fresh.type === "connect-port" && fresh.identity).toEqual(id2);
+  });
+
+  it("a connect-port-ack for the CURRENT identity clears the window — no ping is ever sent", () => {
+    const { engine, clock, router, id } = bootAckWindow();
+    engine.emit(envelope({ type: "connect-port-ack", identity: id }));
+    expect(clock.pendingCount()).toBe(0);
+
+    clock.tick(); // nothing pending to run
+    expect(ofType(engine.sent, "control-ping")).toHaveLength(0);
+    expect(router.currentIdentity()).toEqual(id);
+  });
+
+  it("a STALE-identity connect-port-ack does NOT clear the window (identity-gated) — the probe still runs", () => {
+    const { engine, clock } = bootAckWindow();
+    engine.emit(envelope({ type: "connect-port-ack", identity: { swInstanceId: "sw-1", generation: 99 } }));
+    expect(clock.pendingCount()).toBe(1);
+
+    clock.tick(); // window expiry
+    clock.tick(); // ping 1
+    expect(ofType(engine.sent, "control-ping")).toHaveLength(1);
+  });
+
+  it("BUSY BUT LIVE: the window expires, but the engine answers ONE probe ping → reset, no retirement", () => {
+    const { tabA, engine, clock, router, id } = bootAckWindow();
+    clock.tick(); // window expiry → probe starts
+    clock.tick(); // ping 1
+
+    engine.emit(envelope({ type: "control-ack", identity: id, pingId: lastPingId(engine.sent) }));
+
+    clock.tick();
+    expect(ofType(engine.sent, "control-ping")).toHaveLength(1);
+    expect(clock.pendingCount()).toBe(0);
+    expect(router.currentIdentity()).toEqual(id);
+    expect(ofType(tabA.sent, "engine-retiring")).toHaveLength(0);
+  });
+
+  it("the FINAL (threshold-th) ping gets its OWN full interval: an ack inside it prevents the verdict", () => {
+    // The miss counter answers "did a ping that has already been posted go a WHOLE interval unanswered?" —
+    // so the threshold-th ping is never posted-and-condemned in the same tick. A busy-but-live engine that
+    // surfaces just before its last interval elapses keeps its registration.
+    const { tabA, engine, clock, router, id } = bootAckWindow(); // probeMissThreshold: 3
+    clock.tick(); // window expiry → probe starts
+    clock.tick(); // ping 1 (no miss yet — nothing was outstanding)
+    clock.tick(); // ping 1 unanswered for a full interval → miss 1; ping 2
+    clock.tick(); // ping 2 unanswered → miss 2; ping 3 (the THRESHOLD-th ping)
+    expect(ofType(engine.sent, "control-ping")).toHaveLength(3);
+    expect(router.currentIdentity()).toEqual(id); // not yet condemned — ping 3 owns this interval
+
+    engine.emit(envelope({ type: "control-ack", identity: id, pingId: lastPingId(engine.sent) }));
+
+    clock.tick(); // the loop is stopped: this would have been the verdict tick
+    expect(ofType(tabA.sent, "engine-retiring")).toHaveLength(0);
+    expect(router.currentIdentity()).toEqual(id);
+    expect(clock.pendingCount()).toBe(0);
+  });
+});
+
+// ─── Gap B3: DEFAULT CONFIG — silence is never a retirement verdict (ADR-0049 D5) ──
+
+describe("router liveness on DEFAULT config — no execution limit, no timing verdict (ADR-0049 D5)", () => {
+  it("never arms a connect-ack window, never probes, and NEVER retires a silent engine", () => {
+    // PGlite's synchronous WASM work blocks the engine worker's event loop, so a legitimate long import or
+    // query stops `connect-port-ack` AND `control-ack` from being processed. ADR-0049 D5 is explicit that no
+    // false-positive-free timing detection exists, so the timing machinery is opt-in: with the limit
+    // DISABLED (the default) a second tab attaching mid-import must NEVER retire the healthy engine — the
+    // in-flight mutations would surface `EngineRelocatedError` with `outcome: "unknown"`.
+    const tabA = makePort();
+    const tabB = makePort();
+    const engine = makePort();
+    const clock = makeTimers();
+    const router = createEngineRouter({
+      swInstanceId: "sw-1",
+      timers: clock.timers,
+      createPipe: makePipeFactory().create,
+      connectAckTimeoutMs: 3000,
+      probeMissThreshold: 3,
+    });
+    router.attachTab(tabA.port);
+    const id = router.announceEngine(engine.port);
+    engine.emit(envelope({ type: "engine-ready", identity: id }));
+    expect(ofType(tabA.sent, "connect-port")).toHaveLength(1);
+    // No timer at all: with the limit disabled the router does not even arm the bounded window.
+    expect(clock.pendingCount()).toBe(0);
+
+    // A second tab attaches while the engine is blocked — another pipe delivered, still nothing acked.
+    router.attachTab(tabB.port);
+    expect(ofType(tabB.sent, "connect-port")).toHaveLength(1);
+    expect(clock.pendingCount()).toBe(0);
+
+    // Advance well past the window + every probe interval the enabled path would have used.
+    for (let i = 0; i < 10; i++) clock.tick();
+
+    expect(ofType(engine.sent, "control-ping")).toHaveLength(0);
+    for (const tab of [tabA, tabB]) expect(ofType(tab.sent, "engine-retiring")).toHaveLength(0);
+    expect(router.currentIdentity()).toEqual(id); // the registration is intact
+    expect(router.tabCount()).toBe(2);
+
+    // The blocked engine eventually drains its queue and acks: a no-op on a never-armed window.
+    engine.emit(envelope({ type: "connect-port-ack", identity: id }));
+    expect(router.currentIdentity()).toEqual(id);
+    expect(clock.pendingCount()).toBe(0);
+  });
+
+  it("dead-engine detection still holds on default config: the control-port `close` retires (R1)", () => {
+    // Removing the timing path costs nothing on any current browser: MessagePort `close` is Baseline, and the
+    // reported paths (worker `error`, spawn failure, tab death) plus the teardown handshake are unaffected.
+    const tabA = makePort();
+    const engine = makeClosablePort();
+    const clock = makeTimers();
+    const router = createEngineRouter({
+      swInstanceId: "sw-1",
+      timers: clock.timers,
+      createPipe: makePipeFactory().create,
+    });
+    router.attachTab(tabA.port);
+    const id = router.announceEngine(engine.port);
+    engine.emit(envelope({ type: "engine-ready", identity: id }));
+    expect(clock.pendingCount()).toBe(0); // no window armed, yet death is still detected:
+
+    engine.fireClose();
+
+    expect(lastControl(tabA.sent)).toEqual({ type: "engine-retiring", identity: id });
+    expect(router.currentIdentity()).toBeUndefined();
   });
 });

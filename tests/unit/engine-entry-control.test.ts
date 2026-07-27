@@ -119,6 +119,27 @@ describe("engine entry control plane — the dedicated-worker arm (ADR-0049 step
     expect(pipe.sent.at(-1)!.message).toEqual({ hello: "world" });
   });
 
+  it("connect-port → answers connect-port-ack with the ASSIGNED identity (the router's liveness proof, ADR-0053 R2)", () => {
+    // The router arms a bounded ack window on every delivered pipe; this reply is what tells it the engine's
+    // realm is still alive. A dead engine (its tab gone) answers nothing and the window expires into the probe.
+    const { control } = bootEntry();
+    control.emit(envelope({ type: "assign-identity", identity: ID }));
+    const pipe = makePort();
+    control.emit(envelope({ type: "connect-port", identity: ID }), [pipe.port]);
+
+    const acks = control.controlsOfType("connect-port-ack");
+    expect(acks).toHaveLength(1);
+    expect(acks[0]).toEqual({ type: "connect-port-ack", identity: ID });
+  });
+
+  it("a STALE connect-port is answered by NO connect-port-ack (discarded before the liveness reply)", () => {
+    const { control } = bootEntry();
+    control.emit(envelope({ type: "assign-identity", identity: ID }));
+    const pipe = makePort();
+    control.emit(envelope({ type: "connect-port", identity: STALE }), [pipe.port]);
+    expect(control.controlsOfType("connect-port-ack")).toHaveLength(0);
+  });
+
   it("connect-port with a STALE identity (post-assignment mismatch) → connect() is NOT called", () => {
     const { connected, control } = bootEntry();
     control.emit(envelope({ type: "assign-identity", identity: ID }));

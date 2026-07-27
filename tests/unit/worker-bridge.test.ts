@@ -22,6 +22,7 @@ import {
   type BridgeEnvelope,
   type BridgePort,
   type ClientPGlite,
+  CommittedStoreUnreachableError,
   defineSyncWorker,
   ExecutionLimitMismatchError,
   getReadModelView,
@@ -423,6 +424,55 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
     }
     expect(caught?.message).toContain("store already exists");
     expect(caught?.name).toBe("RestoreTargetExistsError");
+  });
+
+  it("rebuilds CommittedStoreUnreachableError as its CLASS across the bridge (tagged detail, not just a name)", async () => {
+    // A no-grant engine home refusing an `opfs-committed` store is a decision the CONSUMER acts on — offer the
+    // destroy-then-rebuild exit, or re-open from a granted home — so the tab must be able to `instanceof`-branch
+    // it. A name-only crossing rebuilds a plain `Error`, which fails that check; the refusal therefore carries a
+    // tagged `detail` the tab decodes back into the class (the execution-limit/relocation pattern). Driven
+    // through a REAL bridge failure: the worker's boot throws the refusal, and the attach side receives it.
+    const refusal = new CommittedStoreUnreachableError("bridge-committed-store");
+    const poison = new Proxy(
+      {},
+      {
+        get: () => {
+          throw refusal;
+        },
+        set: () => {
+          throw refusal;
+        },
+      },
+    ) as unknown as ClientPGlite;
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      pgliteInstance: poison,
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+    });
+    hosts.push(host);
+
+    const channel = new MessageChannel();
+    channels.push(channel);
+    host.connect(channel.port1 as unknown as never);
+    let caught: Error | undefined;
+    try {
+      await attachSyncClient({
+        registry: todosRegistry,
+        port: channel.port2 as unknown as never,
+        getToken: async () => null,
+      });
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught).toBeInstanceOf(CommittedStoreUnreachableError);
+    // The path rides the wire too, so the tab can call the remedy it names without parsing the message.
+    expect((caught as CommittedStoreUnreachableError).storePath).toBe("bridge-committed-store");
+    expect(caught?.message).toContain("destroyStoreArtifacts");
   });
 });
 

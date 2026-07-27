@@ -288,13 +288,31 @@ paint no longer waits on.
 **`storeKind` names how the store presented at boot** — `"restored"` (seeded from a backup via
 `restoreFrom`), `"fresh"` (a caller-proven schemaless spare — the same signal as the `freshStore` boolean,
 which stays alongside it), or `"warm"` (an existing persisted store, the common case). The `warmBoot` group
-carries the schema-replay + journal-recovery fast-path flags — `schemaSkipped` / `schemaFingerprintMatch`
-(was durable-schema replay skipped on a fingerprint match), and `journalRecoverySkipped` /
-`journalRecoveryRequired` / `journalTablesVisited` / `journalRowsRecovered` (whether the boot-time recovery
-pass ran, how many writable journals it visited, and how many rows it lifted). `journalTablesVisited` is
-populated today (the count of writable journals the recovery pass visits); the skip/match/row-count flags are
-placeholders carrying the current-truth values (recovery and schema replay are unconditional today) until the
-warm-store startup optimizations wire them.
+carries the two warm-boot fast paths, both live.
+
+**Durable-schema replay.** Boot hashes the registry-generated durable SQL and compares it with the
+fingerprint stored in the store. On a match the whole durable replay is **skipped** —
+`schemaSkipped: true`, `schemaFingerprintMatch: true`. On a mismatch or a store with no stored fingerprint
+(fresh, rebuilt) the durable schema is replayed and the new fingerprint stamped, and both flags read `false`.
+The **ephemeral** schema is recreated on every boot regardless (TEMP relations die with the old engine), so it
+is never part of the skip. A boot that adopts a caller-supplied `pgliteInstance` runs no schema stage at all
+and leaves both flags at their conservative `false`.
+
+**Journal recovery.** The boot-time `sending → pending` recovery pass is driven by a durable recovery marker
+that a clean settle clears:
+
+- **Marker clear** (the common warm boot — the previous run proved no `sending` row remains): the per-table
+  pass is skipped entirely. `journalRecoverySkipped: true`, `journalRecoveryRequired: false`,
+  `journalTablesVisited: 0`, `journalRowsRecovered: 0`.
+- **Marker set** (a crash may have left committed `sending` rows): the per-table updates plus the
+  self-verifying marker clear run in one transaction. `journalRecoverySkipped: false`,
+  `journalRecoveryRequired: true`, `journalTablesVisited` is the registry's writable-journal count, and
+  `journalRowsRecovered` is the **real count** of rows lifted `sending → pending`.
+- **Marker absent** (never initialised), a **caller-supplied `pgliteInstance`** (pgxsinkit never touches the
+  marker table it does not own), or a **restore boot** (which ignores the marker and quarantines what it
+  recovers): one conservative unconditional pass. `journalRecoverySkipped: false`,
+  `journalRecoveryRequired: true`, `journalTablesVisited` is the writable-journal count, and
+  `journalRowsRecovered` is `null` — that pass is uncounted, so `null` means "not measured", never "zero".
 
 **Read `fetchMs`/`applyMs` as concurrent segments, not a network bill.** Groups catch up **in parallel** on
 a single-threaded WASM host, so a group's `fetchMs` (its settle→next-delivery wall) absorbs the OTHER
@@ -329,6 +347,13 @@ in, and the WASM cost hides behind user think-time. It is pure best-effort: a re
 caught to `undefined` and PGlite falls back to loading its own assets — the warm never fails the boot.
 The `boot pglite assets warm` rail stamp times the warm itself. (The board demo wires this from its
 login route; see `apps/board/src/board/pglite-warm.ts` for the Vite `?url` asset-resolution pattern.)
+
+In **worker mode the engine loads PGlite's own assets — deliberately**; do not pre-supply them to the
+worker. The tab's warm still serves the engine, by priming the same-origin HTTP cache the worker fetches
+from. Handing the engine a pre-compiled `WebAssembly.Module` benched **net-negative**: it forces
+compile-to-completion before instantiate, forfeiting the pipelining PGlite gets from its own streaming
+load, and the engine realm has no overlap window longer than the placement/handshake gap, so the compile
+only competes for CPU at worker spawn.
 
 Pre-warming hides only the WASM fetch+compile — `PGlite.create` still spends ~1.9s on `initdb` and opening
 the store, and that cannot start until the store id is known (typically the signed-in user). To hide that
@@ -400,6 +425,21 @@ thread in either home.
   app is never blocked, it just loses off-thread isolation and uses IndexedDB. Pass `extendedLifetime: true` on every
   SharedWorker construction: Chromium 148+ may keep it alive for a short flush/warm-start grace period, while Firefox
   and Safari safely ignore the unknown option. It does not keep an elected Chromium/Firefox engine alive.
+</Aside>
+
+<Aside type="caution" title="A home with no OPFS grant refuses a store that is already committed to OPFS">
+  A boot whose engine home holds no OPFS sync-access grant — a tab realm, the in-process fallback above — cannot open a
+  store that a granted home already committed to the OPFS backend. It **fails closed** with
+  `CommittedStoreUnreachableError` rather than opening `idb://<storePath>`, which would mint an **empty sibling** at the
+  same path: the app looks wiped and any offline writes fork into a store no worker-mode boot ever opens. There is no
+  override flag (the same posture as the storage declaration: never a silently different storage mode). The two exits
+  are in the message — boot the store from a home that holds a grant, or destroy it first with
+  `destroyStoreArtifacts(storePath)` and let the next boot rebuild it. That destroy is the callable remedy here: it is
+  **path-addressed** (your boot just failed, so there is no client to call `destroy()` on), it deletes **both**
+  backends plus the commitment sentinel and the meta record, and it needs no grant — quiesce any live worker for the
+  path first (`quiesceStoreWorker`). The error carries the `storePath` it refused, so a handler can call the remedy
+  without parsing the message. A worker-mode `provision` accelerator in such a home declines for the same reason
+  instead of pre-minting the sibling.
 </Aside>
 
 ## Initial catch-up, CDN-cached watermarks, and the alignment trade

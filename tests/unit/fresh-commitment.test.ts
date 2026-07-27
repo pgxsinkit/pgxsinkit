@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-// ADR-0049 (capability-driven engine placement) step 11c: the FRESH/RESTORE COMMITMENT boot WIRING — the gap
-// step 11b left open. Every browser opfs boot must go through the phase machine: a virgin/restore boot stands
+// ADR-0049 (capability-driven engine placement) step 11c: the FRESH/RESTORE COMMITMENT boot WIRING. Every
+// browser opfs boot must go through the phase machine: a virgin/restore boot stands
 // up an UNCOMMITTED opfs candidate (record BEFORE directory), and the shared commitment barrier
 // (strictSync → sentinel → opfs-committed) promotes it BEFORE exposure (invariant 3 — an uncommitted candidate
 // is never exposed to writes). This suite proves the two boot-path helpers `createSyncClient` composes:
@@ -11,19 +11,13 @@ import { describe, expect, it } from "bun:test";
 // Bun has no browser IndexedDB / OPFS / WASM, so every IO surface is faked (mirroring store-boot.test.ts) and
 // no real engine is ever constructed — the barrier's `strictSync()` is an injected recording fn.
 
-import type { SyncTableRegistry } from "@pgxsinkit/contracts";
-
-import type { AdoptionEffects } from "../../packages/client/src/adoption";
 import {
-  type AdoptionWiringSeams,
   fallbackVirginCandidateToIdb,
   type FreshCommitmentSeams,
   resolveFreshBoot,
-  runBootAdoption,
   runFreshCommitmentBarrier,
 } from "../../packages/client/src/index";
 import type { StoreBootResolution } from "../../packages/client/src/store-boot";
-import type { JournalStatusCounts } from "../../packages/client/src/store-lifecycle";
 import { classifyStoreBoot } from "../../packages/client/src/store-meta";
 import {
   opfsCommitmentSentinelPath,
@@ -152,12 +146,15 @@ class FakeDatabase {
 
 class FakeMetaIdb {
   dbs = new Map<string, FakeDatabase>();
+  /** How many times the meta database was OPENED — proves "no meta interaction at all" on short-circuit arms. */
+  opens = 0;
   log: string[] | undefined;
   constructor(log?: string[]) {
     this.log = log;
   }
 
   open(name: string, _version?: number) {
+    if (name === META_DB) this.opens += 1;
     const req: {
       result: FakeDatabase | undefined;
       error: unknown;
@@ -312,7 +309,7 @@ describe("resolveFreshBoot — every opfs boot goes through the phase machine (A
     expect(fresh.verdict).toBeUndefined();
   });
 
-  it("recordless idb store (adoption not declared) → downgrades to idb; no barrier (invariant 14)", async () => {
+  it("existing recordless idb store → downgrades to idb; no barrier (invariant 14)", async () => {
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedPgliteDb("recordless-x");
     const root = new FakeDir();
@@ -320,10 +317,123 @@ describe("resolveFreshBoot — every opfs boot goes through the phase machine (A
 
     expect(fresh.verdict?.action).toBe("boot-idb-authoritative");
     expect(fresh.storageBackend).toBe("idbfs");
-    // A recordless idb store opens on idb even with an opfs grant when adoption is not declared — never a fresh
-    // opfs mint over the top of the existing data.
+    // A store's backend is fixed at first mint: an existing idb store opens on idb even under an opfs grant —
+    // never a fresh opfs mint over the top of the existing data, and never a migration.
     expect(fresh.bootHasOpfs).toBe(false);
     expect(fresh.needsCommitmentBarrier).toBe(false);
+  });
+});
+
+// =========================================================================================================
+// A2. The no-grant arm's committed-store REFUSAL — a home without sync access cannot open an OPFS-committed
+// store, so it fails closed instead of minting an empty idb sibling at the same path (ADR-0050 posture: never
+// a silently different storage mode). The remedy is `destroyStoreArtifacts(storePath)` (path-addressed: it
+// deletes both backends, the sentinel and the meta record without the grant) or booting from a worker home
+// that holds one.
+// =========================================================================================================
+
+describe("resolveFreshBoot — a no-grant home REFUSES an opfs-committed store (typed, fail closed)", () => {
+  it("committed record + no grant → typed refusal naming the remedy; nothing minted, record untouched", async () => {
+    const storePath = "no-grant-committed";
+    const log: string[] = [];
+    const metaIdb = new FakeMetaIdb(log);
+    const root = new FakeDir(log);
+    metaIdb.seedMeta(storePath, "opfs-committed");
+    await seedStoreDir(root, storePath);
+    await seedSentinel(root, storePath);
+    log.length = 0; // drop the seed writes; only post-gate effects matter.
+
+    const refusal = await resolveFreshBoot(storePath, false, undefined, browserSeams(root, metaIdb)).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).name).toBe("CommittedStoreUnreachableError");
+    expect((refusal as Error).message).toContain(JSON.stringify(storePath));
+    // The message must name BOTH the situation and the two exits, so a consumer is never left guessing — and
+    // the destroy exit must be a CALLABLE api (the caller's boot failed; they hold no client to `destroy()`).
+    expect((refusal as Error).message).toContain(`destroyStoreArtifacts(${JSON.stringify(storePath)})`);
+    // Fail CLOSED: no idb sibling minted at the same path, the record and the sentinel untouched.
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+    expect(metaPhase(metaIdb, storePath)).toBe("opfs-committed");
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: true, storeDirectoryPresent: true });
+    expect(log).toEqual([]);
+  });
+
+  it("no grant + record ABSENT or `idb-authoritative` → today's idbfs resolution, untouched", async () => {
+    const metaIdb = new FakeMetaIdb();
+    const root = new FakeDir();
+    metaIdb.seedMeta("no-grant-idb", "idb-authoritative");
+
+    for (const storePath of ["no-grant-recordless", "no-grant-idb"]) {
+      const fresh = await resolveFreshBoot(storePath, false, undefined, browserSeams(root, metaIdb));
+      expect(fresh.bootHasOpfs).toBe(false);
+      expect(fresh.storageBackend).toBe("idbfs");
+      expect(fresh.needsCommitmentBarrier).toBe(false);
+      expect(fresh.verdict).toBeUndefined();
+    }
+    expect(metaPhase(metaIdb, "no-grant-idb")).toBe("idb-authoritative");
+    expect(metaPhase(metaIdb, "no-grant-recordless")).toBeUndefined();
+  });
+
+  it("no grant + `deleting` → the deletion handoff still runs (idb authority published)", async () => {
+    const storePath = "no-grant-deleting";
+    const metaIdb = new FakeMetaIdb();
+    const root = new FakeDir();
+    metaIdb.seedMeta(storePath, "deleting");
+    metaIdb.seedPgliteDb(storePath);
+    await seedStoreDir(root, storePath);
+    await seedSentinel(root, storePath);
+
+    const fresh = await resolveFreshBoot(storePath, false, undefined, browserSeams(root, metaIdb));
+
+    expect(fresh.storageBackend).toBe("idbfs");
+    // The old cache is explicitly destructible, and the handoff finishes the whole of it: sentinel removed,
+    // OPFS store directory removed, idb store dropped, idb authority published.
+    expect(metaPhase(metaIdb, storePath)).toBe("idb-authoritative");
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+  });
+
+  it("no grant + `opfs-candidate` → the candidate is RETIRED before the idb store is minted", async () => {
+    // An unexposed candidate has no authority, and this home cannot open OPFS at all. Left standing, the
+    // record would claim an opfs candidate while a writable idb store was exposed underneath it.
+    const storePath = "no-grant-candidate";
+    const metaIdb = new FakeMetaIdb();
+    const root = new FakeDir();
+    metaIdb.seedMeta(storePath, "opfs-candidate");
+    await seedStoreDir(root, storePath);
+
+    const fresh = await resolveFreshBoot(storePath, false, undefined, browserSeams(root, metaIdb));
+
+    expect(fresh.storageBackend).toBe("idbfs");
+    expect(fresh.needsCommitmentBarrier).toBe(false);
+    expect(metaPhase(metaIdb, storePath)).toBe("idb-authoritative");
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+  });
+
+  it("no meta store at all (META_STORE_UNAVAILABLE — the Node/Bun lane) → NO refusal", async () => {
+    // A scope with no IndexedDB cannot hold a record, so absence is provable and there is no committed OPFS
+    // store to be blind to. The filesystem/idb lanes must stay exactly as they are.
+    const fresh = await resolveFreshBoot("no-meta-store", false, undefined, {
+      meta: { indexedDB: undefined } as never,
+      opfs: { getRoot: async () => new FakeDir() },
+    });
+
+    expect(fresh.bootHasOpfs).toBe(false);
+    expect(fresh.storageBackend).toBe("idbfs");
+    expect(fresh.needsCommitmentBarrier).toBe(false);
+  });
+
+  it("memory test lane short-circuits BEFORE the gate (no meta read at all)", async () => {
+    const metaIdb = new FakeMetaIdb();
+    metaIdb.seedMeta("memory-committed", "opfs-committed");
+    const fresh = await resolveFreshBoot("memory-committed", false, "memory", browserSeams(new FakeDir(), metaIdb));
+
+    expect(fresh.storageBackend).toBe("memory");
+    expect(fresh.bootHasOpfs).toBe(false);
+    expect(metaIdb.opens).toBe(0);
   });
 });
 
@@ -424,12 +534,12 @@ describe("fallbackVirginCandidateToIdb — virgin/candidate opfs open failure �
     // storageFallbackReason carries the VERBATIM open failure (Name: message) — the step-13 seam's value.
     expect(reason).toContain("NotAllowedError: createSyncAccessHandle denied");
     // The candidate directory is gone and the record is now the session's idb authority (NOT deleted — an idb
-    // fallback store is a RECORDED idb store, classification 7's caution / invariant 14).
+    // fallback store is a RECORDED idb store, classification 6's caution / invariant 14).
     expect(await observe(root, "uncreatable-x")).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
     expect(metaPhase(metaIdb, "uncreatable-x")).toBe("idb-authoritative");
   });
 
-  it("STICKINESS: the idb-authoritative record makes the NEXT boot an idb boot (classification 5), never a re-virgin", async () => {
+  it("STICKINESS: the idb-authoritative record makes the NEXT boot an idb boot (classification 4), never a re-virgin", async () => {
     const metaIdb = new FakeMetaIdb();
     const root = new FakeDir();
     const seams = browserSeams(root, metaIdb);
@@ -437,9 +547,9 @@ describe("fallbackVirginCandidateToIdb — virgin/candidate opfs open failure �
     await fallbackVirginCandidateToIdb("sticky-x", openFailure(), seams);
 
     // The next boot re-probes with an opfs grant, but the RECORDED idb-authoritative store is opened in place
-    // (classification 5 → boot-idb-authoritative) — it does NOT loop through virgin re-creation each boot.
-    // Retry-to-opfs is the DESIGNED non-destructive ADOPTION re-entry (a declared consumer re-adopts on a later
-    // drained boot), the honest composition of D6's "non-sticky" verdict with the LATER phase machine.
+    // (classification 4 → boot-idb-authoritative) — it does NOT loop through virgin re-creation each boot, and
+    // it never re-probes destructively: the backend is fixed at first mint, and the only route to another one
+    // is a deliberate destroy + a fresh boot.
     const next = await resolveFreshBoot("sticky-x", true, undefined, seams);
     expect(next.verdict?.action).toBe("boot-idb-authoritative");
     expect(next.bootHasOpfs).toBe(false);
@@ -485,109 +595,5 @@ describe("virgin-uncreatable fallback — the HARD committed paths never fall ba
     // gate excludes it and its open failure is HARD.
     expect(fresh.verdict?.action).toBe("repair-record-then-open-committed");
     expect(fresh.needsCommitmentBarrier).toBe(false);
-  });
-});
-
-// =========================================================================================================
-// C. Composition with 11b — adoption runs first; the fresh path composes, never double-commits
-// =========================================================================================================
-
-function drained(overrides: Partial<JournalStatusCounts> = {}): JournalStatusCounts {
-  return { pending: 0, sending: 0, acked: 0, failed: 0, quarantined: 0, conflicted: 0, rejected: 0, ...overrides };
-}
-
-const FULL_ADOPTION_ORDER = [
-  "bootIdbPreExpose",
-  "strictSyncAndCloseIdb",
-  "setPhase:adopting",
-  "buildCandidateThroughGate",
-  "commitCandidate",
-  "deleteIdbPredecessor",
-];
-
-function fakeAdoptionEffects(counts: JournalStatusCounts): { effects: AdoptionEffects; calls: string[] } {
-  const calls: string[] = [];
-  const record = <T>(name: string, value: T): Promise<T> => {
-    calls.push(name);
-    return Promise.resolve(value);
-  };
-  const effects: AdoptionEffects = {
-    bootIdbPreExpose: () => record("bootIdbPreExpose", counts),
-    strictSyncAndCloseIdb: () => record("strictSyncAndCloseIdb", undefined),
-    setPhase: (phase) => record(`setPhase:${phase}`, undefined),
-    buildCandidateThroughGate: () => record("buildCandidateThroughGate", undefined),
-    commitCandidate: () => record("commitCandidate", undefined),
-    deleteIdbPredecessor: () => record("deleteIdbPredecessor", undefined),
-    teardownCandidate: () => record("teardownCandidate", undefined),
-  };
-  return { effects, calls };
-}
-
-const registry = {} as unknown as SyncTableRegistry;
-const adoptionCtx = { registry, electricUrl: "e", batchWriteUrl: "/api/mutations", syncEnabled: true };
-
-describe("composition — 11b's declared-adoption path runs BEFORE the fresh path (ADR-0049 step 11c)", () => {
-  it("declared + existing idb store → adoption commits the opfs successor; the fresh path sees committed, NO re-commit", async () => {
-    // Mirror createSyncClient's else-branch ordering exactly: runBootAdoption first, THEN resolveFreshBoot.
-    const idbAuthoritative: StoreBootResolution = {
-      dataDir: "idb://compose-x",
-      storageBackend: "idbfs",
-      verdict: { action: "boot-idb-authoritative" },
-    };
-    const committed: StoreBootResolution = {
-      dataDir: "opfs://compose-x",
-      storageBackend: "opfs-repacked",
-      verdict: { action: "open-committed" },
-    };
-    const { effects, calls } = fakeAdoptionEffects(drained());
-    const adoptionSeams: AdoptionWiringSeams = {
-      idbStoreExists: () => Promise.resolve(true),
-      resolveStoreBoot: () => Promise.resolve(idbAuthoritative),
-      buildEffects: () => effects,
-      log: () => undefined,
-    };
-
-    let bootHasOpfs = true; // the probe grant
-    const adoption = await runBootAdoption("compose-x", "server-reconstructible", adoptionCtx, adoptionSeams);
-    bootHasOpfs = adoption.bootHasOpfs;
-    expect(calls).toEqual(FULL_ADOPTION_ORDER); // 11b ran the full transition
-    expect(bootHasOpfs).toBe(true);
-
-    // Now the fresh path runs (guarded on bootHasOpfs). The store is committed → open-committed, no barrier.
-    const fresh = await resolveFreshBoot("compose-x", bootHasOpfs, undefined, {
-      resolveStoreBoot: () => Promise.resolve(committed),
-    });
-    expect(fresh.verdict?.action).toBe("open-committed");
-    expect(fresh.needsCommitmentBarrier).toBe(false); // composes — never re-commits an already-committed store
-  });
-
-  it("declared + owed journal → adoption DEFERS to idb; the fresh path is SKIPPED (guard, this path never runs)", async () => {
-    const { effects } = fakeAdoptionEffects(drained({ pending: 1 }));
-    const adoptionSeams: AdoptionWiringSeams = {
-      idbStoreExists: () => Promise.resolve(true),
-      resolveStoreBoot: () =>
-        Promise.resolve({
-          dataDir: "idb://defer-x",
-          storageBackend: "idbfs",
-          verdict: { action: "boot-idb-authoritative" },
-        }),
-      buildEffects: () => effects,
-      log: () => undefined,
-    };
-
-    const adoption = await runBootAdoption("defer-x", "server-reconstructible", adoptionCtx, adoptionSeams);
-    expect(adoption.bootHasOpfs).toBe(false); // idb stays authoritative
-
-    // createSyncClient guards the fresh path on bootHasOpfs; a false grant short-circuits (idb path untouched).
-    let resolveCalls = 0;
-    const fresh = await resolveFreshBoot("defer-x", adoption.bootHasOpfs, undefined, {
-      resolveStoreBoot: () => {
-        resolveCalls += 1;
-        return Promise.resolve({ dataDir: "opfs://x", storageBackend: "opfs-repacked" });
-      },
-    });
-    expect(resolveCalls).toBe(0);
-    expect(fresh.needsCommitmentBarrier).toBe(false);
-    expect(fresh.bootHasOpfs).toBe(false);
   });
 });

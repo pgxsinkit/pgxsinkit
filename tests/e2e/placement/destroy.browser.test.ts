@@ -76,6 +76,10 @@ test("client.destroy() refuses with a peer, succeeds alone, then a fresh attach 
   expect(await harnessCall(tabA, "metaPhase", store)).not.toBe("deleting");
 });
 
+// BACKEND-FLIP COHERENCE, idbfs → opfs. A store's backend is fixed at its first mint, so the ONLY route to a
+// different one is destroy-then-remint: the destructive lifecycle removes EVERY artefact (the idb database, the
+// meta record, and — see the mirrored lane below — the OPFS directory + commitment sentinel), and the next boot
+// mints afresh on whatever backend the placement probe grants. Never a cross-backend sibling at any point.
 test("destroying an idb-authoritative store deletes its database and permits fresh capability placement", async ({
   page,
 }, testInfo) => {
@@ -88,9 +92,56 @@ test("destroying an idb-authoritative store deletes its database and permits fre
   expect(await harnessCall(page, "destroyIdbStore", store)).toMatchObject({ ok: true });
   expect(await harnessCall(page, "idbExists", store)).toBe(false);
   expect(await harnessCall(page, "metaPhase", store)).toBe("absent");
+  // No cross-backend residue: destroying an idb store leaves the OPFS namespace as empty as it found it.
+  const afterIdbDestroy = await harnessCall(page, "opfsArtefacts", store);
+  if (afterIdbDestroy !== "unobservable") {
+    expect(afterIdbDestroy).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+  }
 
   expect((await harnessCall(page, "attach", { storePath: store, factories: true })).ok).toBe(true);
   const report = (await harnessCall(page, "bootReport", store)) as { report?: { storageBackend?: string } };
   expect(report.report?.storageBackend).toBe("opfs-repacked");
+  await harnessCall(page, "cleanup", store);
+});
+
+// BACKEND-FLIP COHERENCE, the MIRROR (opfs → idbfs). A committed OPFS store destroyed through the real
+// lifecycle must leave NOTHING behind on either backend: no store directory, no commitment sentinel, no meta
+// record, and no idb sibling. That is what makes a preference flip safe — the board flips by obsoleting its
+// current bindings, draining them through this same destruction machine, and minting fresh paths under the new
+// declaration. A surviving sentinel or directory would read as committed authority to the next boot; a
+// surviving idb database would be a cross-backend sibling.
+test("destroying a COMMITTED opfs store leaves no opfs artefacts, no meta record and no idb sibling", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "webkit", "WebKitGTK does not grant the elected worker OPFS sync access");
+  await page.goto("/");
+  const store = uniqueStore("destroy-opfs");
+
+  // A virgin granted boot mints the opfs candidate and its commitment barrier promotes it pre-expose.
+  expect((await harnessCall(page, "attach", { storePath: store, factories: true })).ok).toBe(true);
+  await expect.poll(() => harnessCall(page, "metaPhase", store), { timeout: 30_000 }).toBe("opfs-committed");
+  expect(await harnessCall(page, "opfsArtefacts", store)).toEqual({
+    sentinelPresent: true,
+    storeDirectoryPresent: true,
+  });
+  // A committed opfs store never has an idb sibling at the same path.
+  expect(await harnessCall(page, "idbExists", store)).toBe(false);
+
+  await expect
+    .poll(
+      async () => {
+        const result = await harnessCall(page, "destroy", store);
+        return result.ok ? "ok" : (result.error?.name ?? "error");
+      },
+      { timeout: 30_000 },
+    )
+    .toBe("ok");
+
+  expect(await harnessCall(page, "opfsArtefacts", store)).toEqual({
+    sentinelPresent: false,
+    storeDirectoryPresent: false,
+  });
+  expect(await harnessCall(page, "metaPhase", store)).toBe("absent");
+  expect(await harnessCall(page, "idbExists", store)).toBe(false);
   await harnessCall(page, "cleanup", store);
 });

@@ -170,12 +170,29 @@ export function canonicalRegistryString(registry: SyncTableRegistry): string {
 }
 
 /**
+ * Per-registry-object memo. The full canonicalize → JSON.stringify → hash chain is walked at least twice per
+ * client boot over the SAME registry object (the boot report's `registryFingerprint` and the mutation
+ * runtime's `registryVersion`), and its cost scales with registry width — so cache it on the object.
+ *
+ * There is deliberately no invalidation: a registry is a frozen-by-convention module constant built once by
+ * `defineSyncRegistry` (mutating one after handing it to a client is already undefined behaviour — the shape
+ * fingerprint is what the local store's DDL and subscription state are keyed by). A `WeakMap` keeps the entry
+ * exactly as long as the registry itself, so a per-request/per-tenant registry object is collected normally.
+ */
+const registryFingerprintMemo = new WeakMap<SyncTableRegistry, string>();
+
+/**
  * A stable fingerprint (hex) of the registry's shape. Identical shapes — even with
  * tables declared in a different order — produce the same fingerprint; any
- * structural change produces a different one.
+ * structural change produces a different one. Memoised per registry object (see
+ * {@link registryFingerprintMemo}); two structurally equal registries still fingerprint equal, memo or not.
  */
 export function fingerprintRegistry(registry: SyncTableRegistry): string {
-  return hashString(canonicalRegistryString(registry));
+  const memoised = registryFingerprintMemo.get(registry);
+  if (memoised !== undefined) return memoised;
+  const fingerprint = hashString(canonicalRegistryString(registry));
+  registryFingerprintMemo.set(registry, fingerprint);
+  return fingerprint;
 }
 
 /**
@@ -252,14 +269,38 @@ export function fingerprintReadContract(entry: SyncTableEntry): string {
  * identically in the browser and in Bun (no crypto import). A fingerprint, not a security
  * primitive — used both for the registry shape fingerprint (ADR-0004) and for the apply-function
  * DDL fingerprint embedded in the generated migration (ADR-0018).
+ *
+ * The 64-bit state is carried in TWO 32-bit Number lanes rather than a BigInt, because this runs over
+ * multi-KB payloads on the boot critical path (the local-schema fingerprint hashes the whole generated
+ * durable DDL) and a BigInt allocates per byte. The output is IDENTICAL — same algorithm, same offset
+ * basis, same prime, same modulo-2^64 truncation — and it MUST stay that way: the values are PERSISTED
+ * (`registry_fingerprint`, the `lsf1` local-schema fingerprint, the `apply` DDL fingerprint), so a
+ * changed value would silently wipe every existing store's read cache. `tests/unit/registry-fingerprint`
+ * pins goldens against the original BigInt implementation as the oracle.
+ *
+ * Why plain Numbers are exact here: the prime 0x100000001b3 splits into small halves (high 0x100, low
+ * 0x1b3), so every partial product stays under 2^42 — far inside the 2^53 integer-exact range. The lane
+ * arithmetic therefore needs no `Math.imul` truncation games; only the final `% 2^32` per lane.
  */
 export function hashString(input: string): string {
   const bytes = new TextEncoder().encode(input);
-  const prime = 0x100000001b3n;
-  const mask = (1n << 64n) - 1n;
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of bytes) {
-    hash = ((hash ^ BigInt(byte)) * prime) & mask;
+  const TWO_32 = 4294967296;
+  const PRIME_LOW = 0x1b3;
+  const PRIME_HIGH = 0x100;
+  // The FNV-1a 64-bit offset basis 0xcbf29ce484222325, split into its two 32-bit halves.
+  let high = 0xcbf29ce4;
+  let low = 0x84222325;
+  for (let index = 0; index < bytes.length; index += 1) {
+    // The byte only ever touches the bottom 8 bits, so the XOR is confined to the low lane.
+    low = (low ^ bytes[index]!) >>> 0;
+    // 64-bit multiply, mod 2^64: low·primeLow feeds the low lane and carries into the high lane, which
+    // also takes high·primeLow + low·primeHigh (the primeHigh·high term overflows 2^64 and is dropped).
+    const lowProduct = low * PRIME_LOW;
+    const carry = Math.floor(lowProduct / TWO_32);
+    const nextHigh = (high * PRIME_LOW + low * PRIME_HIGH + carry) % TWO_32;
+    low = lowProduct - carry * TWO_32;
+    high = nextHigh;
   }
-  return hash.toString(16).padStart(16, "0");
+  // Two zero-padded 32-bit halves are byte-identical to padStart(16) over the joined 64-bit value.
+  return high.toString(16).padStart(8, "0") + low.toString(16).padStart(8, "0");
 }

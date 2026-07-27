@@ -12,6 +12,7 @@ import {
   type AttachedSyncClient,
   type AttachSyncClientOptions,
   createClientPGlite,
+  createOpfsEffects,
   createSyncClient,
   destroyStoreArtifacts,
   EngineRelocatedError,
@@ -32,6 +33,7 @@ import {
   type PlacementQueryResult,
 } from "../../../packages/client/src/worker/define-sync-worker";
 import { LEADER_LOCK_PREFIX } from "../../../packages/client/src/worker/election-coordinator";
+import { readControlEnvelope } from "../../../packages/client/src/worker/engine-control";
 import { PLACEMENT_ELECTRIC_URL, PLACEMENT_WRITE_URL, type PlacementRegistry, placementRegistry } from "./registry";
 
 type Client = AttachedSyncClient<PlacementRegistry>;
@@ -82,6 +84,30 @@ type ServerClient = AttachedSyncClient<typeof fkSyncRegistry>;
 const serverClients = new Map<string, ServerClient>();
 // In-flight server-lane `flush()` handles (issued but NOT awaited — the relocation-outcome mutation half).
 const serverFlushes = new Map<string, Promise<unknown>>();
+
+/**
+ * One identity-bearing `pgx0049` control message the ROUTER fanned to a plain (declared, engine-less)
+ * SharedWorker connection — the page-observable form of the client's `EngineIdentity`. `swInstanceId` names
+ * the SharedWorker instance that MINTED the identity and `generation` is monotonic WITHIN that instance
+ * (`engine-control.ts` → `mintEngineIdentity`), so the pair is the only page-side evidence that distinguishes
+ * "the SharedWorker survived and re-elected" (same id, generation+1) from "a fresh SharedWorker booted"
+ * (new id, generation 0).
+ */
+export interface EngineIdentityObservation {
+  /** The control-message type that carried it (`connect-port`, `engine-retiring`, …). */
+  type: string;
+  /** The SharedWorker instance that minted the identity — STABLE for the lifetime of one SharedWorker. */
+  swInstanceId: string;
+  /** Monotonic within one `swInstanceId`; resets to 0 under a new SharedWorker instance. */
+  generation: number;
+}
+
+/**
+ * Live engine-identity observers, keyed by store name. Each holds an ordinary SharedWorker connection that has
+ * DECLARED (so the router routes it as a tab and fans to it) but never attaches a client — a passive tap on the
+ * control plane. The `SharedWorker` itself is retained beside its port so the connection is never collected.
+ */
+const identityObservers = new Map<string, { sw: SharedWorker; port: MessagePort; log: EngineIdentityObservation[] }>();
 
 const clients = new Map<string, Client>();
 // Provision SharedWorker connections retained per store — the elected provision's shared coordinator posts its
@@ -244,6 +270,23 @@ export interface PlacementHarness {
   destroyArtifacts(storePath: string, timeoutMs?: number): Promise<{ ok: boolean; timedOut: boolean; error?: string }>;
   /** The currently HELD leader Web Locks (`pgx-leader-*`), via `navigator.locks.query()`. */
   leaderLocks(): Promise<{ held: string[]; pending: string[] }>;
+  /**
+   * The attached client's OWED journal count (pending + sending + failed, via the `diagnostics` RPC). A locally
+   * enqueued write lives durably in the store's JOURNAL until a server settles it — a bare table count never
+   * sees it — so this is the page-observable proof that an attach reached a store's DATA (`serverOwedCount`'s
+   * attached-lane twin).
+   */
+  localOwedCount(storePath: string, timeoutMs?: number): Promise<number>;
+  /**
+   * Start a passive ENGINE-IDENTITY tap on a store's router: open a SharedWorker connection, declare (no
+   * opinion), and record every identity-bearing `pgx0049` control message the router fans to it. Idempotent per
+   * store. The tap attaches no client and spawns no engine — it only listens, so it never changes placement.
+   */
+  observeEngineIdentity(name: string): { started: boolean };
+  /** Everything {@link PlacementHarness.observeEngineIdentity} has recorded for this store, in arrival order. */
+  engineIdentityLog(name: string): EngineIdentityObservation[];
+  /** Close the identity tap for this store (also done by `cleanup`). */
+  stopEngineIdentityObserver(name: string): void;
   /** The store meta record's phase, or `"absent"` / `"unavailable"`. */
   metaPhase(storePath: string): Promise<string>;
   /** Seed a bare PGlite idb store directly (a recordless idb store), then close it. */
@@ -254,6 +297,15 @@ export interface PlacementHarness {
   destroyIdbStore(storePath: string): Promise<{ ok: boolean; error?: string }>;
   /** The non-creating idb existence check (invariant 14). */
   idbExists(storePath: string): Promise<boolean>;
+  /**
+   * The OPFS commitment-namespace observation for a store — the commitment sentinel and the store directory,
+   * observed WITHOUT creating either. `"unobservable"` when this scope has no OPFS root at all. The
+   * cross-backend-residue probe: an idb-backed store must show neither, and a destroyed store must show
+   * neither afterwards.
+   */
+  opfsArtefacts(
+    storePath: string,
+  ): Promise<{ sentinelPresent: boolean; storeDirectoryPresent: boolean } | "unobservable">;
   /** Best-effort isolation reset: stop the client and delete idb + opfs + meta for this store. */
   cleanup(storePath: string): Promise<void>;
 }
@@ -656,6 +708,57 @@ const harness: PlacementHarness = {
     return { held: leader(snapshot.held), pending: leader(snapshot.pending) };
   },
 
+  async localOwedCount(storePath, timeoutMs = 8_000) {
+    const client = clients.get(storePath);
+    if (!client) return -1;
+    try {
+      const { value, timedOut } = await withTimeout(client.diagnostics(), timeoutMs, () => undefined);
+      if (timedOut) return -1;
+      const m = (value as { mutation?: { pendingCount: number; sendingCount: number; failedCount: number } })?.mutation;
+      return m ? m.pendingCount + m.sendingCount + m.failedCount : -1;
+    } catch {
+      return -1;
+    }
+  },
+
+  observeEngineIdentity(name) {
+    if (identityObservers.has(name)) return { started: true };
+    const sw = newSharedWorker(name);
+    const port = sw.port;
+    const log: EngineIdentityObservation[] = [];
+    port.addEventListener("message", (event: MessageEvent) => {
+      // The router's fan-out rides the SAME namespaced envelope the control plane uses everywhere
+      // (`pgx0049`); bridge traffic and meta replies carry no such key and are ignored by the reader. Only the
+      // identity-TAGGED members say anything about which engine is current, so the untagged ones
+      // (`leader-granted`) are skipped rather than recorded as a nameless entry.
+      const control = readControlEnvelope(event.data);
+      if (control === undefined || !("identity" in control)) return;
+      log.push({
+        type: control.type,
+        swInstanceId: control.identity.swInstanceId,
+        generation: control.identity.generation,
+      });
+    });
+    port.start();
+    // ADR-0050: a port is routed (and therefore fanned to) only once it has DECLARED. An EMPTY declaration
+    // states no opinion, so it is always compatible with whatever this store already bound — the same
+    // no-opinion declaration `probePlacement` and `peerVerdict` post.
+    port.postMessage({ [DECLARATION_KEY]: {} });
+    identityObservers.set(name, { sw, port, log });
+    return { started: true };
+  },
+
+  engineIdentityLog(name) {
+    return [...(identityObservers.get(name)?.log ?? [])];
+  },
+
+  stopEngineIdentityObserver(name) {
+    const observer = identityObservers.get(name);
+    if (!observer) return;
+    observer.port.close();
+    identityObservers.delete(name);
+  },
+
   async metaPhase(storePath) {
     try {
       const record = await readStoreMetaRecord(storePath);
@@ -682,9 +785,9 @@ const harness: PlacementHarness = {
 
   async seedServerIdbStore(storePath) {
     try {
-      // Adoption's drain gate reads the predecessor journal before constructing its successor. A realistic
-      // recordless idb store therefore needs the package-generated local schema for the server registry, while
-      // remaining recordless so the boot classifier still exercises invariant 14.
+      // A realistic recordless idb store for the SERVER lane: it carries the package-generated local schema for
+      // the server registry (so a real sync-enabled boot can open and use it), while remaining recordless so the
+      // boot classifier still exercises invariant 14.
       const pg = await createClientPGlite(storePath);
       await pg.exec(generateLocalSchemaSql(fkSyncRegistry));
       await pg.close();
@@ -714,6 +817,10 @@ const harness: PlacementHarness = {
     return idbStoreExists(storePath);
   },
 
+  opfsArtefacts(storePath) {
+    return createOpfsEffects(storePath).observeCommitmentNamespace();
+  },
+
   async cleanup(storePath) {
     const client = clients.get(storePath);
     if (client) {
@@ -726,6 +833,11 @@ const harness: PlacementHarness = {
     }
     inFlight.delete(storePath);
     provisionWorkers.delete(storePath);
+    const observer = identityObservers.get(storePath);
+    if (observer) {
+      observer.port.close();
+      identityObservers.delete(storePath);
+    }
     const identity = (() => {
       try {
         return storeIdentityComponent(storePath);

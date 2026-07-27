@@ -31,8 +31,14 @@ import {
   provisionSyncWorker,
 } from "../../packages/client/src/index";
 import { type ElectedEngineWorker, wrapEngineWorker } from "../../packages/client/src/worker/attach-sync-client";
-import { bindGlobalScope, bootstrapWorkerScope } from "../../packages/client/src/worker/define-sync-worker";
+import {
+  bindGlobalScope,
+  bootstrapWorkerScope,
+  DECLARATION_KEY,
+  PLACEMENT_RESULT_KEY,
+} from "../../packages/client/src/worker/define-sync-worker";
 import type { CoordinatorDeps } from "../../packages/client/src/worker/election-coordinator";
+import { readControlEnvelope, wrapControlEnvelope } from "../../packages/client/src/worker/engine-control";
 import type { AttachPayload, BridgePort, RestoreArtefactWire } from "../../packages/client/src/worker/protocol";
 import type { SwPlacementResult } from "../../packages/client/src/worker/sw-placement";
 
@@ -59,12 +65,20 @@ const track = (channel: MessageChannel): MessageChannel => {
   openChannels.push(channel);
   return channel;
 };
+// Single ends kept alive by a listener (a channel whose OTHER end was transferred away) are closed the same way.
+let openPorts: MessagePort[] = [];
+const trackPort = (port: MessagePort): MessagePort => {
+  openPorts.push(port);
+  return port;
+};
 afterEach(() => {
   for (const channel of openChannels) {
     channel.port1.close();
     channel.port2.close();
   }
+  for (const port of openPorts) port.close();
   openChannels = [];
+  openPorts = [];
 });
 
 /** A fake SharedWorkerGlobalScope (the constructor marker the bootstrap detects + a settable `onconnect`). */
@@ -102,6 +116,7 @@ function makeFakeDedicatedScope(implicitPort: MessagePort) {
 function scriptedEngineCore(rpcValue: unknown) {
   const attachedPorts: BridgePort[] = [];
   const restoreAttaches: RestoreArtefactWire[] = [];
+  const bridgeArrivals: string[] = [];
   let provisionCount = 0;
   let bootCount = 0;
   const connect = (port: BridgePort) => {
@@ -109,6 +124,7 @@ function scriptedEngineCore(rpcValue: unknown) {
     port.addEventListener("message", (event) => {
       const data = (event as { data: unknown }).data;
       if (!isBridgeEnvelope(data)) return;
+      if (data.type === "provision" || data.type === "attach") bridgeArrivals.push(data.type);
       if (data.type === "provision") {
         // Pre-spawn (initdb only) once; a fresh attach ADOPTS it (never a second initdb).
         provisionCount += 1;
@@ -133,6 +149,7 @@ function scriptedEngineCore(rpcValue: unknown) {
     connect,
     attachedPorts,
     restoreAttaches,
+    bridgeArrivals,
     provisionCount: () => provisionCount,
     bootCount: () => bootCount,
   };
@@ -149,6 +166,24 @@ function makeGrantingLocks(): { locks: CoordinatorDeps["locks"]; requested: stri
       request: (name, _options, callback) => {
         requested.push(name);
         return callback(); // grant — the callback's returned promise HOLDS the lock (stays pending here)
+      },
+    },
+    requested,
+  };
+}
+
+/**
+ * A leader lock ALREADY HELD by another page: the request is recorded and QUEUES forever — the callback never
+ * runs, so this tab elects nothing and spawns no engine (the multi-tab shape: the router pipes this tab to the
+ * HOLDER's engine, and no `engine-ready` fan-out is coming to re-pipe it).
+ */
+function makeQueuedLocks(): { locks: CoordinatorDeps["locks"]; requested: string[] } {
+  const requested: string[] = [];
+  return {
+    locks: {
+      request: (name) => {
+        requested.push(name);
+        return new Promise<void>(() => undefined); // queued behind the holder — never granted in this tab
       },
     },
     requested,
@@ -181,6 +216,59 @@ function makeElectedEngine(rpcValue: unknown) {
     terminate: () => undefined,
   });
   return { core, dedicated, worker };
+}
+
+/**
+ * Register (via a tab port's `engine-announce`) an engine whose WORKER IS GONE — the Chromium
+ * `extendedLifetime` warm-reopen shape (ADR-0053, the 2026-07-26 trace). The SharedWorker and its router state
+ * OUTLIVE the tab that spawned the dedicated engine, and nothing clears `engineReady`, so the router keeps
+ * piping fresh connections to a corpse. The fake completes exactly the announce handshake that makes the router
+ * treat it as pipe-able (`assign-identity` → `engine-ready`) and then services NOTHING: every pipe it is handed
+ * is counted and dropped, so a `provision`/`attach` posted into it is never acked.
+ */
+function announceDeadEngine(tabPort: MessagePort): { pipesDropped: () => number } {
+  const control = new MessageChannel();
+  const engineEnd = trackPort(control.port1);
+  let pipes = 0;
+  engineEnd.addEventListener("message", (event) => {
+    const message = readControlEnvelope((event as MessageEvent).data);
+    if (message === undefined) return;
+    if (message.type === "assign-identity") {
+      engineEnd.postMessage(wrapControlEnvelope({ type: "engine-ready", identity: message.identity }));
+    } else if (message.type === "connect-port") {
+      pipes += 1; // handed a pipe it will never serve — the dead-engine signature
+    }
+  });
+  engineEnd.start();
+  tabPort.postMessage(wrapControlEnvelope({ type: "engine-announce" }), [control.port2]);
+  return { pipesDropped: () => pipes };
+}
+
+/**
+ * Register a LIVE elected engine on another page's behalf: mint the announce control channel, deliver its ENGINE
+ * end to the engine worker (exactly what the coordinator's spawn adapter does) and transfer its ROUTER end to
+ * the SharedWorker over `tabPort`. Used to stand up the peer tab that HOLDS the leader lock.
+ */
+function announceLiveEngine(tabPort: MessagePort, engine: ElectedEngineWorker): void {
+  const control = new MessageChannel();
+  engine.deliverControlPort(control.port2);
+  tabPort.postMessage(wrapControlEnvelope({ type: "engine-announce" }), [control.port1]);
+}
+
+/** Declare a bare (client-less) tab connection so the SharedWorker's placement decision starts and it is routed. */
+function declareBareTab(tabPort: MessagePort): void {
+  tabPort.start();
+  tabPort.postMessage({ [DECLARATION_KEY]: {} });
+}
+
+/** Bounded settlement probe: a HUNG promise must fail a test, never hang the suite. */
+function boundedOutcome<T>(promise: Promise<T>, label: string, ms = 2_000): Promise<T | string> {
+  return Promise.race([promise, new Promise<string>((resolve) => setTimeout(() => resolve(`pending: ${label}`), ms))]);
+}
+
+/** Bounded await for a value: a hung boot rejects with `label` instead of stalling the runner. */
+function boundedValue<T>(promise: Promise<T>, label: string, ms = 3_000): Promise<T> {
+  return Promise.race([promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(label)), ms))]);
 }
 
 describe("composed elected placement path — attach → placement query → election → pipe handshake (ADR-0049)", () => {
@@ -359,6 +447,66 @@ describe("composed elected placement path — attach → placement query → ele
     await settle(4);
   });
 
+  it("a FIRE-AND-FORGET provision with an immediate same-port attach still reaches the engine BEFORE the attach", async () => {
+    // The app prewarm reality (emergent learner main.tsx, ADR-0032 optimisation B): `void provisionSyncWorker(...)`
+    // at bootstrap, `attachSyncClient(...)` on the SAME port moments later — the provision is never awaited first.
+    // For the accelerator to land, the provision envelope must arrive at the engine BEFORE the attach, so the
+    // boot's `provisionAttempt` sample sees it; otherwise the boot silently degrades to a fresh openOwnedStore
+    // create (observed on every emergent warm reopen, 2026-07-26 measurements).
+    const { scope: swScope, connect: swOnConnect } = makeFakeSharedScope();
+    bootstrapWorkerScope({
+      connect: () => undefined,
+      peerCount: () => 0,
+      decidePlacement: deniedPlacement,
+      globalScope: swScope,
+    });
+
+    const { core, worker } = makeElectedEngine(11);
+    let factoryCalls = 0;
+    const factory = (): ElectedEngineWorker => {
+      factoryCalls += 1;
+      return worker;
+    };
+    const grantingLocks = makeGrantingLocks();
+    const storePath = "composed-provision-fire-and-forget";
+
+    const sharedSw = track(new MessageChannel());
+    swOnConnect(sharedSw.port2 as unknown as BridgePort);
+    // NOT awaited — the app pattern under test.
+    const provision = provisionSyncWorker({
+      worker: { port: sharedSw.port1 as unknown as BridgePort } as unknown as never,
+      storePath,
+      createEngineWorker: factory,
+      electionIo: { locks: grantingLocks.locks },
+    });
+    const client = await Promise.race([
+      attachSyncClient({
+        registry: attachRegistry,
+        worker: { port: sharedSw.port1 as unknown as BridgePort } as unknown as never,
+        storePath,
+        createEngineWorker: factory,
+        electionIo: { locks: grantingLocks.locks },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("attach did not complete alongside a fire-and-forget provision")), 2_000),
+      ),
+    ]);
+    await client.ready;
+    await provision.catch(() => undefined);
+    await settle();
+
+    // The accelerator LANDS: provision reached the engine, and BEFORE the attach envelope.
+    expect(core.provisionCount()).toBe(1);
+    expect(core.bridgeArrivals).toEqual(["provision", "attach"]);
+    // Adoption invariants: one lock, one engine.
+    expect(factoryCalls).toBe(1);
+    expect(grantingLocks.requested).toHaveLength(1);
+    expect(core.bootCount()).toBe(1);
+
+    await client.stop();
+    await settle(4);
+  });
+
   it("elected provision then attach on the SAME SharedWorker port completes — the provision pipe is handed over", async () => {
     // The board's real contract (apps/board store-registry-default): provision and the later attach share ONE
     // SharedWorker instance/port so their messages stay ordered. The router mints that port's proxy pipe ONCE
@@ -418,6 +566,250 @@ describe("composed elected placement path — attach → placement query → ele
 
     const rows = (await client.rawQuery("SELECT 1", [])) as unknown;
     expect(rows).toBe(41);
+
+    await client.stop();
+    await settle(4);
+  });
+});
+
+describe("provision pipe under a SURVIVING SharedWorker — newest pipe wins (ADR-0053 R3)", () => {
+  it("a pre-placement pipe to a DEAD engine is SUPERSEDED by the election's pipe: the provision lands the accelerator", async () => {
+    // The live-traced warm-reopen hang (2026-07-26, emergent learner-web on Chromium `extendedLifetime`):
+    //   1044 connect-port (the DEAD engine's pipe) — BEFORE any placement result
+    //   1336 placement result {electionRequired: true} → 1432 leader-granted → a FRESH engine
+    //   2414 connect-port (the fresh pipe) → the provision flow BAILED on its terminal `piped` flag
+    // so the provision envelope only ever reached the corpse, the provision promise never settled, and the
+    // adopting boot fell back to `openOwnedStore` — the accelerator forfeited on EVERY warm reopen.
+    const { scope: swScope, connect: swOnConnect } = makeFakeSharedScope();
+    bootstrapWorkerScope({
+      connect: () => undefined,
+      peerCount: () => 0,
+      decidePlacement: deniedPlacement,
+      globalScope: swScope,
+    });
+
+    // ── The PREVIOUS page: it declared, elected, and registered an engine that died with it. The SharedWorker
+    //    survives, so the router still holds that dead registration as `engineReady`.
+    const staleTab = track(new MessageChannel());
+    swOnConnect(staleTab.port2 as unknown as BridgePort);
+    declareBareTab(staleTab.port1);
+    await settle();
+    const dead = announceDeadEngine(staleTab.port1);
+    await settle();
+    staleTab.port1.postMessage(wrapControlEnvelope({ type: "tab-detach" })); // the page closed; the SW did not
+    await settle();
+
+    // ── The warm reopen: ONE fresh connection carrying emergent's prewarm shape — a fire-and-forget
+    //    `provisionSyncWorker` with the real `attachSyncClient` on the SAME port moments later.
+    const { core, worker } = makeElectedEngine(101);
+    let factoryCalls = 0;
+    const factory = (): ElectedEngineWorker => {
+      factoryCalls += 1;
+      return worker;
+    };
+    const grantingLocks = makeGrantingLocks();
+    const storePath = "composed-dead-engine-supersede";
+
+    const tabSw = track(new MessageChannel());
+    swOnConnect(tabSw.port2 as unknown as BridgePort);
+    // Record the arrival ORDER of the two control messages — the trace's precondition is the dead pipe FIRST.
+    const controlArrivals: string[] = [];
+    tabSw.port1.addEventListener("message", (event) => {
+      const data = (event as MessageEvent).data;
+      if (readControlEnvelope(data)?.type === "connect-port") controlArrivals.push("connect-port");
+      else if (typeof data === "object" && data !== null && PLACEMENT_RESULT_KEY in data) {
+        controlArrivals.push("placement-result");
+      }
+    });
+    tabSw.port1.start();
+
+    const provision = provisionSyncWorker({
+      worker: { port: tabSw.port1 as unknown as BridgePort } as unknown as never,
+      storePath,
+      createEngineWorker: factory,
+      electionIo: { locks: grantingLocks.locks },
+    });
+    void provision.catch(() => undefined);
+    const client = await boundedValue(
+      attachSyncClient({
+        registry: attachRegistry,
+        worker: { port: tabSw.port1 as unknown as BridgePort } as unknown as never,
+        storePath,
+        createEngineWorker: factory,
+        electionIo: { locks: grantingLocks.locks },
+      }),
+      "attach did not complete behind a dead-engine pipe",
+    );
+    await client.ready;
+    await settle();
+
+    // The trace shape was reproduced: the corpse was piped BEFORE the placement reply, and it swallowed a pipe.
+    expect(controlArrivals[0]).toBe("connect-port");
+    expect(controlArrivals.indexOf("placement-result")).toBe(1);
+    expect(dead.pipesDropped()).toBeGreaterThanOrEqual(1);
+
+    // And the provision RESOLVED — the fresh election's pipe superseded the corpse's and carried the envelope.
+    expect(
+      await boundedOutcome(
+        provision.then(() => "resolved"),
+        "provision",
+      ),
+    ).toBe("resolved");
+    // The accelerator LANDS at the fresh engine: provision first, then the boot attach that adopts it.
+    expect(core.provisionCount()).toBe(1);
+    expect(core.bridgeArrivals).toEqual(["provision", "attach"]);
+    // One election, one engine, one boot — the recovery spawned no extras.
+    expect(factoryCalls).toBe(1);
+    expect(grantingLocks.requested).toHaveLength(1);
+    expect(core.bootCount()).toBe(1);
+    expect((await client.rawQuery("SELECT 1", [])) as unknown).toBe(101);
+
+    await client.stop();
+    await settle(4);
+  });
+
+  it("the adopting attach's HANDOVER receives the FRESH pipe, never the superseded dead one", async () => {
+    // Same surviving-SharedWorker precondition, but the provision is AWAITED before the attach (the board's
+    // ordered contract). The attach then gets NO `connect-port` of its own — its port is already routed and no
+    // further `engine-ready` fan-out is coming — so the ONLY way it reaches the engine is the provision-pipe
+    // handover. If the stash still held the dead pipe, this attach would hang exactly as the pre-fix one did.
+    const { scope: swScope, connect: swOnConnect } = makeFakeSharedScope();
+    bootstrapWorkerScope({
+      connect: () => undefined,
+      peerCount: () => 0,
+      decidePlacement: deniedPlacement,
+      globalScope: swScope,
+    });
+
+    const staleTab = track(new MessageChannel());
+    swOnConnect(staleTab.port2 as unknown as BridgePort);
+    declareBareTab(staleTab.port1);
+    await settle();
+    announceDeadEngine(staleTab.port1);
+    await settle();
+    staleTab.port1.postMessage(wrapControlEnvelope({ type: "tab-detach" }));
+    await settle();
+
+    const { core, worker } = makeElectedEngine(202);
+    let factoryCalls = 0;
+    const factory = (): ElectedEngineWorker => {
+      factoryCalls += 1;
+      return worker;
+    };
+    const grantingLocks = makeGrantingLocks();
+    const storePath = "composed-dead-engine-handover";
+
+    const tabSw = track(new MessageChannel());
+    swOnConnect(tabSw.port2 as unknown as BridgePort);
+    const provision = provisionSyncWorker({
+      worker: { port: tabSw.port1 as unknown as BridgePort } as unknown as never,
+      storePath,
+      createEngineWorker: factory,
+      electionIo: { locks: grantingLocks.locks },
+    });
+    void provision.catch(() => undefined);
+    expect(
+      await boundedOutcome(
+        provision.then(() => "resolved"),
+        "provision",
+      ),
+    ).toBe("resolved");
+    expect(core.provisionCount()).toBe(1);
+    expect(core.bootCount()).toBe(0); // still initdb-only — nothing has attached yet
+
+    const client = await boundedValue(
+      attachSyncClient({
+        registry: attachRegistry,
+        worker: { port: tabSw.port1 as unknown as BridgePort } as unknown as never,
+        storePath,
+        createEngineWorker: factory,
+        electionIo: { locks: grantingLocks.locks },
+      }),
+      "the adopting attach never received the fresh provision pipe",
+    );
+    await client.ready;
+    await settle();
+
+    // The handover carried the LIVE pipe: the attach reached the same engine that acked the provision.
+    expect(core.bridgeArrivals).toEqual(["provision", "attach"]);
+    expect(factoryCalls).toBe(1);
+    expect(grantingLocks.requested).toHaveLength(1);
+    expect(core.provisionCount()).toBe(1);
+    expect(core.bootCount()).toBe(1);
+    expect((await client.rawQuery("SELECT 1", [])) as unknown).toBe(202);
+
+    await client.stop();
+    await settle(4);
+  });
+
+  it("a pre-placement pipe to the SharedWorker's still-LIVE engine survives into the attach handover", async () => {
+    // Defect 2 in isolation, on the multi-tab shape: a peer page HOLDS the leader lock, so this tab's claim only
+    // QUEUES — it elects nothing, announces nothing, and therefore NEVER receives a second `connect-port`. The
+    // one pipe it gets is the late-joiner pipe the router mints at declaration time, i.e. BEFORE the placement
+    // reply registers the shared coordinator. Pre-fix `stashProvisionPipe` no-opped there (no entry yet), so the
+    // pipe was lost and the adopting attach waited on a `connect-port` that was never coming.
+    const { scope: swScope, connect: swOnConnect } = makeFakeSharedScope();
+    bootstrapWorkerScope({
+      connect: () => undefined,
+      peerCount: () => 0,
+      decidePlacement: deniedPlacement,
+      globalScope: swScope,
+    });
+
+    // ── The peer page that holds the lock: it announces the LIVE engine every tab is piped to. ──
+    const { core, worker } = makeElectedEngine(303);
+    const leaderTab = track(new MessageChannel());
+    swOnConnect(leaderTab.port2 as unknown as BridgePort);
+    declareBareTab(leaderTab.port1);
+    await settle();
+    announceLiveEngine(leaderTab.port1, worker);
+    await settle();
+
+    let factoryCalls = 0;
+    const factory = (): ElectedEngineWorker => {
+      factoryCalls += 1;
+      return worker;
+    };
+    const queuedLocks = makeQueuedLocks();
+    const storePath = "composed-live-engine-early-pipe";
+
+    const tabSw = track(new MessageChannel());
+    swOnConnect(tabSw.port2 as unknown as BridgePort);
+    const provision = provisionSyncWorker({
+      worker: { port: tabSw.port1 as unknown as BridgePort } as unknown as never,
+      storePath,
+      createEngineWorker: factory,
+      electionIo: { locks: queuedLocks.locks },
+    });
+    void provision.catch(() => undefined);
+    // The early pipe reaches a LIVE engine, so the provision itself settles even pre-fix.
+    expect(
+      await boundedOutcome(
+        provision.then(() => "resolved"),
+        "provision",
+      ),
+    ).toBe("resolved");
+    expect(core.provisionCount()).toBe(1);
+
+    const client = await boundedValue(
+      attachSyncClient({
+        registry: attachRegistry,
+        worker: { port: tabSw.port1 as unknown as BridgePort } as unknown as never,
+        storePath,
+        createEngineWorker: factory,
+        electionIo: { locks: queuedLocks.locks },
+      }),
+      "the adopting attach never received the pre-placement provision pipe",
+    );
+    await client.ready;
+    await settle();
+
+    // The stashed early pipe carried the boot attach to the peer's engine — no election, no second engine.
+    expect(core.bridgeArrivals).toEqual(["provision", "attach"]);
+    expect(core.bootCount()).toBe(1);
+    expect(factoryCalls).toBe(0);
+    expect(queuedLocks.requested).toHaveLength(1); // this tab queued once and was never granted
+    expect((await client.rawQuery("SELECT 1", [])) as unknown).toBe(303);
 
     await client.stop();
     await settle(4);

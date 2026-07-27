@@ -13,7 +13,7 @@ description: >-
 metadata:
   type: core
   library: "@pgxsinkit/client"
-  library_version: "0.2.2"
+  library_version: "0.2.3"
   source: https://pgxsinkit.github.io/llms-full.txt
 ---
 
@@ -225,7 +225,8 @@ Separately from persistence, the store's flush **timing** is `durability`, decla
 physical behavior is backend-specific: idb detaches its whole-snapshot flush, while OPFS-repacked keeps the
 host awaited but omits routine physical flushes. `"strict"` restores each backend's strict boundary. The
 SharedWorker factory, capability-driven Safari/Chromium/Firefox engine placement, relocation outcomes,
-adoption, destruction, write-latency rationale, and recovery windows live in the `operating` skill.
+backend permanence, destruction, write-latency rationale, and recovery windows live in the `operating`
+skill.
 Backups, the SQL exports, and `restoreFrom` are there too.
 
 ## Where to look

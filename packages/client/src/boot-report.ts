@@ -52,9 +52,9 @@ export interface BootReport {
    * The verbatim reason an opfs-CAPABLE boot (the probe granted sync-access handles) nonetheless opened `idbfs`
    * (ADR-0049 decision 12). Set ONLY when such a fallback actually occurred — never on a plain idb boot (the probe
    * denied from the start), and never on a granted opfs boot that stayed on opfs. Today's set-sites are the
-   * granted-then-idb transitions the client owns: a declaration-gated adoption that deferred/failed (idb stays
-   * authoritative) and the recordless idb-store downgrade (invariant 14 — never a fresh opfs mint over an
-   * existing idb store's data). Additive field; `reportVersion` stays `1`.
+   * granted-then-idb transitions the client owns: the recordless idb-store downgrade (invariant 14 — an existing
+   * idb store is opened in place, never overwritten by a fresh opfs mint) and the virgin-uncreatable session
+   * idbfs fallback (the verbatim opfs open failure). Additive field; `reportVersion` stays `1`.
    */
   storageFallbackReason?: string;
   /** Whether the ADR-0032 S4 fetch/schema overlap was active for this boot. */

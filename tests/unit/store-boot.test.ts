@@ -6,7 +6,7 @@ import { describe, expect, it } from "bun:test";
 // the opfs-repacked factory is injected — no real engine is ever constructed.
 
 import { createClientPGlite, resolveStoreBoot } from "../../packages/client/src/index";
-import { recoverDeniedBootDeletion } from "../../packages/client/src/store-boot";
+import { CommittedStoreUnreachableError, resolveDeniedBootAuthority } from "../../packages/client/src/store-boot";
 import { StoreMetaUnreadableError } from "../../packages/client/src/store-meta";
 import {
   opfsCommitmentSentinelPath,
@@ -245,6 +245,15 @@ function browserDeps(root: FakeDir, metaIdb: FakeMetaIdb) {
   };
 }
 
+/**
+ * Drain every queued turn — the microtask queue (the fakes settle on `queueMicrotask`) plus one macrotask
+ * turn — so an assertion that NOTHING further happened cannot pass merely because the work had not run yet.
+ */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 async function observe(root: FakeDir, storePath: string) {
   const { createOpfsEffects } = await import("../../packages/client/src/opfs-effects");
   return createOpfsEffects(storePath, { getRoot: async () => root }).observeCommitmentNamespace();
@@ -328,6 +337,32 @@ describe("resolveStoreBoot — recordless-idb recognition", () => {
     expect(resolution.verdict?.action).toBe("boot-idb-authoritative");
     expect(metaPhase(metaIdb, "recordless")).toBe("idb-authoritative");
   });
+
+  it("PERMANENCE: a GRANTED home over a recordless idb store still boots idb, minting NO opfs artefacts", async () => {
+    // A store's storage backend is fixed at first mint, forever. A capability flip (this home holds OPFS
+    // sync-access handles) migrates NOTHING: the existing idb store is opened IN PLACE and no opfs candidate
+    // record, store directory, or commitment sentinel is ever created. The only route to another backend is a
+    // deliberate `destroyStoreArtifacts()` / `client.destroy()` followed by a fresh boot.
+    const metaIdb = new FakeMetaIdb();
+    metaIdb.seedPgliteDb("recordless-granted");
+    const root = new FakeDir();
+
+    const resolution = await resolveStoreBoot("recordless-granted", {
+      hasOpfsSyncAccess: true,
+      deps: browserDeps(root, metaIdb),
+    });
+
+    expect(resolution.dataDir).toBe("idb://recordless-granted");
+    expect(resolution.storageBackend).toBe("idbfs");
+    expect(resolution.verdict?.action).toBe("boot-idb-authoritative");
+    expect(metaPhase(metaIdb, "recordless-granted")).toBe("idb-authoritative");
+    // The idb store itself is untouched, and OPFS stays pristine — no candidate, no sentinel.
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName("recordless-granted"))).toBe(true);
+    expect(await observe(root, "recordless-granted")).toEqual({
+      sentinelPresent: false,
+      storeDirectoryPresent: false,
+    });
+  });
 });
 
 describe("resolveStoreBoot — committed / repair", () => {
@@ -347,8 +382,51 @@ describe("resolveStoreBoot — committed / repair", () => {
     expect(metaPhase(metaIdb, "committed")).toBe("opfs-committed");
   });
 
-  it("committed boot removes a lingering idb predecessor and the next boot stays clean", async () => {
-    const storePath = "committed-with-predecessor";
+  it("committed record → open-committed while BOTH probes hang (neither is on the awaited path)", async () => {
+    // The warm committed fast path: the meta record alone determines the verdict (classification 2 makes the
+    // OPFS observations irrelevant, and the classifier only consults the idb fact on the recordless arm), so
+    // the boot must resolve even when the commitment-namespace observation and the recordless-idb probe are
+    // wedged. A regression that puts either back on the awaited path deadlocks this test instead of merely
+    // asserting a call count — the strongest available proof that neither is a boot dependency.
+    const metaIdb = new FakeMetaIdb();
+    metaIdb.seedMeta("committed-fast", "opfs-committed");
+    const root = new FakeDir();
+    await seedStoreDir(root, "committed-fast");
+    await seedSentinel(root, "committed-fast");
+
+    let observeStarted = false;
+    let probeStarted = false;
+    const resolution = await resolveStoreBoot("committed-fast", {
+      hasOpfsSyncAccess: true,
+      deps: {
+        meta: { indexedDB: metaIdb, delay: () => Promise.resolve() } as never,
+        opfs: {
+          getRoot: () => {
+            observeStarted = true;
+            return new Promise<never>(() => undefined);
+          },
+        },
+        idbExists: () => {
+          probeStarted = true;
+          return new Promise<never>(() => undefined);
+        },
+      },
+    });
+
+    expect(resolution.verdict?.action).toBe("open-committed");
+    expect(resolution.dataDir).toBe("opfs://committed-fast");
+    expect(resolution.storageBackend).toBe("opfs-repacked");
+    // Neither probe ran at all: the record alone decided the verdict, and the boot ran no work beside it.
+    expect(observeStarted).toBe(false);
+    expect(probeStarted).toBe(false);
+    // Nothing was written: a committed boot touches no authority.
+    expect(metaPhase(metaIdb, "committed-fast")).toBe("opfs-committed");
+  });
+
+  it("a committed boot NEVER touches an idb database at the same path (no probe, no delete)", async () => {
+    // The record decides, and a committed boot's only job is to open the committed store. It deletes nothing
+    // at the path it did not mint — an idb database there is not the committed store's to destroy.
+    const storePath = "committed-beside-idb";
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta(storePath, "opfs-committed");
     metaIdb.seedPgliteDb(storePath);
@@ -361,7 +439,9 @@ describe("resolveStoreBoot — committed / repair", () => {
       deps: browserDeps(root, metaIdb),
     });
     expect(first.verdict?.action).toBe("open-committed");
-    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+    // Drain every queued turn, so a deletion detached off the awaited path would still have landed by now.
+    await settle();
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(true);
 
     const second = await resolveStoreBoot(storePath, {
       hasOpfsSyncAccess: true,
@@ -369,7 +449,8 @@ describe("resolveStoreBoot — committed / repair", () => {
     });
     expect(second.verdict?.action).toBe("open-committed");
     expect(second.storageBackend).toBe("opfs-repacked");
-    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+    await settle();
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(true);
   });
 
   it("no record + sentinel present → repair-record-then-open-committed writes opfs-committed", async () => {
@@ -389,6 +470,32 @@ describe("resolveStoreBoot — committed / repair", () => {
 });
 
 describe("resolveStoreBoot — candidate rebuild", () => {
+  it("opfs-candidate record + an EXISTING idb store → re-classifies onto the idb store, never a shadowing rebuild", async () => {
+    // A store's backend is fixed at first mint. Retiring the unexposed candidate must therefore RE-CLASSIFY,
+    // not jump straight to a fresh opfs mint: the user's data lives in the idb store at this path, and a
+    // rebuilt opfs candidate would shadow it (the app looks wiped).
+    const storePath = "cand-over-idb";
+    const metaIdb = new FakeMetaIdb();
+    metaIdb.seedMeta(storePath, "opfs-candidate");
+    metaIdb.seedPgliteDb(storePath);
+    const root = new FakeDir();
+    await seedStoreDir(root, storePath);
+    await seedSentinel(root, storePath);
+
+    const resolution = await resolveStoreBoot(storePath, {
+      hasOpfsSyncAccess: true,
+      deps: browserDeps(root, metaIdb),
+    });
+
+    expect(resolution.verdict?.action).toBe("boot-idb-authoritative");
+    expect(resolution.dataDir).toBe(`idb://${storePath}`);
+    expect(resolution.storageBackend).toBe("idbfs");
+    expect(metaPhase(metaIdb, storePath)).toBe("idb-authoritative");
+    // The candidate's artefacts are gone, and the populated idb store was NOT deleted.
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(true);
+  });
+
   it("opfs-candidate + stale sentinel → deletes BOTH then re-creates the candidate", async () => {
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta("cand", "opfs-candidate");
@@ -404,7 +511,8 @@ describe("resolveStoreBoot — candidate rebuild", () => {
     });
     expect(resolution.dataDir).toBe("opfs://cand");
     expect(resolution.storageBackend).toBe("opfs-repacked");
-    expect(resolution.verdict?.action).toBe("delete-candidate-and-rebuild");
+    // Retiring the candidate leaves a RECORDLESS state, which re-classifies: nothing anywhere → virgin create.
+    expect(resolution.verdict?.action).toBe("virgin-create");
     // The stale sentinel is gone; a fresh candidate directory was rebuilt; the record is a fresh candidate.
     expect(await observe(root, "cand")).toEqual({ sentinelPresent: false, storeDirectoryPresent: true });
     expect(metaPhase(metaIdb, "cand")).toBe("opfs-candidate");
@@ -435,7 +543,7 @@ describe("resolveStoreBoot — resume deletion then re-classify", () => {
   });
 });
 
-describe("recoverDeniedBootDeletion — denied-home authority handoff", () => {
+describe("resolveDeniedBootAuthority — denied-home authority handoff", () => {
   it("removes the old sentinel, publishes idb authority, and protects replacement journal data on a granted boot", async () => {
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta("denied-delete", "deleting");
@@ -444,16 +552,18 @@ describe("recoverDeniedBootDeletion — denied-home authority handoff", () => {
     await seedStoreDir(root, "denied-delete");
     await seedSentinel(root, "denied-delete");
 
-    expect(await recoverDeniedBootDeletion("denied-delete", browserDeps(root, metaIdb))).toBe(true);
+    expect(await resolveDeniedBootAuthority("denied-delete", browserDeps(root, metaIdb))).toBe(true);
     expect(metaPhase(metaIdb, "denied-delete")).toBe("idb-authoritative");
     expect(metaIdb.hasDb(storeIndexedDbDatabaseName("denied-delete"))).toBe(false);
+    // The handoff finishes the destruction it inherited: the OPFS store directory goes too. The replacement is
+    // idb for life (the backend is fixed at first mint), so nothing later would ever sweep it.
     expect(await observe(root, "denied-delete")).toEqual({
       sentinelPresent: false,
-      storeDirectoryPresent: true,
+      storeDirectoryPresent: false,
     });
 
     // The replacement IDB now contains locally owed work. A later granted boot must follow the record instead
-    // of treating the old sentinel-less OPFS directory as a candidate and abandoning this store.
+    // of minting a fresh opfs store over it.
     metaIdb.seedPgliteDb("denied-delete");
     const granted = await resolveStoreBoot("denied-delete", {
       hasOpfsSyncAccess: true,
@@ -470,7 +580,7 @@ describe("recoverDeniedBootDeletion — denied-home authority handoff", () => {
     metaIdb.seedPgliteDb("unobservable-delete");
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a promise typed as void
     await expect(
-      recoverDeniedBootDeletion("unobservable-delete", {
+      resolveDeniedBootAuthority("unobservable-delete", {
         ...browserDeps(new FakeDir(), metaIdb),
         opfs: { getRoot: async () => Promise.reject(new Error("OPFS unavailable")) },
       }),
@@ -478,45 +588,89 @@ describe("recoverDeniedBootDeletion — denied-home authority handoff", () => {
     expect(metaPhase(metaIdb, "unobservable-delete")).toBe("deleting");
     expect(metaIdb.hasDb(storeIndexedDbDatabaseName("unobservable-delete"))).toBe(true);
   });
-});
 
-describe("resolveStoreBoot — adoption recovery", () => {
-  it("adopting + sentinel present → complete-adoption (opfs-committed + delete idb predecessor)", async () => {
+  it("refuses an `opfs-committed` store TYPED — a no-grant home can never open it", async () => {
     const metaIdb = new FakeMetaIdb();
-    metaIdb.seedMeta("adopt-done", "adopting");
-    metaIdb.seedPgliteDb("adopt-done");
+    metaIdb.seedMeta("committed-no-grant", "opfs-committed");
     const root = new FakeDir();
-    await seedStoreDir(root, "adopt-done");
-    await seedSentinel(root, "adopt-done");
+    await seedStoreDir(root, "committed-no-grant");
+    await seedSentinel(root, "committed-no-grant");
 
-    const resolution = await resolveStoreBoot("adopt-done", {
-      hasOpfsSyncAccess: true,
-      deps: browserDeps(root, metaIdb),
-    });
-    expect(resolution.verdict?.action).toBe("adoption-recovery");
-    expect(resolution.dataDir).toBe("opfs://adopt-done");
-    expect(resolution.storageBackend).toBe("opfs-repacked");
-    expect(metaPhase(metaIdb, "adopt-done")).toBe("opfs-committed");
-    // The idb predecessor is deleted only after commitment.
-    expect(metaIdb.hasDb(storeIndexedDbDatabaseName("adopt-done"))).toBe(false);
+    const refusal = await resolveDeniedBootAuthority("committed-no-grant", browserDeps(root, metaIdb)).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    // Typed and fail-closed: the record's store lives in OPFS, which this home cannot open, so minting the idb
+    // sibling at the same path (an EMPTY store that looks wiped, forking offline writes) is refused outright.
+    expect(refusal).toBeInstanceOf(CommittedStoreUnreachableError);
+    expect((refusal as Error).name).toBe("CommittedStoreUnreachableError");
+    expect(metaPhase(metaIdb, "committed-no-grant")).toBe("opfs-committed");
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName("committed-no-grant"))).toBe(false);
+    expect(await observe(root, "committed-no-grant")).toEqual({ sentinelPresent: true, storeDirectoryPresent: true });
   });
 
-  it("adopting + NO sentinel → teardown-and-restart (idb-authoritative + idb://)", async () => {
+  it("RETIRES an `opfs-candidate` before the idb store is minted (barrier-gap sentinel + directory both go)", async () => {
+    const storePath = "denied-candidate-sentinel";
     const metaIdb = new FakeMetaIdb();
-    metaIdb.seedMeta("adopt-restart", "adopting");
+    metaIdb.seedMeta(storePath, "opfs-candidate");
     const root = new FakeDir();
-    await seedStoreDir(root, "adopt-restart");
+    await seedStoreDir(root, storePath);
+    // A barrier-gap crash can have published a sentinel over a candidate whose phase never flipped.
+    await seedSentinel(root, storePath);
 
-    const resolution = await resolveStoreBoot("adopt-restart", {
-      hasOpfsSyncAccess: true,
-      deps: browserDeps(root, metaIdb),
-    });
-    expect(resolution.verdict?.action).toBe("adoption-recovery");
-    expect(resolution.dataDir).toBe("idb://adopt-restart");
-    expect(resolution.storageBackend).toBe("idbfs");
-    expect(metaPhase(metaIdb, "adopt-restart")).toBe("idb-authoritative");
-    // The torn-down candidate directory is gone.
-    expect(await observe(root, "adopt-restart")).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+    expect(await resolveDeniedBootAuthority(storePath, browserDeps(root, metaIdb))).toBe(true);
+
+    // An unexposed candidate has no authority, and this home cannot open OPFS at all — so the candidate is
+    // retired (sentinel + directory) and idb authority is published BEFORE the replacement store is minted.
+    expect(metaPhase(metaIdb, storePath)).toBe("idb-authoritative");
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+    // Retirement mints nothing itself: the caller opens `idb://` after this returns.
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+  });
+
+  it("retires a sentinel-less `opfs-candidate` too (the ordinary uncommitted candidate)", async () => {
+    const storePath = "denied-candidate-plain";
+    const metaIdb = new FakeMetaIdb();
+    metaIdb.seedMeta(storePath, "opfs-candidate");
+    const root = new FakeDir();
+    await seedStoreDir(root, storePath);
+
+    expect(await resolveDeniedBootAuthority(storePath, browserDeps(root, metaIdb))).toBe(true);
+    expect(metaPhase(metaIdb, storePath)).toBe("idb-authoritative");
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+  });
+
+  it("keeps candidate authority when the commitment namespace cannot be observed", async () => {
+    const metaIdb = new FakeMetaIdb();
+    metaIdb.seedMeta("unobservable-candidate", "opfs-candidate");
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a promise typed as void
+    await expect(
+      resolveDeniedBootAuthority("unobservable-candidate", {
+        ...browserDeps(new FakeDir(), metaIdb),
+        opfs: { getRoot: async () => Promise.reject(new Error("OPFS unavailable")) },
+      }),
+    ).rejects.toThrow("sentinel removal cannot be confirmed");
+    expect(metaPhase(metaIdb, "unobservable-candidate")).toBe("opfs-candidate");
+  });
+
+  it("passes an `idb-authoritative` record and a recordless store through untouched", async () => {
+    const metaIdb = new FakeMetaIdb();
+    const root = new FakeDir();
+    metaIdb.seedMeta("pass-idb-authoritative", "idb-authoritative");
+    expect(await resolveDeniedBootAuthority("pass-idb-authoritative", browserDeps(root, metaIdb))).toBe(false);
+    expect(metaPhase(metaIdb, "pass-idb-authoritative")).toBe("idb-authoritative");
+    expect(await resolveDeniedBootAuthority("pass-recordless", browserDeps(root, metaIdb))).toBe(false);
+    expect(metaPhase(metaIdb, "pass-recordless")).toBeUndefined();
+  });
+
+  it("no meta store at all (META_STORE_UNAVAILABLE) → no refusal, nothing to honour", async () => {
+    expect(
+      await resolveDeniedBootAuthority("no-meta", {
+        meta: { indexedDB: undefined } as never,
+        opfs: { getRoot: async () => new FakeDir() },
+      }),
+    ).toBe(false);
   });
 });
 

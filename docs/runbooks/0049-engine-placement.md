@@ -16,8 +16,11 @@ and why each exists.
 - You need to force `idbfs` for a store, or opt into `strict` durability — both are registry
   `storage` declarations.
 - You want to read the `storageBackend` / `engineHome` boot diagnostics.
-- You need `destroy()`, the opt-in execution limit, or automatic idb→opfs adoption — each has a
-  gate you must understand before enabling.
+- You need `destroy()` or the opt-in execution limit — each has a gate you must understand before
+  enabling.
+- You want an existing store on a different storage backend, and need to know what that costs (a
+  deliberate destroy and a full re-sync — see "A store's storage backend is fixed at its first
+  mint").
 
 ## How placement is decided
 
@@ -83,10 +86,12 @@ report?.storageFallbackReason; // present ONLY when an opfs-capable boot opened 
   capability probe; only a plain test/Node scope with no browser placement omits it.
 - **`storageFallbackReason`** is the verbatim reason an opfs-_capable_ boot (the probe granted
   handles) nonetheless opened `idbfs`. It is set **only** when such a fallback actually happened —
-  never on a plain idb boot, never on a granted boot that stayed on opfs. The set-sites are the
-  two granted-then-idb transitions: a **declared adoption that deferred/failed** (idb stays
-  authoritative) and the **recordless idb-store downgrade** (invariant 14 — an existing idb store is
-  opened in place, never overwritten by a fresh opfs mint). A dashboard can alert on its presence.
+  never on a plain idb boot, never on a granted boot that stayed on opfs. The set-sites are the two
+  granted-then-idb transitions: the **recordless idb-store downgrade** (invariant 14 — an existing
+  idb store is opened in place, never overwritten by a fresh opfs mint) and the
+  **virgin-uncreatable session fallback** (a brand-new opfs candidate that could not be opened after
+  bounded retries; the verbatim open failure is the reason string). A dashboard can alert on its
+  presence.
 
 ## Worker construction: the SharedWorker factory and the engine override
 
@@ -199,32 +204,31 @@ await client.destroy({ force: true }); // wipe even with owed mutations (drops u
 - **IDB destruction deletes the database:** an `idb-authoritative` destroy does not retain a wiped
   shell. The next granted boot is genuinely fresh and may select opfs-repacked.
 
-## Automatic idb→opfs adoption (declaration-gated, DEFAULT OFF)
+## A store's storage backend is fixed at its first mint
 
-Adoption migrates an existing `idb-authoritative` store to a committed `opfs` successor and then
-**deletes the idb predecessor**. Because that deletes local data, it never happens by default. It is
-a **worker-entry** option (baked into your `defineSyncWorker` file as code — a tab cannot set it):
+Whatever backend a store is minted on, it keeps for its whole life. The engine home's capabilities
+decide the backend **once**, at the mint; every later boot opens the store it finds, on the backend
+it finds it on. A capability change on the device moves nothing:
 
-```ts
-defineSyncWorker({
-  // … registry, urls …
-  adoption: "server-reconstructible", // DEFAULT: undefined (off). Hook absence is never authority.
-});
-```
+- **A home that gains OPFS sync access opens your existing IndexedDB store in place**, on `idbfs`.
+  Nothing is copied, no opfs candidate or commitment sentinel appears beside it, and no local data
+  is deleted. The boot report shows `storageBackend: "idbfs"` with a `storageFallbackReason`.
+- **A home with no grant refuses a store already committed to OPFS**, with a typed
+  `CommittedStoreUnreachableError`, rather than open an empty `idb://` sibling at the same path (the
+  app would look wiped, and offline writes would fork into a store no granted boot ever opens). The
+  message names both exits: boot from a home that holds a grant, or destroy the store.
 
-- **What the declaration means:** `"server-reconstructible"` asserts that this store's local-only
-  state is safe to reconstruct from the server — the ONLY authority that lets the toolkit delete the
-  idb predecessor. Absence of any hook is _not_ consent (`rawExec` can write documented local-only
-  state on any store).
-- **What deleting local-only data means:** adoption runs only when the drain predicate is clean
-  (`pending + sending + failed + quarantined + conflicted == 0`) and the opfs successor has passed
-  the authorized online reconstruction gate (the eager Consistency groups caught up) plus the strict
-  commitment barrier. If any of that is unmet, nothing publishes and idb stays authoritative — you
-  see a `storageFallbackReason` on the report. The one-time cost is a re-bootstrap per user.
-- **Manual path (`adoptStore`):** a creation-path API (like `restoreFrom`) — call it _instead of_
-  `createSyncClient`, never against a store an open client already holds (it refuses with
-  `StoreInUseError`). It runs the same drain-gated transition and reports `{ adopted: true }` or
-  `{ adopted: false, reason }`. Use it to migrate on demand without wiring the automatic declaration.
+**Moving a store to another backend is a deliberate destroy and a full rebuild.** Destroy the
+artifacts — `client.destroy()` for a store you still hold, or `destroyStoreArtifacts(storePath)` for
+one nobody is attached to (quiesce any live worker first, `quiesceStoreWorker`) — and let the next
+boot mint afresh on whatever the placement probe grants. That boot re-syncs from the server, so
+budget for the same cold bootstrap a new user pays, and expect any local-only state a store held
+(anything written through `rawExec`, un-flushed journal rows without `force`) to be gone. There is no
+automatic migration and no in-place conversion: the replacement is a new store.
+
+If you are changing a storage **preference** rather than recovering, mint the new store under a
+**fresh path**, point users at it, and destroy the obsolete path in the background — never
+delete-and-recreate the same path while a predecessor worker may still hold it (ADR-0050).
 
 ## Verify
 
@@ -239,10 +243,13 @@ defineSyncWorker({
   query median **3848.6 ms**; provisioned attach→first query median **173.0 ms**; foreground delta
   **−3675.7 ms**. Provision itself took roughly 3.5–5.3 s ahead of attach. Treat these as workstation
   evidence, not a release budget; rerun on target devices before setting thresholds.
-- The server-backed adoption lane proves a drained IDB predecessor reconstructs, commits, deletes
-  the predecessor, and reopens without re-adoption. Destroy/recreate, relocation outcomes,
-  recordless-idb recognition, and fresh commitment have dedicated browser lanes; deterministic lifecycle
-  boundaries remain covered by the unit suites in `docs/testing-strategy.md`.
+- The server-backed permanence lane proves an existing IndexedDB store, booted by a granted,
+  sync-enabled engine home, stays `idb-authoritative` across the boot and across a reload — its
+  database untouched, the OPFS commitment namespace still empty. The destroy lanes prove the
+  mirror: both backend-flip directions leave zero cross-backend residue, so the boot after a
+  destroy mints cleanly on the then-best backend. Relocation outcomes, recordless-idb recognition,
+  and fresh commitment have dedicated browser lanes; deterministic lifecycle boundaries remain
+  covered by the unit suites in `docs/testing-strategy.md`.
 
 ## Pre-mint deletion recovery
 
@@ -253,8 +260,16 @@ precreate falls back through that same complete path. This prevents a replacemen
 Mutation journal—from appearing beneath deletion authority that a later boot must honor.
 
 If a registry-forced-idbfs or handle-denied boot sees an existing `deleting` record, it does not create a new store
-under that live authority. It deletes the old IDB database, removes the commitment sentinel through
-asynchronous OPFS, writes `idb-authoritative`, and only then creates the replacement IDB store. A
-sentinel-less OPFS directory may remain as disposable cache residue; the next candidate build removes
-it before reuse. If the sentinel cannot be inspected/removed, boot remains fail-closed at `deleting`
-rather than risk exposing two authorities.
+under that live authority. It deletes the old IDB database, removes the commitment sentinel **and** the
+store directory through asynchronous OPFS, writes `idb-authoritative`, and only then creates the
+replacement IDB store. The handoff clears the OPFS side itself — it leaves no sentinel-less directory
+behind for a later candidate build to tidy. If the sentinel cannot be inspected/removed, boot remains
+fail-closed at `deleting` rather than risk exposing two authorities.
+
+An existing `opfs-candidate` record is **retired** by the same boot before anything is exposed: an
+unexposed candidate has no authority, and nothing may be minted beneath a record that still claims
+one. The boot deletes the candidate's sentinel (a barrier-gap crash can have published one) and its
+store directory through asynchronous OPFS, writes `idb-authoritative`, and then creates the IDB
+store — the retirement destroys only what the candidate minted, never an IDB database at the path.
+Provision declines on `opfs-candidate` in the denied lane for the same reason it declines on
+`deleting`. The same fail-closed rule applies when the commitment namespace cannot be observed.

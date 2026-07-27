@@ -2,6 +2,8 @@
 
 Status: accepted (2026-06-19)
 
+Amended (2026-07-27): the dev channel now publishes on push to `develop` (freely rewritable), not `main` (stable, never rewritten; a main push publishes nothing) — read §2/§3's "main push" as "develop push". Tags unchanged.
+
 The three core TypeScript repositories — `emergent` (private app + consumer),
 `conform-ed`, and `pgxsinkit` (both public libraries) — had drifted into three
 incompatible toolchains: bare `format`/`lint` *wrote* in pgxsinkit but *checked* in

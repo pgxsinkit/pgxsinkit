@@ -2,8 +2,12 @@ import { defineConfig, devices } from "@playwright/test";
 
 // Dedicated config for the Slice 0a warm-boot browser benchmark (`bun run bench:warm-boot`, driven by
 // scripts/run-warm-boot-bench.ts). Kept SEPARATE from playwright.config.ts on purpose: its `testMatch`
-// is **/*.bench.ts, so the bench spec is invisible to the normal ADR-0032 e2e lane (which matches
-// **/*.e2e.test.ts) and this bench never rides `test:integration`. It reuses the same built-artifact
+// is a *.bench.ts file, so the bench spec is invisible to the normal ADR-0032 e2e lane (which matches
+// **/*.e2e.test.ts) and this bench never rides `test:integration`. The match names THIS ONE spec, not
+// **/*.bench.ts: the ADR-0049 placement bench (tests/e2e/placement/provision-cold-boot.bench.ts) is also
+// a *.bench.ts under testDir, but it drives its own harness page under its own config
+// (tests/e2e/placement/playwright.bench.config.ts) and fails instantly against the board's preview
+// server (no `window.__placement`). It reuses the same built-artifact
 // webServer (vite build with VITE_E2E=1 → vite preview on 5173) and the same backend origin/TLS posture
 // as the worker lane; the backend podman stack is owned by run-warm-boot-bench.ts, not here.
 //
@@ -15,7 +19,7 @@ const insecureTls = process.env["PGXSINKIT_PW_INSECURE_TLS"] === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  testMatch: "**/*.bench.ts",
+  testMatch: "**/warm-boot.bench.ts",
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env["CI"],

@@ -1,9 +1,8 @@
 # Capability-driven engine placement: opfs-repacked on every platform
 
 Status: accepted (2026-07-21; revised four times same day across pre-implementation reviews —
-commitment namespaces + lifecycle, liveness policy, adoption authority, election ownership,
-relocation semantics, and provenance gates reworked; the plan carries the accepted-risk register
-that closes the review cycle)
+commitment namespaces + lifecycle, liveness policy, election ownership, relocation semantics, and
+provenance gates reworked; the plan carries the accepted-risk register that closes the review cycle)
 
 ADR-0048 delivered `opfs-repacked` — a constant-four-handle OPFS VFS that runs on every engine,
 including WebKit's ~252-handle cap — but left hosting as "a consumer decision outside this package",
@@ -71,8 +70,9 @@ layer above `RepackedVfs.open()`.
    probe is denied (storage permission, quota). The fallback is observable, never silent-invisible:
    BootReport carries `storageBackend: "idbfs"` plus the fallback reason (decision 12), and the
    existing-store rules of decisions 6–8 apply unchanged (a fallback boot is record-free; an
-   existing idb store's data is never overwritten by a later opfs mint; adoption is the only path
-   that replaces it). A failure of WIRING is never a fallback: election required but the engine
+   existing idb store's data is never overwritten by a later opfs mint — its backend is fixed at
+   first mint, and only a deliberate destroy-and-rebuild produces a store on another one,
+   decision 7). A failure of WIRING is never a fallback: election required but the engine
    worker cannot be constructed (spawn failure; an underivable entry URL with no
    `createEngineWorker` override) is a hard typed error — the capability was present and the
    configuration was wrong, and silently downgrading storage would hide the defect.
@@ -183,10 +183,10 @@ layer above `RepackedVfs.open()`.
    classified through the recordless-idb arm; the exception is an existing `deleting` record, whose
    denied-boot recovery writes `idb-authoritative` because it transfers durable authority. Its
    state is ONE total phase —
-   `idb-authoritative | opfs-candidate | adopting | opfs-committed | deleting` — with `deleting`
-   taking precedence over everything (a committed store mid-destruction resumes deletion, never
-   the committed verdict), and `adopting` over ordinary idb boot. Destruction completes by
-   DELETING the record. A failed meta read is an ERROR (bounded retry, then fail closed), never
+   `idb-authoritative | opfs-candidate | opfs-committed | deleting` — with `deleting` taking
+   precedence over everything (a committed store mid-destruction resumes deletion, never the
+   committed verdict). Destruction completes by DELETING the record. A failed meta read is an
+   ERROR (bounded retry, then fail closed), never
    "no record". Commitment publishes sentinel first, then the `opfs-committed` phase;
    sentinel-without-record reads as committed and repairs the record. Boot classification:
    - Phase present → it is authoritative (per its precedence above).
@@ -195,10 +195,10 @@ layer above `RepackedVfs.open()`.
      NON-CREATING idb existence check (an `indexedDB.open` aborted on `upgradeneeded` — never
      `databases()`, which is absent on some engines) finding an existing idb store establishes
      `idb-authoritative` — a recordless idb store is a first-class citizen, not an anomaly: it is
-     what a registry-forced idbfs store or a capability-fallback store IS, and it is the ENTRY
-     POINT of the forward idbfs→opfs transition (adoption drains the idb journal, then resyncs
-     fully server-sourced into opfs). Its data is never overwritten by a fresh opfs mint — only a
-     store-less profile is virgin and creates per placement, record first.
+     what a registry-forced idbfs store or a capability-fallback store IS, and this arm is a
+     TERMINUS (decision 7): the store is opened in place and stays idb-authoritative for its whole
+     life, whatever a later boot's capabilities are. Its data is never overwritten by a fresh opfs
+     mint — only a store-less profile is virgin and creates per placement, record first.
    - No record, OPFS NOT observable (throwing OR API absent — present absence is not historical
      proof) → the recordless-idb check still runs; an existing idb store is `idb-authoritative`;
      otherwise boot idb without inventing new meta authority. The double-loss residual (record wiped AND
@@ -214,21 +214,23 @@ layer above `RepackedVfs.open()`.
    - **Restored store** (`restoreFrom`, ADR-0035): successful backup load + restore recovery. A
      backup is authoritative, may hold local-only data and quarantined mutations, and deliberately
      boots offline — it must never await server catch-up nor be scheduled for deletion.
-   - **idb adoption**: successful AUTHORIZED online server reconstruction — the initial catch-up
-     of the eager Consistency groups a valid initial store requires ("authorized" includes
-     legitimately anonymous/public shapes; no auth token is demanded where the server permits
-     anonymous access). Staged-readiness milestones never qualify (`localReadReady` is
-     offline-local; `ready` resolves under `syncEnabled: false`). Only adoption needs this gate,
-     because only adoption deletes a predecessor.
    Then ONE shared durability sequence: provenance gate → explicit `strictSync()` returns with VFS
    health good (data-before-authority, required even under relaxed runtime durability) → sentinel
-   → `opfs-committed` phase → expose the store / delete the predecessor as applicable. If the
-   barrier fails, nothing publishes.
-   **Adoption eligibility and quiescence:** automatic adoption only under the explicit
-   reconstructibility/disposability declaration, DEFAULT OFF (adoption deletes a predecessor, and
-   hook absence is never authority — `rawExec` writes documented local-only state on any store);
-   the transition is pre-expose with the drain predicate in canonical journal terms
-   (`pending + sending + failed + quarantined + conflicted == 0`; `acked`/`rejected` permitted).
+   → `opfs-committed` phase → expose the store. If the barrier fails, nothing publishes.
+
+   **A store's storage backend is FIXED at its first mint, for the store's whole life.** There are
+   exactly two provenances because a commitment only ever publishes a store's own first backend: no
+   provenance replaces a predecessor, so no gate needs the server, no gate deletes local-only
+   state, and every commitment is reachable offline. A later capability flip migrates nothing, in
+   either direction. A home that GAINS OPFS sync access opens an existing IndexedDB-backed store in
+   place on `idbfs` (decision 6's `idb-authoritative` phase and its recordless-idb terminus) and
+   mints neither candidate nor sentinel beside it; a home that holds NO grant refuses an
+   `opfs-committed` store with the typed `CommittedStoreUnreachableError` rather than mint an empty
+   idb sibling at the same path (ADR-0050's posture: never a silently different storage mode; the
+   consumer runbook and the operating skill carry the remedy). The one route to a store on a
+   different backend is a deliberate, app-mediated destroy — `destroyStoreArtifacts(storePath)` or
+   `client.destroy()` (decision 8) — followed by a fresh boot that re-syncs from the server and
+   mints on the then-best backend. Nothing is carried across: the new store is a fresh store.
 
 8. **One toolkit-owned destructive lifecycle, supervised above the engine.** ADR-0048's permanent
    recreate-only policy requires delete-and-recreate on any format break — and with commitment
@@ -255,11 +257,11 @@ layer above `RepackedVfs.open()`.
 
    A denied boot that encounters `deleting` cannot inspect the synchronous OPFS store, but it can
    complete a narrow authority handoff: honestly delete the old IDB database, remove the commitment
-   sentinel through asynchronous OPFS, write `idb-authoritative`, then create the replacement IDB
-   store. Sentinel-less OPFS residue is disposable and removed before any later candidate reuse. If
-   sentinel removal cannot be confirmed, the record remains `deleting` and boot fails closed. IDB
-   deletion resolves only on `onsuccess`; `onblocked` is nonterminal and a bounded timeout leaves the
-   resumable phase intact.
+   sentinel AND the store directory through asynchronous OPFS, write `idb-authoritative`, then create
+   the replacement IDB store. The handoff clears the OPFS side itself rather than leaving disposable
+   residue for a later candidate build. If sentinel removal cannot be confirmed, the record remains
+   `deleting` and boot fails closed. IDB deletion resolves only on `onsuccess`; `onblocked` is
+   nonterminal and a bounded timeout leaves the resumable phase intact.
 
 9. **Durability is registry-declared; relaxed is the default on every backend.** ADR-0047's
    default and loss-window analysis apply to opfs stores verbatim; `storage.durability: "strict"`
@@ -336,15 +338,22 @@ layer above `RepackedVfs.open()`.
   offline-first-boot writes in a deletable candidate and was incompatible with `restoreFrom`'s
   authoritative offline boot — provenance-specific gates + one strict barrier replace it.
 - **Boolean meta fields.** Rejected in review 4 for a total phase machine with `deleting`
-  precedence — booleans left committed+deleting and idb+adopting ambiguous.
+  precedence — a `committed` + `deletionIntent` cross-product left committed+deleting ambiguous.
 - **Fallback on any uninspectable commitment namespace with no meta record.** Refined across
   reviews 2–4 into: first-use record + recordless non-creating idb existence check + fail-closed
   meta errors; the double-loss residual is accepted risk, surfaced on conflict.
 - **Timing-based silent-death detection / always-on execution limit.** Rejected: no finite
   worst-case query duration exists; the limit is opt-in, converts slow to terminated by policy,
   and exists only where termination is possible (elected placement).
-- **Reconstructibility inferred from hook absence.** Rejected (review 3): only the explicit
-  declaration authorizes automatic adoption.
+- **Moving an existing store to a different backend in place** (rebuilding an `idb-authoritative`
+  store as a committed opfs successor when a home later gains handles). Rejected: it buys a
+  vanishingly rare capability flip at the price of deleting a predecessor that may hold local-only
+  state no server can reconstruct (`rawExec` writes documented local-only state on any store).
+  Every safeguard it would need — a disposability declaration, a journal-drain predicate, an
+  authorized online reconstruction gate, a mid-flight phase with its own crash table — is machinery
+  on the boot path serving an event most stores never see. The backend is fixed at mint
+  (decision 7); the honest route to another one is the app-mediated destroy-and-rebuild the toolkit
+  already owns.
 - **Multiplexing all tabs onto one engine stream.** Rejected (review 1): per-tab pipes preserve
   identity structurally.
 - **Per-tab heartbeat/lease liveness.** Rejected as a standing all-tabs protocol; adopted only as
@@ -360,15 +369,15 @@ layer above `RepackedVfs.open()`.
   untouched — reviews 1–4 requested no change to its format, recovery, or durability contract.
 - The public surface this ADR defines: the registry storage declaration
   (`storage.backend`/`storage.durability`), the factory-shaped attach input and the
-  `createEngineWorker` override, the adoption declaration (default off) + manual adoption
-  trigger, `destroy()` on the attached facade, `EngineRelocatedError` with outcome semantics, and
-  the opt-in execution-limit configuration (disabled by default).
+  `createEngineWorker` override, `destroy()` on the attached facade, `EngineRelocatedError` with
+  outcome semantics, and the opt-in execution-limit configuration (disabled by default).
 - Two engine-placement paths exist and both must stay tested; `docs/testing-strategy.md` must be
   refreshed before ADR-0049 is declared complete.
 - The plan carries the normative **accepted-risk register** (double loss, SW-direct silent hang,
   module-worker assumption for auto-derived engine entries, keepalive false-positive benignity,
   same-origin interference, BFCache crash coverage, bounded meta fault testing): items on it are
   settled and are not relitigated in future reviews.
-- A one-time re-bootstrap per user is the adoption cost; adoption additionally requires the
-  explicit declaration and the authorized online reconstruction gate. Fresh and restored stores
-  commit without any server requirement.
+- A store's backend is settled by the capabilities of the home that first minted it, and stays
+  settled: a profile that acquires OPFS sync access later keeps opening its existing idb store, and
+  moving to opfs costs an app-mediated destroy plus a full re-bootstrap from the server on the next
+  boot. Fresh and restored stores commit without any server requirement.

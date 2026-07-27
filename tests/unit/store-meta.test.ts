@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 // ADR-0049 (capability-driven engine placement) step 2: the STORE META RECORD phase machine and boot
 // classification. This slice's unit test covers three separated concerns of `store-meta.ts`:
 //   A. the PURE boot classifier (`classifyStoreBoot`) over the full phase/observation truth table — the
-//      plan's boot classification 1–7 and its precedence rules (invariant 12);
+//      plan's boot classification 1–6 and its precedence rules (invariant 12);
 //   B. the meta-record IndexedDB IO with the failed-read policy (bounded retry → fail closed, invariant 12);
 //   C. the NON-CREATING idb existence check (`idbStoreExists`, invariant 14 / recordless-idb recognition).
 // bun has no browser IDB, so every IO path is exercised against injected structural fakes.
@@ -272,13 +272,7 @@ class FakeExistsIndexedDb {
 // A. Pure boot classifier
 // ---------------------------------------------------------------------------------------------------------
 
-const ALL_PHASES: readonly StoreMetaPhase[] = [
-  "idb-authoritative",
-  "opfs-candidate",
-  "adopting",
-  "opfs-committed",
-  "deleting",
-];
+const ALL_PHASES: readonly StoreMetaPhase[] = ["idb-authoritative", "opfs-candidate", "opfs-committed", "deleting"];
 
 function obs(over: Partial<StoreBootObservations> = {}): StoreBootObservations {
   return {
@@ -293,10 +287,9 @@ function record(phase: StoreMetaPhase): StoreMetaRecord {
   return { phase, updatedAt: 1 };
 }
 
-describe("classifyStoreBoot — phase precedence (classification 1–5)", () => {
+describe("classifyStoreBoot — phase precedence (classification 1–4)", () => {
   const expectations: ReadonlyArray<[StoreMetaPhase, StoreBootVerdict["action"]]> = [
     ["deleting", "resume-deletion"],
-    ["adopting", "adoption-recovery"],
     ["opfs-committed", "open-committed"],
     ["opfs-candidate", "delete-candidate-and-rebuild"],
     ["idb-authoritative", "boot-idb-authoritative"],
@@ -331,14 +324,20 @@ describe("classifyStoreBoot — phase precedence (classification 1–5)", () => 
     ).toBe("resume-deletion");
   });
 
-  it("adopting beats a recordless idb store (precedence over ordinary idb boot)", () => {
-    expect(classifyStoreBoot(obs({ record: record("adopting"), idbStoreExists: true })).action).toBe(
-      "adoption-recovery",
-    );
+  it("an idb-authoritative record beats every OPFS observation (the backend is fixed at first mint)", () => {
+    expect(
+      classifyStoreBoot(
+        obs({
+          record: record("idb-authoritative"),
+          opfs: { sentinelPresent: true, storeDirectoryPresent: true },
+          idbStoreExists: true,
+        }),
+      ).action,
+    ).toBe("boot-idb-authoritative");
   });
 });
 
-describe("classifyStoreBoot — recordless, OPFS observable (classification 6)", () => {
+describe("classifyStoreBoot — recordless, OPFS observable (classification 5)", () => {
   it("sentinel present → repair record then open committed (sentinel authority)", () => {
     expect(classifyStoreBoot(obs({ opfs: { sentinelPresent: true, storeDirectoryPresent: true } })).action).toBe(
       "repair-record-then-open-committed",
@@ -369,7 +368,7 @@ describe("classifyStoreBoot — recordless, OPFS observable (classification 6)",
   });
 });
 
-describe("classifyStoreBoot — recordless, OPFS unobservable (classification 7 / recordless-idb check)", () => {
+describe("classifyStoreBoot — recordless, OPFS unobservable (classification 6 / recordless-idb check)", () => {
   it("existing idb store → boot-idb-authoritative (NEVER virgin)", () => {
     expect(classifyStoreBoot(obs({ opfs: "unobservable", idbStoreExists: true })).action).toBe(
       "boot-idb-authoritative",
@@ -430,7 +429,7 @@ describe("meta record IO", () => {
 
   it("read after delete → undefined", async () => {
     const indexedDB = new FakeIndexedDb();
-    await writeStoreMetaRecord(storePath, { phase: "adopting", updatedAt: 1 }, metaDeps(indexedDB));
+    await writeStoreMetaRecord(storePath, { phase: "opfs-candidate", updatedAt: 1 }, metaDeps(indexedDB));
     await deleteStoreMetaRecord(storePath, metaDeps(indexedDB));
     expect(await readStoreMetaRecord(storePath, metaDeps(indexedDB))).toBeUndefined();
   });

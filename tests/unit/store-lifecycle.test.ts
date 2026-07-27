@@ -1,25 +1,18 @@
 import { describe, expect, it } from "bun:test";
-// ADR-0049 (capability-driven engine placement) step 3: the fresh/restore commitment barrier, the adoption
-// recovery + completion ordering, and the destructive lifecycle, all as PURE EFFECT-DRIVEN machines over
-// their crash tables (plan §§ "Provenance gates and the commitment barrier (D7)", "Adoption sequence",
-// "Destructive lifecycle (D8)"; ADR-0049 decisions 7 & 8; CONTEXT § "Language — engine placement", entries
-// "Commitment marker", "Adoption gate", "Adoption-bootstrap gate", "Drain predicate", "Destructive
-// lifecycle"). The machines never touch IDB/OPFS/PGlite — every side effect is INJECTED, so crashes are
-// simulated by making an effect throw, then re-running the resume path from the observed post-crash state.
-// The final composition test threads the machines' observed post-crash states through `classifyStoreBoot`
-// (store-meta.ts) — the crash-table proof the plan demands: every row of all three crash tables → verdict.
+// ADR-0049 (capability-driven engine placement) step 3: the fresh/restore commitment barrier and the
+// destructive lifecycle, both as PURE EFFECT-DRIVEN machines over their crash tables (plan §§ "Provenance
+// gates and the commitment barrier (D7)", "Destructive lifecycle (D8)"; ADR-0049 decisions 7 & 8; CONTEXT
+// § "Language — engine placement", entries "Commitment marker", "Destructive lifecycle"). The machines never
+// touch IDB/OPFS/PGlite — every side effect is INJECTED, so crashes are simulated by making an effect throw,
+// then re-running the resume path from the observed post-crash state. The final composition test threads the
+// machines' observed post-crash states through `classifyStoreBoot` (store-meta.ts) — the crash-table proof the
+// plan demands: every row of both crash tables → verdict.
 
 import {
-  type AdoptionCompletionEffects,
-  type AdoptionRecoveryVerdict,
   beginFreshCandidate,
-  classifyAdoptionRecovery,
   type CommitmentBarrierEffects,
-  completeAdoption,
   type DestructionEffects,
   type FreshCandidateEffects,
-  journalOwesNothing,
-  type JournalStatusCounts,
   resumeDeletion,
   runCommitmentBarrier,
   runDestruction,
@@ -75,13 +68,6 @@ function destructionEffects(rec: Recorder): DestructionEffects {
     deleteSentinel: () => rec.step("deleteSentinel"),
     deleteBackendStore: () => rec.step("deleteBackendStore"),
     deleteMetaRecord: () => rec.step("deleteMetaRecord"),
-  };
-}
-
-function completionEffects(rec: Recorder): AdoptionCompletionEffects {
-  return {
-    setPhase: (phase) => rec.step(`setPhase:${phase}`),
-    deleteIdbPredecessor: () => rec.step("deleteIdbPredecessor"),
   };
 }
 
@@ -185,82 +171,7 @@ describe("runDestruction / resumeDeletion (D8 — resumable at every boundary)",
 });
 
 // =========================================================================================================
-// C. Adoption recovery (pure verdict + completion ordering)
-// =========================================================================================================
-describe("classifyAdoptionRecovery + completeAdoption", () => {
-  it("sentinel present → complete-adoption (committed; barrier had published before the crash)", () => {
-    const verdict: AdoptionRecoveryVerdict = classifyAdoptionRecovery({ sentinelPresent: true });
-    expect(verdict).toEqual({ action: "complete-adoption" });
-  });
-
-  it("no sentinel → teardown-and-restart (idb still authoritative; re-run adoption from step 1)", () => {
-    const verdict: AdoptionRecoveryVerdict = classifyAdoptionRecovery({ sentinelPresent: false });
-    expect(verdict).toEqual({ action: "teardown-and-restart" });
-  });
-
-  it("completeAdoption runs setPhase(opfs-committed) → deleteIdbPredecessor in order", async () => {
-    const rec = recorder();
-    await completeAdoption(completionEffects(rec));
-    expect(rec.calls).toEqual(["setPhase:opfs-committed", "deleteIdbPredecessor"]);
-  });
-
-  it("deleteIdbPredecessor crashes once → re-run completes (setPhase idempotent)", async () => {
-    const rec = recorder("deleteIdbPredecessor");
-    const effects = completionEffects(rec);
-    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
-    await expect(completeAdoption(effects)).rejects.toThrow("crash:deleteIdbPredecessor");
-    await completeAdoption(effects);
-    expect(rec.counts["setPhase:opfs-committed"]).toBe(2);
-    expect(rec.counts["deleteIdbPredecessor"]).toBe(2);
-  });
-});
-
-// =========================================================================================================
-// D. Drain predicate (canonical journal status terms — CONTEXT "Drain predicate")
-// =========================================================================================================
-describe("journalOwesNothing (drain predicate)", () => {
-  function counts(overrides: Partial<JournalStatusCounts>): JournalStatusCounts {
-    return {
-      pending: 0,
-      sending: 0,
-      acked: 0,
-      failed: 0,
-      quarantined: 0,
-      conflicted: 0,
-      rejected: 0,
-      ...overrides,
-    };
-  }
-
-  it("all zero → owes nothing", () => {
-    expect(journalOwesNothing(counts({}))).toBe(true);
-  });
-
-  it("acked rows alone are settled → owes nothing", () => {
-    expect(journalOwesNothing(counts({ acked: 7 }))).toBe(true);
-  });
-
-  it("rejected rows alone are settled (rejection terminal, ADR-0022) → owes nothing", () => {
-    expect(journalOwesNothing(counts({ rejected: 4 }))).toBe(true);
-  });
-
-  it("acked + rejected together (both settled) → owes nothing", () => {
-    expect(journalOwesNothing(counts({ acked: 3, rejected: 2 }))).toBe(true);
-  });
-
-  for (const blocking of ["pending", "sending", "failed", "quarantined", "conflicted"] as const) {
-    it(`a single ${blocking} row blocks the drain → owes something`, () => {
-      expect(journalOwesNothing(counts({ [blocking]: 1 }))).toBe(false);
-    });
-  }
-
-  it("a blocking row alongside settled rows still blocks", () => {
-    expect(journalOwesNothing(counts({ acked: 9, rejected: 9, conflicted: 1 }))).toBe(false);
-  });
-});
-
-// =========================================================================================================
-// E. Fresh/restore candidate flow + the three-machine crash-table composition proof
+// C. Fresh/restore candidate flow + the two-machine crash-table composition proof
 // =========================================================================================================
 describe("beginFreshCandidate (record-first — invariant 12)", () => {
   it("writes the candidate record BEFORE creating the store directory", async () => {
@@ -285,11 +196,10 @@ describe("beginFreshCandidate (record-first — invariant 12)", () => {
   });
 });
 
-// The crash-table proof: for each crash boundary of ALL THREE machines, the observed store state maps
-// through `classifyStoreBoot` (store-meta.ts) to exactly one boot verdict. Covers every row of the plan's
-// fresh/restore, adoption, and destruction crash tables. Adoption's two `adopting` rows additionally pass
-// through `classifyAdoptionRecovery` to disambiguate.
-describe("three-machine crash-table composition over classifyStoreBoot", () => {
+// The crash-table proof: for each crash boundary of BOTH machines, the observed store state maps through
+// `classifyStoreBoot` (store-meta.ts) to exactly one boot verdict. Covers every row of the plan's
+// fresh/restore and destruction crash tables.
+describe("two-machine crash-table composition over classifyStoreBoot", () => {
   function obs(
     record: StoreBootObservations["record"],
     opfs: StoreBootObservations["opfs"],
@@ -323,8 +233,8 @@ describe("three-machine crash-table composition over classifyStoreBoot", () => {
       // but the sentinel was already published. Phase-total authority — a PRESENT record's phase is the sole
       // authority and the sentinel never overrides it, so this is `delete-candidate-and-rebuild` BY DESIGN:
       // nothing was exposed, nothing strands, and a restore just re-invokes `restoreFrom`. Step-10 teardown of
-      // `delete-candidate-and-rebuild` deletes the stale sentinel alongside the candidate directory (plan,
-      // fresh/restore crash table; CONTEXT § "Commitment marker").
+      // `delete-candidate-and-rebuild` deletes the stale sentinel alongside the candidate directory AND the
+      // record, then re-classifies (plan, fresh/restore crash table; CONTEXT § "Commitment marker").
       name: "fresh: barrier-gap crash (opfs-candidate record + sentinel published, phase never flipped)",
       observed: obs({ phase: "opfs-candidate", updatedAt: 3 }, sentinelAndDir),
       verdict: "delete-candidate-and-rebuild",
@@ -342,21 +252,20 @@ describe("three-machine crash-table composition over classifyStoreBoot", () => {
       observed: obs({ phase: "opfs-committed", updatedAt: 2 }, sentinelAndDir),
       verdict: "open-committed",
     },
-    // ---- adoption crash table (adopting rows also go through classifyAdoptionRecovery below) ----
     {
-      name: "adoption: setPhase(adopting), no sentinel yet",
-      observed: obs({ phase: "adopting", updatedAt: 3 }, dirOnly),
-      verdict: "adoption-recovery",
-    },
-    {
-      name: "adoption: sentinel published, still adopting",
-      observed: obs({ phase: "adopting", updatedAt: 3 }, sentinelAndDir),
-      verdict: "adoption-recovery",
-    },
-    {
-      name: "adoption: completeAdoption set opfs-committed, idb predecessor lingers",
+      // Totality over the idb observation: the record decides on this arm, so an idb database at the same path
+      // is not a rival authority and never re-derives the verdict (classification 2 — the idb fact is consulted
+      // ONLY on the recordless arm).
+      name: "fresh: committed store with an idb database at the same path",
       observed: obs({ phase: "opfs-committed", updatedAt: 4 }, sentinelAndDir, true),
       verdict: "open-committed",
+    },
+    {
+      // The backend is FIXED AT FIRST MINT: an existing idb store is opened in place whatever this boot's
+      // capabilities are, and there is no forward transition to another backend.
+      name: "fixed backend: recordless idb store under a granted home",
+      observed: obs(undefined, nothingInOpfs, true),
+      verdict: "boot-idb-authoritative",
     },
     // ---- destruction crash table ----
     {
@@ -386,9 +295,4 @@ describe("three-machine crash-table composition over classifyStoreBoot", () => {
       expect(classifyStoreBoot(observed).action).toBe(verdict);
     });
   }
-
-  it("adoption-recovery disambiguation: no sentinel → teardown-and-restart, sentinel → complete-adoption", () => {
-    expect(classifyAdoptionRecovery({ sentinelPresent: false })).toEqual({ action: "teardown-and-restart" });
-    expect(classifyAdoptionRecovery({ sentinelPresent: true })).toEqual({ action: "complete-adoption" });
-  });
 });

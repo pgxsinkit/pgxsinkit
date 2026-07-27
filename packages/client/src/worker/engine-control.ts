@@ -134,6 +134,16 @@ export type EngineControlMessage =
    */
   | { type: "connect-port"; identity: EngineIdentity }
   /**
+   * elected engine → SharedWorker: the engine's control plane RECEIVED a `connect-port` for this identity —
+   * the ENGINE-LIVENESS proof the router's bounded ack window waits for. Emitted immediately on receipt, before
+   * the pipe is used for anything, because it answers one question only: does the engine's realm still exist?
+   * (Under `extendedLifetime` the SharedWorker outlives the tab that spawned the dedicated engine, so a
+   * registered engine can be a corpse; where the MessagePort `close` event is unsupported this ack is the only
+   * signal available.) Deliberately its OWN type rather than a `control-ack`: the router relays unmatched
+   * `control-ack`s to tabs as the teardown-ack, so reusing it would leak into a coordinator's teardown wait.
+   */
+  | { type: "connect-port-ack"; identity: EngineIdentity }
+  /**
    * A liveness probe request. Used BOTH as a tab↔SharedWorker keepalive (the leader keepalive) AND as a
    * SharedWorker↔engine control-channel probe (the execution-limit path). `pingId` correlates the ack.
    */
@@ -176,6 +186,7 @@ type TaggedControlType = Exclude<
 const TAGGED_CONTROL_TYPES: ReadonlySet<TaggedControlType> = new Set<TaggedControlType>([
   "engine-ready",
   "connect-port",
+  "connect-port-ack",
   "control-ping",
   "control-ack",
   "overdue-dispatch",
@@ -206,6 +217,7 @@ export function shouldApplyControlMessage(current: EngineIdentity | undefined, m
       return true;
     case "engine-ready":
     case "connect-port":
+    case "connect-port-ack":
     case "control-ping":
     case "control-ack":
     case "overdue-dispatch":

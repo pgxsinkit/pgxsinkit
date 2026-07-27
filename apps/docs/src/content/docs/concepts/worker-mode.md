@@ -268,13 +268,15 @@ deletes the commitment and both possible backend stores, and removes the phase r
 same lifecycle on the next boot; a successful SW-direct destroy ends that SharedWorker lifetime so a later
 attach cannot inherit a closed host.
 
-An existing IndexedDB store is never silently overwritten by a newly capable OPFS home. Automatic
-idb→OPFS adoption is off unless the worker entry declares `adoption: "server-reconstructible"`; that
-declaration authorizes deletion of local-only predecessor state only after the journal is drained, online
-reconstruction completes, and a strict commitment barrier returns. `adoptStore()` runs the same transition
-manually as a creation-path operation: call it instead of opening a client, and handle `StoreInUseError` if
-the store is already open. A restored backup is authoritative and is never treated as an adoption
-candidate.
+A store's **storage backend is fixed at its first mint**, for the store's whole life. An existing
+IndexedDB store is opened in place by a newly capable OPFS home — nothing is copied, no OPFS candidate or
+commitment sentinel appears beside it, and no local data is deleted (the boot report shows
+`storageBackend: "idbfs"` plus a `storageFallbackReason`). The mirror holds too: a home with no grant
+refuses a store already committed to OPFS with `CommittedStoreUnreachableError` rather than open an empty
+`idb://` sibling. Moving a store to another backend is a deliberate destroy — `client.destroy()`, or
+`destroyStoreArtifacts(storePath)` for a store nobody holds — followed by a fresh boot that re-syncs from
+the server and mints on whatever the probe then grants. There is no automatic migration and no in-place
+conversion.
 
 The lazy-relation lifecycle methods **are** proxied — but read the multi-tab semantics before you call
 `desync`. The engine is **shared**, so a `desync(tableKey)` issued from one tab tears the consistency group
@@ -363,12 +365,19 @@ The boot rail stamps this sequence: `boot spare store ensured`, `boot mapped sto
 behind that spare — it runs PGlite
 `create`/initdb inside the worker and holds the raw store idle for the first `attachSyncClient` to adopt —
 but it is **not only for fresh spares**. Adoption is keyed purely on the **storePath**, not on whether the
-store has ever been written: a **returning** user whose IndexedDB is already populated adopts a pre-opened
+store has ever been written: a **returning** user whose store is already populated adopts a pre-opened
 store exactly as a first-time user does. So call `provisionSyncWorker` the moment the store identity is
 known — at login-screen mount for a returning user, say — to overlap the WASM/PGlite open with auth and UI
 startup on that **warm persisted store**. (You still omit the `freshStore` hint for a returning store: that
 hint governs the shape-catch-up overlap above, not the pre-open, and is only ever true for a claimed
 schemaless spare.)
+
+One qualifier follows from the fixed-backend rule above: pre-opening accelerates a store whose backend
+**matches what the provisioner would mint**. The common returning user — a store committed to OPFS — keeps
+the whole head start. A **granted** provision over a store that lives on **IndexedDB** deliberately
+declines instead: it runs the same non-creating idb existence check the boot classifier keys on, finds that
+store, and mints nothing, because the backend was fixed at the store's first mint. Nothing breaks — the
+ordinary attach opens that store in place on idbfs, just without the pre-open head start.
 
 Adoption is **exact-match**: the boot claims the pre-opened engine only when the `attachSyncClient`
 `storePath` equals the provisioned one. A mismatch is not an error — the attach falls back to a fresh
@@ -385,6 +394,19 @@ elected engine is auto-derived from the SharedWorker's own script URL just as in
 `createEngineWorker` only for non-module/underivable entries). On Safari the engine runs in the SharedWorker
 directly; there is no keepalive there, so the factory only becomes a recovery seam if you also set
 `bridgeSilenceMs` (otherwise a dead SharedWorker is recovered by reload, not automatically).
+
+The provision is bounded by one deadline, `provisionExpiryMs` (default 60000): it retires an abandoned warmed
+provision's claim in elected mode, **and** — in both modes — settles the returned promise with the typed
+`ProvisionExpiredError` if nothing acked in that window. So a provision behind a dead SharedWorker connection
+fails loudly instead of hanging forever. The deadline bounds **your promise**; what becomes of the worker's
+create attempt follows the placement. Where the engine runs in the SharedWorker itself (Safari, or a
+declared-idbfs store) the attempt is left running — an in-flight store open cannot be safely abandoned — so the
+attach that follows adopts that create if it completed and waits on it if it is genuinely stuck, and a retry
+re-acks the same attempt rather than starting a second open. In elected placement the same deadline releases
+the provision's claim, and when that is the last claim the coordinator retires the elected engine (teardown,
+then terminate, which releases the VFS handle), so the attach that follows elects a fresh engine and opens the
+store again. An attach that adopted the coordinator before the deadline holds a claim of its own, which keeps
+that engine — and its attempt — alive.
 
 The overlap is measurable: an adopted store reports its pre-open in the `BootReport` `provision` block —
 `provision.initdbMs` is the create cost that ran off-thread before this boot, and

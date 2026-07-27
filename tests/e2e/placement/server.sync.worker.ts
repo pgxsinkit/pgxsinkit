@@ -20,7 +20,6 @@ defineSyncWorker({
   syncEnabled: true,
   // Capability placement is THE behavior (ADR-0049 D1) — the server lanes exercise the elected engine +
   // succession/relocation path via the unconditional probe (`placementRegistry` declares the default `opfs`).
-  adoption: "server-reconstructible",
   // Prompt convergence sweeps so a drained journal reaches the server quickly once writes are un-refused.
   convergenceIntervalMs: 2_000,
 });

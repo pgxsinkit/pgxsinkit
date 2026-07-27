@@ -410,9 +410,14 @@ _Avoid_: "heartbeats" in the plural (non-leader tabs run none).
 
 **Store meta record**:
 The per-store record in a small dedicated IndexedDB database (readable in every
-engine home), written at store CREATION for every backend — the first-use
-authority fallback decisions key on. Its state is ONE total phase —
-`idb-authoritative | opfs-candidate | adopting | opfs-committed | deleting` —
+engine home) — the first-use authority fallback decisions key on. A store minted
+under the opfs commitment machinery records at CREATION
+(candidate-before-directory); a no-grant or registry-forced idbfs mint is
+deliberately RECORDLESS — recordless-idb is a first-class state, recognised by
+boot classification 6 — and gains its `idb-authoritative` record on the first
+pass that MUST write authority (a granted classification-6 boot, a `deleting`
+handoff, a candidate retirement). Its state is ONE total phase —
+`idb-authoritative | opfs-candidate | opfs-committed | deleting` —
 with `deleting` taking precedence over everything; destruction completes by
 DELETING the record. A failed meta read is an ERROR (bounded retry, then fail
 closed), never "no record". One of the two halves of commitment publication;
@@ -439,31 +444,34 @@ _Avoid_: "the directory exists" as a commitment test; any entry inside the store
 directory as a marker; `<identity>.committed` sibling naming (collides with the
 store path `foo.committed`).
 
-**Adoption-bootstrap gate**:
-The authority milestone for publishing an ADOPTED store's commitment — the one
-provenance whose predecessor is deleted, so it alone requires the server:
-authorized online reconstruction, meaning the initial catch-up of the eager
-Consistency groups a valid initial store requires ("authorized" includes
-legitimately anonymous/public shapes). Staged-readiness milestones never qualify
-(`localReadReady` is deliberately offline-local; `ready` resolves immediately
-under `syncEnabled: false`). Gate unmet → nothing publishes; idb stays
-authoritative. Fresh and restored stores have their own provenance gates
-(local init/recovery; backup load + restore recovery) and commit WITHOUT server
-contact — all three then share one strict barrier: `strictSync()` returns →
-sentinel → committed phase → exposure.
+**Provenance gate**:
+The authority milestone a store must pass before its commitment may publish —
+one per store provenance, each proving THAT provenance's data source: a fresh
+store passes on successful local initialization/recovery, a restored store
+(`restoreFrom`) on successful backup load + restore recovery. Both commit
+WITHOUT server contact, because a commitment only ever publishes a store's own
+first backend — nothing is replaced, so nothing can be stranded by committing
+early. Both then share ONE strict barrier: `strictSync()` returns → sentinel →
+committed phase → exposure.
 _Avoid_: one universal online gate (it stranded offline-first-boot writes and
-contradicted Restore's authoritative offline boot); "every required group"
-(name the eager Consistency groups).
+contradicted Restore's authoritative offline boot).
 
-**Adoption gate**:
-The eligibility + drain conditions an existing idb store must meet — evaluated
-pre-expose, so no mutation can race them — before the toolkit builds its opfs
-successor (via normal server bootstrap, through the Adoption-bootstrap gate).
-Eligibility is an explicit consumer declaration that the store is
-server-reconstructible / its local-only data disposable, DEFAULT OFF — hook
-absence is never authority (`rawExec` writes documented local-only state on any
-store); without the declaration only the manual adoption API runs. The idb
-store is deleted only after commitment is published.
+**Backend permanence**:
+A store's storage backend is FIXED at its first mint, for the store's whole
+life: the minting home's capabilities decide it ONCE, and every later boot opens
+the store on the backend it finds it on. A capability change moves nothing in
+either direction — a home that GAINS OPFS sync access opens an existing
+IndexedDB store in place on idbfs (minting no candidate and no sentinel beside
+it, and its provision lane declines on the same non-creating idb existence
+check), and a home holding NO grant refuses an `opfs-committed` store typed
+(`CommittedStoreUnreachableError`) rather than mint an empty idb sibling at the
+same path. The ONE route to another backend is a deliberate, app-mediated
+Destructive lifecycle run (`client.destroy()` / `destroyStoreArtifacts`)
+followed by a fresh boot that re-syncs from the server and mints on the
+then-best backend; nothing carries across, and the replacement is a fresh store.
+_Avoid_: "migration"/"upgrade" for a backend change (there is no in-place
+conversion — it is destroy-and-rebuild); treating a granted probe as authority
+over an existing store.
 
 **Destructive lifecycle**:
 The one toolkit-owned deletion machine for explicit `destroy()`, AUTHORIZED
@@ -519,11 +527,3 @@ refused; idempotent and safe on an already-dead store.
 _Avoid_: folding it into `destroyStoreArtifacts` (that re-opens the grilled
 no-probe contract); reviving a retirement/coordination protocol; terminating a
 SharedWorker from a tab (no such API — teardown must be cooperative + acked).
-
-**Drain predicate**:
-In the journal's canonical status terms: rows in `pending`, `sending`, `failed`,
-`quarantined`, or `conflicted` number ZERO; `acked` and `rejected` rows are
-permitted (both settled — rejection is terminal). Echo-landing is NOT required
-(the opfs successor is rebuilt from the server, which already holds every acked
-write) — deliberately weaker than Data export's "drained", which reads local
-tables.

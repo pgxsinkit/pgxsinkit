@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 
 import { bigint, boolean, jsonb, uuid, varchar } from "drizzle-orm/pg-core";
 
-import { canonicalizeRegistry, defineSyncRegistry, defineSyncTable, fingerprintRegistry } from "@pgxsinkit/contracts";
+import {
+  canonicalizeRegistry,
+  defineSyncRegistry,
+  defineSyncTable,
+  fingerprintRegistry,
+  hashString,
+} from "@pgxsinkit/contracts";
 
 // The registry fingerprint (ADR-0004): the single "has the shape changed" signal,
 // consumed by ADR-0006. Order-independent, shape-sensitive, function-free.
@@ -212,5 +218,91 @@ describe("registry fingerprint (ADR-0004)", () => {
     expect(canon).toHaveLength(1);
     expect(canon[0]!.key).toBe("items");
     expect(canon[0]!.columns.map((column) => column.name)).toEqual(["id", "title"]);
+  });
+
+  it("memoises per registry object without changing the value (same object, and equal shapes still agree)", () => {
+    // The chain is walked at least twice per boot over the SAME object; the memo must be transparent.
+    const registry = defineSyncRegistry({ items: items(), notes: notes() });
+    const first = fingerprintRegistry(registry);
+    expect(fingerprintRegistry(registry)).toBe(first);
+    // A structurally identical but distinct object misses the memo and must still agree.
+    expect(fingerprintRegistry(defineSyncRegistry({ items: items(), notes: notes() }))).toBe(first);
+    // And the memo is not a global: a different shape still fingerprints differently.
+    expect(fingerprintRegistry(defineSyncRegistry({ items: items() }))).not.toBe(first);
+  });
+});
+
+// =========================================================================================================
+// hashString — the FNV-1a-64 primitive. Its OUTPUT is a PERSISTED value (`registry_fingerprint`, the `lsf1`
+// local-schema fingerprint, the `apply` DDL fingerprint in generated migrations), so it is frozen for all
+// time: a changed value silently invalidates every existing store (read-cache wipe + subscription reset) and
+// every emitted migration's fingerprint. The implementation was rewritten off BigInt onto two 32-bit Number
+// lanes for boot cost; these tests are the proof it is byte-for-byte the same function.
+//
+// The ORACLE below is the ORIGINAL BigInt implementation, kept HERE (test-only) and deliberately never
+// exported: it independently reproduces the expected value for any input, while the hardcoded goldens pin
+// the values even if someone "fixes" the oracle too.
+// =========================================================================================================
+
+/** The original BigInt FNV-1a-64 — the oracle, verbatim. Test-only; never ship a second implementation. */
+function hashStringBigIntOracle(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  const prime = 0x100000001b3n;
+  const mask = (1n << 64n) - 1n;
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    hash = ((hash ^ BigInt(byte)) * prime) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+/** A multi-KB structured payload (~11.8 KB of UTF-8) — many bytes ⇒ many lane carries. */
+function multiKbPayload(): string {
+  let out = "";
+  for (let i = 0; i < 400; i += 1) out += `line ${i}: ${"x".repeat(i % 17)} — αβγ\n`;
+  return out;
+}
+
+describe("hashString (FNV-1a-64) — frozen output", () => {
+  // [label, input, the golden value computed by the original BigInt implementation].
+  const goldens: Array<[string, string, string]> = [
+    ["empty string (the bare offset basis)", "", "cbf29ce484222325"],
+    ["one ascii byte", "a", "af63dc4c8601ec8c"],
+    ["short ascii", "pgxsinkit", "83f58420c44a634e"],
+    [
+      "canonical-registry-shaped JSON",
+      '[{"key":"items","mode":"readonly","columns":["id","title"]}]',
+      "0e69921a9e581d7b",
+    ],
+    // Multibyte content: the hash is over UTF-8 BYTES, so accents/CJK/astral planes must fold in identically.
+    ["non-ascii / multibyte", "café — naïve 日本語 🐛", "6f02ae23e8903c05"],
+    // High bytes + NUL, built from char codes so the literal cannot drift with file encoding.
+    ["high bytes and NUL", String.fromCharCode(0xff, 0xfe, 0x00, 0x01, 0x7f, 0x80), "3051cb15a0d5f920"],
+    ["multi-KB payload", multiKbPayload(), "8b773c6d5d399125"],
+  ];
+
+  for (const [label, input, golden] of goldens) {
+    it(`matches the pinned golden and the BigInt oracle: ${label}`, () => {
+      expect(hashString(input)).toBe(golden);
+      expect(hashStringBigIntOracle(input)).toBe(golden);
+    });
+  }
+
+  it("agrees with the BigInt oracle across a wide swathe of generated inputs", () => {
+    // Growth by one byte at a time (every low-lane carry pattern) plus a rolling multibyte tail.
+    let ascii = "";
+    let mixed = "";
+    for (let i = 0; i < 300; i += 1) {
+      ascii += String.fromCharCode(32 + (i % 95));
+      mixed += i % 3 === 0 ? "é" : i % 3 === 1 ? "漢" : String.fromCharCode(i % 256);
+      expect(hashString(ascii)).toBe(hashStringBigIntOracle(ascii));
+      expect(hashString(mixed)).toBe(hashStringBigIntOracle(mixed));
+    }
+  });
+
+  it("always returns 16 lower-case hex chars (zero-padded, never truncated)", () => {
+    for (let i = 0; i < 200; i += 1) {
+      expect(hashString(`pad-${i}`)).toMatch(/^[0-9a-f]{16}$/);
+    }
   });
 });

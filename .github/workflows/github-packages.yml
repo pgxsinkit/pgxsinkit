@@ -8,15 +8,18 @@ name: GitHub Packages
 # NOTE: GitHub Packages requires the npm scope to equal the repo owner, so this only works once the
 # repo lives under a `pgxsinkit` GitHub org (scope @pgxsinkit == owner pgxsinkit).
 #
-#   push to main  -> dev channel:    <version>-dev.<shortSha>  @ dist-tag `dev`
-#   semver tag    -> release parity: the tagged version        @ dist-tag `latest`
+#   push to develop -> dev channel:    <version>-dev.<shortSha>  @ dist-tag `dev`
+#   semver tag      -> release parity: the tagged version        @ dist-tag `latest`
+#
+# `develop` is freely rewritable (force-pushes re-publish the new tip); `main` is stable, never
+# rewritten, and publishes nothing on push (ADR-0001 amendment, 2026-07-27).
 #
 # Publishing is gated on validation (ADR-0016 §7): the dev publish needs `validate:full`; a release
 # (tag) additionally needs `test:integration`. The npm mirror is a separate, human-gated step
 # (`bun run release:npm <tag>`), never run here.
 on:
   push:
-    branches: [main]
+    branches: [develop]
     tags: ["[0-9]*.[0-9]*.[0-9]*"]
   workflow_dispatch:
 

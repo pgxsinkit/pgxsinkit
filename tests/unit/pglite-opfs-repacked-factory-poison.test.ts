@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { PGlite } from "@electric-sql/pglite";
+import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
 
 import { StoreFailedError } from "../../packages/pglite-opfs-repacked/src/core/errors";
 import { OpfsRepackedPort } from "../../packages/pglite-opfs-repacked/src/opfs-port";
@@ -12,7 +13,12 @@ import { MemoryOpfsDirectory } from "../../packages/pglite-opfs-repacked/test/su
 describe("opfs-repacked PGlite poison delivery", () => {
   test("an awaited durability failure rejects its query, poisons cache-only queries, and still closes every handle", async () => {
     const directory = new MemoryOpfsDirectory();
-    const pg = await createOpfsRepackedPGlite({ directory, durability: "strict", extentSize: 8192 });
+    const pg = await createOpfsRepackedPGlite({
+      directory,
+      durability: "strict",
+      extentSize: 8192,
+      pglite: { loadDataDir: await prepopulatedDataDir() },
+    });
     await pg.exec("CREATE TABLE values_to_flush (value integer)");
     const activeMetadata =
       directory.flushCount("metadata-a.bin") >= directory.flushCount("metadata-b.bin")
@@ -44,7 +50,7 @@ describe("opfs-repacked PGlite poison delivery", () => {
       durability: "relaxed",
       extentSize: 8192,
     });
-    const pg = new PGlite({ fs, relaxedDurability: false });
+    const pg = new PGlite({ fs, relaxedDurability: false, loadDataDir: await prepopulatedDataDir() });
     await pg.waitReady;
     fs.strictSync();
 

@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -7,8 +8,9 @@ import type { BootReport } from "@pgxsinkit/client";
 
 // ── Slice 0a warm-boot browser benchmark (manual/nightly, NOT test:integration) ─────────────────────
 // The proposal's "cold-worker warm-store boot" measurement, reproduced against the REAL board app in a
-// REAL Chromium with a PERSISTENT profile — the only faithful model of a returning user whose IndexedDB
-// PGlite store survives but whose SharedWorker (and its hot engine) has died. scripts/run-warm-boot-bench.ts
+// REAL Chromium with a PERSISTENT profile — the only faithful model of a returning user whose persisted
+// PGlite store survives (in worker mode: OPFS, per ADR-0049 capability-driven placement) but whose
+// SharedWorker (and its hot engine) has died. scripts/run-warm-boot-bench.ts
 // owns the podman stack + seed around this; a DEDICATED config (playwright.warm-boot.config.ts, testMatch
 // **/*.bench.ts) keeps this file invisible to the normal e2e lane's **/*.e2e.test.ts match, so the bench
 // never rides `test:integration`.
@@ -19,23 +21,29 @@ import type { BootReport } from "@pgxsinkit/client";
 //     BootReport (assert storeKind "warm", schema replay + journal recovery skipped), navigation→attach,
 //     first live-query snapshot (team nav), first cached row (a seeded issue title). Close between every
 //     sample so each is a genuinely cold worker.
-//   Run C (offline, ×2):  same warm store as B, but with NO sync backend from the first boot — cached
-//     rows MUST still paint (ADR-0041 acceptance criterion, now ASSERTED). THREE harness realities force a
-//     faithful substitution for a literal `context.setOffline(true)` before navigation (flagged as
-//     deviations): (1) the board ships no service worker, so a real offline toggle would also block loading
-//     the app SHELL from :5173 and the SPA could never boot; (2) Playwright `context.route` does NOT
-//     intercept a SharedWorker's own fetches, so a data blackhole leaves the worker fully online (observed:
-//     it caught up and finalized); (3) the board's cold auth path needs GoTrue, so blackholing the whole
-//     front strands the app on the login screen. So Run C: forces the IN-PROCESS fallback
-//     (`delete window.SharedWorker`, the board's scenario-(e) path) — the SAME client boot + cached-read
-//     code, on the main thread whose fetches ARE routable — and blackholes ONLY the pgxsinkit data endpoints
-//     (`/functions/v1/board-sync|board-write`), leaving the shell and GoTrue auth reachable so the board
-//     authenticates and boots off the warm store.
+//   Run C (offline, ×2):  the SAME warm store as B, booted exactly like B (worker mode, no harness
+//     rewiring), but with the sync backend REALLY unreachable: the run STOPS the `board-functions`
+//     container — which hosts BOTH pgxsinkit data endpoints (`/functions/v1/board-sync`, the Electric shape
+//     proxy, and `/functions/v1/board-write`, the mutation ingress) — for the duration of the samples, then
+//     starts it again. `board-auth` (GoTrue, `/auth/v1`) is a SEPARATE container and stays up, so the
+//     persisted session still authenticates, and the caddy front keeps serving the app shell; the only
+//     thing missing is the sync backend. Cached rows MUST still paint (ADR-0041 acceptance criterion,
+//     ASSERTED below).
+//     Why at the CONTAINER and not in the harness: a literal `context.setOffline(true)` is not usable (the
+//     board ships no service worker, so the app SHELL could not load), and Playwright `context.route` does
+//     NOT intercept a SharedWorker's own fetches, so route-aborting the data endpoints leaves a worker-mode
+//     boot fully online. The old model worked around that by ALSO forcing the in-process fallback
+//     (`delete window.SharedWorker`) so the fetches became routable — and that model died with
+//     capability-driven placement (ADR-0049): a worker-mode store lives in OPFS (opfs-repacked), and a tab
+//     realm cannot hold OPFS sync-access handles at all, so the forced in-process boot silently minted an
+//     EMPTY `idb://` sibling at the same store path (full initdb, schema-fingerprint mismatch, zero rows).
+//     It measured "empty different store, offline" and could never pass. Stopping the container needs no
+//     realm cooperation — every fetch fails in every realm — and keeps the product's real mode.
 //     Before ADR-0041 this run painted 0/2 (cached reads were hostage to sync START — see the lane record):
-//     the in-process client did not resolve until the blackholed sync began, so first paint never came.
-//     Under Option B the client resolves at `localReadReady` and the board paints at that point, so cached
-//     rows render with the sync backend unreachable — this run now GATES on that. The BootReport finalizes
-//     at initial sync (whole-sync), which the blackholed sync can never satisfy, so the REPORT stays ABSENT
+//     the client did not resolve until sync began, so first paint never came. Under Option B the client
+//     resolves at `localReadReady` and the board paints at that point, so cached rows render with the sync
+//     backend unreachable — this run now GATES on that. The BootReport finalizes at initial sync
+//     (whole-sync), which an unreachable backend can never satisfy, so the REPORT stays ABSENT
 //     (`localReadReadyMs` is the relevant crossing, but it only rides a finalized report); we assert the
 //     rendered cached rows and capture the sync rail for the record.
 //
@@ -87,30 +95,24 @@ function teamNav(page: Page) {
   return page.getByRole("navigation");
 }
 
-// The board's pgxsinkit DATA endpoints (config.ts): the Electric shape proxy and the write ingress, both
-// under the caddy front's `/functions/v1/*`. We blackhole ONLY these — NOT the app shell (:5173) and NOT
-// GoTrue auth (`/auth/v1` on the same front), so the board still authenticates (persisted session) and
-// boots; the only thing missing is the sync backend, proving cached rows come from the warm store.
-const SYNC_BACKEND_GLOBS = ["**/functions/v1/board-sync**", "**/functions/v1/board-write**"];
+// The container hosting BOTH pgxsinkit data endpoints (`/functions/v1/board-sync` + `/functions/v1/board-write`,
+// infra/compose/board-compose.yml, project `pgxsinkit-board`). Stopping it takes the sync backend down for
+// EVERY realm — including the SharedWorker's own fetches, which Playwright routing cannot touch — while
+// `board-auth` (GoTrue) and `board-caddy` (the shell) stay up so the board still authenticates and boots.
+const SYNC_BACKEND_CONTAINER = "board-functions";
 
-async function launchProfile(offline: boolean): Promise<{ context: BrowserContext; page: Page; console: string[] }> {
+/** Stop/start the sync backend container (podman only — never a docker daemon). Synchronous by design. */
+function syncBackend(action: "stop" | "start"): void {
+  console.log(`[warm-boot-bench] podman ${action} ${SYNC_BACKEND_CONTAINER}…`);
+  execSync(`podman ${action} ${SYNC_BACKEND_CONTAINER}`, { stdio: "inherit", timeout: 90_000 });
+}
+
+async function launchProfile(): Promise<{ context: BrowserContext; page: Page; console: string[] }> {
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: true,
     baseURL: BASE_URL,
     ...(insecureTls ? { ignoreHTTPSErrors: true } : {}),
   });
-  // Offline: model "no sync backend from the first boot" BEFORE any navigation (see the header note).
-  // Force the in-process fallback (the SharedWorker's fetches are NOT routable, the main thread's are),
-  // then blackhole the sync/write data endpoints from t0 (auth + shell stay reachable so the board boots).
-  if (offline) {
-    await context.addInitScript(() => {
-      // @ts-expect-error — deleting the constructor makes the board's feature-detect fall back to in-process.
-      delete window.SharedWorker;
-    });
-    for (const glob of SYNC_BACKEND_GLOBS) {
-      await context.route(glob, (route) => route.abort());
-    }
-  }
   const page = await context.newPage();
   const consoleLines: string[] = [];
   page.on("console", (message) => consoleLines.push(message.text()));
@@ -140,7 +142,7 @@ async function signIn(page: Page, name: string): Promise<void> {
 
 /** Populate + fully catch up the warm store once, then kill the context so the SharedWorker dies. */
 async function populate(): Promise<void> {
-  const { context, page } = await launchProfile(false);
+  const { context, page } = await launchProfile();
   try {
     await page.goto("/");
     await signIn(page, ALICE);
@@ -161,7 +163,7 @@ async function populate(): Promise<void> {
 
 /** One online cold-worker warm-store sample: reopen the profile, capture the milestones, close. */
 async function sample(): Promise<Sample> {
-  const { context, page } = await launchProfile(false);
+  const { context, page } = await launchProfile();
   try {
     const t0 = performance.now();
     const stamp = () => performance.now() - t0;
@@ -196,14 +198,16 @@ async function sample(): Promise<Sample> {
 }
 
 /**
- * One OFFLINE (no-sync-backend) cold warm-store sample (see the header note on why a literal offline cold
- * boot is not achievable here — this drives the in-process fallback with the sync/write endpoints
- * blackholed). Each waiter is bounded and the sample records what the boot actually reached (cached rows
- * painted / attached-but-empty / stranded on login); since ADR-0041 stage 2 the run is ASSERTED — every
- * offline sample must paint cached rows (the Option B acceptance criterion).
+ * One OFFLINE (no-sync-backend) cold-worker warm-store sample. Identical to `sample()` in every respect
+ * — same worker mode, same warm OPFS store, no harness rewiring — except that the caller has STOPPED the
+ * `board-functions` container, so both pgxsinkit data endpoints are unreachable from every realm (see the
+ * header note on why this replaced the old force-in-process + route-abort model). Each waiter is bounded
+ * and the sample records what the boot actually reached (cached rows painted / attached-but-empty /
+ * stranded on login); since ADR-0041 stage 2 the run is ASSERTED — every offline sample must paint cached
+ * rows (the Option B acceptance criterion).
  */
 async function offlineSample(): Promise<Sample> {
-  const { context, page, console: consoleLines } = await launchProfile(true);
+  const { context, page, console: consoleLines } = await launchProfile();
   const BOUND = 40_000;
   try {
     const t0 = performance.now();
@@ -237,7 +241,7 @@ async function offlineSample(): Promise<Sample> {
       .getByRole("heading", { name: "Sign in to the board" })
       .isVisible()
       .catch(() => false);
-    if (Number.isFinite(firstCachedRowMs)) note = "cached rows painted with the sync backend blackholed";
+    if (Number.isFinite(firstCachedRowMs)) note = "cached rows painted with the sync backend stopped";
     else if (loginVisible) note = "stranded on the login screen (cold auth path needs the backend)";
     else if (Number.isFinite(attachMs)) note = "client attached but the warm store's cached rows did not paint";
     else note = "boot did not attach the client within the bound";
@@ -251,7 +255,7 @@ async function offlineSample(): Promise<Sample> {
       bootReportMs,
       report,
       note,
-      // In-process rail lines are `[pgxsinkit …]` (worker lines add a `·w`); capture either.
+      // Worker rail lines are `[pgxsinkit·w …]`, in-process ones plain `[pgxsinkit …]`; capture either.
       syncRailTail: consoleLines.filter((line) => line.includes("[pgxsinkit")).slice(-25),
     };
   } finally {
@@ -319,16 +323,24 @@ test("warm-boot bench: populate, measure ×5, offline ×2", async () => {
     measured.push(s);
   }
 
-  // ── Run C: offline (no-sync-backend) cold warm-store samples — best-effort/observational. ──
+  // ── Run C: offline cold-worker warm-store samples, with the sync backend REALLY down. ──
+  // `podman stop` is synchronous (it returns once the container is stopped), so the samples that follow
+  // genuinely have no board-sync/board-write. Restart it in `finally` so a failing sample still leaves a
+  // healthy stack for `--keep` (and for the runner's teardown).
   const offline: Sample[] = [];
-  for (let i = 0; i < OFFLINE_SAMPLES; i++) {
-    offline.push(await offlineSample());
+  syncBackend("stop");
+  try {
+    for (let i = 0; i < OFFLINE_SAMPLES; i++) {
+      offline.push(await offlineSample());
+    }
+  } finally {
+    syncBackend("start");
   }
   const offlineCachedRowPainted = offline.filter((s) => Number.isFinite(s.firstCachedRowMs)).length;
   const offlineReportFinalized = offline.filter((s) => s.report != null).length;
 
   const online = summarize("measure (online, cold worker, warm store)", measured);
-  const offlineSummary = summarize("offline (no sync backend, in-process fallback, warm store)", offline);
+  const offlineSummary = summarize("offline (sync backend stopped, cold worker, warm store)", offline);
 
   const artifact = {
     generatedAt: new Date().toISOString(),
@@ -340,11 +352,16 @@ test("warm-boot bench: populate, measure ×5, offline ×2", async () => {
     offlineReportFinalized,
     offlineOutcomes: offline.map((s) => s.note ?? "unknown"),
     offlineNote:
-      "Run C ASSERTS the ADR-0041 acceptance criterion: cached rows paint with the sync backend blackholed. " +
-      "A literal offline cold boot of this board is not achievable in-harness (no service worker → the shell " +
-      "can't load offline; a SharedWorker's fetches are unroutable by Playwright; the cold auth path needs " +
-      "GoTrue), so Run C forces the in-process fallback and blackholes only the pgxsinkit sync/write " +
-      "endpoints — the same client boot + cached-read path. See offlineOutcomes and each sample's syncRailTail.",
+      "Run C ASSERTS the ADR-0041 acceptance criterion: a cold worker over the WARM store paints cached rows " +
+      "with the sync backend unreachable. It stops the `board-functions` container (both pgxsinkit data " +
+      "endpoints, board-sync + board-write) for the duration, leaving GoTrue (board-auth) and the caddy front " +
+      "up so the persisted session authenticates and the shell loads; the boot is otherwise identical to the " +
+      "online run (worker mode, warm OPFS store). The previous model — force the in-process fallback (delete " +
+      "window.SharedWorker) so Playwright could route-abort the endpoints a SharedWorker's fetches hide from " +
+      "— was RETIRED: since capability-driven placement (ADR-0049) a worker-mode store lives in OPFS, which a " +
+      "tab realm cannot open, so that boot minted an EMPTY idb:// sibling and the run measured the wrong " +
+      "store. The BootReport still cannot finalize (catch-up needs the backend), so report/bootReportMs stay " +
+      "null. See offlineOutcomes and each sample's syncRailTail.",
   };
 
   const artifactPath = path.join(BENCH_ROOT, `results-${Date.now()}.json`);
@@ -363,7 +380,7 @@ test("warm-boot bench: populate, measure ×5, offline ×2", async () => {
 
   // Run B: the online warm-boot fast-path assertions rode each sample above. Run C (ADR-0041 acceptance
   // criterion): EVERY offline sample must have painted cached rows off the warm store with the sync/write
-  // backend blackholed — the flip from the pre-ADR-0041 0/2 (cached reads hostage to sync start).
+  // backend STOPPED — the flip from the pre-ADR-0041 0/2 (cached reads hostage to sync start).
   expect(measured.length).toBe(MEASURE_SAMPLES);
   expect(offlineCachedRowPainted, `offline cached-row paint (outcomes: ${artifact.offlineOutcomes.join(" | ")})`).toBe(
     OFFLINE_SAMPLES,

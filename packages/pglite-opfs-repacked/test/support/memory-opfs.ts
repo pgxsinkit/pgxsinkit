@@ -1,5 +1,8 @@
 interface MemoryFile {
+  /** Backing buffer, grown geometrically. The logical file content is `bytes.subarray(0, size)`. */
   bytes: Uint8Array;
+  /** Logical file length (may be < bytes.byteLength — capacity is over-allocated). */
+  size: number;
   locked: boolean;
   flushCount: number;
   flushFailure: Error | undefined;
@@ -24,7 +27,8 @@ export class MemoryOpfsDirectory {
     if (!options?.create) throw new DOMException("entry does not exist", "NotFoundError");
     const created = {
       kind: "file" as const,
-      bytes: new Uint8Array(),
+      bytes: new Uint8Array(0),
+      size: 0,
       locked: false,
       flushCount: 0,
       flushFailure: undefined,
@@ -107,12 +111,12 @@ class MemoryOpfsSyncAccessHandle {
 
   getSize(): number {
     this.#assertOpen();
-    return this.#file.bytes.byteLength;
+    return this.#file.size;
   }
 
   read(target: Uint8Array, options: { at: number }): number {
     this.#assertOpen();
-    const count = Math.max(0, Math.min(target.byteLength, this.#file.bytes.byteLength - options.at));
+    const count = Math.max(0, Math.min(target.byteLength, this.#file.size - options.at));
     target.set(this.#file.bytes.subarray(options.at, options.at + count));
     return count;
   }
@@ -120,20 +124,35 @@ class MemoryOpfsSyncAccessHandle {
   write(source: Uint8Array, options: { at: number }): number {
     this.#assertOpen();
     const required = options.at + source.byteLength;
-    if (required > this.#file.bytes.byteLength) {
-      const grown = new Uint8Array(required);
-      grown.set(this.#file.bytes);
-      this.#file.bytes = grown;
-    }
+    this.#ensureCapacity(required);
+    // Zero any gap between the old logical end and the write offset. A freshly grown buffer is already
+    // zero; this covers writing past `size` when existing capacity (e.g. after a shrink) is reused.
+    if (options.at > this.#file.size) this.#file.bytes.fill(0, this.#file.size, options.at);
     this.#file.bytes.set(source, options.at);
+    if (required > this.#file.size) this.#file.size = required;
     return source.byteLength;
   }
 
   truncate(size: number): void {
     this.#assertOpen();
-    const next = new Uint8Array(size);
-    next.set(this.#file.bytes.subarray(0, Math.min(size, this.#file.bytes.byteLength)));
-    this.#file.bytes = next;
+    if (size > this.#file.size) {
+      this.#ensureCapacity(size);
+      this.#file.bytes.fill(0, this.#file.size, size);
+    }
+    // Shrinking only lowers the logical length: reads are bounded by it and a later write past it
+    // re-zeros the gap, so stale capacity bytes never surface. Capacity is retained.
+    this.#file.size = size;
+  }
+
+  // Grow the backing buffer geometrically so a sequence of appends is O(n) amortized, not O(n²).
+  // Real OPFS write is native; this only matters for the in-memory mock, where naive exact-size
+  // reallocation turned a ~40MB cluster load into tens of GB of memcpy.
+  #ensureCapacity(required: number): void {
+    if (required <= this.#file.bytes.byteLength) return;
+    const capacity = Math.max(required, this.#file.bytes.byteLength * 2, 8192);
+    const grown = new Uint8Array(capacity);
+    grown.set(this.#file.bytes.subarray(0, this.#file.size));
+    this.#file.bytes = grown;
   }
 
   flush(): void {
