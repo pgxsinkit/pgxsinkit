@@ -44,7 +44,9 @@ import type { TransactionClient } from "./types";
 export type StartupVerificationMode = "in-process" | "deploy-time";
 
 const { createInsertSchema: createMutationInsertSchema } = createSchemaFactory({
-  coerce: { date: true },
+  // Mutation payloads cross a JSON boundary, so bigint-mode Drizzle columns arrive as decimal strings.
+  // Coerce only while validating; the original JSON payload remains string-valued for the SQL apply path.
+  coerce: { date: true, bigint: true },
 });
 
 type RouteReadQueryClient = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations>, "select">;

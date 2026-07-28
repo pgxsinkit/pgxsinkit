@@ -33,6 +33,20 @@ const authOwned = defineSyncTable({
   },
 });
 
+const observedItem = defineSyncTable({
+  tableName: "observed_items",
+  makeColumns: () => ({
+    id: uuid("id").primaryKey(),
+    observedAtUs: bigint("observed_at_us", { mode: "bigint" }).notNull(),
+    updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+  }),
+  mode: "readwrite",
+  conflictPolicy: "last-write-wins",
+  governance: {
+    managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+  },
+});
+
 describe("create payload validation (managed-on-create fields)", () => {
   it("accepts a create payload that omits the authClaim + managed-timestamp fields", () => {
     const schema = buildCreateValidationSchema(authOwned as unknown as SyncTableEntry);
@@ -45,5 +59,22 @@ describe("create payload validation (managed-on-create fields)", () => {
     const schema = buildCreateValidationSchema(authOwned as unknown as SyncTableEntry);
     // `body` is NOT NULL and not managed, so it stays required — the omit only relaxes managed fields.
     expect(() => schema.parse({ id: "01963227-d4c7-72db-b858-f89f6af8fc02" })).toThrow();
+  });
+
+  it("accepts the decimal string used to transport a non-managed bigint through JSON", () => {
+    const schema = buildCreateValidationSchema(observedItem as unknown as SyncTableEntry);
+    const parsed: unknown = schema.parse({
+      id: "01963227-d4c7-72db-b858-f89f6af8fc03",
+      observedAtUs: "9007199254740993",
+    });
+    expect(parsed).toEqual({
+      id: "01963227-d4c7-72db-b858-f89f6af8fc03",
+      observedAtUs: 9_007_199_254_740_993n,
+    });
+  });
+
+  it("rejects a malformed transported bigint", () => {
+    const schema = buildCreateValidationSchema(observedItem as unknown as SyncTableEntry);
+    expect(() => schema.parse({ id: "01963227-d4c7-72db-b858-f89f6af8fc04", observedAtUs: "not-a-bigint" })).toThrow();
   });
 });

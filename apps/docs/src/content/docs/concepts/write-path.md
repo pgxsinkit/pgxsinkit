@@ -28,6 +28,15 @@ deleted. There is no selectable backend, no strategy enum, and no per-table CRUD
    streams the row back with a server `updated_at_us` at least as new as the acked value — so the UI
    never flickers back to a stale value.
 
+### Bigint values across JSON
+
+Drizzle columns declared with `{ mode: "bigint" }` remain normal `bigint` values in typed client code.
+When a mutation crosses the JSON boundary, pgxsinkit serializes those values as exact decimal strings;
+the server's registry-derived validator coerces the strings back to `bigint` for validation before the
+original JSON payload reaches the PostgreSQL apply path. This applies to application-owned bigint fields
+as well as pgxsinkit's managed microsecond fields. Consumers should not convert them to JavaScript
+`number` or add a custom transport encoding.
+
 ## Why everything is in the database
 
 Putting the apply logic in PL/pgSQL was the toolkit's central finding: it minimises round-trips,

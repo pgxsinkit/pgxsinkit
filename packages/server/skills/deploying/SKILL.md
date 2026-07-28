@@ -146,6 +146,10 @@ detail live in the `operating` skill.
 
 ## Common mistakes
 
+- Adding an app-specific encoder for a Drizzle `{ mode: "bigint" }` mutation field. The client transports
+  bigint values as exact decimal strings across JSON and the server's registry-derived validator accepts
+  that wire representation; keep the typed application value as `bigint` and never round-trip it through
+  JavaScript `number`.
 - Deploying a registry change or a `@pgxsinkit/server` upgrade without regenerating + applying the sync
   function migration. The apply function verifies itself and **refuses to serve writes** (SQLSTATE
   `PXS01`) on a mismatch — enforcement is always-on, there is no override; run `pgxsinkit-generate --check`
