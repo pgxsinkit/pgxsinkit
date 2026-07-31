@@ -53,7 +53,7 @@ Under **ADR-0049** the SharedWorker is always the attach point but is no longer 
   - A bare awaited `client.drizzle` read is **GUARDED on attach** — stricter than the in-process escape hatch, which lets a bare `client.drizzle` read run ungated.
   - `client.drizzle.transaction()` and `client.isSynced(...)` **throw** on a worker-attached client (no tab-local PGlite for a read transaction; `isSynced` is a synchronous activation-started peek the tab cannot answer). See ADR-0044, "The attach client proxies one-shot reads; isSynced stays a refusal".
 
-Coverage: `tests/unit/worker-one-shot-reads.test.ts` (real in-process engine behind `defineSyncWorker`, driven by `attachSyncClient` over injected `MessageChannel` port pairs in Bun) plus the real-SharedWorker case in `tests/e2e/board-worker.e2e.test.ts`.
+Coverage: the one-shot read path and the bridge protocol are a **unit-lane** concern (ADR-0032 decision 8 — the bridge layer is built around injected MessagePort pairs and unit-tested in Bun): `tests/unit/worker-one-shot-reads.test.ts` drives a real in-process engine behind `defineSyncWorker` from `attachSyncClient` over injected `MessageChannel` port pairs, covering `queryRow` (first row / null), `queryRawRow` with a `use`-carrying fragment, and the `client.drizzle.transaction()` refusal. The Playwright lane (`tests/e2e/board-worker.e2e.test.ts`) owns the real-SharedWorker **lifecycle and boot** posture, not the one-shot read path.
 
 The board browser lane also switches between two identities inside one page realm and asserts that their
 localStorage bindings resolve to distinct stores. This pins the general lifecycle contract: a new store may
