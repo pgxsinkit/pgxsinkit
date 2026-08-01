@@ -61,6 +61,21 @@ Run from the repo root. Every step here is **filesystem-only** — nothing reads
    For the board, mind the **apply ordering** — its hand-written customs are not freely interleavable
    with a regenerated schema. See [Board: dependency-ordered full regeneration](#board-dependency-ordered-full-regeneration).
 
+   **`--grant-execute-to` (ADR-0054).** The apply function is deny-by-default: the artifact revokes
+   EXECUTE from `PUBLIC` and the Supabase trio on every install, and grants only roles named on the
+   command line. **Neither of this repo's stacks passes it**, deliberately: the reference harness applies
+   its migrations and connects as `supabase_admin` (a superuser), and the board applies and connects as
+   `postgres` (the function's owner) — in both cases the caller already has EXECUTE without a grant.
+   Pass `--grant-execute-to <role>` only if a stack's server role stops being the owner/superuser, and
+   then pass the SAME roles to the `--check` leg of `sync:function:check` and to that server's
+   `createSyncServer({ applyFunctionGrantExecuteTo })` — the ACL is inside the fingerprinted body, so
+   the three must agree or every write fails `PXS01`.
+
+   **Re-emitting `--utilities` is safe in place.** It rewrites only `migration.sql` and leaves an
+   existing `snapshot.json` untouched, because the next folder in the chain records that snapshot's
+   `id` in its own `prevIds`. Re-emit it whenever the utilities render changes (it now also carries the
+   ADR-0054 ACL for `pgxsinkit_clock_us()`).
+
 3. **Format, validate, drift-check:**
    ```bash
    bun run format:write           # drizzle emits snapshot.json in its own style; oxfmt owns formatting

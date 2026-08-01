@@ -108,6 +108,37 @@ the server from a **Supabase cookie session** (rather than a bearer token), that
 extension: terminate credentialled CORS at your own gateway and turn the cookie into a bearer token (or
 into `JwtClaims`) inside `resolveAuthClaims`.
 
+### The apply function is deny-by-default — name your server's database role
+
+The generated `pgxsinkit_apply_mutations` takes the request's claims as an argument and **trusts them**: it
+copies them into `request.jwt.claims` and switches `role` before running your RLS-governed DML. That is
+correct for your server, which passes claims it verified, and catastrophic for anyone else — a caller who
+can invoke the function directly picks its own claims. So the generated migration is deny-by-default: right
+after `CREATE`, it revokes `EXECUTE` from `PUBLIC` and (guarded on role existence) from `anon`,
+`authenticated` and `service_role`, then grants only the roles you name:
+
+```bash
+bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
+  --project-dir ./db --config drizzle.config.ts --name sync_artifact \
+  --grant-execute-to app_writer          # repeatable, or comma-separated
+```
+
+- **The default is owner-only**, and that is usually right: if your server connects as the role that
+  applies the migrations (the function's owner) or as a superuser, you need no grant at all.
+- **Name only server roles.** A granted role can pass any claims it likes — by design — so the grant list
+  is the write path's entire trust boundary. Never grant a client-facing role.
+- **The grant list is part of the artifact fingerprint**, so the same roles must appear in three places:
+  the generate command, the CI `--check` command, and
+  `createSyncServer({ applyFunctionGrantExecuteTo: ["app_writer"] })`. Otherwise every write fails with
+  `PXS01` (stale artifact).
+- **Everyone regenerates once** on upgrade — the ACL moved the fingerprint. Re-run the `--utilities`
+  migration too: it hardens `public.pgxsinkit_clock_us()` the same way, keeping its grants to
+  `anon`/`authenticated`/`service_role` (a column DEFAULT calling the clock runs as the writing role).
+
+pgxsinkit itself needs **no PostgREST**, and leaving it out is good practice — it removes the
+`/rest/v1/rpc/*` surface that would otherwise expose every `public` function over HTTP. Treat that as
+defence in depth, though: the ACL is the control, and it holds whatever your topology looks like.
+
 ### Deploying the event lane
 
 If your registry declares `streams`, you get a second lane to deploy alongside the two above (the whole

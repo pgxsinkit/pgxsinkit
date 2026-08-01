@@ -17,7 +17,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -25,13 +25,21 @@ import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { eventLaneDdlFingerprint, eventLaneStreamNames, renderEventLaneMigration } from "../events/ddl";
 import { renderPgxsinkitUtilitiesMigration } from "../migrations/utilities";
-import { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "../mutations/plpgsql-apply";
+import {
+  buildPlpgsqlBatchFunctionDdl,
+  expectedApplyFingerprint,
+  type ApplyFunctionRenderOptions,
+} from "../mutations/plpgsql-apply";
 
-function parseArgs(argv: string[]) {
+/** Exported for direct unit coverage of the flag surface (repeatable/comma-separated `--grant-execute-to`). */
+export function parseArgs(argv: string[]) {
   let check = false;
   let utilities = false;
   let events = false;
   let functionSchema: string | undefined;
+  // ADR-0054: repeatable AND comma-separated, so `--grant-execute-to a --grant-execute-to b` and
+  // `--grant-execute-to a,b` are the same list. Empty (the default) is owner-only.
+  const grantExecuteTo: string[] = [];
   let registryPath = "";
   let projectDir = process.cwd();
   let migrationName: string | undefined;
@@ -61,6 +69,10 @@ function parseArgs(argv: string[]) {
       events = true;
     } else if (arg === "--function-schema" && argv[i + 1]) {
       functionSchema = argv[++i]!;
+    } else if (arg === "--grant-execute-to" && argv[i + 1]) {
+      for (const role of argv[++i]!.split(",")) {
+        grantExecuteTo.push(role.trim());
+      }
     }
   }
 
@@ -69,7 +81,14 @@ function parseArgs(argv: string[]) {
   if (!registryPath && !utilities) {
     console.error(
       "Usage:\n" +
-        "  pgxsinkit-generate [--check] --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts] [--out drizzle] [--function-schema schema]\n" +
+        "  pgxsinkit-generate [--check] --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts] [--out drizzle] [--function-schema schema] [--grant-execute-to <role>]...\n" +
+        "\n" +
+        "  --grant-execute-to <role>   Role granted EXECUTE on the apply function (repeatable, or comma-separated).\n" +
+        "                              Default: NOBODY but the function owner (ADR-0054). Name the role your\n" +
+        "                              SERVER connects as — never a client-facing role (anon/authenticated):\n" +
+        "                              the function trusts the claims it is handed, so this list is the write\n" +
+        "                              path's entire trust boundary. It is part of the artifact fingerprint, so\n" +
+        "                              pass the SAME roles to --check and to createSyncServer.\n" +
         "  pgxsinkit-generate --utilities [--check] --name <folder> [--project-dir .] [--config drizzle.config.ts] [--out drizzle]\n" +
         "  pgxsinkit-generate --events [--check] --registry <path> [--export registry] [--project-dir .] [--name event_lane_artifact] [--config drizzle.config.ts] [--out drizzle]",
     );
@@ -81,6 +100,7 @@ function parseArgs(argv: string[]) {
     utilities,
     events,
     functionSchema,
+    grantExecuteTo,
     registryPath,
     projectDir,
     migrationName: migrationName ?? (events ? "event_lane_artifact" : "sync_artifact"),
@@ -213,6 +233,17 @@ function findNewMigrationFile(drizzleDir: string): string | null {
   return null;
 }
 
+/** The renderer options both `--check` and the generate path derive from the same parsed flags. */
+function buildRenderOptions(options: {
+  functionSchema: string | undefined;
+  grantExecuteTo: readonly string[];
+}): ApplyFunctionRenderOptions {
+  return {
+    ...(options.functionSchema ? { functionSchema: options.functionSchema } : {}),
+    ...(options.grantExecuteTo.length > 0 ? { grantExecuteTo: options.grantExecuteTo } : {}),
+  };
+}
+
 /**
  * `--check` (ADR-0018): the read-only, pre-deploy half of apply-function drift detection. Computes the
  * fingerprint the apply function SHOULD carry for this registry + applier codegen and asserts that a
@@ -227,13 +258,13 @@ async function runCheck(
     drizzleConfig: string | undefined;
     outDir: string | undefined;
     functionSchema: string | undefined;
+    grantExecuteTo: readonly string[];
     label: string;
   },
 ): Promise<void> {
-  const fingerprint = expectedApplyFingerprint(
-    registry,
-    options.functionSchema ? { functionSchema: options.functionSchema } : {},
-  );
+  // ADR-0054: `grantExecuteTo` is part of the fingerprinted body, so `--check` must be handed the SAME
+  // roles the artifact was generated with — otherwise it reports drift on a perfectly current artifact.
+  const fingerprint = expectedApplyFingerprint(registry, buildRenderOptions(options));
 
   const drizzleDir = await resolveDrizzleOutDir(options.projectDir, options.drizzleConfig, options.outDir);
   if (!drizzleDir) {
@@ -302,15 +333,23 @@ function writeUtilitiesMigration(drizzleDir: string, folderName: string): string
   // The snapshot mirrors a hand-authored pre-baseline (see board-drizzle/*_board_prereqs): the function
   // is not part of drizzle-kit's tracked DDL model, so the snapshot's `ddl` is empty and it roots the
   // chain at the zero id. `version`/`dialect` match the kit's postgres snapshot format.
-  const snapshot = {
-    id: randomUUID(),
-    prevIds: [ZERO_MIGRATION_ID],
-    version: "8",
-    dialect: "postgres",
-    ddl: [] as unknown[],
-    renames: [] as unknown[],
-  };
-  writeFileSync(join(dir, "snapshot.json"), `${JSON.stringify(snapshot, null, 2)}\n`);
+  //
+  // RE-EMIT KEEPS THE EXISTING IDENTITY. The next folder in the chain records this snapshot's `id` in
+  // its own `prevIds`, so minting a fresh UUID on every run would BREAK the chain of any consumer who
+  // re-emits this folder in place (which ADR-0054 asks them to do, to pick up the clock function's
+  // hardened ACL). Only the SQL is re-rendered; the snapshot is left byte-identical where one exists.
+  const snapshotFile = join(dir, "snapshot.json");
+  if (!existsSync(snapshotFile)) {
+    const snapshot = {
+      id: randomUUID(),
+      prevIds: [ZERO_MIGRATION_ID],
+      version: "8",
+      dialect: "postgres",
+      ddl: [] as unknown[],
+      renames: [] as unknown[],
+    };
+    writeFileSync(snapshotFile, `${JSON.stringify(snapshot, null, 2)}\n`);
+  }
 
   return migrationFile;
 }
@@ -445,6 +484,7 @@ async function main() {
     utilities,
     events,
     functionSchema,
+    grantExecuteTo,
     registryPath,
     projectDir,
     migrationName,
@@ -479,13 +519,17 @@ async function main() {
       drizzleConfig,
       outDir,
       functionSchema,
+      grantExecuteTo,
       label: exportName ?? "(conventional registry)",
     });
     return;
   }
 
   console.log(`Generating DDL for ${Object.keys(registry).length} table(s)...`);
-  const ddl = buildPlpgsqlBatchFunctionDdl(registry);
+  // Both render inputs must reach the renderer here, exactly as `--check` computes them: a
+  // `--function-schema` that only reached `--check` silently generated an unqualified artifact whose
+  // fingerprint could never match (and `--grant-execute-to` would have the same failure mode).
+  const ddl = buildPlpgsqlBatchFunctionDdl(registry, buildRenderOptions({ functionSchema, grantExecuteTo }));
 
   console.log(`Creating empty migration via drizzle-kit generate --custom --name ${migrationName}...`);
   runDrizzleGenerate(projectDir, migrationName, drizzleConfig);

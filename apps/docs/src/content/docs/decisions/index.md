@@ -66,5 +66,6 @@ complete as ADRs are added.
 - [ADR-0051 — Content-addressed validate caching and per-file unit-test selection](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0051-content-addressed-test-selection.md)
 - [ADR-0052 — Row classification and registry invariants](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0052-row-classification-and-registry-invariants.md)
 - [ADR-0053 — Queue-shaped event ingestion as a first-class lane](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0053-queue-shaped-event-ingestion.md)
+- [ADR-0054 — The apply function is deny-by-default](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0054-apply-function-deny-by-default.md)
 
 <!-- adr:list:end -->

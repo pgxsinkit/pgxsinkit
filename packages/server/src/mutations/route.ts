@@ -65,13 +65,19 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null,
   startupVerification: StartupVerificationMode = "in-process",
   logTimings = false,
+  // ADR-0054: the roles the installed artifact was generated with. The ACL is INSIDE the fingerprinted
+  // body, so the expected fingerprint below is only reproducible when this matches the generate flags.
+  applyFunctionGrantExecuteTo: readonly string[] = [],
 ): { batch: FetchHandler; authoritative: FetchHandler } {
   let startupReadyPromise: Promise<void> | undefined;
 
   // ADR-0030: the fingerprint this server expects for its registry + applier codegen, computed ONCE per
   // server instance. Every `executePlpgsqlBatch` passes it so the installed apply function can verify
   // itself in-body (SQLSTATE 'PXS01' on drift) — this replaces the deleted startup verify.
-  const expectedFingerprint = expectedApplyFingerprint(registry);
+  const expectedFingerprint = expectedApplyFingerprint(
+    registry,
+    applyFunctionGrantExecuteTo.length > 0 ? { grantExecuteTo: applyFunctionGrantExecuteTo } : {},
+  );
 
   // Per-request timing scratch (opt-in). authMs/applyMs are filled at the narrow phase call sites inside
   // the handler; totalMs + status are measured by `withTiming` wrapping the returned handler. A fresh

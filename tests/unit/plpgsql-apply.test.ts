@@ -51,17 +51,24 @@ const projectedPlpgsqlRegistry = defineSyncRegistry({
   }),
 });
 
-/**
- * The column names a table branch offers as candidates for one of its two runtime column lists: the
- * INSERT list (`INTO v_cols, v_vals`) or the UPDATE SET list (`INTO v_set`). Each is a `(VALUES
- * ('col','type'), …) AS col_types(col_name, col_type)` block the generated function intersects with the
- * group's payload signature — so a column absent here can never be written by a payload key.
- */
-function candidateColumns(ddl: string, tableName: string, into: "v_cols, v_vals" | "v_set"): string[] {
+/** One table branch of the generated DDL, sliced out by its `ELSIF v_table = '<name>'` guard. */
+function tableBranch(ddl: string, tableName: string): string {
   const branchStart = ddl.indexOf(`ELSIF v_table = '${tableName}' THEN`);
   expect(branchStart).toBeGreaterThan(-1);
   const nextBranch = ddl.indexOf("ELSIF v_table = '", branchStart + 1);
-  const branch = ddl.slice(branchStart, nextBranch === -1 ? undefined : nextBranch);
+  return ddl.slice(branchStart, nextBranch === -1 ? undefined : nextBranch);
+}
+
+/**
+ * The `(column name, payload value expression)` candidate rows a table branch offers for one of its two
+ * runtime column lists: the INSERT list (`INTO v_cols, v_vals`) or the UPDATE SET list (`INTO v_set`).
+ * Each is a `(VALUES ('col','<expr>'), …) AS col_types(col_name, col_value)` block the generated
+ * function intersects with the group's payload signature — so a column absent here can never be written
+ * by a payload key. Rows are one per line, and only a row STARTS a line, so the value expression (which
+ * carries doubled single quotes of its own) cannot confuse the split.
+ */
+function candidateRows(ddl: string, tableName: string, into: "v_cols, v_vals" | "v_set"): Array<[string, string]> {
+  const branch = tableBranch(ddl, tableName);
 
   const intoAt = branch.indexOf(`INTO ${into}`);
   if (intoAt === -1) {
@@ -70,7 +77,28 @@ function candidateColumns(ddl: string, tableName: string, into: "v_cols, v_vals"
   }
   const valuesAt = branch.indexOf("FROM (VALUES", intoAt);
   const valuesEnd = branch.indexOf(") AS col_types", valuesAt);
-  return [...branch.slice(valuesAt, valuesEnd).matchAll(/\('([^']+)', '[^']*'\)/g)].map((match) => match[1]!);
+  return branch
+    .slice(valuesAt, valuesEnd)
+    .split("\n")
+    .flatMap((line) => {
+      const match = /^\('([^']*)', '(.*)'\),?$/.exec(line.trim());
+      return match ? [[match[1]!, match[2]!] as [string, string]] : [];
+    });
+}
+
+/** Just the candidate column NAMES of one runtime column list. */
+function candidateColumns(ddl: string, tableName: string, into: "v_cols, v_vals" | "v_set"): string[] {
+  return candidateRows(ddl, tableName, into).map(([name]) => name);
+}
+
+/** The payload value expression a branch reads one column with, in one of its two column lists. */
+function candidateExpression(
+  ddl: string,
+  tableName: string,
+  into: "v_cols, v_vals" | "v_set",
+  columnName: string,
+): string | undefined {
+  return candidateRows(ddl, tableName, into).find(([name]) => name === columnName)?.[1];
 }
 
 describe("plpgsql batch function generator", () => {
@@ -150,7 +178,7 @@ describe("plpgsql batch function generator", () => {
   });
 
   // A create-only managed field is stamped at birth and INERT thereafter: it must not appear among the
-  // UPDATE SET candidates (the `(col_name, col_type)` VALUES list `v_set` is built from), exactly as
+  // UPDATE SET candidates (the `(col_name, col_value)` VALUES list `v_set` is built from), exactly as
   // create-managed columns are absent from the INSERT candidate list.
   it("omits create-only managed columns from the UPDATE SET candidate list", () => {
     const ddl = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry);
@@ -198,6 +226,107 @@ describe("plpgsql batch function generator", () => {
     expect(ddl).toContain("set_config('role', COALESCE(NULLIF(_previous_role, ''), 'none'), true)");
     expect(ddl).toContain("set_config('request.jwt.claims', COALESCE(_previous_claims, ''), true)");
     expect(ddl).toContain("set_config('request.jwt.claim.sub', COALESCE(_previous_claim_sub, ''), true)");
+  });
+});
+
+// ADR-0054: the artifact is deny-by-default. It DROPs the function on every install, so Postgres's
+// PUBLIC default (and Supabase's default-privilege grants to the anon/authenticated/service_role trio)
+// come back every time — which is why the revokes are unconditional rather than a one-off hardening.
+const APPLY_SIGNATURE = `"pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text)`;
+
+/** The ADR-0054 ACL block: everything the body emits after the function's closing `$$;`. */
+function aclBlock(ddl: string): string {
+  const at = ddl.indexOf("-- ADR-0054");
+  expect(at).toBeGreaterThan(-1);
+  return ddl.slice(at, ddl.indexOf("COMMENT ON FUNCTION"));
+}
+
+/** A guarded statement exactly as the shared `buildRoleGuardedStatement` idiom renders it. */
+function guarded(roleName: string, statement: string): string {
+  return [
+    "DO $$",
+    "BEGIN",
+    `  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN`,
+    `    EXECUTE '${statement}';`,
+    "  END IF;",
+    "END;",
+    "$$;",
+  ].join("\n");
+}
+
+describe("deny-by-default apply-function ACL (ADR-0054)", () => {
+  it("revokes PUBLIC unconditionally and the Supabase trio through the role-existence guard, granting nobody", () => {
+    const acl = aclBlock(buildPlpgsqlBatchFunctionDdl(demoSyncRegistry));
+
+    // Unconditional: PUBLIC always exists, and every install recreates the exposure.
+    expect(acl).toContain(`REVOKE ALL ON FUNCTION ${APPLY_SIGNATURE} FROM PUBLIC;`);
+    // Guarded: PGlite lanes and non-Supabase clusters have no such roles, and a bare REVOKE would error.
+    for (const role of ["anon", "authenticated", "service_role"]) {
+      expect(acl).toContain(guarded(role, `REVOKE ALL ON FUNCTION ${APPLY_SIGNATURE} FROM "${role}"`));
+    }
+    // Default is owner-only: no GRANT of any kind.
+    expect(acl).not.toContain("GRANT");
+  });
+
+  it("emits the ACL INSIDE the fingerprinted body, before the COMMENT that stamps it", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry);
+
+    // ADR-0054 decision 3: grants outside the hashed body would let a stale, PUBLIC-executable install
+    // run forever while `--check` stays green. Order pins that: revokes precede the fingerprint stamp.
+    expect(ddl.indexOf("REVOKE ALL ON FUNCTION")).toBeGreaterThan(ddl.indexOf("CREATE OR REPLACE FUNCTION"));
+    expect(ddl.indexOf("REVOKE ALL ON FUNCTION")).toBeLessThan(ddl.indexOf("COMMENT ON FUNCTION"));
+  });
+
+  it("grants EXECUTE to each configured role, guarded, and after the revokes", () => {
+    const acl = aclBlock(
+      buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: ["app_writer", "reporter"] }),
+    );
+
+    for (const role of ["app_writer", "reporter"]) {
+      expect(acl).toContain(guarded(role, `GRANT EXECUTE ON FUNCTION ${APPLY_SIGNATURE} TO "${role}"`));
+    }
+    // Revoke-then-grant: naming a revoked role in grantExecuteTo must end as a grant, not a revoke.
+    expect(acl.indexOf("GRANT EXECUTE")).toBeGreaterThan(acl.lastIndexOf("REVOKE ALL"));
+  });
+
+  it("lets a deployment deliberately re-grant one of the revoked roles (the grant wins)", () => {
+    const acl = aclBlock(buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: ["authenticated"] }));
+
+    expect(acl).toContain(guarded("authenticated", `REVOKE ALL ON FUNCTION ${APPLY_SIGNATURE} FROM "authenticated"`));
+    expect(acl).toContain(guarded("authenticated", `GRANT EXECUTE ON FUNCTION ${APPLY_SIGNATURE} TO "authenticated"`));
+    expect(acl.indexOf("GRANT EXECUTE")).toBeGreaterThan(acl.indexOf("REVOKE ALL ON FUNCTION"));
+  });
+
+  it("refuses a role name that is not a plain SQL identifier, empty, over-long, or duplicated", () => {
+    // Fail-closed at GENERATE time: a role name reaches the DDL as an identifier AND as a pg_roles
+    // literal, so anything that would need quoting/escaping games is refused instead of emitted.
+    for (const role of ['app"; DROP TABLE x --', "app writer", "app-writer", "", "   ", "1writer"]) {
+      expect(() => buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: [role] })).toThrow(
+        /grantExecuteTo/,
+      );
+    }
+    expect(() => buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: ["a".repeat(64)] })).toThrow(
+      /63-byte/,
+    );
+    expect(() => buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: ["writer", "writer"] })).toThrow(
+      /more than once/,
+    );
+  });
+
+  it("installs with the ACL applied — owner-only, PUBLIC stripped", async () => {
+    const db = await createFreshTestPGlite();
+    const composite = compositeThingsRegistry.compositeThings.table;
+    await createTablesFromSchema(db, { composite });
+    await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry));
+
+    const result = await db.query<{ acl: string | null }>(
+      `SELECT proacl::text AS acl FROM pg_proc WHERE proname = 'pgxsinkit_apply_mutations'`,
+    );
+    const acl = result.rows[0]?.acl ?? "";
+    // A non-null ACL with no `=X/` entry for PUBLIC (which renders as a bare `=X/owner` grantee).
+    expect(acl).not.toBe("");
+    expect(acl).not.toContain("{=X/");
+    expect(acl).not.toContain(",=X/");
   });
 });
 
@@ -267,6 +396,199 @@ async function applyBatch(db: Awaited<ReturnType<typeof createFreshTestPGlite>>,
     [JSON.stringify(batch), fp],
   );
 }
+
+// Array columns: Drizzle carries dimensionality SEPARATELY from `getSQLType()` (which returns the
+// ELEMENT type), so reading only the type string emitted `(x.p->>'source_ids')::uuid` for a `uuid[]`
+// — every non-null array write died with 22P02, `[]` included.
+const arrayItemsRegistry = defineSyncRegistry({
+  arrayItems: defineSyncTable({
+    tableName: "array_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+      sourceIds: uuid("source_ids").array(),
+      tags: varchar("tags", { length: 40 }).array(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+    }),
+    mode: "readwrite",
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+
+function arrayExpression(columnName: string, elementType: string): string {
+  return (
+    `CASE WHEN jsonb_typeof(x.p->''${columnName}'') = ''array'' THEN ` +
+    `ARRAY(SELECT e FROM jsonb_array_elements_text(x.p->''${columnName}'') WITH ORDINALITY AS a(e, ord) ORDER BY ord)` +
+    `::${elementType}[] END`
+  );
+}
+
+function arrayItemsBatch(
+  kind: "create" | "update",
+  entityKey: Record<string, string>,
+  payload: Record<string, unknown>,
+  mutationId: string,
+) {
+  return {
+    mutations: [{ tableName: "array_items", kind, entityKey, payload, mutationId, mutationSeq: 1 }],
+  };
+}
+
+describe("array columns in the write path", () => {
+  it("expands a one-dimensional array element-wise with a terminal typed cast, in both column lists", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(arrayItemsRegistry);
+
+    for (const into of ["v_cols, v_vals", "v_set"] as const) {
+      expect(candidateExpression(ddl, "array_items", into, "source_ids")).toBe(arrayExpression("source_ids", "uuid"));
+      // The element type carries its type arguments; the terminal cast IS the type check (no allowlist).
+      expect(candidateExpression(ddl, "array_items", into, "tags")).toBe(arrayExpression("tags", "varchar(40)"));
+      // Scalar columns keep the long-standing `->>` form byte-for-byte.
+      expect(candidateExpression(ddl, "array_items", into, "label")).toBe(`(x.p->>''label'')::varchar(120)`);
+    }
+    // Never the silently-wrong scalar cast that killed every array write.
+    expect(ddl).not.toContain(`(x.p->>''source_ids'')::uuid`);
+  });
+
+  it("round-trips empty, non-empty and null arrays through create and update", async () => {
+    const db = await createFreshTestPGlite();
+    const arrayItems = arrayItemsRegistry.arrayItems.table;
+    await createTablesFromSchema(db, { arrayItems });
+    await db.exec(buildPlpgsqlBatchFunctionDdl(arrayItemsRegistry));
+
+    const idEmpty = "40000000-0000-4000-8000-00000000000e";
+    const idFull = "40000000-0000-4000-8000-00000000000f";
+    const idNull = "40000000-0000-4000-8000-00000000000d";
+    const first = "50000000-0000-4000-8000-000000000001";
+    const second = "50000000-0000-4000-8000-000000000002";
+
+    await applyBatch(db, arrayItemsBatch("create", { id: idEmpty }, { id: idEmpty, label: "e", source_ids: [] }, "m1"));
+    await applyBatch(
+      db,
+      // Element order must survive: the emitted expansion orders by the JSON array's ordinality.
+      arrayItemsBatch("create", { id: idFull }, { id: idFull, label: "f", source_ids: [second, first] }, "m2"),
+    );
+    await applyBatch(
+      db,
+      // A JSON null is SQL NULL, NOT an empty array — mirroring the scalar `(x.p->>'col')::type` case.
+      arrayItemsBatch("create", { id: idNull }, { id: idNull, label: "n", source_ids: null }, "m3"),
+    );
+
+    const created = await db.query<{ id: string; source_ids: string[] | null }>(
+      `SELECT id, source_ids FROM array_items ORDER BY label`,
+    );
+    expect(created.rows).toEqual([
+      { id: idEmpty, source_ids: [] },
+      { id: idFull, source_ids: [second, first] },
+      { id: idNull, source_ids: null },
+    ]);
+
+    await applyBatch(db, arrayItemsBatch("update", { id: idEmpty }, { source_ids: [first] }, "m4"));
+    await applyBatch(db, arrayItemsBatch("update", { id: idFull }, { source_ids: [] }, "m5"));
+    await applyBatch(db, arrayItemsBatch("update", { id: idNull }, { source_ids: null }, "m6"));
+
+    const updated = await db.query<{ id: string; source_ids: string[] | null }>(
+      `SELECT id, source_ids FROM array_items ORDER BY label`,
+    );
+    expect(updated.rows).toEqual([
+      { id: idEmpty, source_ids: [first] },
+      { id: idFull, source_ids: [] },
+      { id: idNull, source_ids: null },
+    ]);
+  });
+
+  it("leaves an array column untouched when its key is absent from the payload", async () => {
+    const db = await createFreshTestPGlite();
+    const arrayItems = arrayItemsRegistry.arrayItems.table;
+    await createTablesFromSchema(db, { arrayItems });
+    await db.exec(buildPlpgsqlBatchFunctionDdl(arrayItemsRegistry));
+
+    const id = "40000000-0000-4000-8000-0000000000aa";
+    const first = "50000000-0000-4000-8000-000000000001";
+    await applyBatch(db, arrayItemsBatch("create", { id }, { id, label: "a", source_ids: [first] }, "m1"));
+    // Absent key ⇒ the column is not in the group's signature, so the statement never mentions it —
+    // exactly the scalar semantics.
+    await applyBatch(db, arrayItemsBatch("update", { id }, { label: "b" }, "m2"));
+
+    const rows = await db.query<{ label: string; source_ids: string[] | null }>(
+      `SELECT label, source_ids FROM array_items`,
+    );
+    expect(rows.rows).toEqual([{ label: "b", source_ids: [first] }]);
+  });
+
+  it("refuses a multi-dimensional array at generate time, naming the table and column", () => {
+    const multiDimensional = defineSyncRegistry({
+      grids: defineSyncTable({
+        tableName: "grid_items",
+        makeColumns: () => ({
+          id: uuid("id").primaryKey(),
+          matrix: integer("matrix").array("[][]"),
+          updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+        }),
+        mode: "readwrite",
+        conflictPolicy: "last-write-wins",
+        governance: {
+          managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+        },
+      }),
+    });
+
+    expect(() => buildPlpgsqlBatchFunctionDdl(multiDimensional)).toThrow(
+      /grid_items\.matrix is a 2-dimensional array; multi-dimensional arrays are not supported/,
+    );
+  });
+
+  it("refuses an array primary-key column at generate time", () => {
+    const arrayPk = defineSyncRegistry({
+      keyedByArray: defineSyncTable({
+        tableName: "array_pk_items",
+        makeColumns: () => ({
+          memberIds: uuid("member_ids").array().notNull(),
+          label: varchar("label", { length: 120 }).notNull(),
+          updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+        }),
+        mode: "readwrite",
+        conflictPolicy: "last-write-wins",
+        primaryKey: ["member_ids"],
+        governance: {
+          managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+        },
+      }),
+    });
+
+    expect(() => buildPlpgsqlBatchFunctionDdl(arrayPk)).toThrow(
+      /array_pk_items\.member_ids is an array column; array columns are not supported as primary keys/,
+    );
+  });
+
+  it("refuses a managed field on an array column at generate time", () => {
+    const arrayManaged = defineSyncRegistry({
+      stamped: defineSyncTable({
+        tableName: "array_managed_items",
+        makeColumns: () => ({
+          id: uuid("id").primaryKey(),
+          owners: uuid("owners").array(),
+          updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+        }),
+        mode: "readwrite",
+        conflictPolicy: "last-write-wins",
+        governance: {
+          managedFields: [
+            // Both strategies stamp ONE scalar, so an array target could only ever be a type error.
+            { column: "owners", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
+            { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+          ],
+        },
+      }),
+    });
+
+    expect(() => buildPlpgsqlBatchFunctionDdl(arrayManaged)).toThrow(
+      /managed field array_managed_items\.owners is an array column/,
+    );
+  });
+});
 
 describe("canonical entity identity — composite + renamed PK (ADR-0012)", () => {
   it("matches update and delete over the full server primary-key tuple", () => {

@@ -11,3 +11,33 @@ CREATE OR REPLACE FUNCTION public.pgxsinkit_clock_us()
 AS $$
   SELECT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000) AS BIGINT)
 $$;
+
+-- Deny by default, then grant back deliberately (ADR-0054 decision 5). Stated on every install: a
+-- first install on a Supabase-shaped cluster otherwise picks up ALTER DEFAULT PRIVILEGES ... GRANT ALL
+-- ON FUNCTIONS TO anon, authenticated, service_role, so the posture is declared here, never inherited.
+-- The grants are real: a column DEFAULT calling this clock is evaluated as whatever role writes the row.
+REVOKE ALL ON FUNCTION public.pgxsinkit_clock_us() FROM PUBLIC;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.pgxsinkit_clock_us() TO "anon"';
+  END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.pgxsinkit_clock_us() TO "authenticated"';
+  END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.pgxsinkit_clock_us() TO "service_role"';
+  END IF;
+END;
+$$;

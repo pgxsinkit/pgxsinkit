@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { count, eq, sql } from "drizzle-orm";
+import { asc, count, eq, sql } from "drizzle-orm";
+import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
+import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import {
   authorsTable,
   demoSyncRegistry,
@@ -1360,6 +1362,231 @@ describe("pgxsinkit_clock_us canonical microsecond clock", () => {
     });
 
     expect(second).toBeGreaterThan(first);
+  });
+});
+
+// ADR-0054 + array columns in the write path. Both need the REAL installed function on a
+// Supabase-shaped cluster: the ACL is invisible to a pure renderer test, and an array cast that is
+// wrong dies at the DB, not in a payload builder. The scratch table is created by this suite (it is
+// not part of the committed schema) and its registry is installed for the duration.
+const arrayPrefsRegistry = defineSyncRegistry({
+  arrayPrefs: defineSyncTable({
+    tableName: "arrayPrefs",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+      sourceIds: uuid("source_ids").array(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+    }),
+    mode: "readwrite",
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+
+const arrayPrefsTable = arrayPrefsRegistry.arrayPrefs.table;
+
+/** Every message down an error's `cause` chain, joined — drizzle wraps PG errors and buries the SQLSTATE text. */
+function collectErrorChainText(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  while (current != null && parts.length < 10) {
+    if (current instanceof Error) {
+      parts.push(current.message);
+      current = current.cause;
+    } else {
+      parts.push(typeof current === "string" ? current : (JSON.stringify(current) ?? "<unstringifiable>"));
+      current = null;
+    }
+  }
+  return parts.join(" | ");
+}
+
+describe("apply-function ACL + array columns (ADR-0054)", () => {
+  let server!: ReturnType<typeof createSyncServer<typeof arrayPrefsRegistry>>;
+  const serverDb = createServerDb(arrayPrefsRegistry, env.databaseUrl);
+
+  const applySignature = "pgxsinkit_apply_mutations(jsonb,text,boolean,boolean,jsonb,text)";
+
+  /** The fingerprint the CURRENTLY INSTALLED function is stamped with (ADR-0030 self-verification). */
+  async function installedFingerprint(): Promise<string> {
+    const result = await serverDb.db.execute<{ fingerprint: string | null }>(
+      sql`SELECT obj_description(to_regprocedure(${`public.${applySignature}`})::oid, 'pg_proc') AS "fingerprint"`,
+    );
+    return Array.from(result as Iterable<{ fingerprint: string | null }>)[0]?.fingerprint ?? "";
+  }
+
+  /**
+   * Call the installed function DIRECTLY as `authenticated` — the shape of the attack ADR-0054 closes:
+   * a caller who reaches the function chooses its own `p_user_claims`, so the ACL is the only control.
+   * `SET LOCAL ROLE` inside a transaction proves the ACL for a role the test session is a member of;
+   * it is NOT a full PostgREST/HTTP auth path (there is none in this harness), and it does not need to
+   * be — the privilege check Postgres runs on the function call is identical either way.
+   */
+  async function callAsAuthenticated(fingerprint: string): Promise<void> {
+    await serverDb.db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL ROLE authenticated`);
+      await tx.execute(
+        sql`SELECT * FROM pgxsinkit_apply_mutations(${JSON.stringify({ mutations: [] })}::text::jsonb, ${"/api/mutations"}, ${false}, ${false}, ${JSON.stringify({ sub: DEMO_USER1_ID, role: "authenticated" })}::text::jsonb, ${fingerprint})`,
+      );
+    });
+  }
+
+  beforeAll(async () => {
+    const provisioningServer = createSyncServer({ registry: arrayPrefsRegistry, db: serverDb.db });
+
+    try {
+      await createTablesFromSchema(provisioningServer.drizzle, { arrayPrefsTable });
+      await installPlpgsqlBatchFunction(provisioningServer.drizzle, arrayPrefsRegistry);
+    } finally {
+      await provisioningServer.stop();
+    }
+
+    server = createSyncServer({
+      registry: arrayPrefsRegistry,
+      db: serverDb.db,
+      resolveAuthClaims: () => ({ role: "authenticated", sub: DEMO_USER1_ID }),
+    });
+  });
+
+  beforeEach(async () => {
+    await server.drizzle.delete(arrayPrefsTable);
+  });
+
+  afterAll(async () => {
+    await server.stop();
+    await serverDb.close();
+  });
+
+  it("refuses a direct call from `authenticated` — the default install grants EXECUTE to nobody", async () => {
+    const fingerprint = await installedFingerprint();
+    expect(fingerprint).not.toBe("");
+
+    // 42501 insufficient_privilege, raised at call resolution — before any claim in p_user_claims is
+    // read, which is exactly why the forged-claims RPC is closed rather than merely validated.
+    const refusal = await callAsAuthenticated(fingerprint).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+
+    expect(refusal).not.toBeNull();
+    // Drizzle wraps the Postgres error, and the wrapper's own message carries only the failed query
+    // text — the 42501 lives down the `cause` chain, so match against every message in it.
+    expect(collectErrorChainText(refusal)).toMatch(/permission denied for function/i);
+  });
+
+  it("admits `authenticated` only after an explicit grantExecuteTo install", async () => {
+    // A granted role's forged claims are trusted BY DESIGN — the server is the component trusted to
+    // verify claims before passing them, so the grant list is the write path's entire trust boundary
+    // and must name only SERVER roles. `authenticated` here is the proof of the grant path, not advice.
+    await installPlpgsqlBatchFunction(server.drizzle, arrayPrefsRegistry, { grantExecuteTo: ["authenticated"] });
+
+    try {
+      // The fingerprint moved with the ACL (it is inside the hashed body), so read it back rather than
+      // reusing the ungranted one — passing a stale one would fail with PXS01, not with a privilege error.
+      await callAsAuthenticated(await installedFingerprint());
+    } finally {
+      // Restore the owner-only artifact so this suite leaves the database as it found it.
+      await installPlpgsqlBatchFunction(server.drizzle, arrayPrefsRegistry);
+    }
+  });
+
+  it("round-trips an empty, a non-empty and a null uuid[] through create and update", async () => {
+    const idEmpty = "6a52f7d0-0000-4000-8000-00000000000e";
+    const idFull = "6a52f7d0-0000-4000-8000-00000000000f";
+    const idNull = "6a52f7d0-0000-4000-8000-00000000000d";
+    const first = "7b63a8e1-0000-4000-8000-000000000001";
+    const second = "7b63a8e1-0000-4000-8000-000000000002";
+
+    const created = await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id: idEmpty },
+            mutationId: "c1a0b6b4-0000-4000-8000-00000000000e",
+            mutationSeq: 1,
+            kind: "create",
+            payload: { id: idEmpty, label: "empty", source_ids: [] },
+          }),
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id: idFull },
+            mutationId: "c1a0b6b4-0000-4000-8000-00000000000f",
+            mutationSeq: 2,
+            kind: "create",
+            payload: { id: idFull, label: "full", source_ids: [second, first] },
+          }),
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id: idNull },
+            mutationId: "c1a0b6b4-0000-4000-8000-00000000000d",
+            mutationSeq: 3,
+            kind: "create",
+            payload: { id: idNull, label: "null", source_ids: null },
+          }),
+        ],
+      }),
+    });
+
+    await expectResponseStatus(created, 200);
+
+    const afterCreate = await server.drizzle.select().from(arrayPrefsTable).orderBy(asc(arrayPrefsTable.label));
+    expect(afterCreate.map((row) => [row.label, row.sourceIds])).toEqual([
+      // An empty array is a VALUE the client meant to write, never NULL...
+      ["empty", []],
+      // ...element order is the client's array order...
+      ["full", [second, first]],
+      // ...and a JSON null is SQL NULL, matching the scalar cast's semantics.
+      ["null", null],
+    ]);
+
+    const updated = await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id: idEmpty },
+            mutationId: "d2b1c7c5-0000-4000-8000-00000000000e",
+            mutationSeq: 4,
+            kind: "update",
+            payload: { source_ids: [first] },
+          }),
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id: idFull },
+            mutationId: "d2b1c7c5-0000-4000-8000-00000000000f",
+            mutationSeq: 5,
+            kind: "update",
+            payload: { source_ids: null },
+          }),
+          // An update that never mentions the array column must leave it alone.
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id: idNull },
+            mutationId: "d2b1c7c5-0000-4000-8000-00000000000d",
+            mutationSeq: 6,
+            kind: "update",
+            payload: { label: "still null" },
+          }),
+        ],
+      }),
+    });
+
+    await expectResponseStatus(updated, 200);
+
+    const afterUpdate = await server.drizzle.select().from(arrayPrefsTable).orderBy(asc(arrayPrefsTable.id));
+    expect(afterUpdate.map((row) => [row.id, row.sourceIds])).toEqual([
+      [idNull, null],
+      [idEmpty, [first]],
+      [idFull, null],
+    ]);
   });
 });
 

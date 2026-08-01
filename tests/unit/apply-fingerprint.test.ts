@@ -71,6 +71,25 @@ describe("apply-function fingerprint (ADR-0018)", () => {
     expect(expectedApplyFingerprint(baseRegistry, { functionSchema: "custom" })).not.toBe(expected);
   });
 
+  // ADR-0054 decision 3: the ACL is hashed WITH the body, so who may execute is part of the artifact's
+  // identity. An install that lost the revokes — or that grants a role this server does not expect —
+  // is a different fingerprint and is refused at call time, instead of running on while `--check`
+  // reports green.
+  it("changes when grantExecuteTo changes, and is stable for the same list", () => {
+    const granted = expectedApplyFingerprint(baseRegistry, { grantExecuteTo: ["app_writer"] });
+
+    expect(granted).not.toBe(expected);
+    expect(expectedApplyFingerprint(itemsRegistry(), { grantExecuteTo: ["app_writer"] })).toBe(granted);
+    expect(expectedApplyFingerprint(baseRegistry, { grantExecuteTo: ["other_writer"] })).not.toBe(granted);
+    expect(expectedApplyFingerprint(baseRegistry, { grantExecuteTo: ["app_writer", "reporter"] })).not.toBe(granted);
+    // An explicitly empty list IS the default (owner-only), not a third state.
+    expect(expectedApplyFingerprint(baseRegistry, { grantExecuteTo: [] })).toBe(expected);
+  });
+
+  it("refuses an invalid grantExecuteTo role rather than fingerprinting an artifact it cannot emit", () => {
+    expect(() => expectedApplyFingerprint(baseRegistry, { grantExecuteTo: ["app writer"] })).toThrow(/grantExecuteTo/);
+  });
+
   it("installs the COMMENT so obj_description reads back the exact fingerprint", async () => {
     const db = await createFreshTestPGlite();
     await db.exec(`CREATE TABLE fp_items (

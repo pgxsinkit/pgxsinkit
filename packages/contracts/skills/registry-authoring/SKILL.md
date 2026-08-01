@@ -59,7 +59,11 @@ widgets: defineSyncTable({
 **Column types don't constrain sync.** The read-path backfill picks a bulk-insert tier (COPY / JSON /
 per-row `INSERT`) statically from a table's Drizzle column types; enum columns and `GENERATED ALWAYS AS
 IDENTITY` primary keys are fully supported (labels round-trip through COPY/JSON, a synced identity PK keeps
-the server's value via `OVERRIDING SYSTEM VALUE`), so never avoid them for sync's sake.
+the server's value via `OVERRIDING SYSTEM VALUE`), so never avoid them for sync's sake. **Array columns are
+supported at ONE dimension** (`uuid("source_ids").array()`) on both paths: a write sends a JSON array, `[]`
+stores an empty array and JSON `null` stores NULL, element order preserved. Everything else about arrays
+fails at GENERATE time, named — `.array("[][]")` (multi-dimensional), an array PK column, and an array
+`managedFields` target (both strategies stamp one scalar).
 
 ## The `primaryKey` spec emits the physical PRIMARY KEY — it is the single source of truth
 
@@ -78,12 +82,11 @@ produce), so pgxsinkit DDL matches plain-Postgres inline-PK DDL and drizzle-kit 
 ## `applyMode` — CDC insert-apply policy (default stays strict)
 
 `applyMode` chooses how a **server CDC insert** for this table is applied on the client (ADR-0045).
-
-- **`"insert"` (default):** a plain INSERT with no conflict clause, so a genuine primary-key collision
-  **surfaces** (the ADR-0014 invariant — a synced cache table is server-authoritative, and a duplicate insert
-  is a real bug).
-- **`"upsert"`:** applied idempotently as `INSERT … ON CONFLICT (pk) DO UPDATE` (or a pk-targeted
-  `DO NOTHING` for a pk-only table); the authoritative server row overwrites the provisional local one.
+**`"insert"` (default)** is a plain INSERT with no conflict clause, so a genuine primary-key collision
+**surfaces** (the ADR-0014 invariant — a synced cache table is server-authoritative, and a duplicate insert
+is a real bug). **`"upsert"`** applies it idempotently as `INSERT … ON CONFLICT (pk) DO UPDATE` (or a
+pk-targeted `DO NOTHING` for a pk-only table), so the authoritative server row overwrites the provisional
+local one.
 
 **Use `"upsert"` only** when this table legitimately receives locally-**derived** provisional rows — a local
 trigger on another synced table writes a row here that the server independently creates too, so its CDC insert
@@ -107,7 +110,7 @@ A managed field is stamped by the apply function under the verified request clai
 The write API **rejects** a payload that _includes_ a managed field, and the create-validation schema
 **omits** managed-on-create fields — so never put `updated_at_us` or a claim-stamped owner in a client
 payload. The optimistic overlay still fills an `authClaim` create field from the decoded claim, so the row
-renders attributed immediately.
+renders attributed immediately. A managed field's target column must be scalar (an array one throws).
 
 ## Omitted columns are invisible to the write path — by design
 
@@ -123,8 +126,7 @@ that is not a writable (projected) column splits into exactly two cases:
   only here and never for a projected-away column (which is rejected, not dropped).
 
 The rule that follows: **write a server-only (omitted) column outside the sync rail** — a server-side
-`UPDATE`, a trigger, or a managed field (`governance.managedFields`). Do not try to set it from a client
-payload; the route rejects it.
+`UPDATE`, a trigger, or a managed field (`governance.managedFields`); the route rejects it in a payload.
 
 ## Read-path filtering: `customWhere` runs in Electric, not Postgres
 
@@ -193,9 +195,9 @@ What the typed form buys: columns stay rename-safe and existence-checked, and th
 **Subqueries nest by interpolation** — wrap one `sql` fragment in another to narrow a fan-out: `` sql`${c(post.offeringId)} in (${memberOfferings(sub)}) and (${c(post.groupId)} is null or ${c(post.groupId)} in (${memberGroups(sub)}))` `` (each `${sub}`
 is its own bound param). Two constraints: the subquery must stay **self-contained**, and the subquery
 `where` is the **flagged Electric preview** — run Electric with `allow_subqueries,tagged_subqueries` or the
-shape fails closed (no rows); on managed Electric Cloud it is activated per source by Electric staff on
-request (no self-serve toggle yet), so ask or self-host. Combine with the function form when the table is
-defined all-in-one: the row's own column comes from `(columns) => …`, the foreign table is imported built.
+shape fails closed (no rows); on managed Electric Cloud, Electric staff activate it per source on request
+(no self-serve toggle yet). Combine with the function form when the table is defined all-in-one: the row's
+own column comes from `(columns) => …`, the foreign table is imported built.
 
 ## RLS: derive read and write from the same Drizzle columns
 
@@ -237,9 +239,8 @@ The registry keeps ONE table's read filter and write policy from drifting. A dom
 several tables and rails, and no registry feature can see that composition. Worked example: an invite table's
 RLS grants an offering-scoped teacher INSERT; an acceptance worker then mints a membership row. Each policy
 is correct alone; together they violate "this offering only ever has one member". The worker's semantics are
-invisible to per-table declarations, so the obligation is permanently the consumer's.
-
-When you add a worker, route, or trigger that writes rows as a CONSEQUENCE of other rows:
+invisible to per-table declarations, so the obligation is permanently the consumer's. When you add a worker,
+route, or trigger that writes rows as a CONSEQUENCE of other rows:
 
 - List the invariants the OUTPUT table participates in, not just the input's — the output is where the
   violation lands — and for each ask whether the composed path enforces it or merely assumes the input row's
@@ -254,10 +255,10 @@ When you add a worker, route, or trigger that writes rows as a CONSEQUENCE of ot
 ## Provision the apply function from the registry
 
 The write path applies through one in-database PL/pgSQL function, `pgxsinkit_apply_mutations`. Generate its
-drizzle-kit migration with the `pgxsinkit-generate` CLI (a `bin` of `@pgxsinkit/server`), run from your
-project, then apply it through your normal migration flow. The apply function and the audit/version column
-DEFAULTs both **call** `public.pgxsinkit_clock_us()`, so the `--utilities` migration that installs that clock
-must be the **first folder in the chain** (hence the early-sorting name):
+drizzle-kit migration with the `pgxsinkit-generate` CLI (a `bin` of `@pgxsinkit/server`) and apply it through
+your normal migration flow; it is **deny-by-default** (see `deploying` for `--grant-execute-to`). It and the
+audit/version column DEFAULTs both **call** `public.pgxsinkit_clock_us()`, so the `--utilities` migration
+installing that clock must be **first in the chain** (hence the early-sorting name):
 
 ```bash
 bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
@@ -299,8 +300,8 @@ assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "le
 
 `asReadonly` reuses the **same** table+columns for another client. For a **different, narrower shape over an
 existing physical table** — a column subset and/or a different row filter, under a distinct local identity —
-use `defineReadProjection(owner, …)`. First use: a learner reads the full `assessment_definition` (heavy QTI
-jsonb) while an admin reads only titles.
+use `defineReadProjection(owner, …)`: a learner reads the full `assessment_definition` (heavy QTI jsonb)
+while an admin reads only titles.
 
 ```ts
 export const assessmentDefinition = defineSyncTable({ tableName: "assessment_definition", makeColumns /* … */ });
@@ -348,9 +349,7 @@ export const secureItemWindow = defineReadProjection(secureItem, {
 ```
 
 `serverOnlyColumns` requires BOTH `serverProjection.rowTransform` and `columns`, and must be disjoint from
-`columns` and the PK — each is a loud error.
-
-**No inheritance — enforced.** A projection does NOT inherit its owner's `serverProjection`: an inherited
+`columns` and the PK — each is a loud error. **No inheritance — enforced.** A projection does NOT inherit its owner's `serverProjection`: an inherited
 transform whose input column is absent from the projection's fetch list reads `undefined` and fails OPEN.
 Since a bare projection over a redacting owner would then egress the RAW row, `defineReadProjection` THROWS
 when the owner declares an egress `rowTransform` unless the projection declares its posture — its own
@@ -410,7 +409,7 @@ binds every open of every store minted from that registry, so no tab can disagre
   (the server is the source of truth, and the loss window is one recent action); declare `"strict"` only for
   local-only data you cannot re-derive and cannot lose on a crash (ADR-0047).
 
-The declaration scopes the **browser** store only; Node mints stay `file://` and export clones stay memory.
+It scopes the **browser** store only; Node mints stay `file://` and export clones stay memory.
 
 ## Consistency groups: scope them to the joined cluster
 
@@ -437,7 +436,6 @@ every client re-downloads its own log, and conflict machinery taxes rows that ne
 
 ```ts
 import { z } from "zod";
-
 export const registry = defineSyncRegistry({
   tables: { issue },
   streams: {
@@ -482,6 +480,8 @@ export const registry = defineSyncRegistry({
   write them outside the sync rail (a server `UPDATE`, a trigger, or a managed field).
 - In a `customWhere`: comparing an enum without `::text`, qualifying a column (use `c()` for a bare ref),
   or hand-escaping a value into a string instead of binding it via a Drizzle `sql` fragment.
+- A multi-dimensional array column, an array PK, or a managed field on an array column — each fails at
+  generate time; single-dimension arrays are fully supported on both paths.
 - Letting the read filter and RLS policy diverge instead of building both from the same Drizzle columns.
 - Declaring a _second_ owning `defineSyncTable` to read an existing physical table (the registry rejects the
   duplicate local identity) — use `defineReadProjection` for a second shape.

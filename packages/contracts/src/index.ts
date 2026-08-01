@@ -13,4 +13,5 @@ export * from "./projection";
 export * from "./runtime";
 export * from "./sql-defaults";
 export * from "./sql-identifier";
+export * from "./sql-role-guard";
 export * from "./supabase-rls";

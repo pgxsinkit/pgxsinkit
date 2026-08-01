@@ -127,13 +127,13 @@ BEGIN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('display_name', 'varchar(120)'),
-            ('avatar_color', 'varchar(24)')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('display_name', '(x.p->>''display_name'')::varchar(120)'),
+            ('avatar_color', '(x.p->>''avatar_color'')::varchar(24)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -146,12 +146,12 @@ BEGIN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('display_name', 'varchar(120)'),
-            ('avatar_color', 'varchar(24)')
-        ) AS col_types(col_name, col_type)
+            ('display_name', '(x.p->>''display_name'')::varchar(120)'),
+            ('avatar_color', '(x.p->>''avatar_color'')::varchar(24)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -174,12 +174,12 @@ ELSIF v_table = 'team' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('name', 'varchar(120)')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('name', '(x.p->>''name'')::varchar(120)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -192,11 +192,11 @@ ELSIF v_table = 'team' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('name', 'varchar(120)')
-        ) AS col_types(col_name, col_type)
+            ('name', '(x.p->>''name'')::varchar(120)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''team'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) LEFT JOIN "team" AS t ON t."id" = (x.k->>''id'')::uuid WHERE t."id" IS NULL OR (x.b IS NOT NULL AND t."updated_at_us" > x.b)'
@@ -235,13 +235,13 @@ ELSIF v_table = 'team_member' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('team_id', 'uuid'),
-            ('user_id', 'uuid')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('team_id', '(x.p->>''team_id'')::uuid'),
+            ('user_id', '(x.p->>''user_id'')::uuid')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -254,12 +254,12 @@ ELSIF v_table = 'team_member' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('team_id', 'uuid'),
-            ('user_id', 'uuid')
-        ) AS col_types(col_name, col_type)
+            ('team_id', '(x.p->>''team_id'')::uuid'),
+            ('user_id', '(x.p->>''user_id'')::uuid')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -282,15 +282,15 @@ ELSIF v_table = 'channel' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('team_id', 'uuid'),
-            ('kind', 'channel_kind'),
-            ('name', 'varchar(120)'),
-            ('created_at_us', 'bigint')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('team_id', '(x.p->>''team_id'')::uuid'),
+            ('kind', '(x.p->>''kind'')::channel_kind'),
+            ('name', '(x.p->>''name'')::varchar(120)'),
+            ('created_at_us', '(x.p->>''created_at_us'')::bigint')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -303,14 +303,14 @@ ELSIF v_table = 'channel' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('team_id', 'uuid'),
-            ('kind', 'channel_kind'),
-            ('name', 'varchar(120)'),
-            ('created_at_us', 'bigint')
-        ) AS col_types(col_name, col_type)
+            ('team_id', '(x.p->>''team_id'')::uuid'),
+            ('kind', '(x.p->>''kind'')::channel_kind'),
+            ('name', '(x.p->>''name'')::varchar(120)'),
+            ('created_at_us', '(x.p->>''created_at_us'')::bigint')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -333,17 +333,17 @@ ELSIF v_table = 'issue' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('team_id', 'uuid'),
-            ('assignee_id', 'uuid'),
-            ('title', 'varchar(200)'),
-            ('description', 'varchar(4000)'),
-            ('status', 'issue_status'),
-            ('priority', 'issue_priority')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('team_id', '(x.p->>''team_id'')::uuid'),
+            ('assignee_id', '(x.p->>''assignee_id'')::uuid'),
+            ('title', '(x.p->>''title'')::varchar(200)'),
+            ('description', '(x.p->>''description'')::varchar(4000)'),
+            ('status', '(x.p->>''status'')::issue_status'),
+            ('priority', '(x.p->>''priority'')::issue_priority')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -356,16 +356,16 @@ ELSIF v_table = 'issue' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('team_id', 'uuid'),
-            ('assignee_id', 'uuid'),
-            ('title', 'varchar(200)'),
-            ('description', 'varchar(4000)'),
-            ('status', 'issue_status'),
-            ('priority', 'issue_priority')
-        ) AS col_types(col_name, col_type)
+            ('team_id', '(x.p->>''team_id'')::uuid'),
+            ('assignee_id', '(x.p->>''assignee_id'')::uuid'),
+            ('title', '(x.p->>''title'')::varchar(200)'),
+            ('description', '(x.p->>''description'')::varchar(4000)'),
+            ('status', '(x.p->>''status'')::issue_status'),
+            ('priority', '(x.p->>''priority'')::issue_priority')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''issue'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) LEFT JOIN "issue" AS t ON t."id" = (x.k->>''id'')::uuid WHERE t."id" IS NULL OR (x.b IS NOT NULL AND t."updated_at_us" > x.b)'
@@ -404,13 +404,13 @@ ELSIF v_table = 'message' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('channel_id', 'uuid'),
-            ('body', 'varchar(4000)')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('channel_id', '(x.p->>''channel_id'')::uuid'),
+            ('body', '(x.p->>''body'')::varchar(4000)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -423,12 +423,12 @@ ELSIF v_table = 'message' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('channel_id', 'uuid'),
-            ('body', 'varchar(4000)')
-        ) AS col_types(col_name, col_type)
+            ('channel_id', '(x.p->>''channel_id'')::uuid'),
+            ('body', '(x.p->>''body'')::varchar(4000)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -511,4 +511,35 @@ ELSIF v_table = 'message' THEN
 END;
 $$;
 
-COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:668b61bfe647907e';
+-- ADR-0054: deny by default. Emitted on EVERY install because the DROP above resets the ACL to
+-- Postgres's PUBLIC default (plus Supabase's default-privilege grants), so convergence cannot depend
+-- on install history. EXECUTE is owner-only unless the artifact was generated with an explicit
+-- --grant-execute-to; the grant list is the write path's ENTIRE trust boundary, because this function
+-- trusts the claims it is handed.
+REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM PUBLIC;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM "anon"';
+  END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM "authenticated"';
+  END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM "service_role"';
+  END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:1e261259dcdea29b';

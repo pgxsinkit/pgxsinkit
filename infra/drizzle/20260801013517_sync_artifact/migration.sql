@@ -127,12 +127,12 @@ BEGIN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('name', 'varchar(120)')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('name', '(x.p->>''name'')::varchar(120)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -145,11 +145,11 @@ BEGIN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('name', 'varchar(120)')
-        ) AS col_types(col_name, col_type)
+            ('name', '(x.p->>''name'')::varchar(120)')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -172,16 +172,16 @@ ELSIF v_table = 'todos' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('title', 'varchar(120)'),
-            ('description', 'varchar(4000)'),
-            ('author_id', 'uuid'),
-            ('status', 'todo_status'),
-            ('priority', 'todo_priority')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('title', '(x.p->>''title'')::varchar(120)'),
+            ('description', '(x.p->>''description'')::varchar(4000)'),
+            ('author_id', '(x.p->>''author_id'')::uuid'),
+            ('status', '(x.p->>''status'')::todo_status'),
+            ('priority', '(x.p->>''priority'')::todo_priority')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -194,15 +194,15 @@ ELSIF v_table = 'todos' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('title', 'varchar(120)'),
-            ('description', 'varchar(4000)'),
-            ('author_id', 'uuid'),
-            ('status', 'todo_status'),
-            ('priority', 'todo_priority')
-        ) AS col_types(col_name, col_type)
+            ('title', '(x.p->>''title'')::varchar(120)'),
+            ('description', '(x.p->>''description'')::varchar(4000)'),
+            ('author_id', '(x.p->>''author_id'')::uuid'),
+            ('status', '(x.p->>''status'')::todo_status'),
+            ('priority', '(x.p->>''priority'')::todo_priority')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''todos'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) LEFT JOIN "todos" AS t ON t."id" = (x.k->>''id'')::uuid WHERE t."id" IS NULL OR (x.b IS NOT NULL AND t."updated_at_us" > x.b)'
@@ -241,14 +241,14 @@ ELSIF v_table = 'workspaces' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('owner_id', 'uuid'),
-            ('name', 'varchar(120)'),
-            ('locked', 'boolean')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('owner_id', '(x.p->>''owner_id'')::uuid'),
+            ('name', '(x.p->>''name'')::varchar(120)'),
+            ('locked', '(x.p->>''locked'')::boolean')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -261,13 +261,13 @@ ELSIF v_table = 'workspaces' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('owner_id', 'uuid'),
-            ('name', 'varchar(120)'),
-            ('locked', 'boolean')
-        ) AS col_types(col_name, col_type)
+            ('owner_id', '(x.p->>''owner_id'')::uuid'),
+            ('name', '(x.p->>''name'')::varchar(120)'),
+            ('locked', '(x.p->>''locked'')::boolean')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -290,15 +290,15 @@ ELSIF v_table = 'workspace_members' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('workspace_id', 'uuid'),
-            ('member_id', 'uuid'),
-            ('role', 'workspace_member_role'),
-            ('muted', 'boolean')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('workspace_id', '(x.p->>''workspace_id'')::uuid'),
+            ('member_id', '(x.p->>''member_id'')::uuid'),
+            ('role', '(x.p->>''role'')::workspace_member_role'),
+            ('muted', '(x.p->>''muted'')::boolean')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -311,14 +311,14 @@ ELSIF v_table = 'workspace_members' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('workspace_id', 'uuid'),
-            ('member_id', 'uuid'),
-            ('role', 'workspace_member_role'),
-            ('muted', 'boolean')
-        ) AS col_types(col_name, col_type)
+            ('workspace_id', '(x.p->>''workspace_id'')::uuid'),
+            ('member_id', '(x.p->>''member_id'')::uuid'),
+            ('role', '(x.p->>''role'')::workspace_member_role'),
+            ('muted', '(x.p->>''muted'')::boolean')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -341,15 +341,15 @@ ELSIF v_table = 'work_items' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
-            ('id', 'uuid'),
-            ('workspace_id', 'uuid'),
-            ('body', 'varchar(4000)'),
-            ('hidden', 'boolean'),
-            ('status', 'work_item_status')
-        ) AS col_types(col_name, col_type)
+            ('id', '(x.p->>''id'')::uuid'),
+            ('workspace_id', '(x.p->>''workspace_id'')::uuid'),
+            ('body', '(x.p->>''body'')::varchar(4000)'),
+            ('hidden', '(x.p->>''hidden'')::boolean'),
+            ('status', '(x.p->>''status'')::work_item_status')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -362,14 +362,14 @@ ELSIF v_table = 'work_items' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+          SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('workspace_id', 'uuid'),
-            ('body', 'varchar(4000)'),
-            ('hidden', 'boolean'),
-            ('status', 'work_item_status')
-        ) AS col_types(col_name, col_type)
+            ('workspace_id', '(x.p->>''workspace_id'')::uuid'),
+            ('body', '(x.p->>''body'')::varchar(4000)'),
+            ('hidden', '(x.p->>''hidden'')::boolean'),
+            ('status', '(x.p->>''status'')::work_item_status')
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
@@ -452,4 +452,35 @@ ELSIF v_table = 'work_items' THEN
 END;
 $$;
 
-COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:006ea95876c07a0a';
+-- ADR-0054: deny by default. Emitted on EVERY install because the DROP above resets the ACL to
+-- Postgres's PUBLIC default (plus Supabase's default-privilege grants), so convergence cannot depend
+-- on install history. EXECUTE is owner-only unless the artifact was generated with an explicit
+-- --grant-execute-to; the grant list is the write path's ENTIRE trust boundary, because this function
+-- trusts the claims it is handed.
+REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM PUBLIC;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM "anon"';
+  END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM "authenticated"';
+  END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) FROM "service_role"';
+  END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:20c0b1a33f69f12a';

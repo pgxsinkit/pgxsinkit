@@ -1,6 +1,6 @@
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
-import { escapeSqlLiteral, quoteIdentifier as quoteIdent } from "@pgxsinkit/contracts";
+import { buildRoleGuardedStatement, quoteIdentifier as quoteIdent } from "@pgxsinkit/contracts";
 import type { SyncTableEntry, SyncTableRegistry } from "@pgxsinkit/contracts";
 
 const grantPrivilegeOrder = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
@@ -156,15 +156,13 @@ function buildGrantSql(qualifiedTableName: string, grant: TableGrant): string {
     return `GRANT ${privilegeList} ON TABLE ${qualifiedTableName} TO PUBLIC;`;
   }
 
-  return [
-    "DO $$",
-    "BEGIN",
-    `  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${escapeSqlLiteral(grant.roleName)}') THEN`,
-    `    EXECUTE 'GRANT ${privilegeList} ON TABLE ${escapeSqlLiteral(qualifiedTableName)} TO ${escapeSqlLiteral(quoteIdent(grant.roleName))}';`,
-    "  END IF;",
-    "END;",
-    "$$;",
-  ].join("\n");
+  // The shared role-existence guard (@pgxsinkit/contracts) — the same block the apply-function ACL
+  // emits (ADR-0054), so the two artifacts that carry a deployment's authorization posture cannot
+  // drift on how a missing `anon`/`authenticated` role is tolerated.
+  return buildRoleGuardedStatement(
+    grant.roleName,
+    `GRANT ${privilegeList} ON TABLE ${qualifiedTableName} TO ${quoteIdent(grant.roleName)}`,
+  );
 }
 
 function qualifyIdent(schemaName: string | undefined, tableName: string): string {

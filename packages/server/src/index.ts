@@ -132,6 +132,15 @@ export interface CreateSyncServerOptions<
    * diagnostic surface that adds no standing query or latency when unset.
    */
   logTimings?: boolean;
+  /**
+   * The roles the INSTALLED apply function was generated with (`pgxsinkit-generate
+   * --grant-execute-to <role>`, ADR-0054). Default `[]` — owner-only, the default the CLI generates.
+   *
+   * It is not a grant this server performs; it is how the server reproduces the artifact's ADR-0018
+   * fingerprint, which hashes the ACL along with the rest of the body. Generate with a grant and leave
+   * this unset and every write fails `PXS01` (stale artifact) — so the two lists must stay identical.
+   */
+  applyFunctionGrantExecuteTo?: readonly string[];
 }
 
 export interface ServerDiagnostics<TRegistry extends SyncTableRegistry> {
@@ -241,6 +250,7 @@ export function createSyncServer<
     options.resolveAuthClaims,
     options.deployment?.startupVerification ?? "in-process",
     options.logTimings ?? false,
+    options.applyFunctionGrantExecuteTo ?? [],
   );
   for (const path of batchMutationPaths) {
     router.post(path, mutationHandlers.batch);
@@ -382,6 +392,7 @@ export type { StartupVerificationMode } from "./mutations/route";
 export type { CorsConfig, CorsScope, FetchHandler, RouterErrorHandler } from "./router";
 export { FetchRouter } from "./router";
 export { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "./mutations/plpgsql-apply";
+export type { ApplyFunctionRenderOptions } from "./mutations/plpgsql-apply";
 export { renderPgxsinkitUtilitiesMigration } from "./migrations/utilities";
 export { ensureOperationsLogSchema, operationsLogRegclassTarget } from "./operations-log/ddl";
 export { operationsLogTable } from "./operations-log/schema";

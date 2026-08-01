@@ -37,6 +37,15 @@ original JSON payload reaches the PostgreSQL apply path. This applies to applica
 as well as pgxsinkit's managed microsecond fields. Consumers should not convert them to JavaScript
 `number` or add a custom transport encoding.
 
+### Array columns
+
+A **one-dimensional** array column (`uuid("source_ids").array()`) is written like any other: the client
+sends a JSON array, and the apply function expands it element-wise and applies the array cast. `[]` stores
+an empty array, JSON `null` stores `NULL`, omitting the key leaves the column untouched, and element order
+is preserved. Multi-dimensional arrays, an array primary-key column, and a managed field targeting an array
+column are all refused when you generate the migration, naming the table and column — never silently
+mis-written.
+
 ## Why everything is in the database
 
 Putting the apply logic in PL/pgSQL was the toolkit's central finding: it minimises round-trips,

@@ -3,6 +3,7 @@ import { getTableConfig, type AnyPgTable, type PgAsyncDatabase, type PgQueryResu
 import { getColumns } from "drizzle-orm/utils";
 
 import {
+  buildRoleGuardedStatement,
   CLOCK_US_CALL_SQL_TEXT,
   escapeSqlLiteral as toSqlLiteral,
   getProjectedColumns,
@@ -29,6 +30,71 @@ function qualifyIdent(schemaName: string | undefined, name: string): string {
 
 function toSqlTextOrNull(value: string): string {
   return value.length > 0 ? `'${toSqlLiteral(value)}'` : "NULL";
+}
+
+/**
+ * The array dimensionality Drizzle records for a column (0 = scalar). It is carried SEPARATELY from
+ * `getSQLType()`, which returns the ELEMENT type for an array column (`uuid` for a `uuid[]`) — reading
+ * only the type string is what silently emitted a scalar cast for an array column and killed every
+ * non-null array write with 22P02.
+ */
+function columnDimensions(column: { dimensions?: number }): number {
+  return column.dimensions ?? 0;
+}
+
+/**
+ * The SQL expression that reads one writable column out of a mutation's payload (`x.p`), by column
+ * name and Drizzle type. It is embedded in the branch's `(col_name, col_value)` candidate list and
+ * substituted verbatim into the INSERT/UPDATE `format()` template at runtime.
+ *
+ * Scalars keep the long-standing `(x.p->>'col')::type` form. A one-dimensional array column expands
+ * the JSON array element-wise and applies the terminal `::<element>[]` cast, which IS the type check
+ * (no element-type allowlist: an element the target type cannot accept raises, exactly as a scalar
+ * cast does). The three payload shapes match the scalar semantics exactly:
+ *
+ * - **absent key** — never reaches here (the branch intersects the candidate list with the group's
+ *   payload signature, so an unsent column is not in the statement at all);
+ * - **JSON null** — `jsonb_typeof` is `'null'`, the CASE has no ELSE ⇒ SQL NULL, mirroring
+ *   `(x.p->>'col')::type` on a JSON null;
+ * - **`[]`** — an empty typed array, NOT NULL (an empty list is a value the client meant to write).
+ *
+ * Element order is pinned with `WITH ORDINALITY … ORDER BY`, so the stored array order is the
+ * client's array order by construction rather than by set-returning-function evaluation order.
+ * A JSON null ELEMENT becomes a SQL NULL element (`jsonb_array_elements_text` semantics).
+ */
+function buildPayloadValueExpression(
+  tableName: string,
+  column: { name: string; getSQLType: () => string; dimensions?: number },
+): string {
+  const columnLiteral = `'${toSqlLiteral(column.name)}'`;
+  const dimensions = columnDimensions(column);
+  const sqlType = column.getSQLType();
+
+  if (dimensions === 0) {
+    return `(x.p->>${columnLiteral})::${sqlType}`;
+  }
+
+  if (dimensions > 1) {
+    // Loud at GENERATE time, never a silently wrong cast: a multi-dimensional array cannot be
+    // reconstructed from a flat element expansion, and Postgres additionally requires every
+    // sub-array to be the same length — a validity rule this renderer cannot express.
+    throw new Error(
+      `plpgsql apply generator: column ${tableName}.${column.name} is a ${dimensions}-dimensional array; ` +
+        `multi-dimensional arrays are not supported by the apply function (use a single-dimension array, ` +
+        `or a jsonb column)`,
+    );
+  }
+
+  return (
+    `CASE WHEN jsonb_typeof(x.p->${columnLiteral}) = 'array' THEN ` +
+    `ARRAY(SELECT e FROM jsonb_array_elements_text(x.p->${columnLiteral}) WITH ORDINALITY AS a(e, ord) ORDER BY ord)` +
+    `::${sqlType}[] END`
+  );
+}
+
+/** One `(column name, payload value expression)` row of a branch's runtime candidate list. */
+function toColumnCandidateRow(tableName: string, column: { name: string; getSQLType: () => string }): string {
+  return `('${toSqlLiteral(column.name)}', '${toSqlLiteral(buildPayloadValueExpression(tableName, column))}')`;
 }
 
 interface ResolvedManagedField {
@@ -67,6 +133,7 @@ function buildManagedFieldExpression(field: ResolvedManagedField): string {
 // and decides what the applier writes, while GUARDING (contracts' `isManagedFieldGuarded`) decides which
 // columns a client payload may never move, and so which are excluded from the candidate lists below.
 function resolveManagedFields(entry: SyncTableEntry): ResolvedManagedField[] {
+  const tableName = getTableName(entry.table as AnyPgTable);
   const columns = getColumns(entry.table as AnyPgTable);
   const columnNameMap = new Map(Object.entries(columns).map(([propertyKey, column]) => [propertyKey, column.name]));
 
@@ -77,8 +144,18 @@ function resolveManagedFields(entry: SyncTableEntry): ResolvedManagedField[] {
     }
 
     const column =
-      (columns as Record<string, { getSQLType: () => string } | undefined>)[field.column] ??
+      (columns as Record<string, { getSQLType: () => string; dimensions?: number } | undefined>)[field.column] ??
       Object.values(columns).find((candidate) => candidate.name === field.column);
+
+    if (column && columnDimensions(column) > 0) {
+      // Both stamping strategies produce a SCALAR (a microsecond clock read, or one claim at a JSON
+      // path), so an array-typed managed column could only ever be assigned a scalar — a type error at
+      // every write. Refuse at generate time instead.
+      throw new Error(
+        `plpgsql apply generator: managed field ${tableName}.${columnName} is an array column; ` +
+          `managed fields stamp a single scalar value and are not supported on array columns`,
+      );
+    }
 
     return [
       {
@@ -114,6 +191,16 @@ function buildTableBranch(entry: SyncTableEntry): string {
           `the entry's primaryKey spec has drifted from its Drizzle table`,
       );
     }
+    if (columnDimensions(columnObject) > 0) {
+      // The canonical identity is carried as typed recordset columns and as `(x.k->>'col')::type`
+      // join predicates — both scalar forms. An array PK would need array equality semantics the
+      // entity-key wire shape (a JSON object of scalar strings) cannot express, so refuse it here
+      // rather than emit a cast that would raise 22P02 on the first update/delete.
+      throw new Error(
+        `plpgsql apply generator: primary key column ${tableName}.${columnName} is an array column; ` +
+          `array columns are not supported as primary keys by the apply function`,
+      );
+    }
     return { name: columnName, type: columnObject.getSQLType() };
   });
   const primaryKeyColumnNames = new Set(primaryKeyColumns.map((pk) => pk.name));
@@ -135,16 +222,19 @@ function buildTableBranch(entry: SyncTableEntry): string {
     managedFields.filter((field) => isManagedFieldGuarded(field, "update")).map((field) => field.columnName),
   );
 
+  // Each candidate row carries the column's NAME and its fully-rendered payload value EXPRESSION.
+  // The expression is precomputed here (rather than `format()`-ed from a type at runtime) because it
+  // is no longer uniform: an array column needs an element-wise expansion, not a `->>` cast.
   const allColumnPairs = projectedColumns
     .map(({ column }) => column)
     .filter((column) => !createGuardedColumnNames.has(column.name))
-    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(column.getSQLType())}')`)
+    .map((column) => toColumnCandidateRow(tableName, column))
     .join(",\n            ");
 
   const nonPrimaryKeyColumnPairs = projectedColumns
     .map(({ column }) => column)
     .filter((column) => !primaryKeyColumnNames.has(column.name) && !updateGuardedColumnNames.has(column.name))
-    .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(column.getSQLType())}')`)
+    .map((column) => toColumnCandidateRow(tableName, column))
     .join(",\n            ");
 
   const createManagedColumnsSql = createManagedFields.map((field) => quoteIdent(field.columnName)).join(", ");
@@ -198,20 +288,20 @@ function buildTableBranch(entry: SyncTableEntry): string {
   const createColumnSelect = allColumnPairs.length
     ? `SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+          string_agg(col_value, ', ' ORDER BY col_name)
         INTO v_cols, v_vals
         FROM (VALUES
             ${allColumnPairs}
-        ) AS col_types(col_name, col_type)
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));`
     : `v_cols := NULL; v_vals := NULL;`;
 
   const updateSetSelect = nonPrimaryKeyColumnPairs.length
-    ? `SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+    ? `SELECT string_agg(format('%I = %s', col_name, col_value), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
             ${nonPrimaryKeyColumnPairs}
-        ) AS col_types(col_name, col_type)
+        ) AS col_types(col_name, col_value)
         WHERE col_name = ANY(string_to_array(v_sig, ','));`
     : `v_set := NULL;`;
 
@@ -332,12 +422,94 @@ const APPLY_FUNCTION_ARG_TYPES = "jsonb, text, boolean, boolean, jsonb, text";
 // an identity mismatch and the apply function refuses the write.
 const APPLY_FINGERPRINT_PREFIX = "pgxsinkit:fp1:";
 
-function buildApplyFunctionBody(
-  registry: SyncTableRegistry,
-  options: {
-    functionSchema?: string;
-  } = {},
-): string {
+/**
+ * The roles Supabase's `ALTER DEFAULT PRIVILEGES … GRANT ALL ON FUNCTIONS` re-grants at every CREATE
+ * (ADR-0054). The artifact's `DROP FUNCTION` makes each install a fresh creation, so these grants come
+ * BACK on every regenerate — hence an unconditional revoke per install, not a one-off hardening.
+ */
+const SUPABASE_DEFAULT_PRIVILEGE_ROLES = ["anon", "authenticated", "service_role"] as const;
+
+/**
+ * How the generated apply function is rendered. Both fields are part of the artifact's IDENTITY: they
+ * change the fingerprinted body, so a change to either forces the regenerate-and-commit flow, and the
+ * SERVER must be configured with the same values (it recomputes the expected fingerprint at runtime).
+ */
+export interface ApplyFunctionRenderOptions {
+  /** Schema to qualify the function with. Default: unqualified (resolved through `search_path`). */
+  functionSchema?: string;
+  /**
+   * Roles that receive `GRANT EXECUTE` on the apply function (ADR-0054 decision 2). Default `[]` —
+   * **owner-only**, which is right whenever the server connects as the function's owner or a
+   * superuser. Name ONLY server roles: the function trusts the `p_user_claims` it is handed, so a
+   * granted role can pass any claims it likes. The grant list IS the write path's trust boundary.
+   */
+  grantExecuteTo?: readonly string[];
+}
+
+/** An unquoted-safe SQL role name: what `GRANT … TO <role>` may name without surprises. */
+const GRANT_ROLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+
+/**
+ * Validate `grantExecuteTo` at GENERATE time, fail-closed. A role name is emitted into DDL (as a
+ * quoted identifier and as a `pg_roles` literal), and the whole point of ADR-0054 is that who may
+ * execute is named explicitly — so an unusable name is refused loudly here rather than silently
+ * producing an artifact whose ACL does not say what its author meant.
+ */
+function resolveGrantExecuteRoles(grantExecuteTo: readonly string[] | undefined): readonly string[] {
+  const roles = grantExecuteTo ?? [];
+  const seen = new Set<string>();
+
+  for (const role of roles) {
+    if (typeof role !== "string" || role.trim().length === 0) {
+      throw new Error("plpgsql apply generator: grantExecuteTo contains an empty role name");
+    }
+    if (!GRANT_ROLE_NAME_PATTERN.test(role)) {
+      throw new Error(
+        `plpgsql apply generator: grantExecuteTo role '${role}' is not a plain SQL identifier ` +
+          `(letters, digits, '_' and '$', not starting with a digit)`,
+      );
+    }
+    if (role.length > 63) {
+      throw new Error(`plpgsql apply generator: grantExecuteTo role '${role}' exceeds PostgreSQL's 63-byte name limit`);
+    }
+    if (seen.has(role)) {
+      throw new Error(`plpgsql apply generator: grantExecuteTo lists role '${role}' more than once`);
+    }
+    seen.add(role);
+  }
+
+  return roles;
+}
+
+/**
+ * ADR-0054: the apply function is DENY-BY-DEFAULT, and converges on every install.
+ *
+ * The function trusts `p_user_claims` — it copies them into `request.jwt.claims` and switches `role`
+ * before running RLS-governed DML — which is correct for the consumer server (it passes claims it
+ * VERIFIED) and catastrophic for anyone else, who would simply choose their own. Postgres grants
+ * EXECUTE to PUBLIC on every new function and Supabase-shaped clusters additionally re-grant the
+ * `anon`/`authenticated`/`service_role` trio via default privileges; because the artifact begins with
+ * `DROP FUNCTION`, EVERY install recreates that exposure. So the revokes are emitted unconditionally
+ * (convergence must not depend on install history), the Supabase-trio ones through the shared
+ * role-existence guard so the artifact stays portable to PGlite and plain-Postgres lanes.
+ *
+ * Grants come last, so naming a revoked role in `grantExecuteTo` is a deliberate, explicit grant.
+ */
+function buildApplyFunctionAclSql(functionName: string, grantExecuteTo: readonly string[]): string {
+  const signature = `${functionName}(${APPLY_FUNCTION_ARG_TYPES})`;
+
+  return [
+    `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`,
+    ...SUPABASE_DEFAULT_PRIVILEGE_ROLES.map((role) =>
+      buildRoleGuardedStatement(role, `REVOKE ALL ON FUNCTION ${signature} FROM ${quoteIdent(role)}`),
+    ),
+    ...grantExecuteTo.map((role) =>
+      buildRoleGuardedStatement(role, `GRANT EXECUTE ON FUNCTION ${signature} TO ${quoteIdent(role)}`),
+    ),
+  ].join("\n\n");
+}
+
+function buildApplyFunctionBody(registry: SyncTableRegistry, options: ApplyFunctionRenderOptions = {}): string {
   const tableBranches = Object.values(registry)
     // A read projection (ADR-0027) owns no writable table — its `table` IS the owner's, so the owner's
     // branch already handles that physical table. Emitting a branch for the projection too would
@@ -347,6 +519,10 @@ function buildApplyFunctionBody(
     .map((entry) => buildTableBranch(entry as SyncTableEntry))
     .join("\n");
   const functionName = qualifyIdent(options.functionSchema, APPLY_FUNCTION_NAME);
+  // ADR-0054 decision 3: the ACL is rendered INSIDE the fingerprinted body (unlike the COMMENT, which
+  // is appended around it) — an install without the revokes IS a different fingerprint and is refused
+  // at call time, so a stale PUBLIC-executable install cannot run while `--check` stays green.
+  const aclSql = buildApplyFunctionAclSql(functionName, resolveGrantExecuteRoles(options.grantExecuteTo));
 
   return `
 -- Install idempotently by dropping the current signature first. PostgreSQL cannot change a function's
@@ -535,6 +711,13 @@ BEGIN
   FROM jsonb_array_elements(v_conflicts) AS c;
 END;
 $$;
+
+-- ADR-0054: deny by default. Emitted on EVERY install because the DROP above resets the ACL to
+-- Postgres's PUBLIC default (plus Supabase's default-privilege grants), so convergence cannot depend
+-- on install history. EXECUTE is owner-only unless the artifact was generated with an explicit
+-- --grant-execute-to; the grant list is the write path's ENTIRE trust boundary, because this function
+-- trusts the claims it is handed.
+${aclSql}
 `.trim();
 }
 
@@ -547,18 +730,14 @@ $$;
  */
 export function expectedApplyFingerprint(
   registry: SyncTableRegistry,
-  options: {
-    functionSchema?: string;
-  } = {},
+  options: ApplyFunctionRenderOptions = {},
 ): string {
   return APPLY_FINGERPRINT_PREFIX + hashString(buildApplyFunctionBody(registry, options));
 }
 
 export function buildPlpgsqlBatchFunctionDdl(
   registry: SyncTableRegistry,
-  options: {
-    functionSchema?: string;
-  } = {},
+  options: ApplyFunctionRenderOptions = {},
 ): string {
   const body = buildApplyFunctionBody(registry, options);
   const functionName = qualifyIdent(options.functionSchema, APPLY_FUNCTION_NAME);
@@ -574,9 +753,7 @@ export function buildPlpgsqlBatchFunctionDdl(
 export async function installPlpgsqlBatchFunction<TRegistry extends SyncTableRegistry>(
   db: PgAsyncDatabase<PgQueryResultHKT, RegistryRelations<TRegistry>>,
   registry: TRegistry,
-  options: {
-    functionSchema?: string;
-  } = {},
+  options: ApplyFunctionRenderOptions = {},
 ): Promise<void> {
   const ddl = buildPlpgsqlBatchFunctionDdl(registry, options);
   await db.execute(sql.raw(ddl));

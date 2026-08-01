@@ -9,6 +9,7 @@ import { defineEventStream, defineSyncRegistry, defineSyncTable } from "@pgxsink
 import { projectsSyncRegistry } from "@pgxsinkit/schema";
 
 import {
+  parseArgs,
   resolveDrizzleOutDir,
   resolveRegistryModulePath,
   selectRegistryExport,
@@ -39,6 +40,32 @@ describe("pgxsinkit-generate registry loading", () => {
     expect(resolveRegistryModulePath("./sync-registry.ts", "/workspace/app")).toBe(
       resolve("/workspace/app", "sync-registry.ts"),
     );
+  });
+});
+
+// ADR-0054: who may EXECUTE the apply function is named explicitly on the command line, and the
+// default is nobody but the owner. The flag has to be usable both ways CI configs are written.
+describe("pgxsinkit-generate --grant-execute-to", () => {
+  const base = ["--registry", "./sync-registry.ts"];
+
+  it("defaults to owner-only (an empty list)", () => {
+    expect(parseArgs(base).grantExecuteTo).toEqual([]);
+  });
+
+  it("accumulates repeated flags and splits a comma-separated value the same way", () => {
+    expect(
+      parseArgs([...base, "--grant-execute-to", "app_writer", "--grant-execute-to", "reporter"]).grantExecuteTo,
+    ).toEqual(["app_writer", "reporter"]);
+    expect(parseArgs([...base, "--grant-execute-to", "app_writer, reporter"]).grantExecuteTo).toEqual([
+      "app_writer",
+      "reporter",
+    ]);
+  });
+
+  it("passes a malformed entry through to the renderer, which refuses it", () => {
+    // Parsing stays dumb on purpose: validation lives in ONE place (the renderer), so the CLI and a
+    // programmatic caller cannot disagree about what a legal role name is.
+    expect(parseArgs([...base, "--grant-execute-to", "app_writer,"]).grantExecuteTo).toEqual(["app_writer", ""]);
   });
 });
 
