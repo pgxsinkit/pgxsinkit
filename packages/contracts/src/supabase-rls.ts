@@ -1,7 +1,7 @@
 import { and, eq, getTableName, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { PgDialect, pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
 
-import { c, DENY_ALL, type JwtClaims } from "./config";
+import { buildOwnershipShapeWhere, c, DENY_ALL, type JwtClaims } from "./config";
 
 // Render a typed fragment to inline-literal SQL text (CREATE POLICY DDL cannot carry `$n` binds).
 // The tier-② discipline for the text builders below: values enter as typed `${value}` interpolations
@@ -9,6 +9,28 @@ import { c, DENY_ALL, type JwtClaims } from "./config";
 const textDialect = new PgDialect();
 function renderInlineSql(fragment: SQL): string {
   return textDialect.sqlToQuery(fragment.inlineParams()).sql;
+}
+
+// Walk a dotted claim path defensively (unverified claims may be any shape): anything that is not a
+// plain object on the way down yields `undefined` rather than throwing. Shared by every Electric
+// read-path mirror below — each family's mirror sits beside its own policies and reads exactly the
+// claim the policy's SQL reads.
+function readClaimsPath(claims: JwtClaims | null, path: string[]): unknown {
+  let current: unknown = claims;
+  for (const segment of path) {
+    if (typeof current !== "object" || current === null || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+// The JWT subject as the read path sees it: a non-empty `sub` string, else null (no subject → the
+// mirrors deny). The RLS counterpart is `buildSubjectSqlText`, which reads the same claim in Postgres.
+function readSubjectClaim(claims: JwtClaims | null): string | null {
+  const subject = readClaimsPath(claims, ["sub"]);
+  return typeof subject === "string" && subject.length > 0 ? subject : null;
 }
 
 type SupabaseOwnerOrAdminPolicyKind = "select" | "insert" | "update" | "delete";
@@ -27,6 +49,8 @@ export type SupabaseOwnerOrAdminPredicateOptions = {
   ownerSqlColumn?: string;
   adminRoleName?: string;
   subjectCastType?: string;
+  /** Path to the roles array in the claims. Defaults to {@link adminRolesClaimPath}. */
+  adminRolesClaimPath?: readonly string[];
 };
 
 export type SupabaseOwnerOrAdminNativePoliciesOptions = {
@@ -37,6 +61,11 @@ export type SupabaseOwnerOrAdminNativePoliciesOptions = {
   adminRoleName?: string;
   /** SQL type the JWT subject is cast to before comparison (default "uuid"). */
   subjectCastType?: string;
+  /**
+   * Path to the roles array in the claims. Defaults to {@link adminRolesClaimPath}; pass the SAME value to
+   * {@link resolveOwnerOrAdminAccess} / {@link buildOwnerOrAdminShapeWhere} so both surfaces read one claim.
+   */
+  adminRolesClaimPath?: readonly string[];
 };
 
 const defaultOwnerSqlColumn = "owner_id";
@@ -44,6 +73,11 @@ const defaultOwnerPropertyKey = "ownerId";
 const defaultAuthenticatedRoleName = "authenticated";
 const defaultAdminRoleName = "admin";
 const defaultSubjectCastType = "uuid";
+// The DEFAULT claim path the admin check reads — the single source for BOTH surfaces: the SQL `EXISTS`
+// in `buildAdminRoleExistsSqlText` renders its `-> 'seg'` chain from this array, and the read-path mirror
+// (`resolveOwnerOrAdminAccess`) walks the same segments in JS. Overridable per call via
+// `adminRolesClaimPath` on either surface — pass the same value to both or they drift.
+const adminRolesClaimPath = ["app_metadata", "roles"] as const;
 
 const ownerOrAdminPolicyShapes: SupabaseOwnerOrAdminPolicyShape[] = [
   {
@@ -124,11 +158,30 @@ function buildSubjectSqlText(subjectCastType: string): string {
   )::${subjectCastType}`;
 }
 
-// The admin-bypass test: `app_metadata.roles` (from the JWT claims) contains `adminRoleName`. No
-// column reference and no recursion risk, so it is inlined as text (shared by the text builder and
-// the native builder). The role value enters as a typed interpolation (drizzle owns the escaping);
-// the claim-extraction body is the allowed raw leaf.
-function buildAdminRoleExistsSqlText(adminRoleName: string): string {
+// The claim path the admin check walks, validated as plain identifiers (they are emitted into policy
+// DDL). Mirrors `resolveGrantsClaimPath` in the grant-scope family below.
+function resolveAdminRolesClaimPath(path: readonly string[] | undefined): string[] {
+  const segments = path && path.length > 0 ? [...path] : [...adminRolesClaimPath];
+  for (const segment of segments) {
+    assertIdentifier(segment, "adminRolesClaimPath segment");
+  }
+  return segments;
+}
+
+// The claim path as a jsonb `-> 'seg'` chain, one typed interpolation per segment (drizzle owns the
+// quoting), so the SQL walks the SAME array the JS mirror walks — textual agreement is not enough.
+function buildClaimPathChainSql(path: string[]): SQL {
+  return sql.join(
+    path.map((segment) => sql` -> ${segment}`),
+    sql``,
+  );
+}
+
+// The admin-bypass test: the roles array at `adminRolesClaimPath` (from the JWT claims) contains
+// `adminRoleName`. No column reference and no recursion risk, so it is inlined as text (shared by the
+// text builder and the native builder). The role value and the claim-path segments enter as typed
+// interpolations (drizzle owns the escaping); the claim-extraction body is the allowed raw leaf.
+function buildAdminRoleExistsSqlText(adminRoleName: string, claimPath: string[]): string {
   return renderInlineSql(sql`EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
@@ -137,7 +190,7 @@ function buildAdminRoleExistsSqlText(adminRoleName: string): string {
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
-          )::jsonb -> 'app_metadata' -> 'roles'
+          )::jsonb${buildClaimPathChainSql(claimPath)}
         ),
         '[]'::jsonb
       )
@@ -158,6 +211,7 @@ function normalizePredicateOptions(options: SupabaseOwnerOrAdminPredicateOptions
     ownerSqlColumn,
     adminRoleName,
     subjectCastType,
+    claimPath: resolveAdminRolesClaimPath(options.adminRolesClaimPath),
   };
 }
 
@@ -171,7 +225,7 @@ export function buildSupabaseOwnerOrAdminPredicateSqlText(options: SupabaseOwner
 
   return `
   ${normalized.ownerSqlColumn} = ${buildSubjectSqlText(normalized.subjectCastType)}
-  OR ${buildAdminRoleExistsSqlText(normalized.adminRoleName)}
+  OR ${buildAdminRoleExistsSqlText(normalized.adminRoleName, normalized.claimPath)}
 `;
 }
 
@@ -181,7 +235,9 @@ export function buildSupabaseOwnerOrAdminPredicateSqlText(options: SupabaseOwner
 export function buildSupabaseOwnerOrAdminNativePolicies(options: SupabaseOwnerOrAdminNativePoliciesOptions) {
   const adminRoleName = options.adminRoleName ?? defaultAdminRoleName;
   const subject = buildSubjectSql(options.subjectCastType ?? defaultSubjectCastType);
-  const adminExists = sql.raw(buildAdminRoleExistsSqlText(adminRoleName));
+  const adminExists = sql.raw(
+    buildAdminRoleExistsSqlText(adminRoleName, resolveAdminRolesClaimPath(options.adminRolesClaimPath)),
+  );
   const predicate = or(eq(options.ownerColumn, subject), adminExists)!;
   const tableName = tableNameForColumn(options.ownerColumn, "ownerColumn");
 
@@ -205,6 +261,75 @@ export const supabaseOwnerOrAdminDefaults = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// Electric read-path mirror of the owner-or-admin policies. Electric cannot read RLS, so the proxy has
+// to reach the same verdict in JS, from the same claims: the policy's `OR` admin branch becomes "no
+// filter at all" (every row streams), and its owner branch becomes the ownership shape `where`. One
+// declaration — the owner column plus the admin role name — two enforcement surfaces, so a row can
+// never be writable-but-unreadable (or the reverse).
+//
+// SELECT only, by construction: a shape `where` filters a read stream, so it mirrors the `select`
+// policy. INSERT/UPDATE/DELETE remain the policies' business.
+// ---------------------------------------------------------------------------
+
+/**
+ * Claim-reading options for the read mirror; every field must match the value the policies were built
+ * with, or the two surfaces stop agreeing.
+ */
+export type OwnerOrAdminAccessOptions = {
+  /** Role value (in `app_metadata.roles`) that bypasses ownership (default "admin"). */
+  adminRoleName?: string;
+  /** Path to the roles array in the claims. Defaults to {@link adminRolesClaimPath}. */
+  adminRolesClaimPath?: readonly string[];
+};
+
+/** The caller's standing on an owner-or-admin table, as resolved from the claims. */
+export type OwnerOrAdminAccess = {
+  /** The caller holds the admin role — the policy's bypass branch; every row is visible. */
+  admin: boolean;
+  /** The JWT subject when it is a non-empty string, else null (no subject → nothing is visible). */
+  subject: string | null;
+};
+
+/**
+ * The caller's owner-or-admin standing, resolved from the JWT claims — the JS mirror of the policy's
+ * admin `EXISTS` and its subject comparison. `admin` is true when the roles array at
+ * `adminRolesClaimPath` (`app_metadata.roles` by default — the very array
+ * {@link buildSupabaseOwnerOrAdminNativePolicies} renders its `-> 'seg'` chain from, so the two surfaces
+ * read one declaration) contains `adminRoleName`; `subject` is the `sub` claim when it is a non-empty
+ * string, else null.
+ *
+ * Claims arrive unverified in shape, so this never throws: a missing/non-object claims bag, a
+ * non-array `roles`, or non-string members simply confer nothing.
+ */
+export function resolveOwnerOrAdminAccess(
+  claims: JwtClaims | null,
+  options: OwnerOrAdminAccessOptions = {},
+): OwnerOrAdminAccess {
+  const adminRoleName = options.adminRoleName ?? defaultAdminRoleName;
+  const roles = readClaimsPath(claims, resolveAdminRolesClaimPath(options.adminRolesClaimPath));
+  const admin = Array.isArray(roles) && roles.some((role) => typeof role === "string" && role === adminRoleName);
+
+  return { admin, subject: readSubjectClaim(claims) };
+}
+
+/**
+ * The Electric shape `where` for an owner-or-admin table — the read counterpart of
+ * {@link buildSupabaseOwnerOrAdminNativePolicies}, built from the same owner column. An admin gets
+ * `null` (no filter, every row — the policy's bypass branch); anyone else gets
+ * {@link buildOwnershipShapeWhere}, i.e. their own rows, or the {@link DENY_ALL} sentinel when there is
+ * no subject. Returning the sentinel *by reference* is what lets a `customWhere` built on this probe as
+ * claims-dependent (`isClaimsDependentRowFilter`).
+ */
+export function buildOwnerOrAdminShapeWhere(
+  ownerColumn: AnyColumn,
+  claims: JwtClaims | null,
+  options: OwnerOrAdminAccessOptions = {},
+): SQL | null {
+  const access = resolveOwnerOrAdminAccess(claims, options);
+  return access.admin ? null : buildOwnershipShapeWhere(ownerColumn, access.subject);
+}
+
+// ---------------------------------------------------------------------------
 // Membership-scoped policies (generic). A row belongs to a *container* and is
 // visible/writable through membership of that container — not just ownership.
 // This is the readwrite counterpart to a membership row-filter: every member of
@@ -223,6 +348,10 @@ export const supabaseOwnerOrAdminDefaults = {
 // and the `(select current_setting(...)::type)` JWT-subject expression (wrapped in a scalar subquery —
 // the Supabase per-statement-eval RLS perf idiom). Columns serialize qualified
 // (`"work_items"."workspace_id"`) — fine for Postgres RLS (the write path, unlike Electric's bare rule).
+//
+// The `select` half of this family is mirrored on the Electric read path by
+// {@link buildMembershipShapeWhere}, built from the same column declarations — Electric cannot read
+// RLS, so the two surfaces are generated from one declaration and must agree.
 // ---------------------------------------------------------------------------
 
 type MembershipPolicyKind = "select" | "insert" | "update" | "delete";
@@ -377,6 +506,58 @@ export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershi
 }
 
 // ---------------------------------------------------------------------------
+// Electric read-path mirror of the membership policies. Electric cannot read RLS, so the proxy must
+// re-derive the same visible set in the shape `where`, from the SAME Drizzle columns the policies were
+// built from — one declaration, two enforcement surfaces, so a row can never be readable-but-unwritable
+// (or the reverse) through a rename or a typo.
+//
+// SELECT only, by construction: the mirror reproduces the family's `select` predicate — plain
+// membership of the container. The owner/manager branches and the write-state gate are WRITE-side
+// concerns (INSERT/UPDATE/DELETE) and are deliberately absent here; a shape `where` filters a read
+// stream and has nothing to gate.
+//
+// The two surfaces render the SAME containment differently, on purpose:
+//   - RLS (`membershipMatch`) renders `= ANY(ARRAY(select …))` — the InitPlan/bitmap-index-scan
+//     discipline Postgres needs for a runtime-resolved set (see that function's comment).
+//   - Electric renders a plain `IN (subquery)`, because that is what Electric's shape `where` grammar
+//     accepts; there is no Postgres planner on this side to appease.
+// Same columns, two dialects — that is exactly what the mirror is for.
+// ---------------------------------------------------------------------------
+
+/**
+ * The columns {@link buildMembershipShapeWhere} needs: the SELECT-relevant subset of
+ * {@link SupabaseMembershipPredicateColumns}. The write-only fields (owner, manager role, subject cast,
+ * write gate, policy role) are accepted but ignored, so the **same declaration object** you hand to
+ * {@link buildSupabaseMembershipNativePolicies} can be handed to the read mirror verbatim.
+ */
+export type SupabaseMembershipShapeColumns = Pick<
+  SupabaseMembershipPredicateColumns,
+  "containerColumn" | "membershipTable" | "membershipContainerColumn" | "membershipSubjectColumn"
+> &
+  Partial<SupabaseMembershipNativePoliciesOptions>;
+
+/**
+ * The Electric shape `where` for a membership-scoped table — the read counterpart of the `select`
+ * policy in {@link buildSupabaseMembershipNativePolicies}: the row's container must be one the caller
+ * is a member of. Columns are referenced **bare** via {@link c} (Electric's grammar requires plain
+ * column refs) yet still through the real Drizzle column objects, so the reference is rename-safe; the
+ * subject rides as a typed interpolation and becomes a bound param once `buildRowFilterShape`
+ * serializes it (never a hand-escaped literal). The subquery is **self-contained** (uncorrelated) — it
+ * gets its own `FROM`, so the membership table's bare column names resolve to it.
+ *
+ * No subject → {@link DENY_ALL} (by reference, so a `customWhere` built on it probes claims-dependent),
+ * mirroring the policy, whose membership subquery matches nothing without a JWT sub.
+ */
+export function buildMembershipShapeWhere(columns: SupabaseMembershipShapeColumns, claims: JwtClaims | null): SQL {
+  const subject = readSubjectClaim(claims);
+  if (subject === null) {
+    return DENY_ALL;
+  }
+
+  return sql`${c(columns.containerColumn)} in (select ${c(columns.membershipContainerColumn)} from ${columns.membershipTable} where ${c(columns.membershipSubjectColumn)} = ${subject})`;
+}
+
+// ---------------------------------------------------------------------------
 // Grant-scope policies (generic). Authorization is carried IN THE JWT, not a DB
 // table: `app_metadata.authorization.grants` is an array of
 // `{ role, scope: { kind, <kind>Id } }` minted into the token. A row is visible
@@ -395,16 +576,30 @@ export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershi
 //     regression-guard the InitPlan discipline (see the `rls-read-load` perf track);
 //     never ship it.
 //
-// The same grant set is mirrored on the Electric read path by {@link resolveGrantScopeIds}
-// + {@link buildGrantScopeShapeWhere}: the proxy resolves the ids from the claims in JS
-// and injects a literal `scope_col IN ('a','b')` — Electric cannot read RLS, so the two
-// surfaces are generated from one declaration and must agree.
+// The same grant set is mirrored on the Electric read path by {@link resolveGrantScopeAccess}
+// (or {@link resolveGrantScopeIds} for the id set alone) + {@link buildGrantScopeShapeWhere}: the proxy
+// resolves the ids from the claims in JS and injects a literal `scope_col IN ('a','b')` — Electric
+// cannot read RLS, so the two surfaces are generated from one declaration and must agree.
 // ---------------------------------------------------------------------------
 
 type GrantScopePolicyKind = "select" | "insert" | "update" | "delete";
 
 const defaultGrantsClaimPath = ["app_metadata", "authorization", "grants"] as const;
 const defaultGrantScopeCastType = "uuid";
+// Scope kind a bypass grant must carry, on BOTH surfaces: the policy's `buildBypassExistsSqlText`
+// inlines it and the read mirror's `resolveGrantScopeAccess` compares against it.
+const defaultBypassScopeKind = "platform";
+
+/**
+ * An unconditional bypass declaration: any grant whose `role` ∈ `roleValues` and whose `scope.kind` =
+ * `scopeKind` (default `"platform"`) confers access to every row — e.g. a platform-scoped
+ * `platform_admin`. Hand the SAME object to the policy builder and to
+ * {@link resolveGrantScopeAccess} / {@link buildGrantScopeAccessShapeWhere}.
+ */
+export type GrantScopeBypassOptions = {
+  roleValues: string[];
+  scopeKind?: string;
+};
 
 export type GrantScopeClaimOptions = {
   /** Value matched against each grant's `scope.kind` (e.g. "offering"). */
@@ -423,12 +618,13 @@ export type SupabaseGrantScopePredicateColumns = GrantScopeClaimOptions & {
   /** SQL type the extracted grant id is cast to before comparison (default "uuid"). */
   scopeCastType?: string;
   /**
-   * Optional unconditional bypass: any grant whose `role` ∈ `bypass.roleValues` and whose
-   * `scope.kind` = `bypass.scopeKind` (default "platform") grants all rows — e.g. a
-   * platform-scoped `platform_admin`. The bypass is an **uncorrelated** EXISTS, so it stays
-   * InitPlan-hoisted in both the correct and naive forms.
+   * Optional unconditional bypass ({@link GrantScopeBypassOptions}): any grant whose `role` ∈
+   * `bypass.roleValues` and whose `scope.kind` = `bypass.scopeKind` (default "platform") grants all
+   * rows — e.g. a platform-scoped `platform_admin`. The bypass is an **uncorrelated** EXISTS, so it
+   * stays InitPlan-hoisted in both the correct and naive forms. Its read-path twin is
+   * {@link buildGrantScopeAccessShapeWhere} (bypass → `null`, i.e. no shape filter at all).
    */
-  bypass?: { roleValues: string[]; scopeKind?: string };
+  bypass?: GrantScopeBypassOptions;
 };
 
 export type SupabaseGrantScopeNativePoliciesOptions = SupabaseGrantScopePredicateColumns & {
@@ -486,8 +682,8 @@ function resolveGrantScopeIdField(options: GrantScopeClaimOptions): string {
 }
 
 // Uncorrelated bypass test (never references the governed row), so it is InitPlan-hoisted in both forms.
-function buildBypassExistsSqlText(bypass: { roleValues: string[]; scopeKind?: string }, grantsText: string): string {
-  const scopeKind = bypass.scopeKind ?? "platform";
+function buildBypassExistsSqlText(bypass: GrantScopeBypassOptions, grantsText: string): string {
+  const scopeKind = bypass.scopeKind ?? defaultBypassScopeKind;
   return `exists (
     select 1
     from jsonb_array_elements(${grantsText}) as bypass_grant
@@ -547,20 +743,14 @@ export function buildSupabaseGrantScopeNativePolicies(options: SupabaseGrantScop
 // ---------------------------------------------------------------------------
 // Electric read-path mirror of the grant-scope policy. Electric cannot read RLS, so the proxy must
 // resolve the same visible scope-id set from the claims in JS and inject a literal `IN (…)` shape
-// `where`. These two helpers are the read-path counterpart to the policy above — one declaration,
+// `where`. These helpers are the read-path counterpart to the policy above — one declaration,
 // two enforcement surfaces, derived from the same grant data so they cannot drift.
+//
+// The policy's OR bypass branch has a mirror too: {@link resolveGrantScopeAccess} reports it and
+// {@link buildGrantScopeAccessShapeWhere} turns it into `null` — no shape filter at all, every row
+// streams — exactly as the `exists (…)` OR-branch makes the scope test irrelevant on the write side.
+// Without it a bypass grant would be enforced on writes yet invisible on reads.
 // ---------------------------------------------------------------------------
-
-function readClaimsPath(claims: JwtClaims | null, path: string[]): unknown {
-  let current: unknown = claims;
-  for (const segment of path) {
-    if (typeof current !== "object" || current === null || Array.isArray(current)) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[segment];
-  }
-  return current;
-}
 
 /**
  * The set of scope ids the caller can see, resolved from the JWT grants — the JS mirror of the
@@ -616,4 +806,90 @@ export function buildGrantScopeShapeWhere(scopeColumn: AnyColumn, ids: string[])
     ids.map((id) => sql`${id}`),
     sql`, `,
   )})`;
+}
+
+/** The full grant-scope declaration the read mirror needs: the claim options plus the optional bypass. */
+export type GrantScopeAccessOptions = GrantScopeClaimOptions & {
+  /** The same {@link GrantScopeBypassOptions} handed to {@link buildSupabaseGrantScopeNativePolicies}. */
+  bypass?: GrantScopeBypassOptions;
+};
+
+/** The caller's standing on a grant-scope table, as resolved from the claims. */
+export type GrantScopeAccess = {
+  /** A bypass grant is present — the policy's OR branch; every row is visible. */
+  bypass: boolean;
+  /** The de-duplicated scope ids the caller can see (empty → no rows, absent a bypass). */
+  ids: string[];
+};
+
+// The JS mirror of `buildBypassExistsSqlText`: a grant whose `role` is one of `bypass.roleValues` and
+// whose `scope.kind` is `bypass.scopeKind` (defaulting to the same `defaultBypassScopeKind` the SQL
+// inlines). Claims arrive unverified in shape, so nothing here throws — a non-array grants claim, a
+// non-object grant, or a missing `scope` simply confers nothing.
+function hasGrantScopeBypass(claims: JwtClaims | null, options: GrantScopeAccessOptions): boolean {
+  const bypass = options.bypass;
+  if (!bypass) {
+    return false;
+  }
+
+  const grants = readClaimsPath(claims, resolveGrantsClaimPath(options.grantsClaimPath));
+  if (!Array.isArray(grants)) {
+    return false;
+  }
+
+  const scopeKind = bypass.scopeKind ?? defaultBypassScopeKind;
+  const roleValues = new Set(bypass.roleValues);
+
+  for (const grant of grants) {
+    if (typeof grant !== "object" || grant === null) {
+      continue;
+    }
+    const record = grant as Record<string, unknown>;
+    if (!roleValues.has(String(record["role"]))) {
+      continue;
+    }
+    const scope = record["scope"];
+    if (typeof scope !== "object" || scope === null) {
+      continue;
+    }
+    if ((scope as Record<string, unknown>)["kind"] === scopeKind) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * The caller's grant-scope standing, resolved from the JWT grants — the JS mirror of the whole policy
+ * predicate, both branches: `ids` is {@link resolveGrantScopeIds} (the scope-set subquery) and `bypass`
+ * mirrors the policy's OR `exists (…)` branch. One declaration, two enforcement surfaces: pass the SAME
+ * options object you gave {@link buildSupabaseGrantScopeNativePolicies} and a bypass grant cannot be
+ * enforced on writes yet invisible on reads.
+ *
+ * Never throws on malformed claims (they reach a `customWhere` unverified in shape) — a wrong shape
+ * simply confers nothing. A malformed `grantsClaimPath`/`scopeIdField` **option** is still a loud error.
+ */
+export function resolveGrantScopeAccess(claims: JwtClaims | null, options: GrantScopeAccessOptions): GrantScopeAccess {
+  return {
+    bypass: hasGrantScopeBypass(claims, options),
+    ids: resolveGrantScopeIds(claims, options),
+  };
+}
+
+/**
+ * The Electric shape `where` for a grant-scope table, bypass included — the read counterpart of the
+ * `select` policy in {@link buildSupabaseGrantScopeNativePolicies}, from the same declaration. A caller
+ * holding a bypass grant gets `null` (no filter, every row — the policy's OR branch); anyone else gets
+ * {@link buildGrantScopeShapeWhere} over their resolved ids, i.e. the {@link DENY_ALL} sentinel *by
+ * reference* when the set is empty (which is what lets a `customWhere` built on this probe as
+ * claims-dependent). Use {@link buildGrantScopeShapeWhere} directly only when there is no bypass to mirror.
+ */
+export function buildGrantScopeAccessShapeWhere(
+  scopeColumn: AnyColumn,
+  claims: JwtClaims | null,
+  options: GrantScopeAccessOptions,
+): SQL | null {
+  const access = resolveGrantScopeAccess(claims, options);
+  return access.bypass ? null : buildGrantScopeShapeWhere(scopeColumn, access.ids);
 }

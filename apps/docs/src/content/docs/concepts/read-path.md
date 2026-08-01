@@ -22,10 +22,31 @@ PostgreSQL  →  ElectricSQL  →  shape proxy  →  PGlite (local)
    container_id IN (SELECT container_id FROM memberships WHERE member_id = <subject>)
    ```
 
-   Author that predicate with the typed Drizzle helpers, never as a hand-built string — `c()` for each
-   (bare) column, the table object for the `FROM`, and the subject as a **bound param** (so a quote in
-   the value can't inject the predicate). Factor the subquery into a helper to share it with any narrower
-   variant:
+   You do not hand-write that. Membership is one of the shipped policy families, and every family ships
+   a read-path mirror that **generates exactly the predicate above** from the very same columns object
+   you hand the policy builder — one declaration, both engines, so a rename or a typo can never leave a
+   row writable but unreadable:
+
+   ```ts
+   import { buildMembershipShapeWhere } from "@pgxsinkit/contracts";
+
+   // The same object `buildSupabaseMembershipNativePolicies(…)` takes; write-only fields are ignored.
+   const membership = {
+     containerColumn: widgets.containerId,
+     membershipTable: memberships,
+     membershipContainerColumn: memberships.containerId,
+     membershipSubjectColumn: memberships.memberId,
+   };
+
+   const widgetsReadFilter = (claims) => buildMembershipShapeWhere(membership, claims);
+   ```
+
+   It renders the `IN (subquery)` form above with the subject bound as a param, and denies with
+   `DENY_ALL` when the claims carry no subject.
+
+   Reach for a hand-built predicate only past the shipped families — and then use the typed Drizzle
+   helpers, never a string: `c()` for each (bare) column, the table object for the `FROM`, and the
+   subject as a **bound param** (so a quote in the value can't inject the predicate).
 
    ```ts
    import { c, DENY_ALL } from "@pgxsinkit/contracts";

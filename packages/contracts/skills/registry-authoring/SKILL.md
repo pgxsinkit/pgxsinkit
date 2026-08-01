@@ -248,6 +248,19 @@ column rename or a typo:
   first. For "compare OLD vs NEW" rules (column immutability), RLS cannot help (`WITH CHECK` sees only NEW,
   `USING` only OLD) —
   use a `BEFORE UPDATE` trigger.
+- **Do not hand-write the read half — every policy family ships its read-path mirror.** Electric cannot
+  read RLS, so the shape `where` must re-derive the same visible set in JS, from the same declaration:
+  `buildOwnershipShapeWhere(ownerColumn, claims.sub)`, `buildOwnerOrAdminShapeWhere(ownerColumn, claims)`
+  (admin → `null`, i.e. no filter, mirroring the policy's bypass branch),
+  `buildMembershipShapeWhere(columns, claims)` (pass the **same** options object you gave the policy
+  builder — write-only fields are ignored), and `buildGrantScopeAccessShapeWhere(scopeColumn, claims, …)`
+  (bypass grant → `null` too; bare `resolveGrantScopeIds` + `buildGrantScopeShapeWhere` cannot see it).
+  Return each straight from `customWhere`; they deny with `DENY_ALL`, so the filter probes claims-dependent.
+- Two properties of the mirrors to keep in mind: they cover **SELECT only** (a shape `where` filters a read
+  stream — the owner/manager and write-gate branches stay with the INSERT/UPDATE/DELETE policies), and the
+  two surfaces render containment in **different dialects on purpose** — RLS emits `= ANY(ARRAY(select …))`
+  for the InitPlan/index-scan discipline, Electric emits plain `IN (subquery)`, which is what its shape
+  grammar accepts.
 
 Give drizzle-kit `entities: { roles: { provider: "supabase" } }` in `drizzle.config.ts` so it treats the
 Supabase roles (`authenticated`/`anon`/`service_role`/…) as externally managed — referenced in a policy's

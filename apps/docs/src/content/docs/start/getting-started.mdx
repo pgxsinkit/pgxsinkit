@@ -242,6 +242,18 @@ callback. The read filter and the write policy build from the same Drizzle colum
 silently drift. For anything beyond them (e.g. collaborative any-member writes), compose your own
 from `pgPolicy` + Drizzle operators (`and`/`or`/`eq`).
 
+Each family also ships the **read half** of that one declaration, so you never hand-write the mirror:
+return `buildOwnerOrAdminShapeWhere(ownerColumn, claims)` (an admin gets `null` — no filter — mirroring
+the policy's bypass; everyone else gets `buildOwnershipShapeWhere`), `buildMembershipShapeWhere(columns,
+claims)`, or `buildGrantScopeAccessShapeWhere(scopeColumn, claims, options)` for a JWT-resident grant set
+(a bypass grant → `null` too; the bare `resolveGrantScopeIds` + `buildGrantScopeShapeWhere` pair cannot
+see one) — hand each the _same_ options object you gave the policy builder — straight from `customWhere`.
+Each denies with `DENY_ALL` when the claims resolve to no access: the ownership, owner-or-admin and
+membership mirrors when there is no subject, the grant-scope mirror when the resolved grant set is empty.
+They mirror the **SELECT** policy only (a shape `where` filters a read stream), and they render
+containment as Electric's plain `IN (subquery)` where the policy renders `= ANY(ARRAY(select …))` for
+Postgres' index-scan discipline — same columns, two dialects.
+
 </Aside>
 
 ## Stand up the read path

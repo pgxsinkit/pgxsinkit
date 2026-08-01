@@ -4,9 +4,15 @@ import type { SQL } from "drizzle-orm";
 import { PgDialect, pgRole, pgTable, uuid, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import {
+  buildGrantScopeAccessShapeWhere,
   buildGrantScopeShapeWhere,
   buildSupabaseGrantScopeNativePolicies,
+  DENY_ALL,
+  isClaimsDependentRowFilter,
+  resolveGrantScopeAccess,
   resolveGrantScopeIds,
+  type GrantScopeAccessOptions,
+  type JwtClaims,
 } from "@pgxsinkit/contracts";
 
 type NativePolicy = {
@@ -178,5 +184,126 @@ describe("contracts grant-scope RLS helpers", () => {
     expect(normalizeSqlText(inline.sql)).toBe(`"offering_id" in ('a''b')`);
 
     expect(dialect.sqlToQuery(buildGrantScopeShapeWhere(enrolments.offeringId, [])).sql).toBe("false");
+  });
+});
+
+describe("contracts grant-scope bypass read-path mirror", () => {
+  const enrolments = pgTable("enrolments", {
+    id: uuid("id").primaryKey(),
+    offeringId: uuid("offering_id").notNull(),
+  });
+
+  // ONE declaration, handed to both surfaces: the policy builder takes it plus the column/role, the read
+  // mirror takes it verbatim. A bypass enforced on writes must be visible on reads or the surfaces drift.
+  const declaration = {
+    scopeKind: "offering",
+    roleValues: teacherRoles,
+    bypass: { roleValues: ["platform_admin"] },
+  } satisfies GrantScopeAccessOptions;
+
+  function grantClaims(grants: unknown[]): JwtClaims {
+    return { sub: "user-1", app_metadata: { authorization: { grants } } } as JwtClaims;
+  }
+
+  const teacherGrant = { role: "teacher", scope: { kind: "offering", offeringId: "off-a" } };
+  const bypassGrant = { role: "platform_admin", scope: { kind: "platform" } };
+
+  it("resolveGrantScopeAccess reports the bypass branch alongside the id set", () => {
+    expect(resolveGrantScopeAccess(grantClaims([teacherGrant, bypassGrant]), declaration)).toEqual({
+      bypass: true,
+      ids: ["off-a"],
+    });
+
+    // No bypass grant → the id set alone, exactly as resolveGrantScopeIds reports it.
+    expect(resolveGrantScopeAccess(grantClaims([teacherGrant]), declaration)).toEqual({
+      bypass: false,
+      ids: ["off-a"],
+    });
+
+    // A bypass grant with the right role but the WRONG scope kind confers nothing (the SQL's
+    // `scope ->> 'kind' = 'platform'` test), and neither does the right kind under the wrong role.
+    expect(
+      resolveGrantScopeAccess(grantClaims([{ role: "platform_admin", scope: { kind: "offering" } }]), declaration)
+        .bypass,
+    ).toBe(false);
+    expect(
+      resolveGrantScopeAccess(grantClaims([{ role: "teacher", scope: { kind: "platform" } }]), declaration).bypass,
+    ).toBe(false);
+
+    // Declaring no bypass can never confer one, whatever the token carries.
+    expect(
+      resolveGrantScopeAccess(grantClaims([bypassGrant]), { scopeKind: "offering", roleValues: teacherRoles }).bypass,
+    ).toBe(false);
+  });
+
+  it("honours a custom bypass scopeKind and roleValues", () => {
+    const custom = {
+      scopeKind: "offering",
+      roleValues: teacherRoles,
+      bypass: { roleValues: ["tenant_admin", "auditor"], scopeKind: "tenant" },
+    } satisfies GrantScopeAccessOptions;
+
+    expect(resolveGrantScopeAccess(grantClaims([{ role: "auditor", scope: { kind: "tenant" } }]), custom).bypass).toBe(
+      true,
+    );
+    // The DEFAULT platform bypass must not leak in once a custom kind is declared.
+    expect(resolveGrantScopeAccess(grantClaims([bypassGrant]), custom).bypass).toBe(false);
+  });
+
+  it("never throws on malformed claims — a wrong shape simply confers nothing", () => {
+    const malformed: unknown[] = [
+      null,
+      {},
+      { app_metadata: "not-an-object" },
+      { app_metadata: { authorization: { grants: "not-an-array" } } },
+      grantClaims([null, 42, "grant"]),
+      grantClaims([{ role: "platform_admin" }]), // no scope at all
+      grantClaims([{ role: "platform_admin", scope: null }]),
+      grantClaims([{ role: "platform_admin", scope: ["platform"] }]),
+      grantClaims([{ role: 7, scope: { kind: "platform" } }]),
+    ];
+
+    for (const claims of malformed) {
+      expect(resolveGrantScopeAccess(claims as JwtClaims, declaration)).toEqual({ bypass: false, ids: [] });
+    }
+  });
+
+  it("buildGrantScopeAccessShapeWhere: bypass → null, otherwise the ids path, DENY_ALL on empty", () => {
+    // Bypass → no filter at all, mirroring the policy's OR branch (every row streams).
+    expect(buildGrantScopeAccessShapeWhere(enrolments.offeringId, grantClaims([bypassGrant]), declaration)).toBeNull();
+
+    // No bypass → the unchanged ids fragment, bare column + bound ids.
+    const scoped = buildGrantScopeAccessShapeWhere(enrolments.offeringId, grantClaims([teacherGrant]), declaration);
+    const bound = dialect.sqlToQuery(scoped as SQL);
+    expect(normalizeSqlText(bound.sql)).toBe(`"offering_id" in ($1)`);
+    expect(bound.params).toEqual(["off-a"]);
+    expect(renderSql(scoped)).toBe(renderSql(buildGrantScopeShapeWhere(enrolments.offeringId, ["off-a"])));
+
+    // Neither bypass nor grants → the DENY_ALL sentinel BY REFERENCE, so a customWhere built on this
+    // probes claims-dependent.
+    expect(buildGrantScopeAccessShapeWhere(enrolments.offeringId, grantClaims([]), declaration)).toBe(DENY_ALL);
+    expect(buildGrantScopeAccessShapeWhere(enrolments.offeringId, null, declaration)).toBe(DENY_ALL);
+    expect(
+      isClaimsDependentRowFilter({
+        customWhere: (claims) => buildGrantScopeAccessShapeWhere(enrolments.offeringId, claims, declaration),
+      }),
+    ).toBe(true);
+  });
+
+  it("mirror and policy agree on the bypass: same kind and roles on both surfaces", () => {
+    const role = pgRole("authenticated");
+    const governed = pgTable(
+      "enrolments",
+      { id: uuid("id").primaryKey(), offeringId: uuid("offering_id").notNull() },
+      (t) => buildSupabaseGrantScopeNativePolicies({ role, scopeColumn: t.offeringId, ...declaration }),
+    );
+
+    const policyText = byCommand(governed)["select"]?.using ?? "";
+    expect(policyText).toContain(`bypass_grant -> 'scope' ->> 'kind' = 'platform'`);
+    expect(policyText).toContain(`bypass_grant ->> 'role' in ('platform_admin')`);
+
+    // The very grant the policy's EXISTS would match is the one the mirror bypasses on.
+    expect(resolveGrantScopeAccess(grantClaims([bypassGrant]), declaration).bypass).toBe(true);
+    expect(buildGrantScopeAccessShapeWhere(governed.offeringId, grantClaims([bypassGrant]), declaration)).toBeNull();
   });
 });
