@@ -96,6 +96,7 @@ import {
   fingerprintRegistry,
   getProjectedColumns as getProjectedTableColumns,
   getSyncRegistrySchema,
+  isManagedFieldGuarded,
   maybeQuoteIdentifier,
   quoteIdentifier,
   resolveServerVersionColumnName,
@@ -3006,6 +3007,17 @@ function resolveMutationUrls(batchWriteUrl: string): { batch: string; authoritat
   return { batch: batchWriteUrl, authoritative: `${batchWriteUrl}/unit` };
 }
 
+/**
+ * Drop the server-owned keys from an outgoing payload. What counts as server-owned is decided by
+ * contracts' {@link isManagedFieldGuarded} — the single definition of the guard rule, shared with the
+ * write route's `getGuardedManagedFields` and the apply-function generator, so this strip and the
+ * server's rejection can never disagree (notably: an update strips **every** managed field, a create-only
+ * one included, because it is inert on update and the server 400-rejects a payload carrying it — so
+ * stripping keeps a locally-authored patch from round-tripping to that rejection).
+ *
+ * `SyncTableUpdateInput` already omits every managed key at the type level, so this is the runtime half;
+ * a payload reaching here with a managed key came through an untyped path.
+ */
 function stripManagedFields(
   context: TableContext,
   payload: Record<string, unknown>,
@@ -3014,7 +3026,7 @@ function stripManagedFields(
   const managedColumns = new Set<string>();
 
   for (const mf of context.entry.governance?.managedFields ?? []) {
-    if (mf.applyOn.includes(operation)) {
+    if (isManagedFieldGuarded(mf, operation)) {
       managedColumns.add(mf.column);
     }
   }

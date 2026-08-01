@@ -7,9 +7,11 @@ import {
   escapeSqlLiteral as toSqlLiteral,
   getProjectedColumns,
   hashString,
+  isManagedFieldGuarded,
   quoteIdentifier as quoteIdent,
   resolveServerVersionColumnName,
   type BatchMutationRequest,
+  type ManagedFieldApplyOn,
   type RegistryRelations,
   type SyncTableEntry,
   type SyncTableRegistry,
@@ -32,6 +34,7 @@ function toSqlTextOrNull(value: string): string {
 interface ResolvedManagedField {
   propertyKey: string;
   columnName: string;
+  applyOn: readonly ManagedFieldApplyOn[];
   strategy: "nowMicroseconds" | "authClaim";
   claimPath?: string[];
   cast?: string;
@@ -59,15 +62,15 @@ function buildManagedFieldExpression(field: ResolvedManagedField): string {
   return CLOCK_US_CALL_SQL_TEXT;
 }
 
-function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create" | "update"): ResolvedManagedField[] {
+// Every managed field of the entry, resolved to its SQL column name and type. The two consumers slice it
+// differently and the distinction is load-bearing: STAMPING is operation-scoped (`applyOn.includes(op)`)
+// and decides what the applier writes, while GUARDING (contracts' `isManagedFieldGuarded`) decides which
+// columns a client payload may never move, and so which are excluded from the candidate lists below.
+function resolveManagedFields(entry: SyncTableEntry): ResolvedManagedField[] {
   const columns = getColumns(entry.table as AnyPgTable);
   const columnNameMap = new Map(Object.entries(columns).map(([propertyKey, column]) => [propertyKey, column.name]));
 
   return (entry.governance?.managedFields ?? []).flatMap((field) => {
-    if (!field.applyOn.includes(operation)) {
-      return [];
-    }
-
     const columnName = columnNameMap.get(field.column);
     if (!columnName) {
       return [];
@@ -81,6 +84,7 @@ function getManagedFieldsForOperation(entry: SyncTableEntry, operation: "create"
       {
         propertyKey: field.column,
         columnName,
+        applyOn: field.applyOn,
         strategy: field.strategy,
         ...(field.claimPath ? { claimPath: field.claimPath } : {}),
         ...(field.cast ? { cast: field.cast } : {}),
@@ -114,20 +118,32 @@ function buildTableBranch(entry: SyncTableEntry): string {
   });
   const primaryKeyColumnNames = new Set(primaryKeyColumns.map((pk) => pk.name));
 
-  const createManagedFields = getManagedFieldsForOperation(entry, "create");
-  const updateManagedFields = getManagedFieldsForOperation(entry, "update");
-  const createManagedFieldNames = new Set(createManagedFields.map((field) => field.columnName));
-  const updateManagedFieldNames = new Set(updateManagedFields.map((field) => field.columnName));
+  const managedFields = resolveManagedFields(entry);
+  // STAMPING sets — operation-scoped: what the applier itself writes (the INSERT column/value fragments
+  // and the UPDATE managed-assignment fragment below).
+  const createManagedFields = managedFields.filter((field) => field.applyOn.includes("create"));
+  const updateManagedFields = managedFields.filter((field) => field.applyOn.includes("update"));
+  // EXCLUSION sets — the guard rule, from contracts' single definition: a column that is server-owned for
+  // the operation is not a candidate a client payload key can move. On create that is the create-managed
+  // columns (the applier stamps them itself); on update it is EVERY managed column, so a create-only
+  // field (`applyOn: ["create"]`, e.g. an `authClaim` owner) is inert thereafter, and an update-managed
+  // one is assigned by the static managed-assignment fragment instead.
+  const createGuardedColumnNames = new Set(
+    managedFields.filter((field) => isManagedFieldGuarded(field, "create")).map((field) => field.columnName),
+  );
+  const updateGuardedColumnNames = new Set(
+    managedFields.filter((field) => isManagedFieldGuarded(field, "update")).map((field) => field.columnName),
+  );
 
   const allColumnPairs = projectedColumns
     .map(({ column }) => column)
-    .filter((column) => !createManagedFieldNames.has(column.name))
+    .filter((column) => !createGuardedColumnNames.has(column.name))
     .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(column.getSQLType())}')`)
     .join(",\n            ");
 
   const nonPrimaryKeyColumnPairs = projectedColumns
     .map(({ column }) => column)
-    .filter((column) => !primaryKeyColumnNames.has(column.name) && !updateManagedFieldNames.has(column.name))
+    .filter((column) => !primaryKeyColumnNames.has(column.name) && !updateGuardedColumnNames.has(column.name))
     .map((column) => `('${toSqlLiteral(column.name)}', '${toSqlLiteral(column.getSQLType())}')`)
     .join(",\n            ");
 

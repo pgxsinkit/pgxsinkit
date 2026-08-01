@@ -31,6 +31,12 @@ The first published contract is intentionally narrow, and focused tests pin its 
   `tests/unit/schema-fingerprint-fast-path.test.ts`.
 - The apply function exposes only the current mutation signature, and the vendored Supabase router verifies
   asymmetric JWKS-backed JWTs only. Coverage: `tests/unit/plpgsql-apply.test.ts` and the board integration lane.
+- A managed field declared `applyOn: ["create"]` is stamped by the server at birth and is **inert on
+  update**: the generated apply function offers no UPDATE SET candidate for it, and the write route treats
+  it exactly as it treats an update-managed field — flagged as a managed-field violation (400), stripped by
+  the payload sanitizer, and omitted from the update validation schema. Coverage:
+  `tests/unit/plpgsql-apply.test.ts` (candidate lists + a PGlite apply that leaves the stored value
+  untouched) and `tests/unit/update-managed-field-guard.test.ts` (the three request-path guards).
 
 ## Worker bridge protocol
 

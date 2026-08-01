@@ -123,6 +123,15 @@ const invalidLocallyManagedPatch: SyncTableUpdateInput<typeof locallyManagedRegi
   updatedAtUs: 3n,
 };
 
+// A CREATE-ONLY managed field is inert on update (the apply function offers no UPDATE SET candidate, and
+// the write route 400-rejects a payload carrying one), so it is not a settable update key either — the
+// type-level twin of the server's `getGuardedManagedFields(entry, "update")` ⇒ ALL managed fields.
+const invalidLocallyManagedCreateOnlyPatch: SyncTableUpdateInput<typeof locallyManagedRegistry, "locallyManagedItems"> =
+  {
+    // @ts-expect-error create-only managed fields must be omitted from update input too
+    createdAtUs: 4n,
+  };
+
 async function check() {
   const client = await createSyncClient({
     registry: demoSyncRegistry,
@@ -177,6 +186,7 @@ void invalidProjectedField;
 void invalidProjectedPatch;
 void invalidLocallyManagedInput;
 void invalidLocallyManagedCreateTimestamp;
+void invalidLocallyManagedCreateOnlyPatch;
 void invalidLocallyManagedPatch;
 void validInput;
 void validLocallyManagedInput;

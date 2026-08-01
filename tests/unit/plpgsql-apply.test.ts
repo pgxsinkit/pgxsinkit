@@ -51,6 +51,28 @@ const projectedPlpgsqlRegistry = defineSyncRegistry({
   }),
 });
 
+/**
+ * The column names a table branch offers as candidates for one of its two runtime column lists: the
+ * INSERT list (`INTO v_cols, v_vals`) or the UPDATE SET list (`INTO v_set`). Each is a `(VALUES
+ * ('col','type'), …) AS col_types(col_name, col_type)` block the generated function intersects with the
+ * group's payload signature — so a column absent here can never be written by a payload key.
+ */
+function candidateColumns(ddl: string, tableName: string, into: "v_cols, v_vals" | "v_set"): string[] {
+  const branchStart = ddl.indexOf(`ELSIF v_table = '${tableName}' THEN`);
+  expect(branchStart).toBeGreaterThan(-1);
+  const nextBranch = ddl.indexOf("ELSIF v_table = '", branchStart + 1);
+  const branch = ddl.slice(branchStart, nextBranch === -1 ? undefined : nextBranch);
+
+  const intoAt = branch.indexOf(`INTO ${into}`);
+  if (intoAt === -1) {
+    // The generator emits `v_set := NULL;` / `v_cols := NULL; v_vals := NULL;` when no column qualifies.
+    return [];
+  }
+  const valuesAt = branch.indexOf("FROM (VALUES", intoAt);
+  const valuesEnd = branch.indexOf(") AS col_types", valuesAt);
+  return [...branch.slice(valuesAt, valuesEnd).matchAll(/\('([^']+)', '[^']*'\)/g)].map((match) => match[1]!);
+}
+
 describe("plpgsql batch function generator", () => {
   it("preserves submitted group order when table-local mutation sequences overlap", () => {
     const ddl = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry);
@@ -125,6 +147,34 @@ describe("plpgsql batch function generator", () => {
     // Server-stamped, never read from the client payload.
     expect(ddl).not.toContain("($1->>'created_by_person_id')::uuid");
     expect(ddl).not.toContain("auth.uid()");
+  });
+
+  // A create-only managed field is stamped at birth and INERT thereafter: it must not appear among the
+  // UPDATE SET candidates (the `(col_name, col_type)` VALUES list `v_set` is built from), exactly as
+  // create-managed columns are absent from the INSERT candidate list.
+  it("omits create-only managed columns from the UPDATE SET candidate list", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry);
+    const updateCandidates = candidateColumns(ddl, "authors", "v_set");
+
+    // `owner_id` (authClaim, applyOn: ["create"]) and `created_at_us` (nowMicroseconds, applyOn:
+    // ["create"]) are stamped once, at insert — never settable by an update payload.
+    expect(updateCandidates).not.toContain("owner_id");
+    expect(updateCandidates).not.toContain("created_at_us");
+    // Update-managed columns stay excluded as before (they are assigned by the static managed fragment).
+    expect(updateCandidates).not.toContain("updated_at_us");
+    expect(updateCandidates).not.toContain("modified_by");
+    // Ordinary columns are still settable.
+    expect(updateCandidates).toContain("name");
+  });
+
+  it("keeps create-managed columns out of the UPDATE SET list while leaving the INSERT list intact", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(projectedPlpgsqlRegistry);
+
+    // The INSERT candidates are unchanged by this rule: the PK plus the ordinary column (`owner_id`,
+    // `created_at_us` and `updated_at_us` are stamped statically; `internal_note` is projected away).
+    expect(candidateColumns(ddl, "projected_plpgsql_items", "v_cols, v_vals")).toEqual(["id", "title"]);
+    // The UPDATE candidates drop the PK as before, and now also the create-only managed columns.
+    expect(candidateColumns(ddl, "projected_plpgsql_items", "v_set")).toEqual(["title"]);
   });
 
   it("does not build DML branches from client-omitted columns", () => {
@@ -454,6 +504,81 @@ describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase
         { id: ID_A, title: "new" }, // updated
         { id: ID_C, title: "C" }, // created (ID_B deleted)
       ]);
+    } finally {
+      await db.close();
+    }
+  });
+});
+
+// A create-only managed field (`applyOn: ["create"]`) is stamped by the server at birth and is INERT
+// thereafter: the generated UPDATE offers no SET candidate for it, so a payload key carrying one cannot
+// move the stored value (the HTTP route additionally 400-rejects and strips it — this is the DB-level leg).
+const createOnlyManagedRegistry = defineSyncRegistry({
+  notes: defineSyncTable({
+    tableName: "create_only_managed_notes",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+      ownerId: uuid("owner_id"),
+      createdAtUs: bigint("created_at_us", { mode: "bigint" }).notNull().default(0n),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+    }),
+    mode: "readwrite",
+    conflictPolicy: "last-write-wins",
+    primaryKey: ["id"],
+    governance: {
+      managedFields: [
+        { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
+        { column: "createdAtUs", applyOn: ["create"], strategy: "nowMicroseconds" },
+        { column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" },
+      ],
+    },
+  }),
+});
+
+describe("create-only managed fields are inert on update", () => {
+  it("applies the ordinary columns and leaves the create-only managed columns at their stored values", async () => {
+    const db = await createFreshTestPGlite();
+    const notes = createOnlyManagedRegistry.notes.table;
+
+    try {
+      await createTablesFromSchema(db, { notes });
+      await db.exec(buildPlpgsqlBatchFunctionDdl(createOnlyManagedRegistry));
+
+      const id = "80000000-0000-4000-8000-00000000000a";
+      const owner = "80000000-0000-4000-8000-00000000000b";
+      const intruder = "80000000-0000-4000-8000-00000000000c";
+      await drizzleOver(db)
+        .insert(notes)
+        .values({ id, label: "A", ownerId: owner, createdAtUs: 111n, updatedAtUs: 5n });
+
+      // The payload asserts values for BOTH create-only managed columns alongside a legitimate edit.
+      await applyBatch(db, {
+        mutations: [
+          {
+            tableName: "create_only_managed_notes",
+            kind: "update",
+            entityKey: { id },
+            payload: { label: "B", owner_id: intruder, created_at_us: "999" },
+            mutationId: "00000000-0000-4000-8000-00000000000a",
+            mutationSeq: 1,
+            clientTimestampUs: "1000",
+          },
+        ],
+      });
+
+      const rows = await drizzleOver(db)
+        .select({
+          label: notes.label,
+          ownerId: notes.ownerId,
+          createdAtUs: sql<string>`${notes.createdAtUs}::text`.as("createdAtUs"),
+          bumped: sql<boolean>`(${notes.updatedAtUs} > 5)`.as("bumped"),
+        })
+        .from(notes)
+        .where(eq(notes.id, id));
+
+      // Ownership and birth timestamp are untouched; the ordinary edit landed and the Server version bumped.
+      expect(rows[0]).toEqual({ label: "B", ownerId: owner, createdAtUs: "111", bumped: true });
     } finally {
       await db.close();
     }

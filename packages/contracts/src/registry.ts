@@ -436,14 +436,72 @@ type ManagedFieldColumnKeysForOperation<TEntry, TOperation extends ManagedFieldA
       : never
     : never;
 
+/**
+ * EVERY managed column key, whatever its `applyOn` — the omit set for {@link SyncTableUpdateInput}.
+ * `ManagedFieldApplyOn` is a union and the operation parameter is naked, so the conditional distributes
+ * and a field managed on either operation contributes its key.
+ *
+ * The **type-level twin** of {@link isManagedFieldGuarded} at `"update"`: same rule, stated where the
+ * compiler can enforce it. Change one only by changing the rule in {@link isManagedFieldGuarded}.
+ */
+type ManagedFieldColumnKeys<TEntry> = ManagedFieldColumnKeysForOperation<TEntry, ManagedFieldApplyOn>;
+
+/**
+ * Whether a managed field is **SERVER-OWNED** for an operation — the ONE definition of the guard rule,
+ * so the surfaces that enforce it cannot drift apart:
+ *
+ * - **create** ⇒ the field is guarded when its `applyOn` includes `"create"`. The server stamps it after
+ *   validation, so a client value for it is never honoured.
+ * - **update** ⇒ **every** managed field is guarded, a **create-only** one included. An update-managed
+ *   field is stamped by the server on every write; a `applyOn: ["create"]` field is stamped at birth and
+ *   **inert** on update (the generated apply function offers no UPDATE SET candidate for it). Neither is
+ *   ever a settable update key, so both are flagged, stripped, and omitted rather than left for consumer
+ *   RLS to neutralise.
+ * - **delete** ⇒ none. A delete carries no payload, so nothing can be owned.
+ *
+ * "Guarded" is NOT "stamped": stamping is operation-scoped (`applyOn.includes(operation)`) and decides
+ * what the applier writes; guarding decides what a client may not send. They coincide on create and
+ * deliberately diverge on update.
+ *
+ * The consuming surfaces, all of which must go through this predicate:
+ * - the write route's `getGuardedManagedFields` (`packages/server/src/mutations/route.ts`) — the 400
+ *   violation check, the sanitizer, and the create/update validation schemas;
+ * - the client's `stripManagedFields` (`packages/client/src/mutation.ts`) — the outgoing-payload strip;
+ * - the apply-function generator's `buildTableBranch` (`packages/server/src/mutations/plpgsql-apply.ts`) —
+ *   the INSERT/UPDATE candidate-column exclusions;
+ * - {@link ManagedFieldColumnKeys} / `ManagedFieldColumnKeysForOperation` — the type-level twin behind
+ *   {@link SyncTableCreateInput} / {@link SyncTableUpdateInput}.
+ */
+export function isManagedFieldGuarded(
+  field: { applyOn: readonly ManagedFieldApplyOn[] },
+  operation: "create" | "update" | "delete",
+): boolean {
+  switch (operation) {
+    case "create":
+      return field.applyOn.includes("create");
+    case "update":
+      return true;
+    case "delete":
+      return false;
+  }
+}
+
 export type SyncTableCreateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
   TRegistry[TKey] extends SyncTableEntry<AnyPgTable, infer TLocalTable extends AnyPgTable>
     ? Omit<InferInsertModel<TLocalTable>, ManagedFieldColumnKeysForOperation<TRegistry[TKey], "create">>
     : never;
 
+/**
+ * The patch type for an update: the insert model made partial, minus **every** managed key — including
+ * a **create-only** one. A field declared `applyOn: ["create"]` is stamped at birth and inert on update
+ * (the generated apply function offers no UPDATE SET candidate for it), so it is never a settable update
+ * key; the write route 400-rejects an update payload that carries one. This omit set is the type-level
+ * statement of {@link isManagedFieldGuarded} at `"update"` — that predicate is the single definition of
+ * the rule, and every runtime surface derives from it.
+ */
 export type SyncTableUpdateInput<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =
   TRegistry[TKey] extends SyncTableEntry<AnyPgTable, infer TLocalTable extends AnyPgTable>
-    ? Partial<Omit<InferInsertModel<TLocalTable>, ManagedFieldColumnKeysForOperation<TRegistry[TKey], "update">>>
+    ? Partial<Omit<InferInsertModel<TLocalTable>, ManagedFieldColumnKeys<TRegistry[TKey]>>>
     : never;
 
 export type SyncTableRecord<TRegistry extends SyncTableRegistry, TKey extends keyof TRegistry> =

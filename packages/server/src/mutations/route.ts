@@ -8,6 +8,7 @@ import type {
   AuthoritativeWriteRequest,
   BatchMutationRequest,
   JwtClaims,
+  ManagedFieldApplyOn,
   MutationAck,
   RegistryRelations,
   SyncTableEntry,
@@ -18,6 +19,7 @@ import {
   batchMutationRequestSchema,
   getOmittedProjectedColumns as getOmittedProjectionColumns,
   getProjectedColumns,
+  isManagedFieldGuarded,
   resolveServerVersionColumnName,
 } from "@pgxsinkit/contracts";
 
@@ -192,9 +194,7 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
           if (payloadKeys.length === 0) {
             throw new Error("At least one field must be provided");
           }
-          createMutationInsertSchema(syncEntry.table as AnyPgTable)
-            .partial()
-            .parse(normalizedPayload);
+          buildUpdateValidationSchema(syncEntry).parse(normalizedPayload);
         } else if (mutation.kind === "create") {
           buildCreateValidationSchema(syncEntry).parse(normalizedPayload);
         }
@@ -879,7 +879,12 @@ function getUuidClaim(claims: JwtClaims, key: string): string | null {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : null;
 }
 
-function findManagedFieldViolations(
+/**
+ * The server-managed payload keys a mutation must not carry — the 400 guard (see
+ * {@link getGuardedManagedFields} for what counts as managed per operation, notably that a create-only
+ * managed field is guarded on update too). Exported for direct unit coverage.
+ */
+export function findManagedFieldViolations(
   entry: SyncTableEntry,
   mutationKind: BatchMutationRequest["mutations"][number]["kind"],
   payload: unknown,
@@ -888,7 +893,7 @@ function findManagedFieldViolations(
     return [];
   }
 
-  const managedFields = getManagedFieldsForOperation(entry, mutationKind);
+  const managedFields = getGuardedManagedFields(entry, mutationKind);
   if (managedFields.length === 0) {
     return [];
   }
@@ -1014,7 +1019,16 @@ function findProjectedFieldViolations(
   ];
 }
 
-function sanitizeRestrictedFields(batch: BatchMutationRequest, registry: SyncTableRegistry): BatchMutationRequest {
+/**
+ * Defense in depth behind the 400 guard: strip every server-owned key from each payload before apply, so
+ * a caller that reaches this code path without the request-level check (or a key spelled as the DB column
+ * name rather than the property key) still cannot set a managed or projected-away column. Exported for
+ * direct unit coverage.
+ */
+export function sanitizeRestrictedFields(
+  batch: BatchMutationRequest,
+  registry: SyncTableRegistry,
+): BatchMutationRequest {
   return {
     mutations: batch.mutations.map((mutation) => {
       if (mutation.kind === "delete") {
@@ -1027,7 +1041,7 @@ function sanitizeRestrictedFields(batch: BatchMutationRequest, registry: SyncTab
         return mutation;
       }
 
-      const managedFields = getManagedFieldsForOperation(entry as SyncTableEntry, mutation.kind);
+      const managedFields = getGuardedManagedFields(entry as SyncTableEntry, mutation.kind);
       const projectedFields = getProjectedAwayFields(entry as SyncTableEntry);
 
       if (managedFields.length === 0 && projectedFields.length === 0) {
@@ -1064,7 +1078,7 @@ function sanitizeRestrictedFields(batch: BatchMutationRequest, registry: SyncTab
  */
 export function buildCreateValidationSchema(entry: SyncTableEntry) {
   const createSchema = createMutationInsertSchema(entry.table as AnyPgTable);
-  const managedCreateKeys = getManagedFieldsForOperation(entry, "create").map((field) => field.propertyKey);
+  const managedCreateKeys = getGuardedManagedFields(entry, "create").map((field) => field.propertyKey);
   if (managedCreateKeys.length === 0) {
     return createSchema;
   }
@@ -1076,6 +1090,43 @@ export function buildCreateValidationSchema(entry: SyncTableEntry) {
   return createSchema.omit(omitMask);
 }
 
+/**
+ * The zod schema used to validate an `update` payload: the insert schema made `partial()` (an update is a
+ * patch — only the sent keys are validated), minus every server-managed key. This is the update-side
+ * counterpart of {@link buildCreateValidationSchema}: a field managed on update is stamped by the server,
+ * and a **create-only** managed field is inert on update (the generated apply function omits it from the
+ * UPDATE SET candidates), so neither is a settable key of an update payload. Both are already
+ * 400-rejected by {@link findManagedFieldViolations}; omitting them keeps the schema an accurate
+ * statement of what an update may carry.
+ */
+export function buildUpdateValidationSchema(entry: SyncTableEntry) {
+  const updateSchema = createMutationInsertSchema(entry.table as AnyPgTable).partial();
+  const managedKeys = getGuardedManagedFields(entry, "update").map((field) => field.propertyKey);
+  if (managedKeys.length === 0) {
+    return updateSchema;
+  }
+  const omitMask = Object.fromEntries(managedKeys.map((key) => [key, true as const])) as Parameters<
+    typeof updateSchema.omit
+  >[0];
+  return updateSchema.omit(omitMask);
+}
+
+function getManagedFields(
+  entry: SyncTableEntry,
+  matches: (field: { applyOn: readonly ManagedFieldApplyOn[] }) => boolean,
+) {
+  const columns = getColumns(entry.table as AnyPgTable);
+  const columnMap = new Map(Object.entries(columns).map(([propertyKey, column]) => [propertyKey, column.name]));
+
+  return (entry.governance?.managedFields ?? [])
+    .filter((field) => matches(field))
+    .map((field) => ({
+      propertyKey: field.column,
+      columnName: columnMap.get(field.column) ?? field.column,
+      strategy: field.strategy,
+    }));
+}
+
 function getManagedFieldsForOperation(
   entry: SyncTableEntry,
   mutationKind: BatchMutationRequest["mutations"][number]["kind"],
@@ -1084,16 +1135,21 @@ function getManagedFieldsForOperation(
     return [];
   }
 
-  const columns = getColumns(entry.table as AnyPgTable);
-  const columnMap = new Map(Object.entries(columns).map(([propertyKey, column]) => [propertyKey, column.name]));
+  return getManagedFields(entry, (field) => field.applyOn.includes(mutationKind));
+}
 
-  return (entry.governance?.managedFields ?? [])
-    .filter((field) => field.applyOn.includes(mutationKind))
-    .map((field) => ({
-      propertyKey: field.column,
-      columnName: columnMap.get(field.column) ?? field.column,
-      strategy: field.strategy,
-    }));
+/**
+ * The fields the request-path guards treat as **server-owned** for `mutationKind` — the one set the
+ * violation check flags, the sanitizer strips, and the validation schema omits. This resolves the
+ * governance specs to `{ propertyKey, columnName, strategy }`; WHICH of them are server-owned is not
+ * decided here but by contracts' {@link isManagedFieldGuarded}, the single definition of the guard rule
+ * (shared with the client's `stripManagedFields` and the apply-function generator).
+ */
+function getGuardedManagedFields(
+  entry: SyncTableEntry,
+  mutationKind: BatchMutationRequest["mutations"][number]["kind"],
+) {
+  return getManagedFields(entry, (field) => isManagedFieldGuarded(field, mutationKind));
 }
 
 function getProjectedAwayFields(entry: SyncTableEntry) {

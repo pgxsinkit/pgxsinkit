@@ -123,7 +123,54 @@ BEGIN
 
     IF FALSE THEN
       NULL;
-    ELSIF v_table = 'authors' THEN
+    ELSIF v_table = 'profile' THEN
+        IF v_kind = 'create' THEN
+          SELECT
+          string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
+          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_cols, v_vals
+        FROM (VALUES
+            ('id', 'uuid'),
+            ('display_name', 'varchar(120)'),
+            ('avatar_color', 'varchar(24)')
+        ) AS col_types(col_name, col_type)
+        WHERE col_name = ANY(string_to_array(v_sig, ','));
+
+        dml_sql := format(
+          'INSERT INTO "profile" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
+          concat_ws(', ', nullif(v_cols, ''), NULL),
+          concat_ws(', ', nullif(v_vals, ''), NULL)
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSIF v_kind = 'update' THEN
+          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_set
+        FROM (VALUES
+            ('display_name', 'varchar(120)'),
+            ('avatar_color', 'varchar(24)')
+        ) AS col_types(col_name, col_type)
+        WHERE col_name = ANY(string_to_array(v_sig, ','));
+
+        dml_sql := format(
+          'UPDATE "profile" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
+          concat_ws(', ', nullif(v_set, ''), NULL)
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb))), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSIF v_kind = 'delete' THEN
+          EXECUTE 'DELETE FROM "profile" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
+          SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSE
+          RAISE EXCEPTION 'Unsupported mutation kind "%" for table "%"', v_kind, v_table;
+        END IF;
+ELSIF v_table = 'team' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
@@ -136,9 +183,9 @@ BEGIN
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
-          'INSERT INTO "authors" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
-          concat_ws(', ', nullif(v_cols, ''), '"owner_id", "modified_by", "created_at_us", "updated_at_us"'),
-          concat_ws(', ', nullif(v_vals, ''), '(NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, (NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, public.pgxsinkit_clock_us(), public.pgxsinkit_clock_us()')
+          'INSERT INTO "team" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
+          concat_ws(', ', nullif(v_cols, ''), '"created_at_us", "updated_at_us"'),
+          concat_ws(', ', nullif(v_vals, ''), 'public.pgxsinkit_clock_us(), public.pgxsinkit_clock_us()')
         );
         EXECUTE dml_sql USING (
           SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
@@ -148,68 +195,11 @@ BEGIN
           SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('name', 'varchar(120)'),
-            ('owner_id', 'uuid'),
-            ('created_at_us', 'bigint')
+            ('name', 'varchar(120)')
         ) AS col_types(col_name, col_type)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
-        dml_sql := format(
-          'UPDATE "authors" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
-          concat_ws(', ', nullif(v_set, ''), '"modified_by" = (NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, "updated_at_us" = GREATEST(public.pgxsinkit_clock_us(), "updated_at_us" + 1)')
-        );
-        EXECUTE dml_sql USING (
-          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb))), '[]'::jsonb)
-          FROM jsonb_array_elements(v_rows) AS elem
-        );
-        ELSIF v_kind = 'delete' THEN
-          EXECUTE 'DELETE FROM "authors" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
-          SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
-          FROM jsonb_array_elements(v_rows) AS elem
-        );
-        ELSE
-          RAISE EXCEPTION 'Unsupported mutation kind "%" for table "%"', v_kind, v_table;
-        END IF;
-ELSIF v_table = 'todos' THEN
-        IF v_kind = 'create' THEN
-          SELECT
-          string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
-        INTO v_cols, v_vals
-        FROM (VALUES
-            ('id', 'uuid'),
-            ('title', 'varchar(120)'),
-            ('description', 'varchar(4000)'),
-            ('author_id', 'uuid'),
-            ('status', 'todo_status'),
-            ('priority', 'todo_priority')
-        ) AS col_types(col_name, col_type)
-        WHERE col_name = ANY(string_to_array(v_sig, ','));
-
-        dml_sql := format(
-          'INSERT INTO "todos" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
-          concat_ws(', ', nullif(v_cols, ''), '"owner_id", "modified_by", "created_at_us", "updated_at_us"'),
-          concat_ws(', ', nullif(v_vals, ''), '(NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, (NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, public.pgxsinkit_clock_us(), public.pgxsinkit_clock_us()')
-        );
-        EXECUTE dml_sql USING (
-          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
-          FROM jsonb_array_elements(v_rows) AS elem
-        );
-        ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
-        INTO v_set
-        FROM (VALUES
-            ('title', 'varchar(120)'),
-            ('description', 'varchar(4000)'),
-            ('author_id', 'uuid'),
-            ('owner_id', 'uuid'),
-            ('status', 'todo_status'),
-            ('priority', 'todo_priority'),
-            ('created_at_us', 'bigint')
-        ) AS col_types(col_name, col_type)
-        WHERE col_name = ANY(string_to_array(v_sig, ','));
-
-        EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''todos'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) LEFT JOIN "todos" AS t ON t."id" = (x.k->>''id'')::uuid WHERE t."id" IS NULL OR (x.b IS NOT NULL AND t."updated_at_us" > x.b)'
+        EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''team'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) LEFT JOIN "team" AS t ON t."id" = (x.k->>''id'')::uuid WHERE t."id" IS NULL OR (x.b IS NOT NULL AND t."updated_at_us" > x.b)'
           INTO v_group_conflicts
           USING (
             SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
@@ -218,15 +208,15 @@ ELSIF v_table = 'todos' THEN
         v_conflicts := v_conflicts || v_group_conflicts;
 
         dml_sql := format(
-          'UPDATE "todos" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) WHERE t."id" = (x.k->>''id'')::uuid AND (x.b IS NULL OR t."updated_at_us" <= x.b)',
-          concat_ws(', ', nullif(v_set, ''), '"modified_by" = (NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, "updated_at_us" = GREATEST(public.pgxsinkit_clock_us(), "updated_at_us" + 1)')
+          'UPDATE "team" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) WHERE t."id" = (x.k->>''id'')::uuid AND (x.b IS NULL OR t."updated_at_us" <= x.b)',
+          concat_ws(', ', nullif(v_set, ''), '"updated_at_us" = GREATEST(public.pgxsinkit_clock_us(), "updated_at_us" + 1)')
         );
         EXECUTE dml_sql USING (
           SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'delete' THEN
-          EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''todos'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x("id" uuid, b bigint, m text) JOIN "todos" AS t ON t."id" = x."id" WHERE x.b IS NOT NULL AND t."updated_at_us" > x.b'
+          EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''team'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x("id" uuid, b bigint, m text) JOIN "team" AS t ON t."id" = x."id" WHERE x.b IS NOT NULL AND t."updated_at_us" > x.b'
           INTO v_group_conflicts
           USING (
             SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
@@ -234,14 +224,14 @@ ELSIF v_table = 'todos' THEN
           );
         v_conflicts := v_conflicts || v_group_conflicts;
 
-        EXECUTE 'DELETE FROM "todos" AS t USING jsonb_to_recordset($1) AS x("id" uuid, b bigint, m text) WHERE t."id" = x."id" AND (x.b IS NULL OR t."updated_at_us" <= x.b)' USING (
+        EXECUTE 'DELETE FROM "team" AS t USING jsonb_to_recordset($1) AS x("id" uuid, b bigint, m text) WHERE t."id" = x."id" AND (x.b IS NULL OR t."updated_at_us" <= x.b)' USING (
           SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSE
           RAISE EXCEPTION 'Unsupported mutation kind "%" for table "%"', v_kind, v_table;
         END IF;
-ELSIF v_table = 'workspaces' THEN
+ELSIF v_table = 'team_member' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
@@ -249,14 +239,62 @@ ELSIF v_table = 'workspaces' THEN
         INTO v_cols, v_vals
         FROM (VALUES
             ('id', 'uuid'),
-            ('owner_id', 'uuid'),
-            ('name', 'varchar(120)'),
-            ('locked', 'boolean')
+            ('team_id', 'uuid'),
+            ('user_id', 'uuid')
         ) AS col_types(col_name, col_type)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
-          'INSERT INTO "workspaces" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
+          'INSERT INTO "team_member" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
+          concat_ws(', ', nullif(v_cols, ''), '"created_at_us", "updated_at_us"'),
+          concat_ws(', ', nullif(v_vals, ''), 'public.pgxsinkit_clock_us(), public.pgxsinkit_clock_us()')
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSIF v_kind = 'update' THEN
+          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_set
+        FROM (VALUES
+            ('team_id', 'uuid'),
+            ('user_id', 'uuid')
+        ) AS col_types(col_name, col_type)
+        WHERE col_name = ANY(string_to_array(v_sig, ','));
+
+        dml_sql := format(
+          'UPDATE "team_member" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
+          concat_ws(', ', nullif(v_set, ''), '"updated_at_us" = GREATEST(public.pgxsinkit_clock_us(), "updated_at_us" + 1)')
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb))), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSIF v_kind = 'delete' THEN
+          EXECUTE 'DELETE FROM "team_member" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
+          SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSE
+          RAISE EXCEPTION 'Unsupported mutation kind "%" for table "%"', v_kind, v_table;
+        END IF;
+ELSIF v_table = 'channel' THEN
+        IF v_kind = 'create' THEN
+          SELECT
+          string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
+          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_cols, v_vals
+        FROM (VALUES
+            ('id', 'uuid'),
+            ('team_id', 'uuid'),
+            ('kind', 'channel_kind'),
+            ('name', 'varchar(120)'),
+            ('created_at_us', 'bigint')
+        ) AS col_types(col_name, col_type)
+        WHERE col_name = ANY(string_to_array(v_sig, ','));
+
+        dml_sql := format(
+          'INSERT INTO "channel" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
           concat_ws(', ', nullif(v_cols, ''), NULL),
           concat_ws(', ', nullif(v_vals, ''), NULL)
         );
@@ -268,14 +306,15 @@ ELSIF v_table = 'workspaces' THEN
           SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('owner_id', 'uuid'),
+            ('team_id', 'uuid'),
+            ('kind', 'channel_kind'),
             ('name', 'varchar(120)'),
-            ('locked', 'boolean')
+            ('created_at_us', 'bigint')
         ) AS col_types(col_name, col_type)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
-          'UPDATE "workspaces" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
+          'UPDATE "channel" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
           concat_ws(', ', nullif(v_set, ''), NULL)
         );
         EXECUTE dml_sql USING (
@@ -283,14 +322,14 @@ ELSIF v_table = 'workspaces' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'delete' THEN
-          EXECUTE 'DELETE FROM "workspaces" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
+          EXECUTE 'DELETE FROM "channel" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
           SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSE
           RAISE EXCEPTION 'Unsupported mutation kind "%" for table "%"', v_kind, v_table;
         END IF;
-ELSIF v_table = 'workspace_members' THEN
+ELSIF v_table = 'issue' THEN
         IF v_kind = 'create' THEN
           SELECT
           string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
@@ -298,67 +337,18 @@ ELSIF v_table = 'workspace_members' THEN
         INTO v_cols, v_vals
         FROM (VALUES
             ('id', 'uuid'),
-            ('workspace_id', 'uuid'),
-            ('member_id', 'uuid'),
-            ('role', 'workspace_member_role'),
-            ('muted', 'boolean')
+            ('team_id', 'uuid'),
+            ('assignee_id', 'uuid'),
+            ('title', 'varchar(200)'),
+            ('description', 'varchar(4000)'),
+            ('status', 'issue_status'),
+            ('priority', 'issue_priority')
         ) AS col_types(col_name, col_type)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
-          'INSERT INTO "workspace_members" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
-          concat_ws(', ', nullif(v_cols, ''), NULL),
-          concat_ws(', ', nullif(v_vals, ''), NULL)
-        );
-        EXECUTE dml_sql USING (
-          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
-          FROM jsonb_array_elements(v_rows) AS elem
-        );
-        ELSIF v_kind = 'update' THEN
-          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
-        INTO v_set
-        FROM (VALUES
-            ('workspace_id', 'uuid'),
-            ('member_id', 'uuid'),
-            ('role', 'workspace_member_role'),
-            ('muted', 'boolean')
-        ) AS col_types(col_name, col_type)
-        WHERE col_name = ANY(string_to_array(v_sig, ','));
-
-        dml_sql := format(
-          'UPDATE "workspace_members" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
-          concat_ws(', ', nullif(v_set, ''), NULL)
-        );
-        EXECUTE dml_sql USING (
-          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb))), '[]'::jsonb)
-          FROM jsonb_array_elements(v_rows) AS elem
-        );
-        ELSIF v_kind = 'delete' THEN
-          EXECUTE 'DELETE FROM "workspace_members" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
-          SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
-          FROM jsonb_array_elements(v_rows) AS elem
-        );
-        ELSE
-          RAISE EXCEPTION 'Unsupported mutation kind "%" for table "%"', v_kind, v_table;
-        END IF;
-ELSIF v_table = 'work_items' THEN
-        IF v_kind = 'create' THEN
-          SELECT
-          string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
-          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
-        INTO v_cols, v_vals
-        FROM (VALUES
-            ('id', 'uuid'),
-            ('workspace_id', 'uuid'),
-            ('body', 'varchar(4000)'),
-            ('hidden', 'boolean'),
-            ('status', 'work_item_status')
-        ) AS col_types(col_name, col_type)
-        WHERE col_name = ANY(string_to_array(v_sig, ','));
-
-        dml_sql := format(
-          'INSERT INTO "work_items" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
-          concat_ws(', ', nullif(v_cols, ''), '"owner_id", "created_at_us", "updated_at_us"'),
+          'INSERT INTO "issue" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
+          concat_ws(', ', nullif(v_cols, ''), '"created_by", "created_at_us", "updated_at_us"'),
           concat_ws(', ', nullif(v_vals, ''), '(NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, public.pgxsinkit_clock_us(), public.pgxsinkit_clock_us()')
         );
         EXECUTE dml_sql USING (
@@ -369,17 +359,80 @@ ELSIF v_table = 'work_items' THEN
           SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
         INTO v_set
         FROM (VALUES
-            ('workspace_id', 'uuid'),
-            ('owner_id', 'uuid'),
-            ('body', 'varchar(4000)'),
-            ('hidden', 'boolean'),
-            ('status', 'work_item_status'),
-            ('created_at_us', 'bigint')
+            ('team_id', 'uuid'),
+            ('assignee_id', 'uuid'),
+            ('title', 'varchar(200)'),
+            ('description', 'varchar(4000)'),
+            ('status', 'issue_status'),
+            ('priority', 'issue_priority')
+        ) AS col_types(col_name, col_type)
+        WHERE col_name = ANY(string_to_array(v_sig, ','));
+
+        EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''issue'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) LEFT JOIN "issue" AS t ON t."id" = (x.k->>''id'')::uuid WHERE t."id" IS NULL OR (x.b IS NOT NULL AND t."updated_at_us" > x.b)'
+          INTO v_group_conflicts
+          USING (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+            FROM jsonb_array_elements(v_rows) AS elem
+          );
+        v_conflicts := v_conflicts || v_group_conflicts;
+
+        dml_sql := format(
+          'UPDATE "issue" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb, b bigint, m text) WHERE t."id" = (x.k->>''id'')::uuid AND (x.b IS NULL OR t."updated_at_us" <= x.b)',
+          concat_ws(', ', nullif(v_set, ''), '"updated_at_us" = GREATEST(public.pgxsinkit_clock_us(), "updated_at_us" + 1)')
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb), 'k', COALESCE(elem->'entityKey', '{}'::jsonb), 'b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSIF v_kind = 'delete' THEN
+          EXECUTE 'SELECT COALESCE(jsonb_agg(jsonb_build_object(''mutationId'', x.m, ''tableName'', ''issue'', ''currentServerVersion'', t."updated_at_us")), ''[]''::jsonb) FROM jsonb_to_recordset($1) AS x("id" uuid, b bigint, m text) JOIN "issue" AS t ON t."id" = x."id" WHERE x.b IS NOT NULL AND t."updated_at_us" > x.b'
+          INTO v_group_conflicts
+          USING (
+            SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+            FROM jsonb_array_elements(v_rows) AS elem
+          );
+        v_conflicts := v_conflicts || v_group_conflicts;
+
+        EXECUTE 'DELETE FROM "issue" AS t USING jsonb_to_recordset($1) AS x("id" uuid, b bigint, m text) WHERE t."id" = x."id" AND (x.b IS NULL OR t."updated_at_us" <= x.b)' USING (
+          SELECT COALESCE(jsonb_agg(COALESCE(elem->'entityKey', '{}'::jsonb) || jsonb_build_object('b', (elem->>'baseServerVersion')::bigint, 'm', elem->>'mutationId')), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSE
+          RAISE EXCEPTION 'Unsupported mutation kind "%" for table "%"', v_kind, v_table;
+        END IF;
+ELSIF v_table = 'message' THEN
+        IF v_kind = 'create' THEN
+          SELECT
+          string_agg(quote_ident(col_name), ', ' ORDER BY col_name),
+          string_agg(format('(x.p->>%L)::%s', col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_cols, v_vals
+        FROM (VALUES
+            ('id', 'uuid'),
+            ('channel_id', 'uuid'),
+            ('body', 'varchar(4000)')
         ) AS col_types(col_name, col_type)
         WHERE col_name = ANY(string_to_array(v_sig, ','));
 
         dml_sql := format(
-          'UPDATE "work_items" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
+          'INSERT INTO "message" (%s) SELECT %s FROM jsonb_to_recordset($1) AS x(p jsonb)',
+          concat_ws(', ', nullif(v_cols, ''), '"author_id", "created_at_us", "updated_at_us"'),
+          concat_ws(', ', nullif(v_vals, ''), '(NULLIF(current_setting(''request.jwt.claims'', true), '''')::jsonb #>> ''{sub}'')::uuid, public.pgxsinkit_clock_us(), public.pgxsinkit_clock_us()')
+        );
+        EXECUTE dml_sql USING (
+          SELECT COALESCE(jsonb_agg(jsonb_build_object('p', COALESCE(elem->'payload', '{}'::jsonb))), '[]'::jsonb)
+          FROM jsonb_array_elements(v_rows) AS elem
+        );
+        ELSIF v_kind = 'update' THEN
+          SELECT string_agg(format('%I = (x.p->>%L)::%s', col_name, col_name, col_type), ', ' ORDER BY col_name)
+        INTO v_set
+        FROM (VALUES
+            ('channel_id', 'uuid'),
+            ('body', 'varchar(4000)')
+        ) AS col_types(col_name, col_type)
+        WHERE col_name = ANY(string_to_array(v_sig, ','));
+
+        dml_sql := format(
+          'UPDATE "message" AS t SET %s FROM jsonb_to_recordset($1) AS x(p jsonb, k jsonb) WHERE t."id" = (x.k->>''id'')::uuid',
           concat_ws(', ', nullif(v_set, ''), '"updated_at_us" = GREATEST(public.pgxsinkit_clock_us(), "updated_at_us" + 1)')
         );
         EXECUTE dml_sql USING (
@@ -387,7 +440,7 @@ ELSIF v_table = 'work_items' THEN
           FROM jsonb_array_elements(v_rows) AS elem
         );
         ELSIF v_kind = 'delete' THEN
-          EXECUTE 'DELETE FROM "work_items" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
+          EXECUTE 'DELETE FROM "message" AS t USING jsonb_to_recordset($1) AS x("id" uuid) WHERE t."id" = x."id"' USING (
           SELECT COALESCE(jsonb_agg(elem->'entityKey'), '[]'::jsonb)
           FROM jsonb_array_elements(v_rows) AS elem
         );
@@ -458,4 +511,4 @@ ELSIF v_table = 'work_items' THEN
 END;
 $$;
 
-COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:45a7d3b54ac1d45e';
+COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:668b61bfe647907e';
