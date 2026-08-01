@@ -177,23 +177,36 @@ function buildClaimPathChainSql(path: string[]): SQL {
   );
 }
 
+// An extracted claim as an ARRAY or nothing at all — the SQL twin of the mirrors' "an unverified claim
+// of the wrong shape confers nothing". Absent/null already yields `[]`; the load-bearing case is a
+// claim that is PRESENT but not an array (a token hook emitting `roles: "admin"` instead of
+// `["admin"]`), which would otherwise reach `jsonb_array_elements(_text)` and raise "cannot extract
+// elements from a scalar/object" — turning every governed write into an RLS execution ERROR instead of
+// a clean deny. Wrapped here, a non-array claim behaves exactly like an absent one, so the policy
+// reaches the same verdict as `resolveOwnerOrAdminAccess` / `resolveGrantScopeAccess`.
+// The expression is repeated (Postgres has nowhere to bind it inside a policy predicate); it is a
+// stable per-statement expression, so the planner evaluates it once, not per row.
+function buildClaimArraySqlText(claimSqlText: string): string {
+  return `case jsonb_typeof(${claimSqlText}) when 'array' then ${claimSqlText} else '[]'::jsonb end`;
+}
+
 // The admin-bypass test: the roles array at `adminRolesClaimPath` (from the JWT claims) contains
 // `adminRoleName`. No column reference and no recursion risk, so it is inlined as text (shared by the
 // text builder and the native builder). The role value and the claim-path segments enter as typed
-// interpolations (drizzle owns the escaping); the claim-extraction body is the allowed raw leaf.
+// interpolations (drizzle owns the escaping); the claim-extraction body is the allowed raw leaf, and it
+// goes through {@link buildClaimArraySqlText} so a malformed `roles` denies instead of erroring.
 function buildAdminRoleExistsSqlText(adminRoleName: string, claimPath: string[]): string {
-  return renderInlineSql(sql`EXISTS (
-    SELECT 1
-    FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+  const rolesClaim = renderInlineSql(sql`(
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb${buildClaimPathChainSql(claimPath)}
-        ),
-        '[]'::jsonb
-      )
+        )`);
+
+  return renderInlineSql(sql`EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements_text(
+      ${sql.raw(buildClaimArraySqlText(rolesClaim))}
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = ${adminRoleName}
   )`);
@@ -648,19 +661,18 @@ function resolveGrantsClaimPath(path: readonly string[] | undefined): string[] {
   return segments;
 }
 
-// The grants array as a Postgres jsonb expression, defaulting to `[]` when absent so
-// `jsonb_array_elements` never errors. `#>` takes a text[] path; the segments are validated
-// identifiers, so the `'{…}'` path literal is injection-safe.
+// The grants array as a Postgres jsonb expression, guarded by {@link buildClaimArraySqlText} so
+// `jsonb_array_elements` never errors: an absent, null, OR non-array grants claim all yield `[]`, i.e.
+// no grants — the same "confers nothing" verdict `resolveGrantScopeAccess` reaches in JS. Shared by the
+// scope predicate (both forms) and the bypass EXISTS. `#>` takes a text[] path; the segments are
+// validated identifiers, so the `'{…}'` path literal is injection-safe.
 function buildGrantsArraySqlText(path: string[]): string {
-  return `coalesce(
-    (
+  return buildClaimArraySqlText(`(
       coalesce(
         nullif(current_setting('request.jwt.claim', true), ''),
         nullif(current_setting('request.jwt.claims', true), '')
       )::jsonb #> '{${path.join(",")}}'
-    ),
-    '[]'::jsonb
-  )`;
+    )`);
 }
 
 function buildRoleInListSqlText(roleValues: string[]): string {

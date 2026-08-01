@@ -38,8 +38,16 @@ import { authUid } from "drizzle-orm/supabase";
 // ordering trap — a `CREATE POLICY` referencing a function needs that function to exist first.
 // Reads `request.jwt.claims` (the same source as `auth.uid()`), which the Mutation applier sets
 // before applying a batch. The cross-team-move trigger reuses this predicate in PL/pgSQL.
-export const BOARD_ADMIN_PREDICATE_SQL =
-  "EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles', '[]'::jsonb)) AS r(role) WHERE r.role = 'admin')";
+//
+// The `case jsonb_typeof(…)` wrapper is the deny-on-malformed guard (the contracts twin does the same in
+// `buildClaimArraySqlText`): a `roles` claim that is present but NOT an array — a token hook emitting
+// `roles: "admin"` — would otherwise reach `jsonb_array_elements_text` and raise "cannot extract elements
+// from a scalar", turning every governed write into an RLS execution error. Guarded, a malformed claim
+// confers no Admin standing, exactly as the read-path filters treat it. The claim expression is repeated
+// because a policy predicate has nowhere to bind it; it is a stable per-statement expression.
+const BOARD_ADMIN_ROLES_CLAIM_SQL =
+  "nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles'";
+export const BOARD_ADMIN_PREDICATE_SQL = `EXISTS (SELECT 1 FROM jsonb_array_elements_text(case jsonb_typeof(${BOARD_ADMIN_ROLES_CLAIM_SQL}) when 'array' then ${BOARD_ADMIN_ROLES_CLAIM_SQL} else '[]'::jsonb end) AS r(role) WHERE r.role = 'admin')`;
 
 const ADMIN = sql.raw(BOARD_ADMIN_PREDICATE_SQL);
 // `authUid` (drizzle-orm/supabase) emits `(select auth.uid())`, not bare `auth.uid()` — the Supabase

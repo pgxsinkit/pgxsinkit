@@ -79,10 +79,14 @@ function nativeRoleToName(role: NativePolicy["to"]): string {
   return "";
 }
 
-// The DEFAULT owner-or-admin predicate, byte-for-byte as it renders today. Committed migrations may
-// embed this text, so it is a compatibility surface: the admin-roles claim path is now DERIVED from the
-// shared `adminRolesClaimPath` constant instead of being hard-coded in the SQL template, and this pin is
-// what proves the derivation changed nothing. A deliberate change here means regenerating artifacts.
+// The DEFAULT owner-or-admin predicate, byte-for-byte as it renders today. Committed migrations embed
+// this text, so it is a compatibility surface and the pin exists to catch ACCIDENTAL drift of the
+// rendered form. A change here is only ever deliberate, and comes with regenerated artifacts. The
+// current form reflects two such deliberate changes: the admin-roles claim path is DERIVED from the
+// shared `adminRolesClaimPath` constant rather than hard-coded, and the extracted roles claim goes
+// through the `case jsonb_typeof(…) when 'array' …` guard so a present-but-non-array claim DENIES (as
+// the JS mirror does) instead of raising "cannot extract elements from a scalar/object" — the guard's
+// behaviour is executed against PGlite in `rls-malformed-claim-arrays.test.ts`.
 const defaultOwnerOrAdminPredicateSql = `
   owner_id = coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),
@@ -91,15 +95,17 @@ const defaultOwnerOrAdminPredicateSql = `
   OR EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   )

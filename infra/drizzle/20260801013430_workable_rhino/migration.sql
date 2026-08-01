@@ -115,15 +115,17 @@ CREATE POLICY "authors_select_owner_or_admin" ON "authors" AS PERMISSIVE FOR SEL
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -133,15 +135,17 @@ CREATE POLICY "authors_insert_owner_or_admin" ON "authors" AS PERMISSIVE FOR INS
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -151,15 +155,17 @@ CREATE POLICY "authors_update_owner_or_admin" ON "authors" AS PERMISSIVE FOR UPD
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   )))) WITH CHECK ((("authors"."owner_id" = (select coalesce(
@@ -168,15 +174,17 @@ CREATE POLICY "authors_update_owner_or_admin" ON "authors" AS PERMISSIVE FOR UPD
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -186,15 +194,17 @@ CREATE POLICY "authors_delete_owner_or_admin" ON "authors" AS PERMISSIVE FOR DEL
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -204,15 +214,17 @@ CREATE POLICY "todos_select_owner_or_admin" ON "todos" AS PERMISSIVE FOR SELECT 
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -222,15 +234,17 @@ CREATE POLICY "todos_insert_owner_or_admin" ON "todos" AS PERMISSIVE FOR INSERT 
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -240,15 +254,17 @@ CREATE POLICY "todos_update_owner_or_admin" ON "todos" AS PERMISSIVE FOR UPDATE 
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   )))) WITH CHECK ((("todos"."owner_id" = (select coalesce(
@@ -257,15 +273,17 @@ CREATE POLICY "todos_update_owner_or_admin" ON "todos" AS PERMISSIVE FOR UPDATE 
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -275,15 +293,17 @@ CREATE POLICY "todos_delete_owner_or_admin" ON "todos" AS PERMISSIVE FOR DELETE 
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -293,15 +313,17 @@ CREATE POLICY "rls_todos_select_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -311,15 +333,17 @@ CREATE POLICY "rls_todos_insert_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -329,15 +353,17 @@ CREATE POLICY "rls_todos_update_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   )))) WITH CHECK ((("rls_todos"."owner_id" = (select coalesce(
@@ -346,15 +372,17 @@ CREATE POLICY "rls_todos_update_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint
@@ -364,15 +392,17 @@ CREATE POLICY "rls_todos_delete_owner_or_admin" ON "rls_todos" AS PERMISSIVE FOR
   )::uuid)) or (EXISTS (
     SELECT 1
     FROM jsonb_array_elements_text(
-      COALESCE(
-        (
+      case jsonb_typeof((
           coalesce(
             nullif(current_setting('request.jwt.claim', true), ''),
             nullif(current_setting('request.jwt.claims', true), '')
           )::jsonb -> 'app_metadata' -> 'roles'
-        ),
-        '[]'::jsonb
-      )
+        )) when 'array' then (
+          coalesce(
+            nullif(current_setting('request.jwt.claim', true), ''),
+            nullif(current_setting('request.jwt.claims', true), '')
+          )::jsonb -> 'app_metadata' -> 'roles'
+        ) else '[]'::jsonb end
     ) AS assigned_role(role_name_value)
     WHERE assigned_role.role_name_value = 'admin'
   ))));--> statement-breakpoint

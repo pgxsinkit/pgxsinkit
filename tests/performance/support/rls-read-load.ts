@@ -232,7 +232,12 @@ function buildNaiveMembershipPolicies(): ReturnType<typeof pgPolicy>[] {
 }
 
 // Shared SQL fragments for the experimental variants (the grants jsonb array; the JWT subject uuid).
-const GRANTS_JSONB = `coalesce((coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb #> '{app_metadata,authorization,grants}'), '[]'::jsonb)`;
+// The array guard matches the shipped canonical form, contracts' `buildClaimArraySqlText`: a claim that is
+// PRESENT but not an array yields `[]` rather than erroring inside `jsonb_array_elements`. The harness
+// synthesizes its own claims, so the malformed path is unreachable here — it is written this way so the
+// perf lab shows the same expression the real policies emit, not an older unguarded variant to copy.
+const GRANTS_CLAIM = `(coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb #> '{app_metadata,authorization,grants}')`;
+const GRANTS_JSONB = `case jsonb_typeof(${GRANTS_CLAIM}) when 'array' then ${GRANTS_CLAIM} else '[]'::jsonb end`;
 const SUBJECT_UUID = `(select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid)`;
 const CALLER_OFFERINGS_FN = `${PREFIX}caller_offerings`;
 

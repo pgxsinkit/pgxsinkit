@@ -30,7 +30,15 @@ $$;
 -- sees only the old row, WITH CHECK only the new), so a BEFORE UPDATE trigger enforces it (attached to
 -- `issue` in the grants+trigger migration, once the table exists). The Admin check is the same inline
 -- predicate the RLS policies use — reading request.jwt.claims, which the Mutation applier sets before
--- applying a batch. Server authority, never local (the Parity boundary).
+-- applying a batch. Server authority, never local (the Parity boundary). It is a hand-kept copy of
+-- `BOARD_ADMIN_PREDICATE_SQL` (packages/board-schema/src/policies.ts) — PL/pgSQL in a custom migration
+-- cannot import the TypeScript constant, so the two are edited together.
+--
+-- `CASE jsonb_typeof(…) WHEN 'array'` is the deny-on-malformed guard the policies carry too: a signed
+-- token whose `roles` claim is present but NOT an array (a custom-access-token-hook emitting
+-- `roles: "admin"`) would otherwise reach `jsonb_array_elements_text` and raise "cannot extract elements
+-- from a scalar", making every `issue` UPDATE fail with an execution error instead of simply denying the
+-- caller Admin standing.
 CREATE OR REPLACE FUNCTION board_block_cross_team_move() RETURNS trigger
   LANGUAGE plpgsql AS $$
 BEGIN
@@ -38,7 +46,10 @@ BEGIN
      AND NOT EXISTS (
        SELECT 1
        FROM jsonb_array_elements_text(
-         coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles', '[]'::jsonb)
+         CASE jsonb_typeof(nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles')
+           WHEN 'array' THEN nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'app_metadata' -> 'roles'
+           ELSE '[]'::jsonb
+         END
        ) AS r(role)
        WHERE r.role = 'admin'
      )
