@@ -21,6 +21,15 @@ export const channelKindEnum = pgEnum("channel_kind", ["global", "team"]);
 // added to a Team sees the Team, its Channel, and its Issues appear in one frame — no broken-join flicker.
 const TEAM_SCOPE = "team-scope";
 
+// Row classification (pgxsinkit ADR-0052). The board's vocabulary is declared on the registry
+// (registry.ts) and read straight off what each entry's read filter and RLS actually gate on:
+//   - "directory"      — every authenticated identity sees every row (profile).
+//   - "team-scoped"    — visible through membership of the row's team (team, team_member, issue).
+//   - "channel-scoped" — visible through channel visibility, i.e. a global channel or one of your
+//                        teams' channels (channel, message).
+// Declaring the vocabulary makes classification mandatory: a seventh board table cannot be added
+// without its author deciding which of these three kinds of rows it carries.
+
 function isAdmin(claims: JwtClaims): boolean {
   return claims.app_metadata?.roles?.includes("admin") ?? false;
 }
@@ -49,6 +58,7 @@ const profileSyncEntry = defineSyncTable({
   }),
   policies: buildProfilePolicies(authenticatedRole),
   mode: "readonly",
+  rowClass: "directory",
   shape: {
     rowFilter: () => ({ customWhere: (claims): SQL | null => (claims.sub ? null : DENY_ALL) }),
   },
@@ -69,6 +79,7 @@ const teamSyncEntry = defineSyncTable({
   }),
   extras: (t) => buildTeamPolicies(authenticatedRole, t.id),
   mode: "readwrite",
+  rowClass: "team-scoped",
   conflictPolicy: "reject-if-stale",
   consistencyGroup: TEAM_SCOPE,
   shape: {
@@ -104,6 +115,7 @@ const teamMemberSyncEntry = defineSyncTable({
   }),
   extras: (t) => buildTeamMemberPolicies(authenticatedRole, t.teamId),
   mode: "readwrite",
+  rowClass: "team-scoped",
   conflictPolicy: "last-write-wins",
   consistencyGroup: TEAM_SCOPE,
   shape: {
@@ -136,6 +148,7 @@ const channelSyncEntry = defineSyncTable({
   }),
   extras: (t) => buildChannelPolicies(authenticatedRole, t.kind, t.teamId),
   mode: "readonly",
+  rowClass: "channel-scoped",
   consistencyGroup: TEAM_SCOPE,
   shape: {
     rowFilter: (columns) => ({
@@ -181,6 +194,7 @@ const messageSyncEntry = defineSyncTable({
   }),
   extras: (t) => buildMessagePolicies(authenticatedRole, t.channelId, t.authorId, channelSyncEntry.table),
   mode: "readwrite",
+  rowClass: "channel-scoped",
   conflictPolicy: "last-write-wins",
   // `lazy` for both roles; the authoritative entry is `persistent` (Admin), projected `ephemeral` for the
   // Member in registry.ts. See the block comment above.
@@ -225,6 +239,7 @@ const issueSyncEntry = defineSyncTable({
   }),
   extras: (t) => buildIssuePolicies(authenticatedRole, t.teamId),
   mode: "readwrite",
+  rowClass: "team-scoped",
   conflictPolicy: "reject-if-stale",
   consistencyGroup: TEAM_SCOPE,
   shape: {

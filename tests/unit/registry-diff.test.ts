@@ -7,6 +7,7 @@ import {
   compareRegistries,
   defineSyncRegistry,
   defineSyncTable,
+  diffRegistryAgainstLock,
   runRegistryCheck,
   summarizeRegistryDiff,
 } from "@pgxsinkit/contracts";
@@ -24,6 +25,18 @@ const single = (makeColumns: () => Record<string, unknown>) =>
   });
 
 const base = () => single(() => ({ id: uuid("id").primaryKey(), title: varchar("title", { length: 120 }).notNull() }));
+
+// The same shape, optionally carrying a row classification (ADR-0052) — a sibling of the canonical
+// shape, so `classified()` and `classified("private")` differ only in the lock's `rowClasses` map.
+const classified = (rowClass?: string) =>
+  defineSyncRegistry({
+    items: defineSyncTable({
+      tableName: "items",
+      makeColumns: () => ({ id: uuid("id").primaryKey(), title: varchar("title", { length: 120 }).notNull() }),
+      clientProjection: { omitColumns: [] },
+      ...(rowClass != null ? { rowClass } : {}),
+    }),
+  });
 
 describe("registry diff gate (ADR-0006)", () => {
   it("reports no changes for an identical shape", () => {
@@ -198,6 +211,46 @@ describe("registry diff gate (ADR-0006)", () => {
     expect(compareRegistries(mk("forum"), mk("roster")).severity).toBe("risky");
     // No change in group membership is not flagged.
     expect(compareRegistries(mk("forum"), mk("forum")).changes).toEqual([]);
+  });
+
+  it("carries row classification in the lock as a sibling of the canonical tables (ADR-0052)", () => {
+    const lock = buildRegistryLock(classified("private"));
+    expect(lock.rowClasses).toEqual({ items: "private" });
+    // Classification must not leak into the canonical shape — that is what the persisted fingerprint hashes.
+    expect(JSON.stringify(lock.tables)).not.toContain("private");
+    expect(lock.version).toBe(buildRegistryLock(classified()).version);
+  });
+
+  it("classifies a row-class change as risky (ADR-0052)", () => {
+    const diff = compareRegistries(classified("private"), classified("shared"));
+    expect(diff.severity).toBe("risky");
+    expect(
+      diff.changes.some((change) =>
+        /row class changed: private -> shared \(review invariant enrollment\)/.test(change.detail),
+      ),
+    ).toBe(true);
+  });
+
+  it("classifies adopting a row class as compatible and dropping one as risky (ADR-0052)", () => {
+    const adopted = compareRegistries(classified(), classified("private"));
+    expect(adopted.severity).toBe("compatible");
+    expect(adopted.changes.some((change) => /row class declared: private/.test(change.detail))).toBe(true);
+
+    const dropped = compareRegistries(classified("private"), classified());
+    expect(dropped.severity).toBe("risky");
+    expect(
+      dropped.changes.some((change) =>
+        /row class removed: private \(un-enrols from registry invariants\)/.test(change.detail),
+      ),
+    ).toBe(true);
+  });
+
+  it("reads a lock predating rowClasses as an unclassified baseline (ADR-0052)", () => {
+    // A committed lock is JSON on disk; one written before the field existed simply has no `rowClasses`.
+    const { rowClasses: _dropped, ...oldLock } = buildRegistryLock(classified());
+    const diff = diffRegistryAgainstLock(classified("private"), oldLock);
+    expect(diff.severity).toBe("compatible");
+    expect(diff.changes.some((change) => /row class declared: private/.test(change.detail))).toBe(true);
   });
 
   it("round-trips a lock and gates a breaking change", () => {

@@ -15,14 +15,21 @@ import {
  * proxy); the write-path RLS lives on the tables (schema.ts / policies.ts). The two are deliberate
  * mirrors: read filters and write policies derive from the same member-of-team / channel-visibility /
  * admin predicates so a row can never be visible-but-unwritable or vice versa by accident.
+ *
+ * It declares its `rowClasses` vocabulary (pgxsinkit ADR-0052), which makes classification a fail-closed
+ * obligation: every entry must carry a `rowClass` from that set, so a new board table cannot join the
+ * registry without its author saying which kind of rows it holds. See schema.ts for what each class means.
  */
 export const boardSyncRegistry = defineSyncRegistry({
-  profile: profileSyncEntry,
-  team: teamSyncEntry,
-  team_member: teamMemberSyncEntry,
-  channel: channelSyncEntry,
-  issue: issueSyncEntry,
-  message: messageSyncEntry,
+  rowClasses: ["directory", "team-scoped", "channel-scoped"],
+  tables: {
+    profile: profileSyncEntry,
+    team: teamSyncEntry,
+    team_member: teamMemberSyncEntry,
+    channel: channelSyncEntry,
+    issue: issueSyncEntry,
+    message: messageSyncEntry,
+  },
 });
 
 /**
@@ -47,11 +54,17 @@ export const boardSyncRegistry = defineSyncRegistry({
  */
 export const boardAdminRegistry = boardSyncRegistry;
 
+// The same vocabulary is declared here too: the projections carry each entry's `rowClass` through
+// (`asReadonly`/`asEphemeral` preserve it), so the member registry is held to the same fail-closed
+// classification as the authoritative one — a projection can never quietly drop a row's class.
 export const boardMemberRegistry = defineSyncRegistry({
-  ...boardSyncRegistry,
-  team: asReadonly(boardSyncRegistry.team),
-  team_member: asReadonly(boardSyncRegistry.team_member),
-  message: asEphemeral(boardSyncRegistry.message),
+  rowClasses: ["directory", "team-scoped", "channel-scoped"],
+  tables: {
+    ...boardSyncRegistry,
+    team: asReadonly(boardSyncRegistry.team),
+    team_member: asReadonly(boardSyncRegistry.team_member),
+    message: asEphemeral(boardSyncRegistry.message),
+  },
 });
 
 // Fail closed if a projection ever diverges the data it syncs (columns / pk / row-filter shape) — a

@@ -133,6 +133,25 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
    * local row instead of failing the commit. Resolved to `"insert"` when omitted.
    */
   applyMode: "insert" | "upsert";
+  /**
+   * Consumer-defined ROW CLASSIFICATION (ADR-0052) — documentation-as-code for what KIND of rows this
+   * entry carries. The vocabulary is entirely the CONSUMER's: pgxsinkit defines no values and attaches no
+   * behaviour to any of them. Its two jobs:
+   *
+   * - **Fail-closed enumeration.** When the registry declares its vocabulary
+   *   ({@link SyncRegistryDefinition.rowClasses}), EVERY entry must carry a `rowClass` drawn from that set —
+   *   validated at `defineSyncRegistry`, i.e. at module eval. A new entry therefore cannot join the registry
+   *   without its author classifying it, which is what stops a privacy/visibility obligation from being
+   *   silently inherited by tables nobody remembered to enumerate.
+   * - **The binding key for {@link assertRegistryInvariant}.** An invariant binds to `rowClass` values
+   *   rather than to a hand-maintained table list, so coverage grows with the registry instead of drifting
+   *   behind it.
+   *
+   * When the registry declares no `rowClasses`, this field is unconstrained (any string, or none). It is
+   * authoring metadata only: it is deliberately absent from the registry fingerprint and the read-contract
+   * fingerprint, so classifying a table never shifts a persisted cache key (ADR-0052).
+   */
+  rowClass?: string;
   shape?: ShapeSpec;
   clientProjection?: ClientProjectionSpecForTable<TTable>;
   serverProjection?: ServerProjectionSpec;
@@ -347,6 +366,12 @@ export type SyncTableInput<
    * local row. Declare the exception here, where it lives — do not weaken the invariant repo-wide.
    */
   applyMode?: "insert" | "upsert";
+  /**
+   * Consumer-defined row classification (ADR-0052) — see {@link SyncTableEntry.rowClass}. Required (and
+   * checked against the declared set) when the registry declares {@link SyncRegistryDefinition.rowClasses};
+   * unconstrained otherwise.
+   */
+  rowClass?: string;
   shape?: ShapeSpecInputFor<TColumns>;
   clientProjection?: SyncTableInputProjection<TColumns, TOmittedColumns>;
   /** Server-side response-path projection (e.g. `rowTransform`). Server authority, not client shape. */
@@ -392,11 +417,26 @@ export interface SyncRegistryDefinition<TRegistry extends SyncTableRegistry> {
    * the returned registry and read back with {@link getSyncRegistryStorage}. See {@link SyncStorageDeclaration}.
    */
   storage?: SyncStorageDeclaration;
+  /**
+   * The registry's CLOSED row-classification vocabulary (ADR-0052) — the consumer's own set of
+   * {@link SyncTableEntry.rowClass} values (pgxsinkit defines none). Declaring it turns classification into
+   * a fail-closed obligation: EVERY entry must then carry a `rowClass` drawn from this exact set, validated
+   * at {@link defineSyncRegistry} (module eval), so a newly added entry cannot join the registry
+   * unclassified and silently escape whatever invariants its class enrols it in. The declared set is carried
+   * on the returned registry and read back with {@link getSyncRegistryRowClasses}, which
+   * {@link assertRegistryInvariant} uses to reject a misspelled class in an invariant's `appliesTo`.
+   *
+   * Omit it and `rowClass` is unconstrained (the bare-registry-map overload has nowhere to declare a set, so
+   * it is always unconstrained). Purely authoring metadata: it never enters the registry fingerprint.
+   */
+  rowClasses?: readonly string[];
 }
 
 export const syncRegistrySchemaSymbol = Symbol.for("@pgxsinkit/contracts/syncRegistrySchema");
 
 export const syncRegistryStorageSymbol = Symbol.for("@pgxsinkit/contracts/syncRegistryStorage");
+
+export const syncRegistryRowClassesSymbol = Symbol.for("@pgxsinkit/contracts/syncRegistryRowClasses");
 
 export type RegistryTables<TRegistry extends SyncTableRegistry> = {
   [TKey in keyof TRegistry]: TRegistry[TKey]["table"];
@@ -817,6 +857,13 @@ export function defineReadProjection<
      * `serverProjection.rowTransform` and `columns`; must be disjoint from `columns` and the primary key.
      */
     serverOnlyColumns?: readonly TableColumnKey<TOwnerTable>[];
+    /**
+     * Row classification (ADR-0052) for THIS projection. Defaults to the OWNER's `rowClass` — a projection
+     * reads the owner's rows, so it carries the owner's classification (and the invariants bound to it)
+     * unless you say otherwise. Override when the narrower shape genuinely changes the KIND of row the
+     * client receives (e.g. a redacting window over private rows that egresses only public fields).
+     */
+    rowClass?: string;
     consistencyGroup?: string;
     subscription?: SubscriptionTiming;
     retention?: Retention;
@@ -993,11 +1040,16 @@ export function defineReadProjection<
   // `serverProjection` is attached HERE on the outer object (mirroring `shape`), NOT threaded through the
   // inner `defineSyncTable` call — that alone makes the proxy's shapeKey resolution find and run the
   // projection's egress transform (getRowTransformForTable → resolveEntryByShapeKey(…)?.serverProjection).
+  // Row classification (ADR-0052) is INHERITED from the owner by default — a projection streams the owner's
+  // rows, so it belongs to the owner's class (and to every invariant bound to it) unless the projection's
+  // narrower shape genuinely changes the kind of row a client receives, which `opts.rowClass` overrides.
+  const rowClass = opts.rowClass ?? owner.rowClass;
   const projection = {
     ...built,
     table: owner.table,
     shape,
     readProjection: true as const,
+    ...(rowClass != null ? { rowClass } : {}),
     ...(serverProjection != null ? { serverProjection } : {}),
   };
   // The local table carries the OWNER's real column types restricted to the kept keys (`TColumns[number]`
@@ -1025,13 +1077,18 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
     validateRegistryTableUniqueness(input.tables);
     validateRegistryLifecycleGroups(input.tables);
     validateStorageDeclaration(input.storage);
+    validateRowClassification(input.tables, input.rowClasses);
 
     // Schema first (it may return the same tables object), then stamp the storage declaration on the
     // returned registry as a non-enumerable symbol — the same carrier pattern as the schema symbol — so
     // client code reads the data-contract storage back off the registry value (getSyncRegistrySchema's
     // twin, getSyncRegistryStorage). The bare-registry-map overload carries no storage and reads back
-    // `undefined`, which resolves to the ADR-0047 defaults at the mint seam.
-    return attachSyncRegistryStorage(attachSyncRegistrySchema(input.tables, input.schema), input.storage);
+    // `undefined`, which resolves to the ADR-0047 defaults at the mint seam. The declared row-class
+    // vocabulary rides the same way (ADR-0052), for getSyncRegistryRowClasses.
+    return attachSyncRegistryRowClasses(
+      attachSyncRegistryStorage(attachSyncRegistrySchema(input.tables, input.schema), input.storage),
+      input.rowClasses,
+    );
   }
 
   for (const entry of getRegistryEntries(input)) {
@@ -1347,6 +1404,121 @@ export function getSyncRegistryStorage<TRegistry extends SyncTableRegistry>(
 ): SyncStorageDeclaration | undefined {
   const storage = Reflect.get(registry, syncRegistryStorageSymbol) as unknown;
   return storage != null && typeof storage === "object" ? (storage as SyncStorageDeclaration) : undefined;
+}
+
+/**
+ * Stamp the registry's declared row-class vocabulary (ADR-0052) onto the registry value as a non-enumerable
+ * symbol — the classification twin of {@link attachSyncRegistryStorage}. An absent/empty declaration attaches
+ * nothing (the bare-registry-map overload, and any definition that declares no vocabulary), so
+ * {@link getSyncRegistryRowClasses} reads back `undefined` and classification stays unconstrained.
+ */
+export function attachSyncRegistryRowClasses<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+  rowClasses: readonly string[] | undefined,
+) {
+  if (rowClasses == null) {
+    return registry;
+  }
+  // Idempotent for an EQUAL vocabulary (a registry value reused across constructions may be re-stamped with
+  // the same set) but fail-closed on a CONFLICT — two different vocabularies over one registry is a
+  // definition error, never silently resolved.
+  const existing = getSyncRegistryRowClasses(registry);
+  if (existing != null) {
+    if (existing.length !== rowClasses.length || existing.some((value, index) => value !== rowClasses[index])) {
+      throw new Error(
+        `conflicting rowClasses declaration for registry: already [${existing.join(", ")}], cannot re-declare ` +
+          `[${rowClasses.join(", ")}]`,
+      );
+    }
+    return registry;
+  }
+  Object.defineProperty(registry, syncRegistryRowClassesSymbol, {
+    value: Object.freeze([...rowClasses]),
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return registry;
+}
+
+/**
+ * Read the row-class vocabulary (ADR-0052) a registry was built with, or `undefined` when none was declared
+ * (a bare registry map, or a definition with no `rowClasses`) — the classification twin of
+ * {@link getSyncRegistryStorage}. {@link assertRegistryInvariant} consults it to reject an invariant whose
+ * `appliesTo` names a class this registry does not define (a typo that would otherwise bind nothing).
+ */
+export function getSyncRegistryRowClasses<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+): readonly string[] | undefined {
+  const rowClasses = Reflect.get(registry, syncRegistryRowClassesSymbol) as unknown;
+  return Array.isArray(rowClasses) ? (rowClasses as readonly string[]) : undefined;
+}
+
+/**
+ * Fail-closed at module-eval (ADR-0052): when a registry declares a `rowClasses` vocabulary, EVERY entry
+ * must carry a {@link SyncTableEntry.rowClass} drawn from it. This is the whole point of the field — a new
+ * entry added tomorrow cannot join the registry without its author classifying it, so an invariant that
+ * binds by class can never quietly under-enumerate the tables it is supposed to cover.
+ *
+ * Rejection-only, and it names EVERY offender in one error (an author fixing a batch of entries should not
+ * have to re-run the build once per entry). An undeclared vocabulary constrains nothing — the entries may
+ * carry any `rowClass`, or none.
+ */
+function validateRowClassification(registry: SyncTableRegistry, rowClasses: readonly string[] | undefined) {
+  if (rowClasses == null) {
+    return;
+  }
+
+  if (rowClasses.length === 0) {
+    throw new Error(
+      `rowClasses is declared but empty: a declared vocabulary makes classification mandatory, so an empty ` +
+        `set can never be satisfied. Declare the classes this registry uses, or omit rowClasses entirely.`,
+    );
+  }
+
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const rowClass of rowClasses) {
+    if (typeof rowClass !== "string" || rowClass.length === 0) {
+      throw new Error(
+        `rowClasses contains an invalid value ${JSON.stringify(rowClass)}: each class must be a non-empty string`,
+      );
+    }
+    if (seen.has(rowClass)) {
+      duplicates.add(rowClass);
+    }
+    seen.add(rowClass);
+  }
+  if (duplicates.size > 0) {
+    throw new Error(`rowClasses declares duplicate classes: ${[...duplicates].join(", ")}`);
+  }
+
+  const unclassified: string[] = [];
+  const unknown: string[] = [];
+  for (const [key, entry] of Object.entries(registry)) {
+    const rowClass = (entry as SyncTableEntry<AnyPgTable>).rowClass;
+    if (rowClass == null) {
+      unclassified.push(key);
+      continue;
+    }
+    if (!seen.has(rowClass)) {
+      unknown.push(`${key} (rowClass "${rowClass}")`);
+    }
+  }
+
+  if (unclassified.length === 0 && unknown.length === 0) {
+    return;
+  }
+
+  const problems = [
+    ...(unclassified.length > 0 ? [`unclassified entries: ${unclassified.join(", ")}`] : []),
+    ...(unknown.length > 0 ? [`entries with an undeclared class: ${unknown.join(", ")}`] : []),
+  ];
+  throw new Error(
+    `row classification is incomplete (ADR-0052). This registry declares rowClasses ` +
+      `[${rowClasses.join(", ")}], so every entry must carry a rowClass from that set — ${problems.join("; ")}. ` +
+      `Classify each entry (or widen rowClasses if a genuinely new kind of row has arrived).`,
+  );
 }
 
 /**

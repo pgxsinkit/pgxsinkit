@@ -549,6 +549,87 @@ dynamic override is the imperative `transaction({ mode })` block.
 
 ---
 
+## Row classification
+
+A privacy or visibility rule is rarely about one entry — it is about a **kind of row** that several
+entries carry. Classification lets you name those kinds in your own words, make classifying mandatory,
+and then assert rules against every entry of a class at once. See [ADR-0052](/decisions/).
+
+### `rowClass`
+
+**What it achieves.** Records what **kind** of rows this entry carries. The vocabulary is entirely
+yours — pgxsinkit defines no values and attaches no behaviour to any of them. It is
+documentation-as-code at the definition site, and the key an invariant binds to.
+
+```ts
+rowClass: "team-scoped",
+```
+
+**Default.** None. **Constraints.** When the registry declares [`rowClasses`](#rowclasses-on-the-registry),
+this becomes **required** and must be one of the declared values; otherwise it is unconstrained. It is
+authoring metadata only: it never enters the registry fingerprint or the read-contract fingerprint, so
+classifying a table never invalidates a local store's cache. Every projection carries it through —
+`asReadonly`, `withRetention`/`asEphemeral`, and `defineReadProjection` (which **inherits** the owner's
+class unless you pass its own `rowClass`).
+
+### `rowClasses` (on the registry)
+
+**What it achieves.** Declares the registry's **closed** classification vocabulary — and by doing so makes
+classification a fail-closed obligation: every entry must then carry a `rowClass` from that exact set,
+checked when `defineSyncRegistry` runs (so, at module eval).
+
+```ts
+export const registry = defineSyncRegistry({
+  rowClasses: ["directory", "team-scoped", "channel-scoped"],
+  tables: { profile, team, team_member, channel, issue, message },
+});
+```
+
+**When to use.** As soon as any rule spans more than one table. The point is not the labels — it is that
+the **next** table someone adds cannot join the registry without its author deciding which kind of rows it
+holds, so it can never inherit an obligation invisibly. The error names every unclassified or
+wrongly-classified entry at once. **Constraints.** Only available on the definition-object form (the bare
+registry map has nowhere to declare it, and is unconstrained); an empty or duplicated declaration is
+rejected.
+
+### `assertRegistryInvariant` (the registry-wide invariant)
+
+**What it achieves.** Asserts a rule about the **rendered** authorization artifacts of every entry a
+class binds, evaluated against named claims personas. Each cell hands your predicate the real read filter
+for those claims (`renderedWhere` — the same `buildRowFilterShape` call the proxy makes per shape request)
+and the entry table's RLS policies rendered to SQL text (`renderedPolicies`), so one predicate can check
+**both** enforcement surfaces at once.
+
+```ts
+import { assertRegistryInvariant } from "@pgxsinkit/contracts";
+
+assertRegistryInvariant(registry, {
+  name: "team-scoped rows are never visible to an anonymous caller",
+  appliesTo: ["team-scoped", "channel-scoped"], // or a predicate over the entry
+  claimsFixtures: { anonymous: {}, member: { sub: memberId }, admin: adminClaims },
+  holds: ({ fixtureName, renderedWhere }) =>
+    fixtureName !== "anonymous" || renderedWhere?.where === "false" || "anonymous read is not denied",
+});
+```
+
+**When to use.** At module eval beside the registry (or in a test), the same way
+[`assertReadContractPreserved`](#assertreadcontractpreserved-the-projection-invariant) is used. Unlike the
+fingerprints, it can see the `customWhere` **body** — because it renders it — so it catches a filter-logic
+change no hash can; the trade is that it sees exactly the personas you enumerate, and nothing else.
+Complement it with `rowFilter.revision` (which forces the cache/subscription reset a logic change needs).
+
+**Fail-closed behaviour.** Every failing cell is aggregated into one error (`entry (fixture): reason`),
+never first-failure-only. A class in `appliesTo` that the registry's declared vocabulary does not contain
+throws immediately, and an invariant that binds **zero** entries throws — an invariant that checks nothing
+would otherwise pass vacuously, which is the exact failure this mechanism exists to remove. It is a pure
+audit: nothing about runtime behaviour changes.
+
+**What it cannot see.** Per-entry declarations only. If a worker or route writes rows into one table as a
+consequence of rows in another, that composition is invisible here — test it at the composition seam. See
+[The two paths](/concepts/two-paths/).
+
+---
+
 ## Per-client projections
 
 One authoritative registry defines each table at its **maximum** capability; each client consumes a
@@ -629,4 +710,4 @@ divergence is caught.
   [read path](/concepts/read-path/) — the mental model these options configure.
 - [`@pgxsinkit/contracts` API reference](/api/contracts/) — exact types for every field above.
 - [Design decisions](/decisions/) — ADR-0015 (conflict policy), ADR-0021 (lifecycle axes), ADR-0022
-  (write modes), ADR-0025 (per-client projection).
+  (write modes), ADR-0025 (per-client projection), ADR-0052 (row classification and registry invariants).

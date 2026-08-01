@@ -5,6 +5,7 @@ export * from "./convergence-model";
 export * from "./fingerprint";
 export * from "./registry";
 export * from "./registry-diff";
+export * from "./registry-invariant";
 export * from "./mutation";
 export * from "./projection";
 export * from "./runtime";

@@ -8,8 +8,8 @@ import type { ClientProjectionSpecForTable, SyncTableEntry, SyncTableRegistry } 
  * Per-client mode projection (ADR-0025). The authoritative (server) registry defines a table once with
  * its full write contract; a client that must only *read* that table consumes the same entry through
  * `asReadonly`. The read/identity contract — table, columns, primary key, synced-table name, column
- * omission, the shape/row filter, AND the column-builder factory (`makeColumns`) — is preserved
- * verbatim; the write-capability metadata is dropped:
+ * omission, the shape/row filter, the row classification (`rowClass`), AND the column-builder factory
+ * (`makeColumns`) — is preserved verbatim; the write-capability metadata is dropped:
  *
  * - `mode` flips to `readonly`;
  * - the overlay-merged read-model `view` and the overlay/journal client projection (the local write
@@ -54,6 +54,11 @@ export function asReadonly<TTable extends AnyPgTable, TLocalTable extends AnyPgT
     // Read-relevant (ADR-0045): a readonly projection over a table that receives locally-derived rows must
     // apply CDC inserts with the same idempotent policy, so carry the resolved applyMode verbatim.
     applyMode: entry.applyMode,
+    // Read-relevant (ADR-0052): the classification describes the KIND of rows this entry carries, which a
+    // readonly projection carries unchanged (it syncs the same rows). Dropping it would silently un-enrol the
+    // projected entry from every invariant bound to that class — and, in a registry that declares its
+    // `rowClasses`, the projection registry would fail closed at module eval instead.
+    ...(entry.rowClass != null ? { rowClass: entry.rowClass } : {}),
     ...(entry.shape != null ? { shape: entry.shape } : {}),
     ...(readonlyProjection != null ? { clientProjection: readonlyProjection } : {}),
     ...(entry.serverProjection != null ? { serverProjection: entry.serverProjection } : {}),

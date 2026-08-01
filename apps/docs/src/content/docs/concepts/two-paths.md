@@ -44,3 +44,18 @@ function. See
 
 > Read from PGlite. Write through the write route. Never write to a synced table directly, and never
 > expect Electric to carry a write.
+
+## Composition is yours
+
+The registry keeps **one table's** read filter and write policy in agreement — that is its job, and it
+does it from a single declaration. What it cannot see is a rule that spans tables and rails.
+
+An example: an invite table's RLS legitimately lets an offering-scoped teacher create an invite, and an
+acceptance worker later mints a membership row from it. Both policies are correct alone; together they can
+break "this offering only ever has one member", because the worker's semantics appear in no per-table
+declaration.
+
+So when something writes rows as a **consequence** of other rows, the invariants of the **output** table
+are the ones at stake — re-check them against current state when the worker runs, rather than trusting that
+the input row's authorization already settled it. And test at the composition seam, driving the worker or
+route end to end: per-table policy tests structurally cannot fail on a composition hole.

@@ -1,5 +1,5 @@
 import { canonicalizeRegistry, fingerprintRegistry, type CanonicalTable } from "./fingerprint";
-import type { SyncTableRegistry } from "./registry";
+import type { SyncTableEntry, SyncTableRegistry } from "./registry";
 
 /**
  * The registry-diff gate (ADR-0006): classify a registry change as
@@ -29,6 +29,31 @@ export interface RegistryDiff {
 export interface RegistryLock {
   version: string;
   tables: CanonicalTable[];
+  /**
+   * Each entry's row classification (ADR-0052), keyed by registry key; `null` = unclassified. A SIBLING of
+   * `tables`, deliberately not a field of {@link CanonicalTable}: the canonical table shape is what
+   * `fingerprintRegistry` hashes, and that hash is PERSISTED as the local store's cache key — so folding
+   * classification into it would make merely classifying a table wipe every store's read cache. The lock
+   * still records it, so an un-enrolment (a class removed or changed) is a reviewable diff.
+   *
+   * Optional because a committed lock is JSON on disk: one written before this field existed simply has no
+   * `rowClasses`, and the diff then reads the whole baseline as unclassified — so adopting classification
+   * against an old lock is a set of `compatible` declarations, never spurious risk. {@link buildRegistryLock}
+   * always populates it.
+   */
+  rowClasses?: RegistryRowClasses;
+}
+
+/** Registry key → row class (`null` = unclassified). See {@link RegistryLock.rowClasses}. */
+export type RegistryRowClasses = Record<string, string | null>;
+
+/** The row classification of every entry, with sorted keys so a serialized lock is stable. */
+export function registryRowClasses(registry: SyncTableRegistry): RegistryRowClasses {
+  const classes: RegistryRowClasses = {};
+  for (const key of Object.keys(registry).sort()) {
+    classes[key] = (registry[key] as SyncTableEntry | undefined)?.rowClass ?? null;
+  }
+  return classes;
 }
 
 const SEVERITY_RANK: Record<RegistryChangeSeverity, number> = { compatible: 0, risky: 1, breaking: 2 };
@@ -40,9 +65,13 @@ function maxSeverity(changes: readonly RegistryChange[]): RegistryChangeSeverity
   );
 }
 
-/** Build the committed lock (fingerprint + canonical shape) for a registry. */
+/** Build the committed lock (fingerprint + canonical shape + row classification) for a registry. */
 export function buildRegistryLock(registry: SyncTableRegistry): RegistryLock {
-  return { version: fingerprintRegistry(registry), tables: canonicalizeRegistry(registry) };
+  return {
+    version: fingerprintRegistry(registry),
+    tables: canonicalizeRegistry(registry),
+    rowClasses: registryRowClasses(registry),
+  };
 }
 
 function diffTable(table: string, previous: CanonicalTable, next: CanonicalTable, changes: RegistryChange[]): void {
@@ -156,14 +185,54 @@ function diffShape(
   }
 }
 
-/** Classify the change from one canonical registry shape to another. */
+/**
+ * Row-classification changes (ADR-0052). Classification is authoring metadata, invisible to the runtime and
+ * to the fingerprint — but it decides which registry invariants an entry is ENROLLED in, so a change to it
+ * is exactly the kind of quiet authoring drift the gate exists to surface.
+ *
+ * - class → different class: `risky` (the entry left one invariant's coverage and joined another's).
+ * - unclassified → classified: `compatible` (pure adoption; nothing loses coverage).
+ * - classified → unclassified: `risky` (the entry un-enrols from every invariant bound to that class).
+ */
+function diffRowClass(table: string, previous: string | null, next: string | null, changes: RegistryChange[]): void {
+  if (previous === next) {
+    return;
+  }
+  if (previous == null) {
+    changes.push({ severity: "compatible", table, detail: `row class declared: ${next}` });
+    return;
+  }
+  if (next == null) {
+    changes.push({
+      severity: "risky",
+      table,
+      detail: `row class removed: ${previous} (un-enrols from registry invariants)`,
+    });
+    return;
+  }
+  changes.push({
+    severity: "risky",
+    table,
+    detail: `row class changed: ${previous} -> ${next} (review invariant enrollment)`,
+  });
+}
+
+/**
+ * Classify the change from one canonical registry shape to another. `rowClasses` carries each side's row
+ * classification (ADR-0052) — a sibling of the canonical tables, never a field of them (see
+ * {@link RegistryLock.rowClasses}); an omitted side reads as entirely unclassified, which is how a lock
+ * predating the field diffs as adoption rather than as spurious risk.
+ */
 export function diffCanonicalRegistries(
   previous: readonly CanonicalTable[],
   next: readonly CanonicalTable[],
+  rowClasses?: { previous?: RegistryRowClasses | undefined; next?: RegistryRowClasses | undefined },
 ): RegistryDiff {
   const changes: RegistryChange[] = [];
   const prevByKey = new Map(previous.map((table) => [table.key, table]));
   const nextByKey = new Map(next.map((table) => [table.key, table]));
+  const prevClasses = rowClasses?.previous ?? {};
+  const nextClasses = rowClasses?.next ?? {};
 
   for (const [key, prevTable] of prevByKey) {
     const nextTable = nextByKey.get(key);
@@ -172,6 +241,7 @@ export function diffCanonicalRegistries(
       continue;
     }
     diffTable(key, prevTable, nextTable, changes);
+    diffRowClass(key, prevClasses[key] ?? null, nextClasses[key] ?? null, changes);
   }
 
   for (const key of nextByKey.keys()) {
@@ -185,12 +255,18 @@ export function diffCanonicalRegistries(
 
 /** Classify the change between two registries. */
 export function compareRegistries(previous: SyncTableRegistry, next: SyncTableRegistry): RegistryDiff {
-  return diffCanonicalRegistries(canonicalizeRegistry(previous), canonicalizeRegistry(next));
+  return diffCanonicalRegistries(canonicalizeRegistry(previous), canonicalizeRegistry(next), {
+    previous: registryRowClasses(previous),
+    next: registryRowClasses(next),
+  });
 }
 
 /** Classify a registry against a committed lock baseline. */
 export function diffRegistryAgainstLock(registry: SyncTableRegistry, lock: RegistryLock): RegistryDiff {
-  return diffCanonicalRegistries(lock.tables, canonicalizeRegistry(registry));
+  return diffCanonicalRegistries(lock.tables, canonicalizeRegistry(registry), {
+    previous: lock.rowClasses,
+    next: registryRowClasses(registry),
+  });
 }
 
 /**
