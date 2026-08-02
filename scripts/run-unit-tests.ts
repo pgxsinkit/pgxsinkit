@@ -40,8 +40,12 @@ const ISOLATED = new Set([
 // Rough per-file cost (seconds) for balancing the bins; unlisted files default to 1. Only affects how
 // evenly work is spread, never correctness.
 const WEIGHT: Record<string, number> = {
-  "overlay-state": 12,
-  copy: 10,
+  "sync-engine": 120,
+  "overlay-state": 26,
+  copy: 25,
+  "boot-report": 20,
+  "worker-one-shot-reads": 18,
+  "sync-commit-queue": 9,
   "plpgsql-apply": 5,
   "convergence-model": 4,
   "local-store": 4,
