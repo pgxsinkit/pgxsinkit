@@ -59,8 +59,10 @@ registry with the `pgxsinkit-generate` CLI (`bunx pgxsinkit-generate …`, see
 The applier takes the request's claims as an argument and **trusts them** — correct for your server, which
 verified them, and catastrophic for any other caller, who would simply choose its own. So the generated
 migration revokes `EXECUTE` from `PUBLIC` and from the Supabase roles (`anon`, `authenticated`,
-`service_role`) immediately after creating the function, and grants it only to the roles you name with
-`--grant-execute-to`; the default is owner-only. Those statements live **inside the fingerprinted body**, so
+`service_role`) immediately after creating the function — then enumerates the installed function's actual
+grantees and revokes every one that is neither its owner nor a role you named, so a grant inherited from
+your own `ALTER DEFAULT PRIVILEGES` cannot survive an install either — and grants it only to the roles you
+name with `--grant-execute-to`; the default is owner-only. Those statements live **inside the fingerprinted body**, so
 a stale, still-PUBLIC install cannot pass the self-verification, and the grant list has to match in three
 places (generate, CI `--check`, and `applyFunctionGrantExecuteTo`). See
 [ADR-0054](/decisions/) for the rationale, and

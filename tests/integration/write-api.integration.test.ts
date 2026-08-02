@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
 import { asc, count, eq, sql } from "drizzle-orm";
-import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, jsonb, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import {
@@ -1376,6 +1376,11 @@ const arrayPrefsRegistry = defineSyncRegistry({
       id: uuid("id").primaryKey(),
       label: varchar("label", { length: 120 }).notNull(),
       sourceIds: uuid("source_ids").array(),
+      // A `jsonb[]`: the element is itself a JSON value, so the array cast must NOT go through
+      // `jsonb_array_elements_text` (that strips the element's JSON quoting — the string "123" became
+      // the NUMBER 123, and "hi" failed the cast outright). Cheap to carry here: the whole table is a
+      // scratch table this suite creates.
+      prefs: jsonb("prefs").array(),
       updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
     }),
     mode: "readwrite",
@@ -1425,13 +1430,25 @@ describe("apply-function ACL + array columns (ADR-0054)", () => {
    * it is NOT a full PostgREST/HTTP auth path (there is none in this harness), and it does not need to
    * be — the privilege check Postgres runs on the function call is identical either way.
    */
-  async function callAsAuthenticated(fingerprint: string): Promise<void> {
+  async function callAsRole(role: string, fingerprint: string): Promise<void> {
     await serverDb.db.transaction(async (tx) => {
-      await tx.execute(sql`SET LOCAL ROLE authenticated`);
+      await tx.execute(sql`SET LOCAL ROLE ${sql.identifier(role)}`);
       await tx.execute(
-        sql`SELECT * FROM pgxsinkit_apply_mutations(${JSON.stringify({ mutations: [] })}::text::jsonb, ${"/api/mutations"}, ${false}, ${false}, ${JSON.stringify({ sub: DEMO_USER1_ID, role: "authenticated" })}::text::jsonb, ${fingerprint})`,
+        sql`SELECT * FROM pgxsinkit_apply_mutations(${JSON.stringify({ mutations: [] })}::text::jsonb, ${"/api/mutations"}, ${false}, ${false}, ${JSON.stringify({ sub: DEMO_USER1_ID, role })}::text::jsonb, ${fingerprint})`,
       );
     });
+  }
+
+  async function callAsAuthenticated(fingerprint: string): Promise<void> {
+    await callAsRole("authenticated", fingerprint);
+  }
+
+  /** Does `role` hold EXECUTE on the installed apply function, per Postgres itself? */
+  async function hasExecutePrivilege(role: string): Promise<boolean> {
+    const result = await serverDb.db.execute<{ allowed: boolean }>(
+      sql`SELECT has_function_privilege(${role}, ${`public.${applySignature}`}, 'EXECUTE') AS "allowed"`,
+    );
+    return Array.from(result as Iterable<{ allowed: boolean }>)[0]?.allowed === true;
   }
 
   beforeAll(async () => {
@@ -1490,6 +1507,100 @@ describe("apply-function ACL + array columns (ADR-0054)", () => {
     } finally {
       // Restore the owner-only artifact so this suite leaves the database as it found it.
       await installPlpgsqlBatchFunction(server.drizzle, arrayPrefsRegistry);
+    }
+  });
+
+  it("revokes a grantee it cannot name — an inherited default-privilege grant — on the next install", async () => {
+    // The exposure the named revokes could not close: a grant to a role the LIBRARY cannot enumerate.
+    // A direct grant would not prove it (the artifact's own DROP FUNCTION clears those), so the grant
+    // here is re-applied by the cluster at the CREATE inside every install — exactly how Supabase's
+    // trio comes back, but under a name only this deployment knows.
+    const scratchRole = "pgxsinkit_acl_scratch";
+
+    await serverDb.db.execute(sql`DROP ROLE IF EXISTS ${sql.identifier(scratchRole)}`);
+    await serverDb.db.execute(sql`CREATE ROLE ${sql.identifier(scratchRole)} NOLOGIN`);
+
+    try {
+      // A direct grant on the CURRENT install, to show the starting state is genuinely "granted".
+      // (GRANT / ALTER DEFAULT PRIVILEGES have no Drizzle object form; the signature is the one raw
+      // fragment, and every name goes through a typed identifier.)
+      await serverDb.db.execute(
+        sql`GRANT EXECUTE ON FUNCTION ${sql.raw(applySignature)} TO ${sql.identifier(scratchRole)}`,
+      );
+      expect(await hasExecutePrivilege(scratchRole)).toBe(true);
+
+      // …and a default privilege, so the grant is RE-created by the install's own CREATE FUNCTION.
+      await serverDb.db.execute(
+        sql`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO ${sql.identifier(scratchRole)}`,
+      );
+
+      await installPlpgsqlBatchFunction(server.drizzle, arrayPrefsRegistry);
+
+      // The converger enumerated the real grantees and revoked the one that is neither owner nor
+      // allowlisted — a re-granted role does not survive an install.
+      expect(await hasExecutePrivilege(scratchRole)).toBe(false);
+
+      const refusal = await callAsRole(scratchRole, await installedFingerprint()).then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+      expect(refusal).not.toBeNull();
+      expect(collectErrorChainText(refusal)).toMatch(/permission denied for function/i);
+
+      // An allowlisted role, inheriting the SAME default privilege, is deliberately kept.
+      await installPlpgsqlBatchFunction(server.drizzle, arrayPrefsRegistry, { grantExecuteTo: [scratchRole] });
+      expect(await hasExecutePrivilege(scratchRole)).toBe(true);
+    } finally {
+      await serverDb.db.execute(
+        sql`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM ${sql.identifier(scratchRole)}`,
+      );
+      // Back to the owner-only artifact first: the function must hold no grant to the role being dropped.
+      await installPlpgsqlBatchFunction(server.drizzle, arrayPrefsRegistry);
+      await serverDb.db.execute(sql`DROP ROLE IF EXISTS ${sql.identifier(scratchRole)}`);
+    }
+  });
+
+  it("round-trips a write through an install in a custom --function-schema", async () => {
+    // The generate flag was always honoured; the RUNTIME half is `applyFunctionSchema`, which both
+    // reproduces the schema-qualified artifact's fingerprint AND qualifies the call this server makes.
+    const functionSchema = "pgxsinkit_test_fns";
+    await serverDb.db.execute(sql`CREATE SCHEMA IF NOT EXISTS ${sql.identifier(functionSchema)}`);
+
+    const schemaServer = createSyncServer({
+      registry: arrayPrefsRegistry,
+      db: serverDb.db,
+      resolveAuthClaims: () => ({ role: "authenticated", sub: DEMO_USER1_ID }),
+      applyFunctionSchema: functionSchema,
+    });
+
+    try {
+      await installPlpgsqlBatchFunction(schemaServer.drizzle, arrayPrefsRegistry, { functionSchema });
+
+      const id = "9f10c3d2-0000-4000-8000-000000000001";
+      const response = await schemaServer.request("/api/mutations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mutations: [
+            buildBatchMutation({
+              tableName: "arrayPrefs",
+              entityKey: { id },
+              mutationId: "9f10c3d2-0000-4000-8000-0000000000a1",
+              mutationSeq: 1,
+              kind: "create",
+              payload: { id, label: "custom schema" },
+            }),
+          ],
+        }),
+      });
+
+      await expectResponseStatus(response, 200);
+
+      const rows = await schemaServer.drizzle.select().from(arrayPrefsTable).where(eq(arrayPrefsTable.id, id));
+      expect(rows.map((row) => row.label)).toEqual(["custom schema"]);
+    } finally {
+      await schemaServer.stop();
+      await serverDb.db.execute(sql`DROP SCHEMA IF EXISTS ${sql.identifier(functionSchema)} CASCADE`);
     }
   });
 
@@ -1587,6 +1698,79 @@ describe("apply-function ACL + array columns (ADR-0054)", () => {
       [idEmpty, [first]],
       [idFull, null],
     ]);
+  });
+
+  it("round-trips a jsonb[] whose elements are JSON strings, objects and nulls", async () => {
+    // The corruption this pins: a uniform `jsonb_array_elements_text` expansion strips each element's
+    // JSON quoting, so the STRING "123" was stored as the NUMBER 123 (silent) and "hi" failed the cast
+    // outright (loud). Both go through a real HTTP batch here, against the real installed function.
+    const id = "8e07b2c1-0000-4000-8000-000000000001";
+    const created = await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id },
+            mutationId: "8e07b2c1-0000-4000-8000-0000000000a1",
+            mutationSeq: 1,
+            kind: "create",
+            payload: { id, label: "json prefs", prefs: ["123", "hi", { theme: "dark" }, null] },
+          }),
+        ],
+      }),
+    });
+
+    await expectResponseStatus(created, 200);
+
+    // Read the element TYPES from Postgres, not the driver's JS values: `"123"` and `123` both arrive
+    // as truthy JS values, and only `jsonb_typeof` distinguishes the string from the number.
+    const elementTypes = await serverDb.db.execute<{
+      first: string;
+      second: string;
+      third: string;
+      fourth: string;
+      len: number;
+    }>(
+      sql`SELECT jsonb_typeof(prefs[1]) AS "first",
+                 jsonb_typeof(prefs[2]) AS "second",
+                 jsonb_typeof(prefs[3]) AS "third",
+                 jsonb_typeof(prefs[4]) AS "fourth",
+                 cardinality(prefs) AS "len"
+          FROM ${arrayPrefsTable} WHERE ${eq(arrayPrefsTable.id, id)}`,
+    );
+    expect(Array.from(elementTypes as Iterable<unknown>)[0]).toMatchObject({
+      first: "string",
+      second: "string",
+      third: "object",
+      // A JSON null ELEMENT is preserved verbatim as a JSON null value, not collapsed to a SQL NULL.
+      fourth: "null",
+      len: 4,
+    });
+
+    // Update over the same column: an empty array is a value, never NULL.
+    const updated = await server.request("/api/mutations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mutations: [
+          buildBatchMutation({
+            tableName: "arrayPrefs",
+            entityKey: { id },
+            mutationId: "8e07b2c1-0000-4000-8000-0000000000a2",
+            mutationSeq: 2,
+            kind: "update",
+            payload: { prefs: [] },
+          }),
+        ],
+      }),
+    });
+
+    await expectResponseStatus(updated, 200);
+
+    const afterUpdate = await server.drizzle.select().from(arrayPrefsTable).where(eq(arrayPrefsTable.id, id));
+    expect(afterUpdate.map((row) => row.prefs)).toEqual([[]]);
   });
 });
 

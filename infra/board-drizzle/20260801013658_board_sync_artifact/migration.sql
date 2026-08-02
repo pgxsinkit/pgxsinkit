@@ -542,4 +542,35 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:1e261259dcdea29b';
+DO $$
+DECLARE
+  _fn oid := '"pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text)'::regprocedure;
+  _owner oid;
+  _keep text[] := ARRAY[]::text[];
+  _grantees oid[];
+  _grantee oid;
+  _grantee_name text;
+BEGIN
+  SELECT p.proowner INTO _owner FROM pg_proc AS p WHERE p.oid = _fn;
+  SELECT array_agg(DISTINCT acl.grantee) INTO _grantees
+  FROM pg_proc AS p, aclexplode(p.proacl) AS acl
+  WHERE p.oid = _fn;
+
+  FOREACH _grantee IN ARRAY COALESCE(_grantees, ARRAY[]::oid[]) LOOP
+    IF _grantee = _owner THEN
+      CONTINUE;
+    END IF;
+    IF _grantee = 0 THEN
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', _fn::regprocedure::text);
+      CONTINUE;
+    END IF;
+    _grantee_name := pg_get_userbyid(_grantee);
+    IF _grantee_name = ANY (_keep) THEN
+      CONTINUE;
+    END IF;
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', _fn::regprocedure::text, _grantee_name);
+  END LOOP;
+END;
+$$;
+
+COMMENT ON FUNCTION "pgxsinkit_apply_mutations"(jsonb, text, boolean, boolean, jsonb, text) IS 'pgxsinkit:fp1:de9214b6fbbacedc';

@@ -30,6 +30,8 @@ import { readSqlState } from "../sql-state";
 import {
   executePlpgsqlBatch,
   expectedApplyFingerprint,
+  resolveApplyFunctionSchema,
+  type ApplyFunctionRenderOptions,
   type MutationConflict,
   verifyRlsAuthHelpers,
 } from "./plpgsql-apply";
@@ -68,16 +70,27 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
   // ADR-0054: the roles the installed artifact was generated with. The ACL is INSIDE the fingerprinted
   // body, so the expected fingerprint below is only reproducible when this matches the generate flags.
   applyFunctionGrantExecuteTo: readonly string[] = [],
+  // The schema the installed artifact was generated into (`pgxsinkit-generate --function-schema`).
+  // It is BOTH a fingerprint input (the body embeds the qualified name) and the name this server must
+  // CALL, so one value drives both — a server that knows the fingerprint but calls the function
+  // unqualified would resolve through `search_path` and, in the usual case, find nothing.
+  applyFunctionSchema?: string,
 ): { batch: FetchHandler; authoritative: FetchHandler } {
   let startupReadyPromise: Promise<void> | undefined;
+
+  const applyFunctionRenderOptions: ApplyFunctionRenderOptions = {
+    ...(applyFunctionGrantExecuteTo.length > 0 ? { grantExecuteTo: applyFunctionGrantExecuteTo } : {}),
+    ...(applyFunctionSchema ? { functionSchema: applyFunctionSchema } : {}),
+  };
+  // Validated once here (the same rule the renderer applies) rather than per request, so a bad schema
+  // name fails at server construction instead of on the first write.
+  const resolvedApplyFunctionSchema = resolveApplyFunctionSchema(applyFunctionRenderOptions.functionSchema);
+  const applyInvocationOptions = resolvedApplyFunctionSchema ? { functionSchema: resolvedApplyFunctionSchema } : {};
 
   // ADR-0030: the fingerprint this server expects for its registry + applier codegen, computed ONCE per
   // server instance. Every `executePlpgsqlBatch` passes it so the installed apply function can verify
   // itself in-body (SQLSTATE 'PXS01' on drift) — this replaces the deleted startup verify.
-  const expectedFingerprint = expectedApplyFingerprint(
-    registry,
-    applyFunctionGrantExecuteTo.length > 0 ? { grantExecuteTo: applyFunctionGrantExecuteTo } : {},
-  );
+  const expectedFingerprint = expectedApplyFingerprint(registry, applyFunctionRenderOptions);
 
   // Per-request timing scratch (opt-in). authMs/applyMs are filled at the narrow phase call sites inside
   // the handler; totalMs + status are measured by `withTiming` wrapping the returned handler. A fresh
@@ -360,6 +373,7 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
           shouldApplyRlsContext,
           userClaims,
           expectedFingerprint,
+          applyInvocationOptions,
         );
         if (timing) timing.applyMs = perfNow() - applyStart;
 
@@ -583,6 +597,7 @@ export function createMutationHandler<TRegistry extends SyncTableRegistry>(
           shouldApplyRlsContext,
           userClaims,
           expectedFingerprint,
+          applyInvocationOptions,
         );
         if (timing) timing.applyMs = perfNow() - applyStart;
 

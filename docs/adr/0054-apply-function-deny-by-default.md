@@ -25,14 +25,28 @@ memberships.
 
 ## Decision
 
-1. **The artifact revokes before it grants, on every install.** Immediately after
-   `CREATE OR REPLACE FUNCTION`, the renderer emits: an unconditional
+1. **The artifact revokes before it grants, on every install, and the revokes converge EVERY
+   grantee.** Immediately after `CREATE OR REPLACE FUNCTION`, the renderer emits: an unconditional
    `REVOKE ALL … FROM PUBLIC`; guarded revokes for `anon`, `authenticated`, and `service_role`
    (the roles Supabase default privileges re-grant at creation — guarded with the repo's
    established `DO $$ … IF EXISTS (SELECT 1 FROM pg_roles …)` idiom, because PGlite lanes and
-   non-Supabase clusters lack them); then a guarded `GRANT EXECUTE` per configured role. The
-   revokes are unconditional per install because the `DROP FUNCTION` reset means every install
-   RECREATES the exposure — convergence must not depend on install history.
+   non-Supabase clusters lack them); then a **dynamic converger**; then a guarded `GRANT EXECUTE`
+   per configured role. The revokes are unconditional per install because the `DROP FUNCTION` reset
+   means every install RECREATES the exposure — convergence must not depend on install history.
+
+   The named revokes close only the exposures this renderer can NAME. A later review pointed out
+   that this is not the same as owner-only: a consumer's own
+   `ALTER DEFAULT PRIVILEGES … GRANT ALL ON FUNCTIONS TO <their role>` re-grants at every `CREATE`
+   exactly as Supabase's does, so a deployment-specific grantee — a name no library can enumerate —
+   survived every install and kept a forged-claims caller on the write path indefinitely. So the
+   artifact now ENUMERATES the installed function's real grantees
+   (`SELECT DISTINCT (aclexplode(proacl)).grantee FROM pg_proc WHERE oid = '<signature>'::regprocedure`)
+   and revokes EXECUTE from each one that is neither the function's owner (`proowner`) nor in the
+   `grantExecuteTo` allowlist; grantee `0` is PUBLIC and is revoked by that spelling, every other by
+   `quote_ident`ed name. Ordering is load-bearing: a never-granted function has a NULL `proacl` that
+   explodes to nothing, and it is the unconditional `REVOKE … FROM PUBLIC` emitted first that
+   materializes the ACL, so the converger reads a catalog that states the truth. The named revokes
+   stay as the readable fast path; the converger is the guarantee.
 
 2. **Who may execute is named explicitly, and the default is nobody.**
    `grantExecuteTo?: readonly string[]` on the renderer options (beside `functionSchema`) and a

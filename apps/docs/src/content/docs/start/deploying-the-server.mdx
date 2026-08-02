@@ -134,6 +134,12 @@ bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
 - **Everyone regenerates once** on upgrade — the ACL moved the fingerprint. Re-run the `--utilities`
   migration too: it hardens `public.pgxsinkit_clock_us()` the same way, keeping its grants to
   `anon`/`authenticated`/`service_role` (a column DEFAULT calling the clock runs as the writing role).
+- **Roles you never named are revoked too.** After those named revokes, the migration enumerates the
+  installed function's actual grantees (`aclexplode(pg_proc.proacl)`) and revokes `EXECUTE` from every one
+  that is neither the function's owner nor on your `--grant-execute-to` list. This matters if your own
+  cluster carries `ALTER DEFAULT PRIVILEGES … GRANT ALL ON FUNCTIONS TO <role>`: like Supabase's, it
+  re-grants at the `CREATE` inside every install, and only an enumeration can close a name the toolkit
+  cannot know. The end state is exactly **owner + the roles you named**, on every install.
 
 The failure mode when the grant is missing is loud and total, by design. A server connecting as a role that
 is **neither the function's owner nor named in `--grant-execute-to`** fails **every** write with SQLSTATE
@@ -145,6 +151,30 @@ and add that role to the CI `--check` command and to `applyFunctionGrantExecuteT
 pgxsinkit itself needs **no PostgREST**, and leaving it out is good practice — it removes the
 `/rest/v1/rpc/*` surface that would otherwise expose every `public` function over HTTP. Treat that as
 defence in depth, though: the ACL is the control, and it holds whatever your topology looks like.
+
+### Installing into a schema of your own: `--function-schema`
+
+By default the apply function is generated **unqualified** and resolved through the connection's
+`search_path`. `pgxsinkit-generate --function-schema app_fns` installs it into a schema you choose
+instead — and, exactly like the grant list, **the schema is part of the artifact's fingerprint**, because
+the function names itself in its own self-check. So it too must appear in three places, or writes fail:
+
+```bash
+bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
+  --project-dir ./db --config drizzle.config.ts --name sync_artifact \
+  --function-schema app_fns             # …and the same flag on the CI `--check` command
+```
+
+```ts
+createSyncServer({ registry, db, resolveAuthClaims, applyFunctionSchema: "app_fns" });
+```
+
+`applyFunctionSchema` does both halves of the job: it makes the server compute the fingerprint the
+schema-qualified artifact was stamped with, **and** it qualifies the call the server actually makes.
+Generate with `--function-schema` but leave the server option unset and the call goes out unqualified —
+it either finds nothing (`42883`, `function pgxsinkit_apply_mutations(…) does not exist`) or finds a
+same-named function elsewhere on the `search_path` and fails `PXS01` against a fingerprint that install
+does not carry. Set both to the same schema, or neither.
 
 ### Deploying the event lane
 

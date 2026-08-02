@@ -141,6 +141,19 @@ export interface CreateSyncServerOptions<
    * this unset and every write fails `PXS01` (stale artifact) — so the two lists must stay identical.
    */
   applyFunctionGrantExecuteTo?: readonly string[];
+  /**
+   * The schema the INSTALLED apply function lives in (`pgxsinkit-generate --function-schema <schema>`).
+   * Default: unset — the artifact is generated unqualified and resolved through the connection's
+   * `search_path`.
+   *
+   * It does two things at once, which is why one option drives both: the schema is part of the
+   * fingerprinted body (the function names itself in its own self-check), AND it is how this server
+   * QUALIFIES the call. Generate with `--function-schema` and leave this unset and the call goes out
+   * unqualified — which either finds nothing (`42883`) or, worse, finds a same-named function elsewhere
+   * on the `search_path` that then fails `PXS01` against a fingerprint it does not carry. The two must
+   * name the same schema.
+   */
+  applyFunctionSchema?: string;
 }
 
 export interface ServerDiagnostics<TRegistry extends SyncTableRegistry> {
@@ -251,6 +264,7 @@ export function createSyncServer<
     options.deployment?.startupVerification ?? "in-process",
     options.logTimings ?? false,
     options.applyFunctionGrantExecuteTo ?? [],
+    options.applyFunctionSchema,
   );
   for (const path of batchMutationPaths) {
     router.post(path, mutationHandlers.batch);

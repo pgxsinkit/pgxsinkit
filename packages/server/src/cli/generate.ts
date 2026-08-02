@@ -89,6 +89,9 @@ export function parseArgs(argv: string[]) {
         "                              the function trusts the claims it is handed, so this list is the write\n" +
         "                              path's entire trust boundary. It is part of the artifact fingerprint, so\n" +
         "                              pass the SAME roles to --check and to createSyncServer.\n" +
+        "  --function-schema <schema>  Install the apply function into <schema> instead of leaving it unqualified.\n" +
+        "                              Also part of the fingerprint AND the name the server must call, so pass the\n" +
+        "                              SAME schema to --check and to createSyncServer({ applyFunctionSchema }).\n" +
         "  pgxsinkit-generate --utilities [--check] --name <folder> [--project-dir .] [--config drizzle.config.ts] [--out drizzle]\n" +
         "  pgxsinkit-generate --events [--check] --registry <path> [--export registry] [--project-dir .] [--name event_lane_artifact] [--config drizzle.config.ts] [--out drizzle]",
     );

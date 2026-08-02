@@ -60,7 +60,17 @@ function columnDimensions(column: { dimensions?: number }): number {
  *
  * Element order is pinned with `WITH ORDINALITY … ORDER BY`, so the stored array order is the
  * client's array order by construction rather than by set-returning-function evaluation order.
- * A JSON null ELEMENT becomes a SQL NULL element (`jsonb_array_elements_text` semantics).
+ * A JSON null ELEMENT becomes a SQL NULL element (`jsonb_array_elements_text` semantics) — except for
+ * the JSON element types, see below.
+ *
+ * The one branch inside the array branch is the ELEMENT type: `json`/`jsonb` elements expand with
+ * `jsonb_array_elements` (the JSON-valued expansion), never `jsonb_array_elements_text`. Text expansion
+ * of a JSON element STRIPS its JSON quoting, which is silent type corruption for a `jsonb[]`: the element
+ * `"123"` (a JSON string) re-parses as the JSON NUMBER `123`, and `"hi"` fails the cast outright with
+ * `invalid input syntax for type json`. `jsonb_array_elements` preserves each element VERBATIM, so a JSON
+ * null element stays a JSON null value (`jsonb_typeof(e) = 'null'`, not SQL NULL) — the faithful reading
+ * for a JSON-typed element, and what round-trips back to the client unchanged. The column-level shapes
+ * (absent key / JSON null / `[]`) are identical to the text branch.
  */
 function buildPayloadValueExpression(
   tableName: string,
@@ -85,11 +95,21 @@ function buildPayloadValueExpression(
     );
   }
 
+  // A `json`/`jsonb` ELEMENT type must keep its JSON value (quoting included); every other element type
+  // is reconstructed from the element's TEXT rendering, which is what the terminal `::<type>[]` cast reads.
+  const elementExpansion = isJsonElementType(sqlType) ? "jsonb_array_elements" : "jsonb_array_elements_text";
+
   return (
     `CASE WHEN jsonb_typeof(x.p->${columnLiteral}) = 'array' THEN ` +
-    `ARRAY(SELECT e FROM jsonb_array_elements_text(x.p->${columnLiteral}) WITH ORDINALITY AS a(e, ord) ORDER BY ord)` +
+    `ARRAY(SELECT e FROM ${elementExpansion}(x.p->${columnLiteral}) WITH ORDINALITY AS a(e, ord) ORDER BY ord)` +
     `::${sqlType}[] END`
   );
+}
+
+/** `json` / `jsonb` — the element types whose VALUE (not text rendering) must survive the expansion. */
+function isJsonElementType(sqlType: string): boolean {
+  const normalized = sqlType.trim().toLowerCase();
+  return normalized === "json" || normalized === "jsonb";
 }
 
 /** One `(column name, payload value expression)` row of a branch's runtime candidate list. */
@@ -450,6 +470,37 @@ export interface ApplyFunctionRenderOptions {
 const GRANT_ROLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_$]*$/;
 
 /**
+ * Validate a `functionSchema` — the ONE definition, shared by the renderer (which qualifies the emitted
+ * DDL with it) and by the running server (`applyFunctionSchema`, which must qualify its invocation the
+ * same way and recompute the same fingerprint). A schema name reaches SQL as a quoted identifier, so the
+ * rule is the same plain-identifier rule role names get: an unusable name is refused loudly at generate
+ * / server-construction time rather than producing an artifact nobody can call.
+ *
+ * Returns `undefined` for an absent schema — the default, an unqualified name resolved through
+ * `search_path`.
+ */
+export function resolveApplyFunctionSchema(functionSchema: string | undefined): string | undefined {
+  if (functionSchema === undefined) {
+    return undefined;
+  }
+  if (typeof functionSchema !== "string" || functionSchema.trim().length === 0) {
+    throw new Error("plpgsql apply generator: functionSchema is empty");
+  }
+  if (!GRANT_ROLE_NAME_PATTERN.test(functionSchema)) {
+    throw new Error(
+      `plpgsql apply generator: functionSchema '${functionSchema}' is not a plain SQL identifier ` +
+        `(letters, digits, '_' and '$', not starting with a digit)`,
+    );
+  }
+  if (functionSchema.length > 63) {
+    throw new Error(
+      `plpgsql apply generator: functionSchema '${functionSchema}' exceeds PostgreSQL's 63-byte name limit`,
+    );
+  }
+  return functionSchema;
+}
+
+/**
  * Validate `grantExecuteTo` at GENERATE time, fail-closed. A role name is emitted into DDL (as a
  * quoted identifier and as a `pg_roles` literal), and the whole point of ADR-0054 is that who may
  * execute is named explicitly — so an unusable name is refused loudly here rather than silently
@@ -478,7 +529,75 @@ function resolveGrantExecuteRoles(grantExecuteTo: readonly string[] | undefined)
     seen.add(role);
   }
 
-  return roles;
+  // Canonical (byte) order, so an equivalent SET of roles is one artifact whatever order the caller
+  // listed them in. The list is emitted into the FINGERPRINTED body, so without this
+  // `["a","b"]` and `["b","a"]` — the same authorization posture — would be two different artifacts,
+  // and a server configured with one ordering would fail `PXS01` against the other's install. Role names
+  // are validated plain identifiers (ASCII only), so JS's default code-unit sort IS byte order.
+  return [...roles].sort();
+}
+
+/**
+ * The GUARANTEE behind the readable revokes: converge the installed function's ACL to
+ * `owner + grantExecuteTo`, whatever it actually contains.
+ *
+ * The named revokes above close the two exposures we can NAME (Postgres's PUBLIC default, Supabase's
+ * default-privilege trio). They cannot close a grant to a role we cannot name — and a consumer's own
+ * `ALTER DEFAULT PRIVILEGES … GRANT ALL ON FUNCTIONS TO <their role>` re-grants at every `CREATE`
+ * exactly like Supabase's does, so a deployment-specific grantee would survive every install and keep a
+ * forged-claims caller on the write path indefinitely. So the artifact ENUMERATES the installed
+ * function's real grantees (`aclexplode(pg_proc.proacl)`) and revokes EXECUTE from each one that is
+ * neither the function's OWNER (`proowner` — revoking the owner is meaningless, they can re-grant at
+ * will) nor in the explicit allowlist.
+ *
+ * Two details make it total:
+ * - **A default (NULL) `proacl` explodes to nothing.** That is why the unconditional
+ *   `REVOKE ALL … FROM PUBLIC` is emitted FIRST: revoking materializes the previously-implicit ACL
+ *   (`NULL` → `{owner=X/owner}`), so by the time this block runs the catalog states the truth. Pinned by
+ *   the PGlite unit lane, and by the integration lane against a real cluster.
+ * - **Grantee `0` is PUBLIC**, which has no role name (`pg_get_userbyid(0)` returns a placeholder
+ *   string), so it is revoked by the `FROM PUBLIC` spelling rather than by name.
+ *
+ * The grantee list is snapshotted into an array BEFORE any revoke runs, so the loop never revokes while
+ * scanning the catalog it is mutating. Identifiers go through `format('%I', …)` (= `quote_ident`), and
+ * the function is named by `oid::regprocedure::text`, which schema-qualifies and quotes as required.
+ */
+function buildApplyFunctionAclConvergerSql(signature: string, grantExecuteTo: readonly string[]): string {
+  const keepList =
+    grantExecuteTo.length > 0
+      ? `ARRAY[${grantExecuteTo.map((role) => `'${toSqlLiteral(role)}'`).join(", ")}]::text[]`
+      : `ARRAY[]::text[]`;
+
+  return `DO $$
+DECLARE
+  _fn oid := '${toSqlLiteral(signature)}'::regprocedure;
+  _owner oid;
+  _keep text[] := ${keepList};
+  _grantees oid[];
+  _grantee oid;
+  _grantee_name text;
+BEGIN
+  SELECT p.proowner INTO _owner FROM pg_proc AS p WHERE p.oid = _fn;
+  SELECT array_agg(DISTINCT acl.grantee) INTO _grantees
+  FROM pg_proc AS p, aclexplode(p.proacl) AS acl
+  WHERE p.oid = _fn;
+
+  FOREACH _grantee IN ARRAY COALESCE(_grantees, ARRAY[]::oid[]) LOOP
+    IF _grantee = _owner THEN
+      CONTINUE;
+    END IF;
+    IF _grantee = 0 THEN
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', _fn::regprocedure::text);
+      CONTINUE;
+    END IF;
+    _grantee_name := pg_get_userbyid(_grantee);
+    IF _grantee_name = ANY (_keep) THEN
+      CONTINUE;
+    END IF;
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', _fn::regprocedure::text, _grantee_name);
+  END LOOP;
+END;
+$$;`;
 }
 
 /**
@@ -493,6 +612,10 @@ function resolveGrantExecuteRoles(grantExecuteTo: readonly string[] | undefined)
  * (convergence must not depend on install history), the Supabase-trio ones through the shared
  * role-existence guard so the artifact stays portable to PGlite and plain-Postgres lanes.
  *
+ * Those named revokes are the READABLE fast path — a reviewer sees the two known exposures closed in
+ * plain SQL. The guarantee is {@link buildApplyFunctionAclConvergerSql}, which then revokes EVERY
+ * remaining grantee outside `owner + grantExecuteTo`, including ones this renderer cannot name.
+ *
  * Grants come last, so naming a revoked role in `grantExecuteTo` is a deliberate, explicit grant.
  */
 function buildApplyFunctionAclSql(functionName: string, grantExecuteTo: readonly string[]): string {
@@ -503,6 +626,7 @@ function buildApplyFunctionAclSql(functionName: string, grantExecuteTo: readonly
     ...SUPABASE_DEFAULT_PRIVILEGE_ROLES.map((role) =>
       buildRoleGuardedStatement(role, `REVOKE ALL ON FUNCTION ${signature} FROM ${quoteIdent(role)}`),
     ),
+    buildApplyFunctionAclConvergerSql(signature, grantExecuteTo),
     ...grantExecuteTo.map((role) =>
       buildRoleGuardedStatement(role, `GRANT EXECUTE ON FUNCTION ${signature} TO ${quoteIdent(role)}`),
     ),
@@ -518,7 +642,7 @@ function buildApplyFunctionBody(registry: SyncTableRegistry, options: ApplyFunct
     .filter((entry) => !(entry as SyncTableEntry).readProjection)
     .map((entry) => buildTableBranch(entry as SyncTableEntry))
     .join("\n");
-  const functionName = qualifyIdent(options.functionSchema, APPLY_FUNCTION_NAME);
+  const functionName = qualifyIdent(resolveApplyFunctionSchema(options.functionSchema), APPLY_FUNCTION_NAME);
   // ADR-0054 decision 3: the ACL is rendered INSIDE the fingerprinted body (unlike the COMMENT, which
   // is appended around it) — an install without the revokes IS a different fingerprint and is refused
   // at call time, so a stale PUBLIC-executable install cannot run while `--check` stays green.
@@ -740,7 +864,7 @@ export function buildPlpgsqlBatchFunctionDdl(
   options: ApplyFunctionRenderOptions = {},
 ): string {
   const body = buildApplyFunctionBody(registry, options);
-  const functionName = qualifyIdent(options.functionSchema, APPLY_FUNCTION_NAME);
+  const functionName = qualifyIdent(resolveApplyFunctionSchema(options.functionSchema), APPLY_FUNCTION_NAME);
   const fingerprint = APPLY_FINGERPRINT_PREFIX + hashString(body);
 
   // ADR-0018: stamp the function with the fingerprint of this exact DDL body. Stored as a COMMENT
@@ -819,9 +943,11 @@ export async function executePlpgsqlBatch(
 ): Promise<MutationConflict[]> {
   const normalizedClaims = userClaims ?? {};
   // Typed identifier interpolation (never `sql.raw` of a hand-quoted name); the OUT-column aliases
-  // are the generated function's fixed names.
-  const functionRef = options.functionSchema
-    ? sql`${sql.identifier(options.functionSchema)}.${sql.identifier("pgxsinkit_apply_mutations")}`
+  // are the generated function's fixed names. The schema goes through the SAME validator the renderer
+  // uses, so a server configured with `applyFunctionSchema` names exactly what the artifact installed.
+  const functionSchema = resolveApplyFunctionSchema(options.functionSchema);
+  const functionRef = functionSchema
+    ? sql`${sql.identifier(functionSchema)}.${sql.identifier("pgxsinkit_apply_mutations")}`
     : sql`${sql.identifier("pgxsinkit_apply_mutations")}`;
 
   // The applier RETURNS the stale-write conflicts (ADR-0015). Read them from the function's result

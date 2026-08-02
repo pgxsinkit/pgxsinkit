@@ -90,6 +90,24 @@ describe("apply-function fingerprint (ADR-0018)", () => {
     expect(() => expectedApplyFingerprint(baseRegistry, { grantExecuteTo: ["app writer"] })).toThrow(/grantExecuteTo/);
   });
 
+  // The grant list is a SET, not a sequence: the renderer sorts it canonically, so the same roles in
+  // any order are one artifact identity. Without this, a generate command and a `createSyncServer`
+  // config that agree on WHO may execute but not on the order would fail every write with PXS01.
+  it("is independent of the ORDER grantExecuteTo is listed in", () => {
+    expect(expectedApplyFingerprint(baseRegistry, { grantExecuteTo: ["reporter", "app_writer"] })).toBe(
+      expectedApplyFingerprint(baseRegistry, { grantExecuteTo: ["app_writer", "reporter"] }),
+    );
+  });
+
+  // F2: the schema is a fingerprint input AND the name the server must call, so both sides read it
+  // through one validator — a name the renderer would refuse must never be accepted by the server.
+  it("refuses a functionSchema that is not a plain SQL identifier", () => {
+    for (const schema of ["", "   ", "app fns", 'app"; DROP TABLE x --', "1schema"]) {
+      expect(() => expectedApplyFingerprint(baseRegistry, { functionSchema: schema })).toThrow(/functionSchema/);
+    }
+    expect(() => expectedApplyFingerprint(baseRegistry, { functionSchema: "a".repeat(64) })).toThrow(/63-byte/);
+  });
+
   it("installs the COMMENT so obj_description reads back the exact fingerprint", async () => {
     const db = await createFreshTestPGlite();
     await db.exec(`CREATE TABLE fp_items (

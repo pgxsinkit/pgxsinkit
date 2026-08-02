@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { asc, count, eq, sql } from "drizzle-orm";
-import { bigint, integer, uuid, varchar, type AnyPgTable } from "drizzle-orm/pg-core";
+import { bigint, integer, json, jsonb, uuid, varchar, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
@@ -328,6 +328,73 @@ describe("deny-by-default apply-function ACL (ADR-0054)", () => {
     expect(acl).not.toContain("{=X/");
     expect(acl).not.toContain(",=X/");
   });
+
+  // The named revokes close only the exposures the renderer can NAME. A consumer's own
+  // `ALTER DEFAULT PRIVILEGES … GRANT ALL ON FUNCTIONS TO <their role>` re-grants at every CREATE
+  // exactly like Supabase's does, so without a dynamic converger such a grantee would survive every
+  // install — the reviewer finding this closes.
+  it("emits a grantee-enumerating converger, not just the named revokes", () => {
+    const acl = aclBlock(buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: ["app_writer"] }));
+
+    // The enumeration IS the guarantee: the installed function's real ACL, not a list of known roles.
+    expect(acl).toContain(`_fn oid := '${APPLY_SIGNATURE.replace(/'/g, "''")}'::regprocedure;`);
+    expect(acl).toContain("FROM pg_proc AS p, aclexplode(p.proacl) AS acl");
+    expect(acl).toContain("SELECT p.proowner INTO _owner");
+    // The allowlist is the ONLY exemption besides the owner, and it carries the configured roles.
+    expect(acl).toContain(`_keep text[] := ARRAY['app_writer']::text[];`);
+    // Grantee 0 is PUBLIC (it has no role name); everything else is revoked by quote_ident'ed name.
+    expect(acl).toContain("IF _grantee = 0 THEN");
+    expect(acl).toContain("EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', _fn::regprocedure::text);");
+    expect(acl).toContain(
+      "EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', _fn::regprocedure::text, _grantee_name);",
+    );
+    // Owner-only default still emits the converger — with an empty allowlist.
+    expect(aclBlock(buildPlpgsqlBatchFunctionDdl(demoSyncRegistry))).toContain(`_keep text[] := ARRAY[]::text[];`);
+  });
+
+  it("revokes a grantee it cannot name — an inherited ALTER DEFAULT PRIVILEGES grant — while keeping the allowlist", async () => {
+    const db = await createFreshTestPGlite();
+    const composite = compositeThingsRegistry.compositeThings.table;
+    await createTablesFromSchema(db, { composite });
+
+    // The realistic survivor: the artifact's own `DROP FUNCTION` clears direct grants, but a default
+    // privilege re-applies at the `CREATE` that follows it, on EVERY install.
+    await db.exec(`CREATE ROLE acl_interloper; CREATE ROLE acl_app_writer;`);
+    await db.exec(
+      `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO acl_interloper, acl_app_writer;`,
+    );
+
+    await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry, { grantExecuteTo: ["acl_app_writer"] }));
+
+    const signature = "pgxsinkit_apply_mutations(jsonb,text,boolean,boolean,jsonb,text)";
+    const privileges = await db.query<{ interloper: boolean; writer: boolean; pub: boolean }>(
+      `SELECT has_function_privilege('acl_interloper', '${signature}', 'EXECUTE') AS interloper,
+              has_function_privilege('acl_app_writer', '${signature}', 'EXECUTE') AS writer,
+              has_function_privilege('public', '${signature}', 'EXECUTE') AS pub`,
+    );
+    // The unnamed inherited grantee is gone; the explicitly allowlisted role and nobody else remains.
+    expect(privileges.rows[0]).toEqual({ interloper: false, writer: true, pub: false });
+
+    const grantees = await db.query<{ grantee: string }>(
+      `SELECT DISTINCT pg_get_userbyid(acl.grantee) AS grantee
+       FROM pg_proc AS p, aclexplode(p.proacl) AS acl
+       WHERE p.oid = '${signature}'::regprocedure
+       ORDER BY grantee`,
+    );
+    // Exactly owner + allowlist: no PUBLIC entry, no inherited entry.
+    expect(grantees.rows.map((row) => row.grantee).sort()).toEqual(["acl_app_writer", "postgres"]);
+  });
+
+  it("orders the grant list canonically, so an equivalent role SET is one artifact", () => {
+    // Both the DDL text and the fingerprint it hashes: a caller that lists the same roles in another
+    // order must not mint a second artifact identity (and a server configured the other way round
+    // would otherwise fail PXS01 against a functionally identical install).
+    const forward = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: ["reporter", "app_writer"] });
+    const reverse = buildPlpgsqlBatchFunctionDdl(demoSyncRegistry, { grantExecuteTo: ["app_writer", "reporter"] });
+    expect(forward).toBe(reverse);
+    expect(aclBlock(forward)).toContain(`_keep text[] := ARRAY['app_writer', 'reporter']::text[];`);
+    expect(aclBlock(forward).indexOf(`TO "app_writer"`)).toBeLessThan(aclBlock(forward).indexOf(`TO "reporter"`));
+  });
 });
 
 // ADR-0012: the applier matches update/delete over the FULL server primary-key tuple, by column
@@ -419,9 +486,13 @@ const arrayItemsRegistry = defineSyncRegistry({
 });
 
 function arrayExpression(columnName: string, elementType: string): string {
+  // json/jsonb ELEMENTS keep their JSON value (`jsonb_array_elements`); every other element type is
+  // rebuilt from its TEXT rendering (`jsonb_array_elements_text`), which is what the terminal cast reads.
+  const expansion =
+    elementType === "json" || elementType === "jsonb" ? "jsonb_array_elements" : "jsonb_array_elements_text";
   return (
     `CASE WHEN jsonb_typeof(x.p->''${columnName}'') = ''array'' THEN ` +
-    `ARRAY(SELECT e FROM jsonb_array_elements_text(x.p->''${columnName}'') WITH ORDINALITY AS a(e, ord) ORDER BY ord)` +
+    `ARRAY(SELECT e FROM ${expansion}(x.p->''${columnName}'') WITH ORDINALITY AS a(e, ord) ORDER BY ord)` +
     `::${elementType}[] END`
   );
 }
@@ -587,6 +658,147 @@ describe("array columns in the write path", () => {
     expect(() => buildPlpgsqlBatchFunctionDdl(arrayManaged)).toThrow(
       /managed field array_managed_items\.owners is an array column/,
     );
+  });
+});
+
+// A `json[]` / `jsonb[]` column: the ELEMENT is itself a JSON value, so the uniform
+// `jsonb_array_elements_text` expansion of the array branch was silent type corruption — it strips the
+// element's JSON quoting, so the JSON STRING `"123"` re-parsed as the JSON NUMBER `123`, and `"hi"`
+// failed the cast outright. These pin the branch that keeps each element verbatim.
+const jsonArrayRegistry = defineSyncRegistry({
+  jsonArrayItems: defineSyncTable({
+    tableName: "json_array_items",
+    makeColumns: () => ({
+      id: uuid("id").primaryKey(),
+      label: varchar("label", { length: 120 }).notNull(),
+      prefs: jsonb("prefs").array(),
+      legacyPrefs: json("legacy_prefs").array(),
+      updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+    }),
+    mode: "readwrite",
+    conflictPolicy: "last-write-wins",
+    governance: {
+      managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+    },
+  }),
+});
+
+function jsonArrayBatch(
+  kind: "create" | "update",
+  entityKey: Record<string, string>,
+  payload: Record<string, unknown>,
+  mutationId: string,
+) {
+  return {
+    mutations: [{ tableName: "json_array_items", kind, entityKey, payload, mutationId, mutationSeq: 1 }],
+  };
+}
+
+describe("json[] / jsonb[] columns keep each element's JSON value", () => {
+  it("expands json/jsonb elements with jsonb_array_elements, never the text form", () => {
+    const ddl = buildPlpgsqlBatchFunctionDdl(jsonArrayRegistry);
+
+    for (const into of ["v_cols, v_vals", "v_set"] as const) {
+      expect(candidateExpression(ddl, "json_array_items", into, "prefs")).toBe(arrayExpression("prefs", "jsonb"));
+      expect(candidateExpression(ddl, "json_array_items", into, "legacy_prefs")).toBe(
+        arrayExpression("legacy_prefs", "json"),
+      );
+    }
+    // The corrupting expansion must not appear for either column.
+    expect(ddl).not.toContain(`jsonb_array_elements_text(x.p->''prefs'')`);
+    expect(ddl).not.toContain(`jsonb_array_elements_text(x.p->''legacy_prefs'')`);
+  });
+
+  it("round-trips a string element as a JSON STRING (the corruption pin), plus objects, nulls and []", async () => {
+    const db = await createFreshTestPGlite();
+    const jsonArrayItems = jsonArrayRegistry.jsonArrayItems.table;
+    await createTablesFromSchema(db, { jsonArrayItems });
+    await db.exec(buildPlpgsqlBatchFunctionDdl(jsonArrayRegistry));
+
+    const idStrings = "60000000-0000-4000-8000-000000000001";
+    const idEmpty = "60000000-0000-4000-8000-000000000002";
+    const idNull = "60000000-0000-4000-8000-000000000003";
+
+    await applyBatch(
+      db,
+      jsonArrayBatch(
+        "create",
+        { id: idStrings },
+        {
+          id: idStrings,
+          label: "a",
+          // "123" is the sharp case: text expansion turned this JSON string into a JSON number, and a
+          // non-numeric string like "hi" failed the cast outright. Both must survive as JSON strings.
+          prefs: ["123", "hi", { theme: "dark" }, null],
+          legacy_prefs: ["123", { theme: "dark" }],
+        },
+        "m1",
+      ),
+    );
+    await applyBatch(
+      db,
+      jsonArrayBatch("create", { id: idEmpty }, { id: idEmpty, label: "b", prefs: [], legacy_prefs: [] }, "m2"),
+    );
+    await applyBatch(
+      db,
+      // A JSON null COLUMN is SQL NULL, exactly as for every other array element type.
+      jsonArrayBatch("create", { id: idNull }, { id: idNull, label: "c", prefs: null, legacy_prefs: null }, "m3"),
+    );
+
+    const stored = await db.query<{
+      label: string;
+      first_type: string | null;
+      first_text: string | null;
+      second_type: string | null;
+      third_type: string | null;
+      fourth_type: string | null;
+      fourth_is_sql_null: boolean | null;
+      len: number | null;
+      legacy_first_type: string | null;
+      is_null: boolean;
+    }>(
+      `SELECT label,
+              jsonb_typeof(prefs[1]) AS first_type,
+              prefs[1]::text AS first_text,
+              jsonb_typeof(prefs[2]) AS second_type,
+              jsonb_typeof(prefs[3]) AS third_type,
+              jsonb_typeof(prefs[4]) AS fourth_type,
+              prefs[4] IS NULL AS fourth_is_sql_null,
+              cardinality(prefs) AS len,
+              json_typeof(legacy_prefs[1]) AS legacy_first_type,
+              prefs IS NULL AS is_null
+       FROM json_array_items ORDER BY label`,
+    );
+
+    expect(stored.rows[0]).toEqual({
+      label: "a",
+      // The pin: still a JSON string, not the number 123 the text expansion produced.
+      first_type: "string",
+      first_text: '"123"',
+      // The element the text expansion could not cast at all.
+      second_type: "string",
+      third_type: "object",
+      // A JSON null ELEMENT is preserved verbatim as a JSON null VALUE — not a SQL NULL element.
+      fourth_type: "null",
+      fourth_is_sql_null: false,
+      len: 4,
+      legacy_first_type: "string",
+      is_null: false,
+    });
+    // `[]` is an empty typed array (a value the client meant to write), never NULL.
+    expect(stored.rows[1]).toMatchObject({ label: "b", len: 0, is_null: false });
+    // A JSON null column is SQL NULL, mirroring the scalar cast.
+    expect(stored.rows[2]).toMatchObject({ label: "c", len: null, is_null: true });
+
+    // The same on update, over both column lists.
+    await applyBatch(db, jsonArrayBatch("update", { id: idEmpty }, { prefs: ["7", 7] }, "m4"));
+    const updated = await db.query<{ first: string; second: string; raw: string }>(
+      `SELECT jsonb_typeof(prefs[1]) AS first, jsonb_typeof(prefs[2]) AS second, prefs::text AS raw
+       FROM json_array_items WHERE label = 'b'`,
+    );
+    // A JSON string and a JSON number sent in the same array stay distinguishable — which is exactly
+    // what the text expansion destroyed.
+    expect(updated.rows[0]).toMatchObject({ first: "string", second: "number" });
   });
 });
 
