@@ -6,6 +6,7 @@ import {
   customType,
   getTableConfig,
   integer,
+  jsonb,
   pgSchema,
   pgTable,
   pgView,
@@ -27,7 +28,7 @@ import {
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
-import { ALL_MUTATIONS_VIEW, LOCAL_META_TABLE } from "./schema";
+import { ALL_MUTATIONS_VIEW, LOCAL_META_TABLE, OUTBOX_TABLE } from "./schema";
 
 /**
  * Runtime Drizzle objects for the GENERATED local-store relations (ADR-0004): the per-writable-table
@@ -147,6 +148,29 @@ const localMetaShape = pgTable(LOCAL_META_TABLE, {
 });
 
 /**
+ * The **Outbox**'s columns (ADR-0053 decision 2), mirroring the DDL in `schema.ts` — see {@link OUTBOX_TABLE}
+ * there for the column-by-column public contract. The `_us` bigints and `seq` are the same `bigintText`
+ * passthrough the journal object uses (rows come back through the raw seam UNMAPPED, so the runtime reads
+ * them as strings); `payload` is real `jsonb` (PGlite parses it, so the flush loop gets the object back).
+ * `seq` is DEFAULTed by the sequence, so an insert omits it — hence no `.notNull()` footgun on `$inferInsert`.
+ */
+function buildOutboxColumns() {
+  return {
+    seq: bigintText("seq"),
+    eventId: uuid("event_id").notNull(),
+    stream: text("stream").notNull(),
+    occurredAtUs: bigintText("occurred_at_us").notNull(),
+    payload: jsonb("payload").notNull(),
+    enqueuedAtUs: bigintText("enqueued_at_us").notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextRetryAtUs: bigintText("next_retry_at_us"),
+    lastReason: text("last_reason"),
+  };
+}
+
+const outboxShape = pgTable(OUTBOX_TABLE, buildOutboxColumns());
+
+/**
  * The entry's PROJECTED local table type — its server columns minus `clientProjection.omitColumns`,
  * exactly the shape `defineSyncTable` stamped onto `entry.localTable`. When `TEntry` is a concrete
  * entry (a registry built by `defineSyncRegistry`) this carries the real, typed columns; when it is a
@@ -212,6 +236,8 @@ export type JournalTable = typeof journalShape & { [columnName: string]: PgColum
 export type SyncStateView = typeof syncStateShape & { [columnName: string]: PgColumn };
 /** The `pgxsinkit_local_meta` key/value table (ADR-0006). */
 export type LocalMetaTable = typeof localMetaShape;
+/** The `pgxsinkit_outbox` Event-lane staging table (ADR-0053). */
+export type OutboxTable = typeof outboxShape;
 
 /**
  * Build a runtime `pgTable` for a local-store relation. An `ephemeral`-lifecycle entry (ADR-0021 §3)
@@ -280,6 +306,7 @@ interface EntryLocalTables {
 
 const localTablesCache = new WeakMap<SyncTableRegistry, Map<string, EntryLocalTables>>();
 const localMetaCache = new Map<string, LocalMetaTable>();
+const outboxCache = new Map<string, OutboxTable>();
 
 function cacheFor(registry: SyncTableRegistry, tableKey: string): EntryLocalTables {
   let byKey = localTablesCache.get(registry);
@@ -583,6 +610,26 @@ export type AllMutationsView = typeof allMutationsShape;
 
 export function getAllMutationsView(_registry: SyncTableRegistry): AllMutationsView {
   return allMutationsShape;
+}
+
+/**
+ * The **Outbox** (ADR-0053 decision 2) under the registry's local schema, as a runtime Drizzle object — the
+ * one relation the Event lane stages into. Registry-WIDE (one table, a `stream` column) and memoized per
+ * local schema, exactly like {@link getLocalMetaTable}; it takes the registry only to resolve that schema.
+ *
+ * Public on purpose: the table's shape is contract, so an app composing a best-guess view (pending events
+ * over down-synced aggregates) authors it as tier-① Drizzle instead of hand-written SQL —
+ * `client.query((c) => c.drizzle.select().from(getOutboxTable(registry)).where(eq(outbox.stream, "…")))`.
+ */
+export function getOutboxTable(registry: SyncTableRegistry): OutboxTable {
+  const localSchema = getSyncRegistrySchema(registry);
+  const cached = outboxCache.get(localSchema);
+  if (cached) {
+    return cached;
+  }
+  const table = makeTable(localSchema, OUTBOX_TABLE, buildOutboxColumns()) as OutboxTable;
+  outboxCache.set(localSchema, table);
+  return table;
 }
 
 /** The `pgxsinkit_local_meta` key/value table (ADR-0006) under the registry's local schema. */

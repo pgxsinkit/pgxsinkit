@@ -157,6 +157,10 @@ describe("dedup × hydration over the worker bridge (ADR-0040 Slice 3)", () => {
       buildDataExportCloneCleanupSql: () => "",
       ALL_MUTATIONS_VIEW: "pgxsinkit_all_mutations",
       LOCAL_META_TABLE: "pgxsinkit_local_meta",
+      // The Event lane's Outbox (ADR-0053): `local-tables.ts` imports the name from this module, so a
+      // partial mock of it must carry the constant or the whole client fails to load.
+      OUTBOX_TABLE: "pgxsinkit_outbox",
+      OUTBOX_SEQUENCE: "pgxsinkit_outbox_seq",
     }));
   });
 

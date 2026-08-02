@@ -6,7 +6,7 @@
 // copy from board.cloud.env.example). Each step is also a separate `board:cloud:*` script so you can
 // re-run just one.
 //
-//   bun run board:cloud:deploy      # migrate → secrets → functions → seed (the whole repeatable path)
+//   bun run board:cloud:deploy      # migrate → secrets → functions → cron → seed (the whole repeatable path)
 //   bun run board:cloud:reset       # purge → migrate → seed (rebuild the cloud DB from the committed
 //                                   # history — same as the nightly Demo reset action; run after a
 //                                   # migration-history rewrite, plus board:cloud:functions if server
@@ -14,19 +14,27 @@
 //   bun run board:cloud:migrate     # apply the board's migrations to the cloud DB (direct connection)
 //   bun run board:cloud:secrets     # set the function secrets the platform does NOT auto-provide
 //   bun run board:cloud:functions   # build the bundles + `supabase functions deploy`
+//   bun run board:cloud:cron        # schedule the Event lane's drain sweep (pg_cron → pg_net → the
+//                                   # board-events-drain function); idempotent, re-run after a secret change
 //   bun run board:cloud:seed        # GoTrue identities + fixtures against the cloud project
 //   bun run board:cloud:dev         # launch the local Vite client against the cloud backend
 //   bun run board:cloud:preview     # build + serve the compiled client against the cloud backend
 //
 // What the platform provides vs. what we set: Supabase Cloud auto-injects SUPABASE_URL (→ JWKS) and
 // SUPABASE_DB_URL (the pooler → board-write) into every function, and the `SUPABASE_` prefix is
-// RESERVED (the CLI rejects secrets with it). So the only function secret to set is ELECTRIC_SHAPE_URL
-// (board-sync's upstream, with the Cloud source_id+secret). BOARD_ALLOWED_ORIGINS defaults to the
+// RESERVED (the CLI rejects secrets with it). So the function secrets to set are ELECTRIC_SHAPE_URL
+// (board-sync's upstream, with the Cloud source_id+secret) and BOARD_EVENTS_DRAIN_SECRET (the shared
+// secret gating the Event lane's drain function). BOARD_ALLOWED_ORIGINS defaults to the
 // local Vite origin, which is what the frontend uses against the cloud backend, so it needs no secret.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/bun-sql";
+
+import { BOARD_EVENTS_DRAIN_SECRET_HEADER } from "../apps/board-api/src/core/events-drain";
 
 const ENV_FILE = "board.cloud.env";
 
@@ -35,8 +43,10 @@ const ENV_FILE = "board.cloud.env";
 // spawned process.
 const SUPABASE_BIN = process.env["SUPABASE_BIN"] ?? "supabase";
 
-type Step = "deploy" | "purge" | "migrate" | "secrets" | "functions" | "seed";
-const STEPS: readonly Step[] = ["migrate", "secrets", "functions", "seed"];
+type Step = "deploy" | "purge" | "migrate" | "secrets" | "functions" | "cron" | "seed";
+// `cron` follows `functions` deliberately: the schedule it creates starts firing at once, so the function
+// it calls (and the secret that function checks) must already be deployed.
+const STEPS: readonly Step[] = ["migrate", "secrets", "functions", "cron", "seed"];
 // `reset` = what the Demo reset workflow (.github/workflows/demo-reset.yml) runs nightly, from the CL:
 // drop every migration-created board object, re-apply the latest committed history, reseed. The way to
 // ship a rewritten/collapsed migration history (docs/runbooks/regenerate-migrations.md) to the cloud
@@ -93,7 +103,62 @@ export function boardSupabaseSecretsArgs(env: Record<string, string>, file: stri
 }
 
 export function boardSupabaseFunctionsArgs(env: Record<string, string>): string[] {
-  return ["functions", "deploy", "--project-ref", boardSupabaseProject(env).ref, "board-write", "board-sync"];
+  return [
+    "functions",
+    "deploy",
+    "--project-ref",
+    boardSupabaseProject(env).ref,
+    "board-write",
+    "board-sync",
+    // The Event lane's serverless drain (pgxsinkit ADR-0053, amendment): cloud-only, because managed
+    // Supabase cannot host the long-lived consumer runner the local stack uses.
+    "board-events-drain",
+  ];
+}
+
+/** The fixed pg_cron job name — fixed so a re-run REPLACES the schedule instead of stacking another. */
+export const BOARD_EVENTS_DRAIN_JOB = "board_events_drain";
+/**
+ * How often the sweep runs. pg_cron's sub-minute granularity, and the Event lane's guarantee on this stack:
+ * the ingest-side nudge (board-write → the drain function) is what makes an interactive append feel
+ * instant, but a nudge can be lost, so this bounds worst-case archive latency at ~10s regardless. An empty
+ * pass is one cheap pgmq read per Event stream, which is what makes that cadence affordable.
+ */
+export const BOARD_EVENTS_DRAIN_SCHEDULE = "10 seconds";
+/** Secrets are embedded in the scheduled command's SQL text, so only an injection-proof shape is accepted. */
+const DRAIN_SECRET_PATTERN = /^[A-Za-z0-9_-]{16,}$/;
+
+/**
+ * The command pg_cron runs on each tick: one `net.http_post` at the drain function, presenting the shared
+ * secret. Tier ③ SQL by necessity and by placement — it is DEPLOY tooling, not app schema, and its values
+ * (project URL, shared secret) are host-specific, so it must never be baked into a committed migration.
+ *
+ * The secret is validated against {@link DRAIN_SECRET_PATTERN} before it reaches this string: an embedded
+ * literal is unavoidable inside a job command, so the safety comes from refusing anything that could close
+ * the quote rather than from escaping it.
+ */
+export function boardEventsDrainCronCommand(drainUrl: string, secret: string): string {
+  if (!DRAIN_SECRET_PATTERN.test(secret)) {
+    throw new Error(
+      `${ENV_FILE} BOARD_EVENTS_DRAIN_SECRET must be at least 16 characters of [A-Za-z0-9_-] — it is embedded ` +
+        "in the cron job's SQL, so nothing quotable is accepted. Generate one with `openssl rand -hex 32`.",
+    );
+  }
+  const url = new URL(drainUrl);
+  if (url.protocol !== "https:" || url.search || url.username || url.password) {
+    throw new Error(`The drain function URL must be a plain https URL (got ${drainUrl}).`);
+  }
+  return [
+    "select net.http_post(",
+    `  url := '${url.toString()}',`,
+    "  headers := jsonb_build_object(",
+    "    'Content-Type', 'application/json',",
+    `    '${BOARD_EVENTS_DRAIN_SECRET_HEADER}', '${secret}'`,
+    "  ),",
+    "  body := jsonb_build_object('source', 'pg_cron'),",
+    "  timeout_milliseconds := 10000",
+    ") as request_id;",
+  ].join("\n");
 }
 
 export function boardSupabaseCliEnv(env: Record<string, string>): Record<string, string> {
@@ -189,6 +254,10 @@ function secrets(env: Record<string, string>): void {
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "board-cloud-secret.env");
   const lines = [`ELECTRIC_SHAPE_URL=${env["ELECTRIC_SHAPE_URL"]}`];
+  // The Event lane's drain secret: the ONLY gate on board-events-drain (its callers are machines with no
+  // GoTrue session), and the same value the cron job presents. board-write reads it too — its presence is
+  // what wires the ingest-side nudge, so an unset secret simply leaves the cloud stack on the cron sweep.
+  lines.push(`BOARD_EVENTS_DRAIN_SECRET=${requireDrainSecret(env)}`);
   // Optional: the CORS allow-list both functions read (board-sync + board-write). Needed when the
   // frontend is hosted at a real origin (e.g. a GitHub Pages /demo) rather than localhost. The
   // functions default to localhost dev origins, so it can be left unset for `board:cloud:dev`.
@@ -208,6 +277,49 @@ function secrets(env: Record<string, string>): void {
 function functions(env: Record<string, string>): void {
   run("bun", ["run", "edge:build"]);
   run(SUPABASE_BIN, boardSupabaseFunctionsArgs(env), boardSupabaseCliEnv(env));
+}
+
+function requireDrainSecret(env: Record<string, string>): string {
+  const secret = env["BOARD_EVENTS_DRAIN_SECRET"];
+  if (!secret || PLACEHOLDER_MARKERS.some((marker) => secret.includes(marker))) {
+    throw new Error(
+      `${ENV_FILE} needs a real BOARD_EVENTS_DRAIN_SECRET — the shared secret gating the Event lane's drain ` +
+        "function (pgxsinkit ADR-0053). Generate one with `openssl rand -hex 32` and add it to " +
+        `${ENV_FILE}; see ${ENV_FILE}.example.`,
+    );
+  }
+  return secret;
+}
+
+// Schedule the Event lane's drain sweep. Managed Supabase cannot host the toolkit's long-lived consumer
+// runner, so the drain is a THIRD edge function invoked on a schedule (pgxsinkit ADR-0053, amendment):
+// pg_cron ticks, pg_net posts, the function runs one bounded `drainOnce()` pass.
+//
+// Idempotent by construction: the extensions are `if not exists`, and `cron.schedule` keyed on a FIXED job
+// name replaces the existing job rather than adding a second one — so re-running after a secret rotation or
+// a URL change is the supported way to update it. Deliberately NOT a migration: the URL and the secret are
+// host-specific values that must never enter git.
+async function cron(env: Record<string, string>): Promise<void> {
+  const secret = requireDrainSecret(env);
+  const drainUrl = new URL("/functions/v1/board-events-drain", boardSupabaseProject(env).url).toString();
+  const command = boardEventsDrainCronCommand(drainUrl, secret);
+
+  console.log(`\n$ psql (direct) → cron.schedule('${BOARD_EVENTS_DRAIN_JOB}', '${BOARD_EVENTS_DRAIN_SCHEDULE}', …)`);
+  const db = drizzle({ connection: env["BOARD_DATABASE_URL"]! });
+  try {
+    // Tier ③ throughout: extension enablement, a schema grant, and a pg_cron call have no Drizzle form.
+    await db.execute(sql`create extension if not exists pg_cron`);
+    await db.execute(sql`create extension if not exists pg_net`);
+    // Supabase's own pg_cron recipe: the project's `postgres` role drives the job table.
+    await db.execute(sql`grant usage on schema cron to postgres`);
+    await db.execute(sql`select cron.schedule(${BOARD_EVENTS_DRAIN_JOB}, ${BOARD_EVENTS_DRAIN_SCHEDULE}, ${command})`);
+    const jobs = await db.execute(
+      sql`select jobname, schedule, active from cron.job where jobname = ${BOARD_EVENTS_DRAIN_JOB}`,
+    );
+    console.log(`  ✓ ${JSON.stringify(jobs)}`);
+  } finally {
+    await db.$client.end();
+  }
 }
 
 // Drop every migration-created board object (model-derived list; scripts/board-purge.ts) so `migrate`
@@ -270,7 +382,7 @@ function preview(env: Record<string, string>): void {
   run("bun", ["run", "--cwd", "apps/board", "preview"], browserEnv);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const arg = (process.argv[2] ?? "deploy") as Step | "dev" | "preview" | "reset";
   if (
     arg !== "deploy" &&
@@ -310,6 +422,7 @@ function main(): void {
     else if (step === "migrate") migrate(env);
     else if (step === "secrets") secrets(env);
     else if (step === "functions") functions(env);
+    else if (step === "cron") await cron(env);
     else if (step === "seed") seed(env);
   }
 
@@ -318,4 +431,4 @@ function main(): void {
   }
 }
 
-if (import.meta.main) main();
+if (import.meta.main) await main();

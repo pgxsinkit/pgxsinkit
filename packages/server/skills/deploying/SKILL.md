@@ -2,12 +2,16 @@
 name: deploying
 description: >-
   Load when deploying the @pgxsinkit/server write API and Electric shape proxy onto Bun, Deno, Supabase
-  Edge Functions, or Cloudflare Workers. Covers the runtime-portable fetch handler, the three concrete
-  steps a non-Bun edge runtime needs (bundle the function so Deno can load the toolkit's bare specifiers
-  with node: builtins, strip the function-name path prefix before server.fetch, resolve claims from the
-  platform JWT in resolveAuthClaims), splitting write and sync into two functions, setting the worker
-  timeout above Electric's ~25s long-poll, and forcing cache-control:no-store on a same-origin shape
-  proxy. Load before deploying the server or wiring it into an edge platform.
+  Edge Functions, or Cloudflare Workers. Covers the runtime-portable fetch handler, the three steps a
+  non-Bun edge runtime needs (bundle for Deno with node: builtins, strip the function-name path prefix,
+  resolve claims in resolveAuthClaims), the deny-by-default apply-function ACL and --grant-execute-to
+  (ADR-0054), splitting write and sync into two functions, setting the worker
+  timeout above Electric's ~25s long-poll, and cache-control:no-store on a same-origin shape proxy. Also
+  covers the Event lane (ADR-0053): the auto-mounted /api/events route, the eventGate hook, the pgmq
+  prerequisite and pgxsinkit-generate --events queue DDL, and the consumer runner (defineEventConsumer) as a
+  long-lived Bun process never deployed serverless — plus its bounded drainOnce mode for platforms with no
+  long-lived compute (scheduled invocation + onEventsEnqueued nudge). Load before deploying the server or
+  running an event consumer.
 metadata:
   type: task
   library: "@pgxsinkit/server"
@@ -81,6 +85,46 @@ unfingerprinted** function (no comment) is also refused; an **old-signature** fu
 resolution (undefined function). Regenerate + apply the sync-function migration to fix it, and run
 `pgxsinkit-generate --check` in CI to catch the drift before deploy.
 
+## The apply function is deny-by-default: name your server's DB role (ADR-0054)
+
+The apply function takes `p_user_claims` and **trusts them** — it copies them into `request.jwt.claims`
+and switches `role` before running RLS-governed DML. That is correct for your server (which passes claims
+it VERIFIED) and catastrophic for anyone else, who would simply choose their own. So the artifact is
+**deny-by-default**: right after `CREATE`, it `REVOKE`s EXECUTE from `PUBLIC` and (guarded on role
+existence) from `anon`/`authenticated`/`service_role`, then `GRANT`s only to roles you name:
+
+```bash
+bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
+  --project-dir ./db --config drizzle.config.ts --name sync_artifact \
+  --grant-execute-to app_writer          # repeatable, or comma-separated
+```
+
+- **Default is owner-only** (`[]`). If your server connects as the function's **owner** (the role that
+  applies the migrations) or as a **superuser**, you do not need the flag — most deployments do not.
+- **Name only SERVER roles.** A granted role can forge any claims it likes; that is by design (the server
+  is the component trusted to verify them), which makes the grant list **the write path's entire trust
+  boundary**. Never grant `anon`, `authenticated`, `service_role`, or any other client-facing role.
+- **It is part of the artifact fingerprint**, so pass the SAME roles three places or every write fails
+  `PXS01`: the generate command, the CI `--check` command, and
+  `createSyncServer({ applyFunctionGrantExecuteTo: ["app_writer"] })`.
+- **The revokes are re-emitted on every install** — the artifact begins with `DROP FUNCTION`, so a fresh
+  creation re-inherits Postgres's PUBLIC default and Supabase's `ALTER DEFAULT PRIVILEGES … TO anon,
+authenticated, service_role`. A hand-hardened function would silently un-harden itself; this converges.
+- **Grantees the toolkit cannot name are revoked too.** After the named revokes, the artifact enumerates
+  the installed function's real grantees (`aclexplode(pg_proc.proacl)`) and revokes `EXECUTE` from every
+  one that is neither the owner nor on the grant list. Your OWN `ALTER DEFAULT PRIVILEGES … GRANT ALL ON
+FUNCTIONS TO <role>` re-grants at the `CREATE` inside every install exactly like Supabase's does, so
+  without the enumeration such a role would survive every regenerate. End state: owner + your list.
+- **Everyone regenerates once.** The ACL moved the fingerprint, so upgrading `@pgxsinkit/server` means
+  re-running the generate command (and `--utilities`, which hardens `pgxsinkit_clock_us()` the same way,
+  keeping its grants to the Supabase trio — a column DEFAULT calling the clock runs as the writing role).
+
+**PostgREST is not required, and omitting it is good deployment guidance.** pgxsinkit needs no PostgREST;
+the board stack deliberately omits it, which removes the `/rest/v1/rpc/*` surface that would otherwise
+expose every `public` function over HTTP. But do not treat that as the control: the ACL is, and it holds
+under every topology (lateral movement from a role membership needs no HTTP surface at all, and Studio's
+table editor wants PostgREST back). Ship the grant list right; treat "no PostgREST" as defence in depth.
+
 **Order the utilities migration first.** The generated apply function and the `clockMicrosecondsSql`
 column DEFAULTs both **call** `public.pgxsinkit_clock_us()` — the canonical microsecond clock installed by
 the **utilities migration** (`renderPgxsinkitUtilitiesMigration()`, or the generate CLI's `--utilities`
@@ -109,6 +153,128 @@ createSyncServer({
   matters where the platform serves one worker per request (each write otherwise replays the whole startup
   gate). Pair it with warming the JWT/JWKS verify at module scope so the first verify does not pay a cold
   key fetch.
+
+## The Event lane: an auto-mounted route, deploy-time queues, and a runner you host (ADR-0053)
+
+If your registry declares `streams` (see the `registry-authoring` skill, `@pgxsinkit/contracts`), the server
+gains a **second lane** beside the sync rail. Three deployment obligations, and one of them is a process.
+
+**1. The route mounts itself.** `createSyncServer` registers `POST /api/events` **only** when the registry
+registers at least one Event stream (no streams → the path stays a 404). Nothing is probed or provisioned at
+startup, so the zero-startup-query posture is intact and the edge deployment story is unchanged — the same
+function-name prefix strip that serves `/api/mutations` serves `/api/events`, because they are siblings under
+`/api/`. Two options are yours:
+
+```ts
+createSyncServer({
+  registry,
+  db,
+  resolveAuthClaims,
+  // Consent/entitlement refusal, keyed by Event-stream name. ABSENT = every well-formed event is allowed.
+  // Called after the payload validated and identity resolved, BEFORE anything is enqueued; a refusal is a
+  // per-event `refused` verdict (terminal — the client deletes it and surfaces it on its report).
+  eventGate: ({ stream, identity }) => (stream === "issue_viewed" ? consentedViewers.has(identity["viewerId"]!) : true),
+  // Defaults to the shipped pgmq backend over this server's own `db`, which is what makes an enqueue join
+  // the endpoint's transaction. Override only for another backend or a test fake.
+  eventQueue: createPgmqEventQueue({ db }),
+});
+```
+
+The gate is called **per event**, not per stream × batch (a consent decision may legitimately depend on the
+payload); the claims are constant across a batch, so memoize on them if the hook consults a store. A gate
+that **throws** fails the whole batch retryably (500, nothing enqueued) — a gate that cannot decide is never
+read as "allow". Any stream your registry declares whose identity comes from claims makes the endpoint
+require verified claims: an unauthenticated request is a batch 401.
+
+**Request-shape limits are toolkit constants, enforced server-side independently of any client tuning**:
+1000 events per batch, 64 KiB serialized payload per event, 4 MiB request body. A batch-count/body violation
+is a 413 and a framing failure is a 400 — both reachable only from a non-library caller or under skew, since
+the library validates at append and builds the envelopes. A single oversized payload is a per-event
+`rejected` instead, so one bad row cannot wedge a whole Outbox. When the queue is unavailable the endpoint
+returns **503 + `Retry-After` and enqueues NOTHING** — a batch is atomic, and the server never buffers on the
+queue's behalf.
+
+**2. pgmq is a prerequisite, and the queues are deploy-time DDL.** One queue per Event stream
+(`pgxsinkit_events_<stream>`), so a poison event in one stream cannot head-of-line-block another. Generate
+the migration and apply it through your normal flow — never at runtime, because the endpoint may enqueue long
+before any runner first starts:
+
+```bash
+bun run pgxsinkit-generate --events --registry ./sync-registry.ts --export registry \
+  --project-dir ./db --config drizzle.config.ts --name event_lane_artifact
+```
+
+It gets its own migration folder (queues are provisioned independently of the apply function) and carries a
+fingerprint of the registry's stream set. **Add `--events --check` to CI beside the apply-function
+`--check`**: adding or removing a stream without regenerating then fails before deploy, instead of at the
+first enqueue onto a queue that does not exist. (A registry with no streams passes `--check` trivially —
+nothing to provision is not drift.)
+
+**3. The consumer runner is a LONG-LIVED process — do not deploy it serverless.** `defineEventConsumer`
+returns a `start()`/`stop()` handle; your app runs it in its own Bun process, deliberately apart from
+`createSyncServer`'s serverless posture. There is no CLI entrypoint, no supervisor and no signal handling
+inside it — the app owns its lifecycle:
+
+```ts
+const consumer = defineEventConsumer({
+  registry,
+  queue: createPgmqEventQueue({ db }), // required — the runner is backend-agnostic by construction
+  streams: ["issue_viewed"], // optional: the knob that splits streams across processes (unknown name → throws)
+  callback: async ({ stream, events }) => {
+    await db.transaction(async (tx) => {
+      await tx.insert(viewArchive).values(events.map(toRow)).onConflictDoNothing({ target: viewArchive.eventId });
+    });
+  },
+  onDeadLetter: (report) => alert(report), // the runner ALSO warn-logs every one, unconditionally
+});
+consumer.start();
+process.on("SIGTERM", () => void consumer.stop()); // graceful: no new reads, in-flight callbacks awaited
+```
+
+- **The callback MUST be idempotent.** Delivery is at-least-once; the blessed pattern is deduping on
+  `eventId` against your own durable store (`ON CONFLICT (event_id) DO NOTHING`), which composes to
+  effectively-exactly-once. Returning acks the sub-batch; **throwing retries it**.
+- **Order is batch-internal only.** Events arrive in append order within one delivered sub-batch; across
+  sub-batches there is no promise (a retried one is redelivered after its successors, and `concurrency > 1`
+  runs them in parallel). Re-sort from your own archive on `occurredAtUs` if you need temporal order.
+- **Pacing is internal** — adaptive interval polling (immediate re-read after a non-empty read; consecutive
+  empty reads grow the wait from ~250 ms toward a ~5 s idle ceiling). Floor/ceiling/factor are tuning, not
+  contract; there is no LISTEN/NOTIFY, deliberately (Bun's `SQL` has none, and a held listening connection is
+  exactly what a transaction pooler will not give you).
+- **Leases ARE renewed internally; a thrown sub-batch's is deliberately left to lapse.** One read makes the
+  whole batch invisible, so while the runner works through it it extends every unsettled receipt (the one in
+  flight plus the ones queued behind it) every `visibilityTimeoutSeconds / 2` — ten slow callbacks can no
+  longer let message 10 resurface while message 1 is still running. So the timeout is NOT a batch budget: it
+  is the **redelivery delay** of a sub-batch whose callback threw (which stops being renewed at once — that
+  lapse IS the retry pacing) and the crash-recovery bound. Size it above ONE callback's worst case. Renewal
+  is best-effort: a failed renewal warns and the loop continues, because redelivery is the fallback anyway.
+- After `maxAttempts` (default 5) a sub-batch **dead-letters into pgmq's own per-queue archive** — there is
+  no library-owned DLQ table. Requeue is a deliberate act (`requeueDeadLetter`), never automatic.
+- One runner hosts many streams (independent loops each), so a small deployment runs one process and a large
+  one splits `streams` across processes. Construction is query-free: the first statement is the first poll.
+
+**3b. No long-lived compute at all? `drainOnce()` on a schedule.** On a platform whose only server-side unit
+is a per-request function (managed Supabase, say), there is nowhere to put `start()` — and the queue would
+never drain. The SAME handle answers a bounded pass instead; everything else (delivery path, renewal, retry,
+dead-lettering) is identical code, which is possible because pacing was never contract:
+
+```ts
+// In the scheduled function. Query-free construction ⇒ building one per invocation costs nothing.
+const consumer = defineEventConsumer({ registry, queue: createPgmqEventQueue({ db }), callback });
+const { delivered, deadLettered, empty } = await consumer.drainOnce({ budgetMs: 20_000 });
+```
+
+- **`budgetMs` goes UNDER the platform's invocation cap, with head-room for one callback** — it is checked
+  between sub-batches, never inside one, so a running callback is always awaited and acked first.
+- **`empty: false` = "there is more"** (budget cut it short, or a read faulted): invoke again rather than
+  waiting out the period. A sub-batch whose callback threw near the edge redelivers next pass — at-least-once.
+- **Overlapping invocations are safe** (visibility timeouts arbitrate, as with two runners). Two passes on
+  ONE handle are not: `drainOnce` beside a live `start()`, beside another pass, or after `stop()`, throws.
+- **Pair it with the ingest nudge for latency, never for delivery:**
+  `createSyncServer({ onEventsEnqueued: ({ streams }) => void fetch(drainUrl, …) })` fires after a
+  successful enqueue with the request's deduplicated stream names, fire-and-forget (a throw is caught and
+  warn-logged). **The schedule is the guarantee**; a lost nudge costs only time. Keep the long-lived runner
+  wherever you can run one — it is still the primary mode.
 
 ## Measure before tuning: `logTimings`
 
@@ -154,9 +320,31 @@ detail live in the `operating` skill.
   function migration. The apply function verifies itself and **refuses to serve writes** (SQLSTATE
   `PXS01`) on a mismatch — enforcement is always-on, there is no override; run `pgxsinkit-generate --check`
   in CI to catch it before deploy.
+- Passing `--grant-execute-to` to the generate command but not to CI's `--check` and
+  `createSyncServer({ applyFunctionGrantExecuteTo })` — the ACL is inside the fingerprinted body, so the
+  three lists must agree or every write fails `PXS01`. (The list is order-insensitive: the renderer sorts
+  it, so the same roles in any order are one artifact.)
+- The same mistake with `--function-schema`: generating into a schema without
+  `createSyncServer({ applyFunctionSchema: "<schema>" })`. That option is BOTH halves — the fingerprint
+  input and the qualification of the call the server makes — so without it the server calls
+  `pgxsinkit_apply_mutations` unqualified and either finds nothing (`42883`) or finds a `search_path`
+  namesake and fails `PXS01`. Set the flag and the option to the same schema, or neither.
+- Granting EXECUTE on the apply function to `authenticated` (or any client-facing role) to "make writes
+  work". That re-creates the forged-claims impersonation the deny-by-default ACL exists to close: name the
+  role your SERVER connects as, or connect as the owner and grant nobody.
 - Ordering the utilities migration after the schema/apply-function migration, or omitting it — the apply
   function and column DEFAULTs call `public.pgxsinkit_clock_us()`, so migrate fails with an
   undefined-function error. Generate it first (`--utilities`).
+- Deploying the event **consumer runner** as a serverless function or a route on the sync server. It is a
+  long-lived polling process by design; a per-request worker would poll once and die. If the platform has no
+  long-lived compute, use `drainOnce()` on a schedule — never `start()` in a request handler.
+- Treating the `onEventsEnqueued` nudge as the delivery mechanism. It is fire-and-forget latency relief; the
+  scheduled sweep is what guarantees the queue drains.
+- Registering an Event stream without generating + applying the `--events` migration (the endpoint then
+  enqueues onto a queue that does not exist), or leaving `--events --check` out of CI.
+- A consumer callback that is not idempotent. Delivery is at-least-once; dedupe on `eventId`.
+- A `visibilityTimeoutSeconds` below a SINGLE callback's worst-case duration — renewal runs at half of it, so
+  a callback slower than that window can still be redelivered while the first invocation is running.
 - Shipping toolkit source to Deno without bundling, or leaving builtins un-prefixed (not `node:*`).
 - Forgetting to strip the function-name prefix, so `/write/api/mutations` 404s.
 - Verifying the JWT only at the gateway instead of in `resolveAuthClaims` (non-portable).

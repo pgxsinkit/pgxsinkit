@@ -34,12 +34,15 @@ a rewritten history ships by dispatching that workflow (never by hand-reconcilin
   | set                   | generated (re-emit on change)                                                                                                             | hand-written (custom SQL — no generator)                                                                                     |
   | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
   | `infra/drizzle`       | utilities (generate CLI `--utilities`), schema (`db:generate`), governance (`db:generate:governance`), sync-fn (`sync:function:generate`) | —                                                                                                                            |
-  | `infra/board-drizzle` | utilities (generate CLI `--utilities`), schema (`db:board:generate`), sync-fn (`db:board:sync-fn`)                                        | `*_board_prereqs` (membership + cross-team-trigger functions), `*_board_grants_trigger` (table grants + the `issue` trigger) |
+  | `infra/board-drizzle` | utilities (generate CLI `--utilities`), schema (`db:board:generate`), sync-fn (`db:board:sync-fn`), event lane (`db:board:events`)        | `*_board_prereqs` (membership + cross-team-trigger functions), `*_board_grants_trigger` (table grants + the `issue` trigger) |
 
   `db:generate` / `db:board:generate` diff the Drizzle schema against the latest `snapshot.json` on disk
   — they **never read a database**. The sync-fn generators (ADR-0018) stamp the apply function with a
   fingerprint of its own DDL; `sync:function:check` (run in CI and the server at startup) fails if a
-  committed migration ever lags its registry.
+  committed migration ever lags its registry. The **event-lane** artifact (ADR-0053,
+  `pgxsinkit-generate --events`) works the same way in its own folder — the pgmq extension plus one queue
+  per registered Event stream, fingerprinted over that stream set — and `sync:function:check` runs its
+  `--events --check` leg for both registries (a registry with no Event streams passes trivially).
 
 ## Procedure (all of it is the agent's; none of it needs a database)
 
@@ -52,6 +55,8 @@ Run from the repo root. Every step here is **filesystem-only** — nothing reads
    - `infra/drizzle` registry / apply-function change: `bun run sync:function:generate`
    - board schema change: `bun run db:board:generate`
    - board registry / apply-function change: `bun run db:board:sync-fn`
+   - board Event-stream added/removed: `bun run db:board:events` (nothing to do for a payload-schema
+     change — a payload provisions no queue, so the event-lane fingerprint does not move)
 
    For the board, mind the **apply ordering** — its hand-written customs are not freely interleavable
    with a regenerated schema. See [Board: dependency-ordered full regeneration](#board-dependency-ordered-full-regeneration).
@@ -106,6 +111,9 @@ place. The order, and why:
 issue_block_cross_team_move` (both need the tables, so they follow the schema).
 5. **`*_board_sync_artifact`** (generated, `db:board:sync-fn`) — the `pgxsinkit_apply_mutations` apply
    function. Standalone `DROP … ; CREATE OR REPLACE`, ordered last.
+6. **`*_board_event_lane`** (generated, `db:board:events`) — `CREATE EXTENSION IF NOT EXISTS pgmq` plus one
+   idempotent `pgmq.create()` per registered Event stream. It depends on nothing above (Event streams touch
+   no table), so its position is free; it is emitted last only because it is generated last.
 
 Procedure (filesystem-only; timestamps increase with each call so the folders sort in this order):
 
@@ -119,6 +127,7 @@ bun run db:board:generate                                          # the schema 
 bunx drizzle-kit generate --custom --name=board_grants_trigger --config=infra/board-drizzle.config.ts
 #   → fill its migration.sql with the GRANTs + CREATE TRIGGER
 bun run db:board:sync-fn                                           # the apply function
+bun run db:board:events                                            # the pgmq extension + per-stream queues
 ```
 
 Then run the standard step 3 (`format:write`, `validate`, `sync:function:check`).

@@ -2,6 +2,8 @@ export * from "./apply-strategy";
 export * from "./common";
 export * from "./config";
 export * from "./convergence-model";
+export * from "./event-stream";
+export * from "./events";
 export * from "./fingerprint";
 export * from "./registry";
 export * from "./registry-diff";

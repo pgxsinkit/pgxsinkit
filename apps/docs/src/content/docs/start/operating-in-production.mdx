@@ -214,6 +214,49 @@ How it recovers depends on _why_ it degraded:
   There is no separate reset call for this; `recoverSending` rebuilds the _write_ journal, not the read
   frontier.
 
+## Watching the event lane's Outbox
+
+If your app appends events (the model is in [The event lane](/concepts/event-lane/)), the client gives you
+two surfaces to operate it with, and neither is optional reading before you ship one.
+
+**The drain signal** is `client.onOutboxStatus(({ empty }) => …)` — the empty ↔ non-empty transitions, with
+the current state delivered on subscribe (`await client.outboxStatus()` is the one-shot pull). Use it to
+invalidate a view that composes pending events with down-synced aggregates: when the Outbox drains, the
+aggregate is authoritative again. It carries no count deliberately — a count that updates only on
+transitions is stale by construction — so query the Outbox table (`getOutboxTable(registry)`) if you want
+one.
+
+**The verdicts** are `client.onEventLaneReport(cb)`: per flush pass, the terminal non-`acked` verdicts, the
+`deferred` ones, and the lane's batch-level backoff transitions. Subscribe for the **app's lifetime**, not
+per screen — the subscription is ephemeral, and once a terminal row is deleted the Outbox cannot answer for
+it. (With nothing subscribed the library logs each report at warn level rather than dropping it.)
+
+Read them this way:
+
+- `refused` — your `eventGate` declined it. Expected, not an error.
+- `rejected` — a schema-invalid or oversized payload for a **known** stream. The library validates at
+  append, so in practice this means a non-library caller or a broken deployment: treat it as a **bug**.
+- `deferred` — the server does not (yet) know that stream. This is **not** a failure and **not** terminal:
+  it is ordinary rollout skew, the rows stay in the Outbox, and they drain when the server deploy lands. A
+  burst right after a client release is the deploy order; a burst that never clears means **deployment
+  skew** — the server's registry does not declare that stream (it is the registry, and only the registry,
+  that decides this verdict). Never "clean up" the Outbox in response to it.
+
+A lane stuck in **batch-level backoff** is a different diagnosis, and the report's `backoff` transitions
+(plus a persistent `503` with `Retry-After`) are its signal. The server knows the stream but could not
+enqueue the batch, and it fails the batch **whole** — nothing is enqueued and no per-event verdicts are
+issued. The first thing to check is the queue itself: registering a stream requires generating and applying
+the **`--events` migration**, and without it the endpoint enqueues onto a pgmq queue that does not exist.
+(Then: the database's reachability from the ingress, and the server log line the 503 always writes.)
+
+<Aside type="note" title="A growing Outbox is the design working, not a leak">
+  There is no attempt cap and no client-side quarantine on this lane: a row leaves the Outbox only on a server-issued
+  per-event verdict, which is what at-least-once means on this edge. So a lane that cannot reach its server presents as
+  a growing Outbox backing off observably (with `Retry-After` honoured), never as silently discarded events — the Outbox
+  is designed to absorb offline weeks. Note also that `destroy()` refuses while it is non-empty, exactly as it refuses
+  on owed mutations.
+</Aside>
+
 ## `operations_log` records user content
 
 The optional write-side audit log (`operationsLog: { enabled: true }`, **off by default**) persists every

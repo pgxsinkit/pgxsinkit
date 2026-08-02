@@ -22,7 +22,7 @@ import type { BunPlugin } from "bun";
 // Only the board functions are bundled (they pull unpublished @pgxsinkit/* source). `main` is the
 // OFFICIAL Supabase edge-runtime router, vendored unmodified — it runs as raw TS (it imports `jose`
 // from a URL, which a bundler can't inline), so it is copied verbatim, not built.
-const BUNDLED = ["board-write", "board-sync"] as const;
+const BUNDLED = ["board-write", "board-sync", "board-events-drain"] as const;
 const SOURCE_ROOT = "supabase/functions";
 const DIST_ROOT = "supabase/functions-dist";
 

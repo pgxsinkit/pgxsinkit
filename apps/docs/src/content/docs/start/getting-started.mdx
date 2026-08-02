@@ -373,6 +373,49 @@ assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "le
   [ADR-0025](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0025-per-client-mode-projection.md).
 </Aside>
 
+## Register an event stream (queue-shaped data)
+
+Not everything belongs on a synced table. High-volume, append-only client facts — "the user viewed this",
+interaction logs, review grades — are never edited, never conflict, and are never read back down, so putting
+them on the sync rail makes every client re-download its own log. They go on the **event lane** instead,
+registered on the same registry under a `streams` key whose record key is the stream name:
+
+```ts
+import { defineEventStream, defineSyncRegistry } from "@pgxsinkit/contracts";
+import { z } from "zod";
+
+export const registry = defineSyncRegistry({
+  tables: { issue },
+  streams: {
+    issue_viewed: defineEventStream({
+      // Strict is REQUIRED for an object payload, and validated at `appendEvent` as well as at ingest.
+      payload: z.object({ issueId: z.uuid() }).strict(),
+      // Stamped SERVER-side from the verified claims — the same claimPath addressing managed fields use.
+      identity: { viewerId: { claimPath: ["sub"] } },
+    }),
+  },
+});
+```
+
+Then `await client.appendEvent("issue_viewed", { issueId })` stages the event in a durable local Outbox and
+resolves — delivery happens in the background, and an append made offline drains on reconnect. Three rules
+worth knowing at authoring time:
+
+- **Never put a viewer/actor id in the payload.** A payload is client-supplied and can lie; `identity` is
+  read from verified claims, and the client's envelope carries no identity at all.
+- **Stream names are validated when the module evaluates** — lowercase `[a-z][a-z0-9_]*`, at most 30
+  characters — so a name that could not be provisioned fails at definition rather than at deployment.
+- **An object payload must be strict** — `.strict()` or `z.strictObject()`, on the root and on every object
+  in a union — and the registry throws if it is not, so an unknown key can never be stripped in silence.
+- **A payload schema may only evolve backward-compatibly.** Events written offline under the old schema are
+  still in flight; an incompatible change needs a **new stream name**. Bump `revision` whenever you change
+  acceptance logic the lock's JSON-Schema hash cannot see (a `.refine`, a transform), or the review gate
+  never fires.
+
+Registering a stream touches no synced table and no apply function, so it never rebuilds a client's read
+cache — but it does add a deploy step (per-stream queues) and a consumer process. Full model:
+[The event lane](/concepts/event-lane/); deployment: [Deploying the server](/start/deploying-the-server/).
+
 ## Try the demo
 
 The repository's `apps/board` (a Linear-style board + chat) drives all of the above end-to-end

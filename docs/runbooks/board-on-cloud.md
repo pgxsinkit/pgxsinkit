@@ -73,7 +73,8 @@ server-side as a function secret — it never reaches the browser.
 cp board.cloud.env.example board.cloud.env   # board.cloud.env is gitignored — it holds real secrets
 ```
 
-Fill in every value from steps 1–2.
+Fill in every value from steps 1–2, plus `BOARD_EVENTS_DRAIN_SECRET` — a secret you generate yourself
+(`openssl rand -hex 32`) that gates the Event lane's drain function (see the Event lane section below).
 
 The scripts pass `BOARD_SUPABASE_PROJECT_REF` through `--project-ref` for secrets and function
 deployment. They do not use mutable `supabase link` state, so another checkout linked to another
@@ -94,14 +95,40 @@ That runs, in order (each is also its own `board:cloud:*` script if you need to 
 
 1. **migrate** — applies the board's migrations to the cloud DB over the **direct** connection (the
    SECURITY DEFINER membership helper + the apply function need the privileged `postgres` role).
-2. **secrets** — sets `ELECTRIC_SHAPE_URL` as a function secret. That is the _only_ secret to set:
-   Supabase Cloud auto-injects `SUPABASE_URL` (→ JWKS) and `SUPABASE_DB_URL` (the pooler → board-write)
-   into every function, and the `SUPABASE_` prefix is reserved (the CLI rejects setting it).
-3. **functions** — `bun run edge:build` then `supabase functions deploy board-write board-sync`. They
-   deploy from the pre-built bundles (`supabase/config.toml` points each `entrypoint` at
-   `functions-dist/<name>/index.js`, `verify_jwt = false` — the functions self-verify the session token).
-4. **seed** — GoTrue identities (admin API via the project gateway, which translates your secret key into
+2. **secrets** — sets `ELECTRIC_SHAPE_URL` and `BOARD_EVENTS_DRAIN_SECRET` as function secrets. Those are
+   the _only_ secrets to set: Supabase Cloud auto-injects `SUPABASE_URL` (→ JWKS) and `SUPABASE_DB_URL`
+   (the pooler → board-write) into every function, and the `SUPABASE_` prefix is reserved (the CLI rejects
+   setting it).
+3. **functions** — `bun run edge:build` then
+   `supabase functions deploy board-write board-sync board-events-drain`. They deploy from the pre-built
+   bundles (`supabase/config.toml` points each `entrypoint` at `functions-dist/<name>/index.js`,
+   `verify_jwt = false` — the functions self-verify the session token, and the drain function verifies its
+   shared secret).
+4. **cron** — enables `pg_cron` + `pg_net` and schedules `board_events_drain` to POST at the drain function
+   every 10 seconds. See below.
+5. **seed** — GoTrue identities (admin API via the project gateway, which translates your secret key into
    the service_role JWT) + the deterministic public fixtures (direct DB connection).
+
+### The Event lane on this stack (the third function + cron)
+
+Locally, the board's Event lane is drained by the toolkit's **long-lived consumer runner**
+(`bun run dev:board:consumer`). Managed Supabase cannot host a long-lived process, so the cloud deploy
+drains the same queues through a third edge function, `board-events-drain`, which runs one bounded
+`drainOnce()` pass per invocation (pgxsinkit ADR-0053, amendment 2026-08-02). Two things call it:
+
+- **The cron schedule is the delivery guarantee.** `bun run board:cloud:cron` is idempotent — it creates
+  the extensions `if not exists` and (re-)schedules the fixed job name `board_events_drain`, so re-running
+  it after a secret rotation or URL change is the supported way to update it. The job SQL embeds
+  host-specific values (your project URL, your secret), which is exactly why it lives in the deploy script
+  and never in a committed migration.
+- **`board-write` nudges it on enqueue,** so an issue view archives in milliseconds rather than up to ten
+  seconds later. The nudge is fire-and-forget: losing one costs latency, never an event.
+
+`BOARD_EVENTS_DRAIN_SECRET` (in `board.cloud.env`) is the only gate — the callers are machines with no
+GoTrue session — and the function compares it in constant time. Generate one with `openssl rand -hex 32`;
+the deploy refuses anything but ≥16 characters of `[A-Za-z0-9_-]`, because it is embedded in the job's SQL.
+Check on it with `select * from cron.job where jobname = 'board_events_drain';` and
+`select * from cron.job_run_details order by start_time desc limit 5;`.
 
 ## Run the frontend against the cloud backend
 

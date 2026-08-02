@@ -38,6 +38,17 @@ import { type BootReport, type BootReportBuilder, createBootReportBuilder } from
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { syncDebug, timeAsync } from "./debug";
 import { describeErrorChain } from "./error-chain";
+import {
+  createEventFlushDriver,
+  createEventLaneRuntime,
+  deriveBatchEventUrl,
+  type EventAppendResult,
+  type EventFlushDriver,
+  type EventLaneOptions,
+  type EventLaneReport,
+  type EventLaneRuntime,
+  type OutboxStatus,
+} from "./event-lane";
 import { type DataExportOptions, type DataExportResult, performDataExport } from "./export-data";
 import { type DiagnosticExportOptions, type DiagnosticExportResult, performDiagnosticExport } from "./export-dump";
 import { performStoreExport, type StoreExportOptions, type StoreExportResult } from "./export-store";
@@ -152,6 +163,39 @@ export {
   type StoreExportResult,
 } from "./export-store";
 export { createLifecycleSlot, LifecycleBusyError, type LifecycleSlot } from "./lifecycle-slot";
+// The Event lane's client half (ADR-0053). The runtime/driver factories are exported alongside the types
+// because the lane is composable the same way the mutation runtime is (the harness and tests drive them
+// directly); app code reaches it through `client.appendEvent` / `onOutboxStatus` / `onEventLaneReport`.
+export {
+  classifyEventBatchFailure,
+  computeEventBackoffMs,
+  createEventFlushDriver,
+  createEventLaneRuntime,
+  DEFAULT_EVENT_BACKOFF_BASE_MS,
+  DEFAULT_EVENT_BACKOFF_CEILING_MS,
+  DEFAULT_EVENT_BATCH_SIZE,
+  DEFAULT_EVENT_FLUSH_INTERVAL_MS,
+  deriveBatchEventUrl,
+  type EventAppendResult,
+  type EventBackoffOptions,
+  type EventFlushDriver,
+  type EventFlushDriverOptions,
+  type EventFlushGate,
+  type EventLaneBackoffTransition,
+  type EventLaneDb,
+  type EventLaneOptions,
+  type EventLaneReport,
+  type EventLaneRuntime,
+  type EventLaneVerdict,
+  EventPayloadInvalidError,
+  EventPayloadTooLargeError,
+  type EventStreamFlushOptions,
+  EventStreamsNotRegisteredError,
+  type OutboxStatus,
+  parseRetryAfterMs,
+  resolveBatchEventUrl,
+  UnknownEventStreamError,
+} from "./event-lane";
 export {
   destroyStoreArtifacts,
   type ElectedEngineWorker,
@@ -254,17 +298,22 @@ export {
   type LazyGuardIndex,
   LazyRelationNotActivatedError,
 } from "./lazy-guard";
+// The Outbox's object NAMES are public contract like its shape (ADR-0053 decision 2) — inspection
+// surfaces (the board's schema map, debug tooling) need them without re-deriving DDL internals.
+export { OUTBOX_SEQUENCE, OUTBOX_TABLE } from "./schema";
 export {
   type AllMutationsView,
   getAllMutationsView,
   getJournalTable,
   getLocalMetaTable,
+  getOutboxTable,
   getOverlayTable,
   getReadModelView,
   getSyncedLocalTable,
   getSyncStateView,
   type JournalTable,
   type LocalMetaTable,
+  type OutboxTable,
   type OverlayTable,
   type ReadModelView,
   type SyncStateView,
@@ -1066,6 +1115,21 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   /** Invoked after each automatic convergence pass with its error, or `null` on success (only when `autoSync` is set). */
   onConvergencePass?: (error: unknown) => void;
   /**
+   * The **Event lane**'s ingestion endpoint (ADR-0053 decision 3) — `"/api/events"`, or an absolute
+   * deployment URL ending in it, under the same hard-required-path rule as {@link batchWriteUrl}. Omit it and
+   * the client DERIVES it from `batchWriteUrl` (`…/api/mutations` → `…/api/events`), which is correct for the
+   * ordinary deployment where one `createSyncServer` mounts both; set it explicitly when the two endpoints
+   * are not siblings.
+   */
+  batchEventUrl?: string;
+  /**
+   * The Event lane's client-level flush policy (ADR-0053): batch caps, the fallback interval, backoff
+   * tuning, and per-Event-stream overrides. NEVER on the registry — the registry is the contract, cadence is
+   * deployment tuning, and a batch-size tweak must not surface as a registry diff. Client batching is
+   * additionally clamped by the contracts-level request-shape limits the server enforces independently.
+   */
+  events?: EventLaneOptions;
+  /**
    * Invoked when a read-path sync commit fails after exhausting its retries (ADR-0009 decision 5).
    * The runtime enters the `degraded` phase and holds the read cache at the last applied commit
    * instead of silently diverging from the server; recovery is a later commit or a restart/refetch.
@@ -1335,23 +1399,86 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
   haltActivity: () => void;
   stop: () => Promise<void>;
   /**
-   * Wipe the entire local store (synced cache + overlay + journal) and close the handle
-   * (ADR-0005). Refuses if mutations are still owed to the server unless `force` is set, so
-   * it never silently drops un-flushed writes. Distinct from `stop()`, which only halts sync.
+   * Wipe the entire local store (synced cache + overlay + journal + Outbox) and close the handle
+   * (ADR-0005). Refuses if mutations are still owed to the server — OR if the Outbox still holds staged
+   * events (ADR-0053 decision 8: the same "never discard without a server verdict" rule the owed-mutations
+   * refusal upholds) — unless `force` is set, so it never silently drops un-flushed writes or un-delivered
+   * events. The refusal names which of the two blocked it. Distinct from `stop()`, which only halts sync.
    * Runs under the single lifecycle slot (ADR-0035 decision 4): a concurrent export — or another
    * `destroy`/`discardEphemeral`/`dropReadCache` — rejects with a {@link LifecycleBusyError} rather
    * than interleaving the wipe with a running export.
    */
   destroy: (options?: { force?: boolean }) => Promise<void>;
   /**
-   * Drop and rebuild the reconstructible synced read cache, preserving the overlay and
-   * mutation journal (ADR-0006). The next sync refills it. Use to recover from a corrupt or
+   * Drop and rebuild the reconstructible synced read cache, preserving the overlay, the
+   * mutation journal, and the Outbox (ADR-0006; ADR-0053 decision 8 — the Outbox is not read cache, so this
+   * never touches it). The next sync refills it. Use to recover from a corrupt or
    * stale read cache without losing un-flushed writes. Runs under the single lifecycle slot
    * (ADR-0035 decision 4) — it drops and rebuilds the synced tables, so an export must not capture a
    * half-rebuilt cache; a concurrent export (or `destroy`/`discardEphemeral`) rejects with a
    * {@link LifecycleBusyError}.
    */
   dropReadCache: () => Promise<void>;
+  /**
+   * Append one client event to the **Outbox** (ADR-0053 decision 2) — the Event lane's entry point, and the
+   * only way an app produces an event. Fire-and-forget by design: nothing echoes back, nothing is overlaid,
+   * nothing converges. The promise resolves on DURABLE local enqueue under the store's declared durability,
+   * NOT on delivery; the flush loop drains the Outbox in the background (and after reconnect/boot), and the
+   * server's per-event verdicts surface on {@link onEventLaneReport}.
+   *
+   * Four refusals, all synchronous call-site failures rather than runtime conditions — the invariant
+   * "everything in the Outbox is well-formed" is what the flush loop and any best-guess view lean on:
+   *
+   * - no Event stream registered at all → {@link EventStreamsNotRegisteredError};
+   * - an unregistered Event-stream name → {@link UnknownEventStreamError};
+   * - a payload failing the stream's registered zod schema → {@link EventPayloadInvalidError};
+   * - a serialized payload over the contracts-level per-event cap → {@link EventPayloadTooLargeError}.
+   *
+   * The library stamps `eventId` (uuid — the server's dedupe key, which is what makes at-least-once delivery
+   * idempotent end-to-end) and `occurredAtUs`, and returns both plus the local append ordinal.
+   *
+   * `stream`/`payload` are typed as `string`/`unknown`: a registry's Event streams ride a symbol and are
+   * type-erased by `defineSyncRegistry`'s return type, so the REGISTERED ZOD SCHEMA is the enforced contract
+   * (at append, and again at ingest for non-library callers).
+   */
+  appendEvent: (stream: string, payload: unknown) => Promise<EventAppendResult>;
+  /**
+   * Drain the Outbox now — the Event lane's manual primitive, the twin of {@link flush}. Assembles batches
+   * in append (`seq`) order across every Event stream, POSTs them, and applies the per-event verdicts, until
+   * nothing more is eligible this pass. A no-op while the lane is in batch-level backoff, and a no-op for a
+   * registry with no Event streams. With `autoSync` installed the lane drives itself (appends nudge a pass,
+   * an interval is the fallback, and boot/reconnect drain what was written offline); this is the escape
+   * hatch for a fully-manual host.
+   */
+  flushEvents: () => Promise<void>;
+  /**
+   * The **drain signal** (ADR-0053 decision 2): subscribe to the Outbox's empty ↔ non-empty transitions, with
+   * the CURRENT state delivered on subscribe. Returns an unsubscribe.
+   *
+   * The invalidation hook for a best-guess view that composes pending events with down-synced aggregates:
+   * when the Outbox drains, the aggregate is authoritative again. Deliberately carries no count — a count
+   * that updates only on transitions is stale by construction, and one that updates per append is a worse
+   * live query; for richer detail, query the Outbox table (`getOutboxTable(registry)`).
+   */
+  onOutboxStatus: (listener: (status: OutboxStatus) => void) => () => void;
+  /**
+   * The drain signal as a one-shot READ — the pull twin of {@link onOutboxStatus}'s push (the
+   * {@link bootReport} pattern). Reads the store, so it is always current: a tab attaching long after the
+   * engine's last transition folds its initial state from here rather than waiting for the next one.
+   */
+  outboxStatus: () => Promise<OutboxStatus>;
+  /**
+   * The Event lane's verdict/report surface (ADR-0053 decision 2): per flush pass, the TERMINAL non-`acked`
+   * verdicts (`refused` — the server's gating hook said no; `rejected` — a schema-invalid or oversized
+   * payload for a KNOWN stream), the `deferred` ones (an Event stream the server does not yet know — ordinary
+   * rollout skew; the rows stay and retry), and the batch-level backoff transitions. `acked` is not reported:
+   * a high-volume append-only lane would drown the app in its own success.
+   *
+   * An EPHEMERAL subscription, deliberately — a durable client-side verdict table would be retention-bearing
+   * state for a debugging need. With nothing subscribed the library logs each report at warn level rather
+   * than dropping it, because once a terminal row is deleted the Outbox cannot answer what happened to it.
+   */
+  onEventLaneReport: (listener: (report: EventLaneReport) => void) => () => void;
   flush: (table?: SyncTableName<TRegistry>) => Promise<void>;
   reconcile: (table?: SyncTableName<TRegistry>) => Promise<void>;
   retryFailed: (table?: SyncTableName<TRegistry>) => Promise<void>;
@@ -1391,7 +1518,16 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
     table: TKey,
     entityKey: Record<string, string>,
   ) => Promise<void>;
-  diagnostics: (table?: SyncTableName<TRegistry>) => Promise<{ mutation: MutationDiagnostics }>;
+  /**
+   * The store's owed-state diagnostics: the mutation journal's per-status counts, plus — when this client has
+   * an Event lane — the Outbox's drain signal (ADR-0053 decision 8: the Event lane's durable state takes a
+   * position on every lifecycle surface). `outbox` is the boolean signal rather than a count, for the reason
+   * {@link onOutboxStatus} carries none; it is absent on a client with no lane.
+   */
+  diagnostics: (table?: SyncTableName<TRegistry>) => Promise<{
+    mutation: MutationDiagnostics;
+    outbox?: OutboxStatus;
+  }>;
   /**
    * The registry-wide reactive mutation-status surface: a global per-status summary and a
    * filtered normalized detail list over EVERY writable journal, each available one-shot or as a live
@@ -2286,6 +2422,35 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     ...(options.onReject ? { onReject: options.onReject } : {}),
   });
 
+  // The Event lane (ADR-0053). Constructed on EVERY boot, registry streams or not: the Outbox DDL is
+  // stream-independent and the runtime is inert without streams (`appendEvent` throws, `flushEvents` no-ops,
+  // no driver is stood up), so there is no conditional to get wrong when a registry gains its first stream.
+  // The ingestion endpoint is the mutation endpoint's sibling — derived from `batchWriteUrl` unless the
+  // consumer names it — and it shares the write path's headers (same ingress, same gateway credentials).
+  // A caller-owned PGlite (`pgliteInstance`) never had the toolkit's schema applied, so the Outbox table may
+  // not exist: the lane stays unconstructed there, exactly as the meta-table marker is left alone.
+  const eventLaneUrl = options.batchEventUrl ?? deriveBatchEventUrl(options.batchWriteUrl);
+  const eventLane: EventLaneRuntime | null =
+    eventLaneUrl != null && !options.pgliteInstance
+      ? createEventLaneRuntime({
+          db: pglite,
+          registry: options.registry,
+          batchEventUrl: eventLaneUrl,
+          ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
+          ...(writePathHeaders ? { requestHeaders: writePathHeaders } : {}),
+          ...(options.events ? { events: options.events } : {}),
+        })
+      : null;
+  /** The refusal a lane-less client gives, naming the two ways a lane can be absent. */
+  const requireEventLane = (): EventLaneRuntime => {
+    if (eventLane) return eventLane;
+    throw new Error(
+      "pgxsinkit: the Event lane is not available on this client — either `batchWriteUrl` is not the canonical " +
+        '"…/api/mutations" shape (pass `batchEventUrl` explicitly), or this client adopted a caller-owned ' +
+        "`pgliteInstance` (whose store pgxsinkit never provisioned, so it has no Outbox).",
+    );
+  };
+
   // Activation buffer (ADR-0041): a read (`ensureSynced`) OR a write (`onOrdinaryEnqueue`) can reference a
   // lazy group after `localReadReady` but BEFORE `sync` is wired (the Option B window). With a null `sync` the
   // seams cannot start a group, so BOTH feed this one buffer; the tail replays it once sync is wired, so the
@@ -2351,6 +2516,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
 
   let sync: Awaited<ReturnType<typeof startConfiguredSync>> | null = null;
   let convergenceDriver: ConvergenceDriver | null = null;
+  let eventFlushDriver: EventFlushDriver | null = null;
 
   // Lifecycle guard (ADR-0041): `stop()`/`destroy()` can now be called while the background write/sync tail is
   // still in flight (React StrictMode mount/unmount is the canonical case). `disposed` lets the tail bail at
@@ -2407,8 +2573,12 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     disposed = true;
     clearReadSilenceWatchdog();
     mutationRuntime.abortInFlight();
+    // The Event lane's in-flight POST is aborted on the same synchronous edge as the write path's: a flush
+    // must not still be settling verdicts into a store the teardown is about to close.
+    eventLane?.abortInFlight();
     void engine.close();
     void convergenceDriver?.stop();
+    void eventFlushDriver?.stop();
   };
 
   // The write/sync activation tail (ADR-0041 decision 3). On a NORMAL boot this runs in the BACKGROUND after
@@ -2526,6 +2696,30 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // failure), so the rejection handler keeps the driver un-started and off the unhandled-rejection path.
     void ready.then(
       () => convergenceDriver?.start(),
+      () => undefined,
+    );
+  }
+
+  // The Event-lane flush driver (ADR-0053 decision 3), standing on the SAME scheduling seam as convergence:
+  // one `autoSync` trigger answers both "is the app online/foregrounded?" (the offline pause) and "something
+  // changed, try now" (online/visibility signals). It keeps its own, slower interval — an append nudges a
+  // pass, so the interval only has to catch retries and recovery — and `start()` runs a pass immediately,
+  // which is what drains events written offline after a boot or reconnect with no new append.
+  //
+  // Gated exactly like convergence on a restore boot that stays OFFLINE, for the mirrored reason: recovered
+  // Outbox rows are NOT quarantined (ADR-0053 decision 8), but a store whose recovered JOURNAL is parked is
+  // being held for human inspection, and starting network activity under it would contradict that.
+  if (eventLane?.hasStreams && options.autoSync && (!restoreBoot || syncEnabled)) {
+    const autoSync = options.autoSync;
+    eventFlushDriver = createEventFlushDriver({
+      flush: () => eventLane.flush(),
+      gate: { subscribe: autoSync.subscribe, shouldFlush: () => autoSync.shouldConverge() },
+      ...(options.events?.intervalMs != null ? { intervalMs: options.events.intervalMs } : {}),
+    });
+    // Start once initial sync is ready, mirroring convergence: the first pass never races the first shape
+    // load, and a rejected `ready` (a failed background tail) leaves the driver un-started.
+    void ready.then(
+      () => eventFlushDriver?.start(),
       () => undefined,
     );
   }
@@ -2981,8 +3175,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // PGlite. Any sync the tail started before disposal is now in `sync` for the unsubscribe below.
       await quiesceTailForTeardown();
       // Await any in-flight convergence pass before closing PGlite, so a pass never queries a
-      // closed handle.
+      // closed handle. The Event-lane flush pass is awaited on the same rule, for the same reason.
       await convergenceDriver?.stop();
+      await eventFlushDriver?.stop();
       sync?.unsubscribe();
       status.isRunning = false;
       options.onStatusChange?.(status);
@@ -3020,11 +3215,23 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
               `destroy() refused: ${owed} mutation(s) still owed to the server. Flush them first or call destroy({ force: true }).`,
             );
           }
+
+          // ADR-0053 decision 8: the same refusal, for the Event lane's durable state. A non-empty Outbox
+          // holds events the SERVER has not yet ruled on, and "never discard without a server verdict" is
+          // exactly what at-least-once means on this edge — so a non-forced destroy refuses here too,
+          // naming the Outbox so the two causes are never confused.
+          if (eventLane && !(await eventLane.outboxStatus()).empty) {
+            throw new Error(
+              "destroy() refused: the Outbox still holds staged event(s) awaiting a server verdict. " +
+                "Flush them first (`flushEvents()`) or call destroy({ force: true }).",
+            );
+          }
         }
 
         // Drain any in-flight convergence pass before wiping, so a pass never writes into a store
-        // being torn down underneath it.
+        // being torn down underneath it. Same for the Event lane's flush pass.
         await convergenceDriver?.stop();
+        await eventFlushDriver?.stop();
         sync?.unsubscribe();
         status.isRunning = false;
         options.onStatusChange?.(status);
@@ -3082,6 +3289,31 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         })
       );
     },
+    // The Event lane (ADR-0053). An append touches only the Outbox — no journal, no overlay, no recovery
+    // pass — so it gates on `localReadReady` (the store is open and its durable schema, Outbox included, is
+    // provisioned), NOT on `writeReady`. That is deliberate: an app that instruments its very first paint
+    // should not have its telemetry blocked behind the mutation runtime's boot recovery.
+    appendEvent: async (stream, payload) => {
+      const lane = requireEventLane();
+      await localReadReady;
+      const result = await lane.appendEvent(stream, payload);
+      // Nudge the driver so a fresh event flushes now rather than at the next interval tick — the
+      // event-driven path, coalesced exactly like an interval signal (and a no-op when no driver runs).
+      eventFlushDriver?.requestPass();
+      return result;
+    },
+    flushEvents: async () => {
+      const lane = requireEventLane();
+      await localReadReady;
+      return lane.flush();
+    },
+    onOutboxStatus: (listener) => requireEventLane().onOutboxStatus(listener),
+    outboxStatus: async () => {
+      const lane = requireEventLane();
+      await localReadReady;
+      return lane.outboxStatus();
+    },
+    onEventLaneReport: (listener) => requireEventLane().onEventLaneReport(listener),
     // Write-path methods gate on `writeReady` (ADR-0041): each enqueues, drains, or mutates a journal, so
     // none may run before the write runtime + boot recovery have completed. `writeReady` is already resolved
     // on the steady-state client, so these are settled-promise awaits.
@@ -3117,6 +3349,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // See the `readMutationDetails` note: a read, ungated, so pre-`writeReady` it may show pre-recovery counts.
     diagnostics: async (table) => ({
       mutation: await mutationRuntime.readMutationStats(table),
+      // The Event lane's durable state belongs in the store's diagnostics too (ADR-0053 decision 8). It is
+      // the BOOLEAN drain signal, not a count: the read is a `LIMIT 1`, so adding it costs nothing even on
+      // the export drain's polling loop. Absent when this client has no lane at all.
+      ...(eventLane ? { outbox: await eventLane.outboxStatus() } : {}),
     }),
     // The registry-wide mutation-status API (slice 4). Assigned just below the object so it can close over
     // this client's own `subscribeLiveRows` + `pglite.query` seams — the SAME factory the worker facade uses.

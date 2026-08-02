@@ -23,16 +23,18 @@ import { pathToFileURL } from "node:url";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
+import { eventLaneDdlFingerprint, eventLaneStreamNames, renderEventLaneMigration } from "../events/ddl";
 import { renderPgxsinkitUtilitiesMigration } from "../migrations/utilities";
 import { buildPlpgsqlBatchFunctionDdl, expectedApplyFingerprint } from "../mutations/plpgsql-apply";
 
 function parseArgs(argv: string[]) {
   let check = false;
   let utilities = false;
+  let events = false;
   let functionSchema: string | undefined;
   let registryPath = "";
   let projectDir = process.cwd();
-  let migrationName = "sync_artifact";
+  let migrationName: string | undefined;
   let drizzleConfig = "";
   let outDir: string | undefined;
   let exportName: string | undefined;
@@ -55,18 +57,21 @@ function parseArgs(argv: string[]) {
       check = true;
     } else if (arg === "--utilities") {
       utilities = true;
+    } else if (arg === "--events") {
+      events = true;
     } else if (arg === "--function-schema" && argv[i + 1]) {
       functionSchema = argv[++i]!;
     }
   }
 
   // Utilities mode installs the registry-independent pgxsinkit_clock_us() function, so it needs no
-  // --registry; the apply-artifact modes do.
+  // --registry; the apply-artifact and event-lane modes do (both are derived from the registry).
   if (!registryPath && !utilities) {
     console.error(
       "Usage:\n" +
         "  pgxsinkit-generate [--check] --registry <path> [--export registry] [--project-dir .] [--name sync_artifact] [--config drizzle.config.ts] [--out drizzle] [--function-schema schema]\n" +
-        "  pgxsinkit-generate --utilities [--check] --name <folder> [--project-dir .] [--config drizzle.config.ts] [--out drizzle]",
+        "  pgxsinkit-generate --utilities [--check] --name <folder> [--project-dir .] [--config drizzle.config.ts] [--out drizzle]\n" +
+        "  pgxsinkit-generate --events [--check] --registry <path> [--export registry] [--project-dir .] [--name event_lane_artifact] [--config drizzle.config.ts] [--out drizzle]",
     );
     process.exit(1);
   }
@@ -74,10 +79,11 @@ function parseArgs(argv: string[]) {
   return {
     check,
     utilities,
+    events,
     functionSchema,
     registryPath,
     projectDir,
-    migrationName,
+    migrationName: migrationName ?? (events ? "event_lane_artifact" : "sync_artifact"),
     drizzleConfig,
     outDir,
     exportName,
@@ -237,16 +243,9 @@ async function runCheck(
     process.exit(1);
   }
 
-  for (const entry of readdirSync(drizzleDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    try {
-      if (readFileSync(join(drizzleDir, entry.name, "migration.sql"), "utf-8").includes(fingerprint)) {
-        console.log(`[pgxsinkit-generate --check] ✓ ${options.label}: a committed migration carries ${fingerprint}`);
-        return;
-      }
-    } catch {}
+  if (findMigrationCarrying(drizzleDir, fingerprint)) {
+    console.log(`[pgxsinkit-generate --check] ✓ ${options.label}: a committed migration carries ${fingerprint}`);
+    return;
   }
 
   console.error(
@@ -256,6 +255,25 @@ async function runCheck(
       `  Regenerate it (drop --check) and commit + apply the new migration before deploying.`,
   );
   process.exit(1);
+}
+
+/**
+ * The one committed-migration scan every `--check` mode shares: the folder whose `migration.sql` carries
+ * `marker`, or `null`. Unreadable folders are skipped — a `--check` reports drift, never filesystem noise.
+ * Exported for direct unit coverage.
+ */
+export function findMigrationCarrying(drizzleDir: string, marker: string): string | null {
+  for (const entry of readdirSync(drizzleDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    try {
+      if (readFileSync(join(drizzleDir, entry.name, "migration.sql"), "utf-8").includes(marker)) {
+        return entry.name;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 /** The drizzle-kit "no previous migration" root id (an all-zero UUID), used by a chain's first folder. */
@@ -302,18 +320,11 @@ function writeUtilitiesMigration(drizzleDir: string, folderName: string): string
  * installs the (static, registry-independent) pgxsinkit_clock_us() function. Read-only, no writes.
  */
 function checkUtilities(drizzleDir: string, label: string): void {
-  for (const entry of readdirSync(drizzleDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    try {
-      if (readFileSync(join(drizzleDir, entry.name, "migration.sql"), "utf-8").includes(UTILITIES_SIGNATURE)) {
-        console.log(
-          `[pgxsinkit-generate --utilities --check] ✓ ${label}: a committed migration installs pgxsinkit_clock_us()`,
-        );
-        return;
-      }
-    } catch {}
+  if (findMigrationCarrying(drizzleDir, UTILITIES_SIGNATURE)) {
+    console.log(
+      `[pgxsinkit-generate --utilities --check] ✓ ${label}: a committed migration installs pgxsinkit_clock_us()`,
+    );
+    return;
   }
 
   console.error(
@@ -349,10 +360,90 @@ async function runUtilities(options: {
   console.log(`Wrote pgxsinkit_clock_us() utilities migration to ${migrationFile}`);
 }
 
+/**
+ * `--events` (ADR-0053 decision 5): the Event lane's deploy-time artifact — the pgmq extension plus one queue
+ * per registered Event stream, derived from the registry. It rides the same generate/`--check` flow as the
+ * apply-function artifact, in its OWN migration folder: the queues are provisioned independently of the apply
+ * function (Event streams touch no synced table), and a registry with no streams provisions nothing at all.
+ *
+ * `--check` is the read-only pre-deploy half: it asserts a committed migration carries the fingerprint the
+ * current registry's streams imply, so adding or removing an Event stream without regenerating fails in CI
+ * rather than at the first enqueue against a queue that does not exist.
+ */
+async function runEvents(
+  registry: SyncTableRegistry,
+  options: {
+    check: boolean;
+    projectDir: string;
+    drizzleConfig: string | undefined;
+    outDir: string | undefined;
+    migrationName: string;
+    label: string;
+  },
+): Promise<void> {
+  const streamNames = eventLaneStreamNames(registry);
+
+  if (streamNames.length === 0) {
+    if (options.check) {
+      // Nothing to provision is not drift: a registry without Event streams simply has no event lane.
+      console.log(`[pgxsinkit-generate --events --check] ✓ ${options.label}: no Event streams registered`);
+      return;
+    }
+    console.error(
+      `[pgxsinkit-generate --events] ✗ ${options.label}: this registry registers no Event streams, so there is ` +
+        `no event-lane DDL to emit.\n` +
+        `  Register one with defineSyncRegistry({ tables, streams: { <name>: defineEventStream({ … }) } }).`,
+    );
+    process.exit(1);
+  }
+
+  const drizzleDir = await resolveDrizzleOutDir(options.projectDir, options.drizzleConfig, options.outDir);
+  if (!drizzleDir) {
+    console.error(
+      `[pgxsinkit-generate --events] Could not resolve a drizzle migrations directory in ${options.projectDir}.`,
+    );
+    process.exit(1);
+  }
+
+  const fingerprint = eventLaneDdlFingerprint(registry);
+
+  if (options.check) {
+    if (findMigrationCarrying(drizzleDir, fingerprint)) {
+      console.log(
+        `[pgxsinkit-generate --events --check] ✓ ${options.label}: a committed migration carries ${fingerprint}`,
+      );
+      return;
+    }
+    console.error(
+      `[pgxsinkit-generate --events --check] ✗ ${options.label}: no committed migration in ${drizzleDir} carries ` +
+        `the current event-lane fingerprint (${fingerprint}).\n` +
+        `  The registry's Event streams changed since the event-lane migration was generated ` +
+        `(now: ${streamNames.join(", ")}).\n` +
+        `  Regenerate it (drop --check) and commit + apply the new migration before deploying — the ingestion ` +
+        `endpoint enqueues onto queues the migration provisions.`,
+    );
+    process.exit(1);
+  }
+
+  console.log(`Generating event-lane DDL for ${streamNames.length} Event stream(s): ${streamNames.join(", ")}...`);
+  runDrizzleGenerate(options.projectDir, options.migrationName, options.drizzleConfig);
+
+  const migrationFile = findNewMigrationFile(drizzleDir);
+  if (!migrationFile) {
+    console.error("Could not find the newly created migration file.");
+    process.exit(1);
+  }
+
+  const header = "-- Generated by pgxsinkit-generate --events\n-- Re-run after adding or removing an Event stream.\n\n";
+  writeFileSync(migrationFile, `${header}${renderEventLaneMigration(registry)}\n`);
+  console.log(`Wrote event-lane queues to ${migrationFile}`);
+}
+
 async function main() {
   const {
     check,
     utilities,
+    events,
     functionSchema,
     registryPath,
     projectDir,
@@ -369,6 +460,18 @@ async function main() {
 
   console.log(`Importing registry from ${registryPath}...`);
   const registry = await importRegistry(registryPath, exportName);
+
+  if (events) {
+    await runEvents(registry, {
+      check,
+      projectDir,
+      drizzleConfig,
+      outDir,
+      migrationName,
+      label: exportName ?? "(conventional registry)",
+    });
+    return;
+  }
 
   if (check) {
     await runCheck(registry, {

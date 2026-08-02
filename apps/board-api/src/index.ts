@@ -1,5 +1,15 @@
 export { createBoardClaimsResolver } from "./core/auth";
 export {
+  BOARD_EVENTS_DRAIN_BUDGET_MS,
+  BOARD_EVENTS_DRAIN_SECRET_HEADER,
+  createBoardDrainNudge,
+  createBoardEventsDrainHandler,
+  createBoardIssueViewDrainHandler,
+  type BoardDrainNudgeOptions,
+  type BoardEventsDrainHandlerOptions,
+  type BoardIssueViewDrainHandlerOptions,
+} from "./core/events-drain";
+export {
   createBoardSyncHandler,
   createBoardWriteHandler,
   type BoardClaimsResolver,

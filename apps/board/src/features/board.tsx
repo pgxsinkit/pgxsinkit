@@ -82,11 +82,14 @@ function IssueMenu({
   assignable,
   moveTeams,
   actions,
+  onOpened,
 }: {
   issue: IssueRow;
   assignable: readonly ProfileRow[];
   moveTeams: readonly TeamOption[];
   actions: IssueActions;
+  /** Fired when this Issue's details are opened — the board's Event-lane append (see `useIssueViewEvents`). */
+  onOpened?: () => void;
 }) {
   return (
     <span
@@ -96,7 +99,7 @@ function IssueMenu({
         event.stopPropagation();
       }}
     >
-      <Menu shadow="md" width={210} position="bottom-end" withinPortal>
+      <Menu shadow="md" width={210} position="bottom-end" withinPortal {...(onOpened ? { onOpen: onOpened } : {})}>
         <Menu.Target>
           <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Issue actions">
             <Text size="sm" fw={700} lh={1}>
@@ -418,6 +421,7 @@ export function IssueCard({
   onDragStart,
   onDragEnd,
   onSelect,
+  onOpened,
 }: {
   issue: IssueRow;
   profiles: Map<string, ProfileRow>;
@@ -432,6 +436,9 @@ export function IssueCard({
   /** Touch only (docs/mobile.md): when present the whole card opens the shared bottom sheet and the kebab
    * menu is dropped. Absent on pointer devices, where drag + the kebab menu are unchanged. */
   onSelect?: () => void;
+  /** Fired when this Issue's details are opened, on EITHER surface (kebab menu or bottom sheet) — the
+   * board's `board_issue_viewed` Event-lane append. */
+  onOpened?: () => void;
 }) {
   const priority = PRIORITY_META[issue.priority] ?? PRIORITY_META["none"]!;
   const conflicted = convergence?.conflictState != null;
@@ -478,7 +485,13 @@ export function IssueCard({
             </Text>
           </Group>
           {onSelect == null && (
-            <IssueMenu issue={issue} assignable={assignable} moveTeams={moveTeams} actions={actions} />
+            <IssueMenu
+              issue={issue}
+              assignable={assignable}
+              moveTeams={moveTeams}
+              actions={actions}
+              {...(onOpened ? { onOpened } : {})}
+            />
           )}
         </Group>
         <Group justify="space-between" gap="xs">
@@ -517,6 +530,7 @@ export function BoardColumns({
   serverValueById,
   teamNameById,
   moveTeams = [],
+  onIssueOpened,
 }: {
   issues: readonly IssueRow[];
   profiles: Map<string, ProfileRow>;
@@ -526,6 +540,9 @@ export function BoardColumns({
   serverValueById?: Map<string, ServerIssueValue>;
   teamNameById?: Map<string, string>;
   moveTeams?: readonly TeamOption[];
+  /** Called with an Issue's id when its details are opened — the board's `board_issue_viewed` append
+   * (pgxsinkit ADR-0053; see `useIssueViewEvents`). Absent = the surface records no views. */
+  onIssueOpened?: (issueId: string) => void;
 }) {
   const dragged = useRef<IssueRow | null>(null);
   const [overStatus, setOverStatus] = useState<IssueStatus | null>(null);
@@ -609,7 +626,15 @@ export function BoardColumns({
                       {...(teamName != null ? { teamName } : {})}
                       {...(convergence != null ? { convergence } : {})}
                       {...(serverValue != null ? { serverValue } : {})}
-                      {...(isTouch ? { onSelect: () => setSheetIssueId(issue.id) } : {})}
+                      {...(isTouch
+                        ? {
+                            onSelect: () => {
+                              setSheetIssueId(issue.id);
+                              onIssueOpened?.(issue.id);
+                            },
+                          }
+                        : {})}
+                      {...(onIssueOpened ? { onOpened: () => onIssueOpened(issue.id) } : {})}
                     />
                   );
                 })}

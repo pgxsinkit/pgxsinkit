@@ -39,6 +39,45 @@ interface ResolvedProjection {
 
 /** Local key/value metadata table for current-store safety, boot state, and registry identity. */
 export const LOCAL_META_TABLE = "pgxsinkit_local_meta";
+
+/**
+ * The **Outbox** (ADR-0053 decision 2) — the local-only, append-only table where client events are staged
+ * until a flush is acknowledged. ONE table for every Event stream (a `stream` column, not a table per
+ * stream), library-owned, never in the sync registry and never replicated, and **stream-independent**:
+ * registering an Event stream changes nothing about this DDL, so it is emitted unconditionally beside the
+ * engine's other internal relations rather than derived from `registry.streams`.
+ *
+ * Its SHAPE IS PUBLIC CONTRACT, because apps compose pending rows with down-synced aggregates into
+ * best-guess views. The columns:
+ *
+ * - `seq` — the durable, monotonically increasing local **append ordinal**, the ONE ordering key for
+ *   Outbox selection and batch assembly (UUIDs do not order, `occurred_at_us` collides at these volumes,
+ *   and SQL row order is undefined). Local machinery: it is never transmitted. Assigned from
+ *   {@link OUTBOX_SEQUENCE} exactly as the mutation journal's `mutation_seq` is.
+ * - `event_id` — the library-stamped uuid carried on the wire; the server-side dedupe key that makes
+ *   at-least-once delivery idempotent end-to-end. UNIQUE: a duplicate would be a library bug.
+ * - `stream` — the registered Event-stream name.
+ * - `occurred_at_us` — the library-stamped append time (microseconds), carried on the wire. Consumers
+ *   needing temporal order re-sort on it (ADR-0053 decision 6).
+ * - `payload` — the event body as `jsonb`, validated against the Event stream's zod schema AT APPEND, so
+ *   "everything in the Outbox is well-formed" holds for the flush loop and for best-guess views. It is
+ *   EXACTLY the value the caller passed to `appendEvent` — never the schema's `parsed.data`. The schema is
+ *   used at append only to VALIDATE (its output is discarded); the one AUTHORITATIVE parse is at ingest, and
+ *   that output's JSON-NORMALIZED form is what the consumer receives (a `Date` becomes its ISO string; a
+ *   nested `undefined` property is dropped). The schema therefore executes at both boundaries — so
+ *   transforms must be pure and deterministic — while a best-guess view here reads back precisely what the
+ *   app appended.
+ * - `enqueued_at_us` — when the row was durably enqueued locally (never transmitted; observability).
+ * - `attempt_count` / `next_retry_at_us` — the per-row DEFERRED backoff (ADR-0053 decision 3): an Event
+ *   stream the server does not yet know parks its rows here rather than deleting them. A row whose
+ *   `next_retry_at_us` is in the future is skipped by batch assembly. NULL = eligible now.
+ * - `last_reason` — the most recent server `deferred` reason, kept on the row it belongs to (never a
+ *   second, retention-bearing verdict table — ADR-0053 rejects that).
+ */
+export const OUTBOX_TABLE = "pgxsinkit_outbox";
+
+/** The sequence backing {@link OUTBOX_TABLE}'s `seq` append ordinal (the journal's `mutation_seq` precedent). */
+export const OUTBOX_SEQUENCE = `${OUTBOX_TABLE}_seq`;
 export const REGISTRY_FINGERPRINT_KEY = "registry_fingerprint";
 /**
  * The `pgxsinkit_local_meta` key holding the DURABLE-schema fingerprint the local store was last
@@ -119,6 +158,39 @@ function localMetaBootstrapStatements(localSchema: string): string[] {
   );
 
   return statements;
+}
+
+/**
+ * The **Outbox** DDL (ADR-0053 decision 2) — its sequence, table, and the two indexes that serve it. Emitted
+ * unconditionally in the durable stream (never gated on `registry.streams`): the shape is stream-independent
+ * and the table must exist before the first `appendEvent`, which may be the first thing an app does after a
+ * registry gains its first Event stream. See {@link OUTBOX_TABLE} for the column contract.
+ *
+ * Two indexes, one per access pattern:
+ * - `(stream, seq)` serves the APP's `WHERE stream = ?` best-guess-view queries in append order;
+ * - `(next_retry_at_us, seq)` serves BATCH ASSEMBLY — ordered by `seq` across all streams, skipping rows
+ *   whose deferred backoff has not elapsed.
+ */
+function outboxStatements(localSchema: string): string[] {
+  const outboxTable = qualifyIdentifier(localSchema, OUTBOX_TABLE);
+  const outboxSequence = qualifyIdentifier(localSchema, OUTBOX_SEQUENCE);
+
+  return [
+    `CREATE SEQUENCE IF NOT EXISTS ${outboxSequence} AS bigint START WITH 1 INCREMENT BY 1;`,
+    `CREATE TABLE IF NOT EXISTS ${outboxTable} (\n  ${[
+      `seq BIGINT PRIMARY KEY DEFAULT nextval(${quoteSqlStringLiteral(outboxSequence)})`,
+      "event_id UUID NOT NULL UNIQUE",
+      "stream TEXT NOT NULL",
+      "occurred_at_us BIGINT NOT NULL",
+      "payload JSONB NOT NULL",
+      "enqueued_at_us BIGINT NOT NULL",
+      "attempt_count INTEGER NOT NULL DEFAULT 0",
+      "next_retry_at_us BIGINT",
+      "last_reason TEXT",
+    ].join(",\n  ")}\n);`,
+    renderCreateIndexStatement(outboxTable, `${OUTBOX_TABLE}_stream_seq_idx`, ["stream", "seq"]),
+    renderCreateIndexStatement(outboxTable, `${OUTBOX_TABLE}_retry_seq_idx`, ["next_retry_at_us", "seq"]),
+  ];
 }
 
 /**
@@ -356,7 +428,10 @@ function buildEntryClusterStatements(entry: SyncTableEntry, tableKey: string, lo
  */
 function durableSchemaStatements<TRegistry extends SyncTableRegistry>(registry: TRegistry): string[] {
   const localSchema = getSyncRegistrySchema(registry);
-  const statements: string[] = [...localMetaBootstrapStatements(localSchema)];
+  // The Outbox (ADR-0053) joins the durable stream right after the meta bootstrap: library-owned engine
+  // state, stream-independent, and durable (events survive reload/offline weeks). It is deliberately NOT in
+  // the ephemeral portion and NOT in the read cache.
+  const statements: string[] = [...localMetaBootstrapStatements(localSchema), ...outboxStatements(localSchema)];
 
   for (const enumDefinition of collectEnumDefinitions(registry, localSchema)) {
     statements.push(buildCreateEnumTypeSql(enumDefinition));
@@ -1012,6 +1087,11 @@ export function buildWipeLocalStoreSql<TRegistry extends SyncTableRegistry>(regi
     statements.push(`DROP TYPE IF EXISTS ${qualifyIdentifier(enumDefinition.schemaName, enumDefinition.enumName)};`);
   }
 
+  // The Outbox is durable library-owned state, so the FULL teardown drops it (ADR-0053 decision 8) — and
+  // only the full teardown: `buildDropReadCacheSql` above never names it (the Outbox is not read cache), so
+  // a cache rebuild leaves staged events untouched.
+  statements.push(`DROP TABLE IF EXISTS ${qualifyIdentifier(localSchema, OUTBOX_TABLE)} CASCADE;`);
+  statements.push(`DROP SEQUENCE IF EXISTS ${qualifyIdentifier(localSchema, OUTBOX_SEQUENCE)};`);
   statements.push(`DROP TABLE IF EXISTS ${qualifyIdentifier(localSchema, LOCAL_META_TABLE)} CASCADE;`);
 
   return `${statements.join("\n")}\n`;

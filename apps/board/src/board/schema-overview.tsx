@@ -4,7 +4,7 @@ import { pgSchema, text, union, type AnyPgTable } from "drizzle-orm/pg-core";
 import { useEffect, useMemo, useState } from "react";
 
 import { boardMemberRegistry, boardSyncRegistry } from "@pgxsinkit/board-schema";
-import { getSyncedLocalTable } from "@pgxsinkit/client";
+import { getOutboxTable, getSyncedLocalTable, OUTBOX_SEQUENCE, OUTBOX_TABLE } from "@pgxsinkit/client";
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { useAuth } from "../auth/auth";
@@ -38,7 +38,8 @@ interface RegistryEntryShape {
 interface Entity {
   key: string;
   table: string;
-  mode: RegistryEntryShape["mode"];
+  /** `"local-only"` is the Event lane's Outbox — a real local table, but never a sync entry. */
+  mode: RegistryEntryShape["mode"] | "local-only";
   /** `retention: "ephemeral"` — the whole local cluster is TEMP in `pg_temp` (ADR-0021 §3). */
   ephemeral: boolean;
   /** The synced local table as a Drizzle object (rename-safe), for the row-count probe below. */
@@ -57,27 +58,42 @@ interface Entity {
 // `_read_model` / `_sync_state` views), and every name is verified against the live catalog before it is
 // shown, so nothing here can claim an object the store doesn't actually have.
 function buildEntities(registry: SyncTableRegistry): Entity[] {
-  return (Object.entries(registry) as unknown as [string, RegistryEntryShape][]).map(([key, entry]) => {
-    const table = entry.clientProjection?.syncedTable ?? key;
-    const ephemeral = entry.retention === "ephemeral";
-    // The synced local table as a runtime Drizzle object — resolves the projection rename + the
-    // registry's local schema, so the count query below tracks the same relation `table` names.
-    const syncedLocalTable = getSyncedLocalTable(registry, key);
-    if (entry.mode !== "readwrite") {
-      return { key, table, mode: entry.mode, ephemeral, syncedLocalTable };
-    }
-    return {
-      key,
-      table,
-      mode: entry.mode,
-      ephemeral,
-      syncedLocalTable,
-      overlay: entry.clientProjection?.overlayTable ?? `${table}_overlay`,
-      journal: entry.clientProjection?.journalTable ?? `${table}_mutations`,
-      readModel: `${table}_read_model`,
-      syncState: `${table}_sync_state`,
-    };
+  const entities: Entity[] = (Object.entries(registry) as unknown as [string, RegistryEntryShape][]).map(
+    ([key, entry]) => {
+      const table = entry.clientProjection?.syncedTable ?? key;
+      const ephemeral = entry.retention === "ephemeral";
+      // The synced local table as a runtime Drizzle object — resolves the projection rename + the
+      // registry's local schema, so the count query below tracks the same relation `table` names.
+      const syncedLocalTable = getSyncedLocalTable(registry, key);
+      if (entry.mode !== "readwrite") {
+        return { key, table, mode: entry.mode, ephemeral, syncedLocalTable };
+      }
+      return {
+        key,
+        table,
+        mode: entry.mode,
+        ephemeral,
+        syncedLocalTable,
+        overlay: entry.clientProjection?.overlayTable ?? `${table}_overlay`,
+        journal: entry.clientProjection?.journalTable ?? `${table}_mutations`,
+        readModel: `${table}_read_model`,
+        syncState: `${table}_sync_state`,
+      };
+    },
+  );
+
+  // The Event lane's Outbox (pgxsinkit ADR-0053 decision 2) — not a registry table entry, but a real,
+  // durable, queryable table of the same local store, and its shape is public contract. "What is in my
+  // local store?" is this panel's question, so the Outbox belongs on it like every synced table does.
+  entities.push({
+    key: "outbox",
+    table: OUTBOX_TABLE,
+    mode: "local-only",
+    ephemeral: false,
+    syncedLocalTable: getOutboxTable(registry),
   });
+
+  return entities;
 }
 
 type ObjectKind = "table" | "view" | "sequence" | "trigger";
@@ -96,6 +112,22 @@ const KIND_COLOR: Record<ObjectKind, string> = {
 };
 
 function associatedObjects(entity: Entity): AssocObject[] {
+  if (entity.mode === "local-only") {
+    return [
+      {
+        name: entity.table,
+        kind: "table",
+        purpose:
+          "The Event lane's Outbox: appended events staged durably until the server rules on a flush " +
+          "(acked/refused/rejected delete the row; deferred rows wait here and retry).",
+      },
+      {
+        name: OUTBOX_SEQUENCE,
+        kind: "sequence",
+        purpose: "Issues the monotonic seq append ordinal that orders Outbox batch assembly.",
+      },
+    ];
+  }
   const base: AssocObject = {
     name: entity.table,
     kind: "table",
@@ -107,7 +139,7 @@ function associatedObjects(entity: Entity): AssocObject[] {
   return [
     base,
     { name: entity.overlay, kind: "table", purpose: "Optimistic local writes, awaiting the server echo." },
-    { name: entity.journal, kind: "table", purpose: "The mutation journal (outbox): pending → sending → acked." },
+    { name: entity.journal, kind: "table", purpose: "The mutation journal: pending → sending → acked." },
     {
       name: `${entity.journal}_mutation_seq`,
       kind: "sequence",
@@ -227,8 +259,9 @@ export function SchemaOverview() {
         <div>
           <Title order={3}>Tables in your local store</Title>
           <Text size="sm" c="dimmed">
-            The main synced tables (counts are the rows synced to you). Pick one to see every object pgxsinkit maintains
-            alongside it — tables, views, the journal sequence, and the reconcile trigger.
+            The main synced tables (counts are the rows synced to you), plus the Event lane&apos;s local-only Outbox.
+            Pick one to see every object pgxsinkit maintains alongside it — tables, views, sequences, and the reconcile
+            trigger.
           </Text>
         </div>
 
@@ -271,7 +304,11 @@ export function SchemaOverview() {
                   {selected.table}
                 </Text>
               </Text>
-              <Badge size="sm" variant="light" color={selected.mode === "readwrite" ? "indigo" : "gray"}>
+              <Badge
+                size="sm"
+                variant="light"
+                color={selected.mode === "readwrite" ? "indigo" : selected.mode === "local-only" ? "teal" : "gray"}
+              >
                 {selected.mode}
               </Badge>
               {selected.ephemeral && (
@@ -316,7 +353,13 @@ export function SchemaOverview() {
               </Table>
             </Table.ScrollContainer>
 
-            {selected.mode !== "readwrite" && (
+            {selected.mode === "local-only" && (
+              <Text size="xs" c="dimmed">
+                Local-only — never in the sync registry, never replicated. Rows leave only when the server rules on a
+                flush; an append made offline waits here (and survives reload) until connectivity returns.
+              </Text>
+            )}
+            {selected.mode !== "readwrite" && selected.mode !== "local-only" && (
               <Text size="xs" c="dimmed">
                 Read-only — synced straight from the server, so it has no overlay, journal, sequence, views, or trigger.
               </Text>

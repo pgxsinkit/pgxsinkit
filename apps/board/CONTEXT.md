@@ -59,6 +59,16 @@ An Issue's importance on Linear's scale (`none`, `urgent`, `high`, `medium`,
 story (editing Priority races a Status drag) is concrete.
 _Avoid_: severity, importance.
 
+**Issue view**:
+A Member opening an Issue's details (the card's actions menu on a pointer device, the bottom sheet on
+touch — the board has no separate detail route). A fire-and-forget fact, not a write: it is appended
+to the toolkit's event lane (ADR-0053) and lands in the board's `board_issue_view_event` archive,
+keyed on the event id so an at-least-once redelivery archives it once. Nothing about it syncs back
+down, nothing on the board reads it — it exists so the lane has an exerciser a human can watch
+end-to-end, and so "who looked at what, when" is a query the demo can answer.
+_Avoid_: "read receipt" (implies the Issue's author is told), "impression"/"pageview" (analytics
+vocabulary the board does not otherwise use), "audit" (the Toolkit's `operations_log` owns that word).
+
 ## Language — chat
 
 **Channel**:

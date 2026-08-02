@@ -65,5 +65,6 @@ complete as ADRs are added.
 - [ADR-0050 — Storage declaration transport and path-addressed store teardown](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0050-storage-declaration-transport.md)
 - [ADR-0051 — Content-addressed validate caching and per-file unit-test selection](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0051-content-addressed-test-selection.md)
 - [ADR-0052 — Row classification and registry invariants](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0052-row-classification-and-registry-invariants.md)
+- [ADR-0053 — Queue-shaped event ingestion as a first-class lane](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0053-queue-shaped-event-ingestion.md)
 
 <!-- adr:list:end -->

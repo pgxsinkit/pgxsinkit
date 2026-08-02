@@ -8,8 +8,12 @@ import type {
   SyncServerAddress,
   SyncTableRegistry,
 } from "@pgxsinkit/contracts";
+import { batchEventPaths, getSyncRegistryStreams } from "@pgxsinkit/contracts";
 
 import { proxyElectricShapeRequest } from "./electric-proxy";
+import { createPgmqEventQueue } from "./events/pgmq-queue";
+import type { EventQueue } from "./events/queue";
+import { createEventIngestHandler, type EventGate, type EventsEnqueuedHook } from "./events/route";
 import {
   authoritativeMutationPaths,
   batchMutationPaths,
@@ -99,6 +103,28 @@ export interface CreateSyncServerOptions<
    * are the safe degradation posture (ADR-0030). See {@link DeploymentProfile}.
    */
   deployment?: DeploymentProfile;
+  /**
+   * The **Event lane**'s consent/entitlement gate (ADR-0053 decision 1): the lane's one function, and so an
+   * option here rather than a registry field (the registry stays declarative data only). Called once per
+   * event, after its payload validated and its identity resolved, and before anything is enqueued; a refusal
+   * is a per-event `refused` verdict. Absent → every well-formed event is allowed. See {@link EventGate}.
+   */
+  eventGate?: EventGate;
+  /**
+   * Fired after an ingest request ENQUEUED at least one sub-batch (ADR-0053 amendment, 2026-08-02): the
+   * deployment-agnostic seam a SERVERLESS deployment uses to nudge whatever endpoint runs the consumer's
+   * `drainOnce()`, so an interactive append drains in milliseconds instead of waiting for the next
+   * scheduled tick. Fire-and-forget — it is called after the commit, its throw is caught and warn-logged,
+   * and the scheduled sweep (not the nudge) is the delivery guarantee. Absent → nothing is nudged, which is
+   * right for a deployment hosting the long-lived runner. See {@link EventsEnqueuedHook}.
+   */
+  onEventsEnqueued?: EventsEnqueuedHook;
+  /**
+   * The Event lane's queue backend. Defaults to the shipped pgmq backend over this server's own `db`
+   * (`createPgmqEventQueue`), which is what makes an enqueue join the endpoint's transaction. Override it to
+   * run the lane on another backend, or to substitute a fake in tests.
+   */
+  eventQueue?: EventQueue;
   /**
    * Opt-in per-request timing log (default false). When on, each mutation and shape-proxy request emits
    * one compact `[pgxsinkit-timing]` line with an ISO-8601(ms, UTC) timestamp and phase durations, for
@@ -223,6 +249,24 @@ export function createSyncServer<
     router.post(path, mutationHandlers.authoritative);
   }
 
+  // The Event lane's ingestion endpoint (ADR-0053 decision 3), mounted ONLY when the registry registers at
+  // least one Event stream — a registry without streams has no event lane, and the path stays a 404. Nothing
+  // is probed or provisioned here: the queues are deploy-time DDL (`pgxsinkit-generate --events`), so the
+  // route preserves the zero-startup-query posture.
+  const eventStreams = getSyncRegistryStreams(options.registry);
+  if (eventStreams && Object.keys(eventStreams).length > 0) {
+    const eventQueue = options.eventQueue ?? createPgmqEventQueue({ db });
+    const eventHandler = createEventIngestHandler(db, options.registry, eventQueue, {
+      ...(options.resolveAuthClaims ? { resolveAuthClaims: options.resolveAuthClaims } : {}),
+      ...(options.eventGate ? { eventGate: options.eventGate } : {}),
+      ...(options.onEventsEnqueued ? { onEventsEnqueued: options.onEventsEnqueued } : {}),
+      logTimings: options.logTimings ?? false,
+    });
+    for (const path of batchEventPaths) {
+      router.post(path, eventHandler);
+    }
+  }
+
   // The read-path shape proxy shares the same resolveAuthClaims adapter, so read and
   // write authorization can never diverge (ADR-0003).
   if (options.electricUrl) {
@@ -344,3 +388,58 @@ export { operationsLogTable } from "./operations-log/schema";
 export { proxyElectricShapeRequest } from "./electric-proxy";
 export type { ElectricProxyOptions } from "./electric-proxy";
 export { readSqlState } from "./sql-state";
+export {
+  createEventIngestHandler,
+  eventIngestRequiresClaims,
+  EVENT_QUEUE_UNAVAILABLE_RETRY_AFTER_SECONDS,
+} from "./events/route";
+export type {
+  CreateEventIngestHandlerOptions,
+  EventGate,
+  EventGateDecision,
+  EventGateInput,
+  EventIngestDb,
+  EventsEnqueuedHook,
+  EventsEnqueuedInfo,
+} from "./events/route";
+export { assertEventQueueReceipts, eventStreamQueueName, MalformedEventQueueMessageError } from "./events/queue";
+export type {
+  DeadLetteredEventMessage,
+  DeliveredEventMessage,
+  EventQueue,
+  EventQueueExecutor,
+  EventQueueReadOptions,
+  EventQueueReceipt,
+} from "./events/queue";
+export { createPgmqEventQueue, PGMQ_DEAD_LETTER_KEY } from "./events/pgmq-queue";
+export type { CreatePgmqEventQueueOptions } from "./events/pgmq-queue";
+export {
+  computeEventPollWaitMs,
+  defineEventConsumer,
+  DEFAULT_EVENT_CONSUMER_BATCH_SIZE,
+  DEFAULT_EVENT_DRAIN_BUDGET_MS,
+  DEFAULT_EVENT_MAX_ATTEMPTS,
+  DEFAULT_EVENT_POLL_CEILING_MS,
+  DEFAULT_EVENT_POLL_FACTOR,
+  DEFAULT_EVENT_POLL_FLOOR_MS,
+  DEFAULT_EVENT_VISIBILITY_TIMEOUT_SECONDS,
+} from "./events/consumer";
+export type {
+  DefineEventConsumerOptions,
+  EventConsumer,
+  EventConsumerBatch,
+  EventConsumerCallback,
+  EventConsumerPollOptions,
+  EventConsumerSleep,
+  EventDeadLetterReport,
+  EventDrainOptions,
+  EventDrainSummary,
+} from "./events/consumer";
+export {
+  EVENT_LANE_FINGERPRINT_PREFIX,
+  eventLaneDdlFingerprint,
+  eventLaneStreamNames,
+  renderEventLaneMigration,
+} from "./events/ddl";
+export { resolveEventIdentity } from "./events/identity";
+export type { IdentityResolution } from "./events/identity";

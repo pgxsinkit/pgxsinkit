@@ -189,6 +189,35 @@ while the real board sat on an eternal spinner (the home route's redirect was ga
 offline boot can ever reach; local rows must drive navigation).
 `tests/e2e/board-offline-return.e2e.test.ts` is the owning suite; nothing else claims this coverage.
 
+## Event lane (ADR-0053)
+
+The lane is covered in three tiers, split by what each can actually prove.
+
+**Unit** (`tests/unit/event-*.test.ts`, `tests/unit/board-event-lane.test.ts`) owns the semantics: append
+validation and Outbox durability, batch assembly and per-event verdict settlement (including the
+non-terminal `deferred`), the two retry classes with no attempt cap, the drain signal and report surfaces
+across both client forms, the ingestion endpoint's layered verdicts, the queue interface, the consumer
+runner's pacing/visibility/dead-letter behaviour on a fake queue, and — board-side — that the demo stream
+survives the per-role registry projection and maps onto its archive row.
+
+**Container** (testcontainers/Podman) owns pgmq end-to-end: enqueue → consume → ack → dead-letter against a
+real extension, plus `set_vt` holding a delivered message invisible past its original lease.
+`tests/integration/event-lane-pgmq.integration.test.ts` is the owning suite and it runs in
+`test:integration:implementation` (and therefore in `test:integration`); nothing else claims this coverage.
+
+**Browser** (`tests/e2e/board-event-lane.e2e.test.ts`, in the existing `test:integration:worker` harness)
+owns the two claims only a real browser can make: an append made through the real UI, against the real
+`board-write` deployment, with the engine in a SharedWorker, drains from the Outbox; and an append made
+with the network cut stages, survives the tab being closed and reopened with connectivity still gone, and
+drains on reconnect. The offline order is deliberate — the client never deletes an Outbox row without a
+server verdict, so "staged across a reload, then empty after reconnect" is the round-trip proof that
+"append online, observe empty" could not be (empty is also the resting state).
+
+That lane deliberately does NOT assert the event reached the board's `board_issue_view_event` archive: the
+consumer runner is a separate long-lived process (`bun run dev:board:consumer`) that the worker lane does
+not host, and the Playwright specs have no database client. The consumer half is the unit and container
+tiers' job.
+
 ## Integration tests
 
 Integration tests are container-backed and require `infra/compose/docker-compose.yml`.

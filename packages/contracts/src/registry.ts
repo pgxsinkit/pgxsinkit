@@ -56,6 +56,14 @@ import {
   type TableMode,
   type WriteMode,
 } from "./config";
+import {
+  EVENT_STREAM_NAME_MAX_LENGTH,
+  EVENT_STREAM_NAME_PATTERN,
+  EVENT_STREAM_QUEUE_PREFIX,
+  hasNonStrictObjectRoot,
+  isZodSchema,
+  type EventStreamRegistry,
+} from "./event-stream";
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
 
@@ -430,6 +438,23 @@ export interface SyncRegistryDefinition<TRegistry extends SyncTableRegistry> {
    * it is always unconstrained). Purely authoring metadata: it never enters the registry fingerprint.
    */
   rowClasses?: readonly string[];
+  /**
+   * The registry's **Event streams** (ADR-0053 decision 1) — the Event lane's registration surface, keyed by
+   * Event-stream NAME (the record key IS the name; {@link defineEventStream} declares the entry). Registration
+   * lives here rather than in a parallel artifact so there is ONE contract to lock, diff and thread through
+   * `createSyncServer` and `defineSyncWorker`.
+   *
+   * Validated fail-closed at {@link defineSyncRegistry} (module eval, every offender named at once): the name
+   * must match `[a-z][a-z0-9_]*` and fit the pgmq queue-name budget, the payload must be a zod schema, and each
+   * identity field must name a non-empty claim path. Carried on the returned registry and read back with
+   * {@link getSyncRegistryStreams}.
+   *
+   * Streams follow the `rowClasses` precedent: they ride the registry LOCK as a sibling (added → `compatible`,
+   * removed → `breaking`, payload/identity changed → `risky`) and stay OUT of the canonical fingerprint — an
+   * Event stream touches no synced table, no local schema and no apply function, so registering one must never
+   * wipe a store's read cache. The bare-registry-map overload has nowhere to declare streams.
+   */
+  streams?: EventStreamRegistry;
 }
 
 export const syncRegistrySchemaSymbol = Symbol.for("@pgxsinkit/contracts/syncRegistrySchema");
@@ -437,6 +462,8 @@ export const syncRegistrySchemaSymbol = Symbol.for("@pgxsinkit/contracts/syncReg
 export const syncRegistryStorageSymbol = Symbol.for("@pgxsinkit/contracts/syncRegistryStorage");
 
 export const syncRegistryRowClassesSymbol = Symbol.for("@pgxsinkit/contracts/syncRegistryRowClasses");
+
+export const syncRegistryStreamsSymbol = Symbol.for("@pgxsinkit/contracts/syncRegistryStreams");
 
 export type RegistryTables<TRegistry extends SyncTableRegistry> = {
   [TKey in keyof TRegistry]: TRegistry[TKey]["table"];
@@ -1078,16 +1105,21 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
     validateRegistryLifecycleGroups(input.tables);
     validateStorageDeclaration(input.storage);
     validateRowClassification(input.tables, input.rowClasses);
+    validateEventStreams(input.streams);
 
     // Schema first (it may return the same tables object), then stamp the storage declaration on the
     // returned registry as a non-enumerable symbol — the same carrier pattern as the schema symbol — so
     // client code reads the data-contract storage back off the registry value (getSyncRegistrySchema's
     // twin, getSyncRegistryStorage). The bare-registry-map overload carries no storage and reads back
     // `undefined`, which resolves to the ADR-0047 defaults at the mint seam. The declared row-class
-    // vocabulary rides the same way (ADR-0052), for getSyncRegistryRowClasses.
-    return attachSyncRegistryRowClasses(
-      attachSyncRegistryStorage(attachSyncRegistrySchema(input.tables, input.schema), input.storage),
-      input.rowClasses,
+    // vocabulary rides the same way (ADR-0052), for getSyncRegistryRowClasses, and so do the registered
+    // Event streams (ADR-0053), for getSyncRegistryStreams.
+    return attachSyncRegistryStreams(
+      attachSyncRegistryRowClasses(
+        attachSyncRegistryStorage(attachSyncRegistrySchema(input.tables, input.schema), input.storage),
+        input.rowClasses,
+      ),
+      input.streams,
     );
   }
 
@@ -1452,6 +1484,154 @@ export function getSyncRegistryRowClasses<TRegistry extends SyncTableRegistry>(
 ): readonly string[] | undefined {
   const rowClasses = Reflect.get(registry, syncRegistryRowClassesSymbol) as unknown;
   return Array.isArray(rowClasses) ? (rowClasses as readonly string[]) : undefined;
+}
+
+/**
+ * Stamp the registry's registered Event streams (ADR-0053 decision 1) onto the registry value as a
+ * non-enumerable symbol — the Event-lane twin of {@link attachSyncRegistryRowClasses}. An absent declaration
+ * attaches nothing (the bare-registry-map overload, and any definition that registers no Event stream), so
+ * {@link getSyncRegistryStreams} reads back `undefined` and the registry simply has no Event lane.
+ *
+ * Non-enumerable is load-bearing beyond tidiness: `canonicalizeRegistry` walks the registry's own enumerable
+ * keys, so riding a symbol is what keeps Event streams OUT of the persisted fingerprint.
+ */
+export function attachSyncRegistryStreams<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+  streams: EventStreamRegistry | undefined,
+) {
+  if (streams == null) {
+    return registry;
+  }
+  // Idempotent for the SAME registration (one tables object may be reused across per-client registries built
+  // from one definition) but fail-closed on a CONFLICT — two different Event-lane contracts over one registry
+  // is a definition error, never silently resolved. Entries are compared by identity: a payload schema is an
+  // opaque object, so structural equality here would be a worse promise than none.
+  const existing = getSyncRegistryStreams(registry);
+  if (existing != null) {
+    const existingNames = Object.keys(existing).sort();
+    const nextNames = Object.keys(streams).sort();
+    const same =
+      existingNames.length === nextNames.length &&
+      existingNames.every((name, index) => name === nextNames[index] && existing[name] === streams[name]);
+    if (!same) {
+      throw new Error(
+        `conflicting streams declaration for registry: already [${existingNames.join(", ")}], cannot re-declare ` +
+          `[${nextNames.join(", ")}]`,
+      );
+    }
+    return registry;
+  }
+  Object.defineProperty(registry, syncRegistryStreamsSymbol, {
+    value: Object.freeze({ ...streams }),
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return registry;
+}
+
+/**
+ * Read the Event streams (ADR-0053 decision 1) a registry was built with, or `undefined` when none were
+ * registered — the Event-lane twin of {@link getSyncRegistryRowClasses}. The server mounts the ingestion route
+ * and provisions one pgmq queue per entry from this; the client resolves an `appendEvent` payload schema
+ * through it.
+ */
+export function getSyncRegistryStreams<TRegistry extends SyncTableRegistry>(
+  registry: TRegistry,
+): EventStreamRegistry | undefined {
+  const streams = Reflect.get(registry, syncRegistryStreamsSymbol) as unknown;
+  return streams != null && typeof streams === "object" ? (streams as EventStreamRegistry) : undefined;
+}
+
+/**
+ * Fail-closed at module-eval (ADR-0053 decision 1): every registered Event stream must be nameable as a pgmq
+ * queue and must declare a usable payload contract and identity-stamping rule. A bad Event-stream name has to
+ * fail at DEFINITION — failing at deployment DDL, when `pgxsinkit-generate` emits the per-stream queues, is
+ * far too late.
+ *
+ * Rejection-only, and it names EVERY offender in one error (same posture as {@link validateRowClassification}:
+ * an author fixing a batch of streams should not have to re-run the build once per stream).
+ */
+function validateEventStreams(streams: EventStreamRegistry | undefined) {
+  if (streams == null) {
+    return;
+  }
+
+  const problems: string[] = [];
+
+  for (const [name, entry] of Object.entries(streams)) {
+    if (!EVENT_STREAM_NAME_PATTERN.test(name)) {
+      problems.push(
+        `"${name}": invalid Event-stream name — must match ${EVENT_STREAM_NAME_PATTERN.source} ` +
+          `(lowercase letters, digits and underscores, starting with a letter)`,
+      );
+    } else if (name.length > EVENT_STREAM_NAME_MAX_LENGTH) {
+      problems.push(
+        `"${name}": Event-stream name is ${name.length} characters — at most ${EVENT_STREAM_NAME_MAX_LENGTH} ` +
+          `are allowed, because each stream is provisioned as the pgmq queue ` +
+          `"${EVENT_STREAM_QUEUE_PREFIX}${name}" and pgmq's queue-name limit is 47 characters, of which the ` +
+          `"${EVENT_STREAM_QUEUE_PREFIX}" prefix consumes ${EVENT_STREAM_QUEUE_PREFIX.length}`,
+      );
+    }
+
+    if (entry == null || typeof entry !== "object") {
+      problems.push(`"${name}": not an Event-stream entry — declare it with defineEventStream({ payload, identity })`);
+      continue;
+    }
+
+    if (!isZodSchema(entry.payload)) {
+      problems.push(`"${name}": payload is not a zod schema — declare a strict zod schema for the event payload`);
+    } else if (hasNonStrictObjectRoot(entry.payload)) {
+      // The strict promise is ENFORCED, not advertised. A stripping `z.object({…})` would drop a misspelled
+      // or newly-added key between the caller and the consumer with no verdict anywhere — the exact silence
+      // the lane's "everything in the Outbox is well-formed" invariant exists to prevent. Non-object roots
+      // (string, array, record, transform pipelines) are untouched by this rule.
+      problems.push(
+        `"${name}": the payload's object schema is not strict — declare it with \`.strict()\` or ` +
+          `\`z.strictObject()\` (every object inside a union payload too), so an unknown key is REJECTED at ` +
+          `\`appendEvent\` instead of being silently stripped on the way to the consumer`,
+      );
+    }
+
+    if (entry.revision != null && (!Number.isInteger(entry.revision) || entry.revision <= 0)) {
+      problems.push(
+        `"${name}": revision must be a positive integer (it is the opaque counter you bump when acceptance ` +
+          `logic the JSON-Schema hash cannot see — a refinement threshold, a transform — changes)`,
+      );
+    }
+
+    if (entry.identity == null || typeof entry.identity !== "object") {
+      problems.push(`"${name}": identity must be a record of field name -> { claimPath }`);
+      continue;
+    }
+
+    for (const [field, spec] of Object.entries(entry.identity)) {
+      if (field.trim().length === 0) {
+        problems.push(`"${name}": an identity field name is empty`);
+        continue;
+      }
+      const claimPath = spec?.claimPath;
+      if (!Array.isArray(claimPath) || claimPath.length === 0) {
+        problems.push(
+          `"${name}".identity.${field}: claimPath must be a non-empty JSON path into the verified claims ` +
+            `(e.g. ["sub"] or ["app_metadata", "person_id"])`,
+        );
+        continue;
+      }
+      if (claimPath.some((segment) => typeof segment !== "string" || segment.trim().length === 0)) {
+        problems.push(`"${name}".identity.${field}: every claimPath segment must be a non-empty string`);
+      }
+    }
+  }
+
+  if (problems.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `invalid Event-stream registration (ADR-0053). The record key IS the Event-stream name, and each entry ` +
+      `must be a defineEventStream({ payload, identity }) — ${problems.join("; ")}.`,
+  );
 }
 
 /**

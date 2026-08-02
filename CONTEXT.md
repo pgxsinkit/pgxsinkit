@@ -200,7 +200,9 @@ echo arrives. The read model reads the overlay over the synced row.
 **Mutation journal**:
 The durable local log of staged mutations awaiting flush/ack. A reconcile trigger
 clears overlay and journal rows once the read path echoes the applied row.
-_Avoid_: "the outbox" (acceptable informally, but journal is the canonical term).
+_Avoid_: "the outbox" — that names the event lane's Outbox, a different durable local
+table with different semantics (no overlay, no echo, no convergence); journal is the
+only name for this one.
 
 **Entity identity**:
 The one canonical way a single synced row is named across the write path and the Convergence
@@ -304,7 +306,7 @@ per-tab, or per-table toggle — it is one registry declaration binding every op
 
 **Store backup**:
 The full-fidelity export of the whole local store (`exportStore`): everything the store holds,
-staged writes and sync metadata included, restorable only into PGlite. The lossless option, and the
+staged writes, pending Outbox events, and sync metadata included, restorable only into PGlite. The lossless option, and the
 only export an offline device with unflushed writes can take.
 _Avoid_: "snapshot" (collides with Electric's snapshot rows, ADR-0024); "database dump" (that is a
 Diagnostic dump or Data export — a backup is a store image, not SQL).
@@ -325,7 +327,9 @@ things exported are the synced tables.
 **Restore**:
 Booting a client on a Store backup (`restoreFrom`), into a store that does not yet exist. A restored
 engine always boots offline, and journal rows recovered from the backup are quarantined, never
-auto-flushed — the write path has no mutation dedupe, so replaying them is not idempotent. Catch-up
+auto-flushed — the write path has no mutation dedupe, so replaying them is not idempotent. Outbox
+rows recovered from a backup are NOT quarantined — they resume flushing normally, because event
+delivery is idempotent end-to-end (the event-id dedupe), which mutation replay is not. Catch-up
 after go-online is the ordinary read path, not a special mode.
 _Avoid_: "import" — restore recreates a local store; loading a Data export into some Postgres is
 outside the client's vocabulary.
@@ -337,6 +341,46 @@ functions, materialized views, and managed-field values. **Not yet local** (gaps
 to narrow, best-effort against the synced subset): static defaults, CHECK,
 generated columns, FOREIGN KEY, and UNIQUE. The server is always the integrity
 and security authority; the client only ever holds a filtered subset of rows.
+
+## Language — event ingestion
+
+**Event lane**:
+The toolkit's second lane beside the sync rail: the whole path from an event's
+append into the Outbox, through the flush endpoint and the queue, to the
+app-provided consumer callback. Carries fire-and-forget facts with at-least-once
+delivery and per-event terminal verdicts. Not a general pub/sub, and not a
+replacement for the write path — writes needing conflict resolution, optimistic
+overlay, or echo stay on the mutation path.
+_Avoid_: "event sync" (nothing syncs back down), "the queue" for the whole lane
+(the queue is one segment of it).
+
+**Event stream**:
+A named, registered category of append-only client events sharing one payload
+schema and one consumer-side handling. The unit of registration, validation,
+gating, and consumption in the event lane. Bare `stream` is acceptable as a
+field/parameter name inside event-lane API surfaces only.
+_Avoid_: bare "stream" in prose (ambiguous against the read path's Electric shape
+streams), "topic"/"channel" (pub/sub connotations the event lane disclaims;
+"channel" collides with the Board demo's chat Channels).
+
+**Outbox**:
+The local-only, append-only durable table where client events are staged until a
+flush is acknowledged. Fire-and-forget: acked rows are deleted, never echoed back,
+never overlaid, never conflict-resolved — the Outbox is not the Mutation journal
+(no overlay, no echo, no convergence). Queryable by the app (best-guess views may
+compose pending events with down-synced aggregates), so its shape is public
+contract, not an internal detail. Never in the sync registry, never replicated.
+_Avoid_: "outbox" for the Mutation journal (retired informal alias), "event
+journal", "event buffer" (it is durable, not an in-memory buffer).
+
+**Drain signal**:
+The observable client surface reporting whether the Outbox is empty, firing on
+the empty ↔ non-empty transitions (with the current state delivered on
+subscribe) — the invalidation hook for best-guess views composing pending events
+with down-synced aggregates. Deliberately not a per-append or per-flush progress
+feed: apps know their own appends, and richer detail is a query against the
+Outbox table.
+_Avoid_: "flush event" (it reports Outbox state transitions, not flush attempts).
 
 ## Language — engine placement
 

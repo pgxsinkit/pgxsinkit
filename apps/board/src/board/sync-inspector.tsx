@@ -2,7 +2,13 @@ import { Badge, Button, Drawer, Group, ScrollArea, Stack, Switch, Table, Text } 
 import { useMediaQuery } from "@mantine/hooks";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
-import type { BootReport, LiveQueryDiagnostics, MutationDetail } from "@pgxsinkit/client";
+import type {
+  BootReport,
+  EventLaneReport,
+  LiveQueryDiagnostics,
+  MutationDetail,
+  OutboxStatus,
+} from "@pgxsinkit/client";
 
 import { useBootReport, useSyncClient } from "../board-client";
 import { useBoardOffline } from "./board-client-provider";
@@ -102,6 +108,43 @@ function useLiveQueries(enabled: boolean): LiveQueryDiagnostics[] {
   return entries;
 }
 
+/**
+ * The Event lane's two client observation surfaces (pgxsinkit ADR-0053 decision 2), for the whole session
+ * — NOT gated on the drawer being open, unlike the journal/live-query readouts above.
+ *
+ * The reason is the difference between a pull and a push: those two are queried on demand, while these are
+ * transition-fired. `onOutboxStatus` fires on the empty ↔ non-empty transitions (delivering the current
+ * state on subscribe), and `onEventLaneReport` is EPHEMERAL — a verdict nobody was subscribed for is gone,
+ * because once the server has ruled on a row the Outbox no longer holds it. Subscribing only while the
+ * drawer is open would therefore miss exactly the events worth seeing.
+ *
+ * Both refuse on a client with no Event lane (a non-canonical write URL), so the subscribe is guarded and
+ * the readout simply stays at its defaults there.
+ */
+function useEventLane(): { outbox: OutboxStatus | null; reports: EventLaneReport[] } {
+  const client = useSyncClient();
+  const [outbox, setOutbox] = useState<OutboxStatus | null>(null);
+  const [reports, setReports] = useState<EventLaneReport[]>([]);
+  useEffect(() => {
+    let unsubscribeStatus: (() => void) | undefined;
+    let unsubscribeReport: (() => void) | undefined;
+    try {
+      unsubscribeStatus = client.onOutboxStatus(setOutbox);
+      unsubscribeReport = client.onEventLaneReport((report) => {
+        // Newest first, bounded: this is a glance, not a log. The library still warn-logs every report.
+        setReports((previous) => [report, ...previous].slice(0, 5));
+      });
+    } catch {
+      // No Event lane on this client — nothing to show, and nothing to clean up.
+    }
+    return () => {
+      unsubscribeStatus?.();
+      unsubscribeReport?.();
+    };
+  }, [client]);
+  return { outbox, reports };
+}
+
 // Active entries first (busiest by subscriber count), then retained zero-subscriber ones — so the
 // switch-back grace windows sink to the bottom of the panel.
 function sortLiveQueries(entries: readonly LiveQueryDiagnostics[]): LiveQueryDiagnostics[] {
@@ -109,6 +152,25 @@ function sortLiveQueries(entries: readonly LiveQueryDiagnostics[]): LiveQueryDia
     if (a.retained !== b.retained) return a.retained ? 1 : -1;
     return b.subscriberCount - a.subscriberCount;
   });
+}
+
+/**
+ * One flush pass's outcome as a single line. Terminal verdicts (`refused`/`rejected`) mean the row was
+ * deleted on the server's say-so; `deferred` means the server does not know that Event stream YET (ordinary
+ * rollout skew) and the rows stayed put; a backoff transition is the lane's batch-level retry state.
+ */
+function describeEventReport(report: EventLaneReport): string {
+  const parts: string[] = [];
+  for (const verdict of report.terminal) parts.push(`${verdict.status} ${verdict.stream}`);
+  if (report.deferred.length > 0) parts.push(`deferred ×${report.deferred.length}`);
+  if (report.backoff != null) {
+    parts.push(
+      report.backoff.state === "entered"
+        ? `backoff ${Math.round((report.backoff.retryInMs ?? 0) / 1000)}s`
+        : "backoff cleared",
+    );
+  }
+  return parts.join(" · ") || "flush pass";
 }
 
 function shortKey(entityKey: Record<string, string>): string {
@@ -167,6 +229,7 @@ export function SyncInspector() {
   const bootReport = useBootReport();
   const journal = useJournal(open);
   const liveQueries = sortLiveQueries(useLiveQueries(open));
+  const { outbox, reports: eventReports } = useEventLane();
   // Below `sm` the drawer takes the whole screen (docs/mobile.md) — a 440px panel on a 360px phone would
   // otherwise be a sliver of page behind it. Width, not touch capability, is the right question here.
   const narrow = useMediaQuery("(max-width: 48em)", false, { getInitialValueInEffect: false });
@@ -311,6 +374,34 @@ export function SyncInspector() {
                 </Table.Tbody>
               </Table>
             </ScrollArea.Autosize>
+          )}
+
+          {/*
+            Event lane (ADR-0053): the board's OTHER lane, deliberately shown beside the mutation journal
+            so the contrast is on one screen. A journal row converges (flush → ack → echo → cleared); an
+            Outbox row is fire-and-forget (flushed, verdicted, deleted — nothing comes back). The drain
+            signal is a boolean by design: a count that only updated on transitions would be stale by
+            construction, and the Outbox table itself answers "how many".
+          */}
+          <Text size="sm" fw={600}>
+            Event lane
+          </Text>
+          <Group gap="xs">
+            <Badge color={outbox == null ? "gray" : outbox.empty ? "teal" : "yellow"} variant="light">
+              {outbox == null ? "Outbox —" : outbox.empty ? "Outbox drained" : "Outbox staging"}
+            </Badge>
+            <Text size="xs" c="dimmed">
+              Opening an Issue appends a `board_issue_viewed` event.
+            </Text>
+          </Group>
+          {eventReports.length > 0 && (
+            <Stack gap={2}>
+              {eventReports.map((report, index) => (
+                <Text key={index} size="xs" ff="monospace" c="dimmed">
+                  {describeEventReport(report)}
+                </Text>
+              ))}
+            </Stack>
           )}
 
           {/*

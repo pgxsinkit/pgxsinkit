@@ -114,6 +114,7 @@
       "dependencies": {
         "@pgxsinkit/contracts": "workspace:*",
         "drizzle-orm": "1.0.0-rc.4",
+        "zod": "4.4.3",
       },
     },
     "packages/client": {

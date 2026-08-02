@@ -24,3 +24,16 @@ entrypoint = "./functions-dist/board-write/index.js"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions-dist/board-sync/index.js"
+
+# The Event lane's serverless drain (pgxsinkit ADR-0053, amendment 2026-08-02). Cloud-only: nothing here can
+# host the long-lived consumer runner the local stack uses, so a Supabase Cron schedule (set up by
+# `bun run board:cloud:cron`) calls this every 10s, and board-write nudges it on enqueue for latency.
+#
+# verify_jwt = false for a DIFFERENT reason than its siblings: they self-verify a GoTrue session token,
+# whereas this endpoint's callers are machines — pg_cron's net.http_post and board-write's own worker — that
+# have no session at all. Its gate is a constant-time compare of the BOARD_EVENTS_DRAIN_SECRET header, which
+# the function enforces itself (it refuses to start without the secret).
+[functions.board-events-drain]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions-dist/board-events-drain/index.js"

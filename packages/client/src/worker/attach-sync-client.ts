@@ -27,6 +27,7 @@ import { StorageDeclarationRefusedError } from "@pgxsinkit/contracts";
 
 import type { BootReport } from "../boot-report";
 import { syncDebug } from "../debug";
+import type { EventAppendResult, EventLaneReport, OutboxStatus } from "../event-lane";
 import type { DataExportOptions, DataExportResult } from "../export-data";
 import type { DiagnosticExportOptions, DiagnosticExportResult } from "../export-dump";
 import type { StoreExportOptions, StoreExportResult } from "../export-store";
@@ -575,6 +576,12 @@ const MUTATION_RPC_OPS: ReadonlySet<RpcOp> = new Set<RpcOp>([
   "discardQuarantined",
   "desync",
   "discardEphemeral",
+  // The Event lane's two write-capable ops (ADR-0053). `appendEvent` STAGES a durable row, so a lost
+  // response is genuinely `"unknown"` — a blind repeat would stamp a FRESH `eventId` and append a second
+  // event (the server's dedupe keys on the id we never learned). `flushEvents` settles verdicts into the
+  // Outbox, so its outcome is likewise unknown on a lost response.
+  "appendEvent",
+  "flushEvents",
   // `rawExec` is WRITE-CAPABLE (its docstring: any write it issues stays local and will NOT converge), so a
   // dispatched rawExec with a lost response is `"unknown"` — retrying could double-apply a local write.
   "rawExec",
@@ -1095,6 +1102,13 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   // `live-hydrated` on the same port as the diff stream, strictly after the catch-up rows — so
   // resolution here guarantees the rows have already been applied by the materializer.
   const hydratedPending = new Map<string, () => void>();
+  // The Event lane's two tab-side subscriber sets (ADR-0053 decision 2). The worker holds ONE Outbox and
+  // broadcasts its transitions/reports; each tab fans them out to its own observers. `lastOutboxStatus`
+  // caches the most recent broadcast so a subscriber arriving between transitions is served without a
+  // round trip (a tab that has seen NO broadcast pulls the current state instead).
+  const outboxStatusListeners = new Set<(status: OutboxStatus) => void>();
+  const eventLaneReportListeners = new Set<(report: EventLaneReport) => void>();
+  let lastOutboxStatus: OutboxStatus | null = null;
   // Set once this tab detaches (explicit `stop()` OR a terminal `pagehide`). Guards NEW operations (they
   // reject at once) and lets `detachFromWorker` settle every outstanding promise — the port listener is torn
   // down on detach, so an unsettled `rpc`/`live-initial` waiter would otherwise hang forever (ADR-0040 P2).
@@ -1186,6 +1200,27 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
       case "reject":
         options.onReject?.(event.details as MutationDetail[]);
         break;
+      case "outbox-status": {
+        // The drain signal's transition push (ADR-0053 decision 2), fanned out to this tab's observers and
+        // cached so a later subscriber is served without a pull.
+        const status = event.status as OutboxStatus;
+        lastOutboxStatus = status;
+        for (const listener of outboxStatusListeners) listener(status);
+        break;
+      }
+      case "event-lane-report": {
+        const report = event.report as EventLaneReport;
+        if (eventLaneReportListeners.size === 0) {
+          // The default warn lives HERE, not in the worker: the engine always has the bridge as a
+          // subscriber, and a SharedWorker's console is invisible anyway. Same `onDeadLetter` rule — a
+          // terminal verdict must never be silent, because once the row is deleted the Outbox cannot
+          // answer for it.
+          console.warn("pgxsinkit: event-lane report (no `onEventLaneReport` subscriber)", report);
+          break;
+        }
+        for (const listener of eventLaneReportListeners) listener(report);
+        break;
+      }
       case "schema-change":
         options.onSchemaChange?.(event.event as LocalStoreVersionEvent);
         break;
@@ -2226,7 +2261,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
       const peers = await queryDestroyPeers();
       if (peers > 1) throw new StoreDestroyRefusedError(peers);
       if (!destroyOptions?.force) {
-        const { mutation } = await client.diagnostics();
+        const { mutation, outbox } = await client.diagnostics();
         const owed =
           mutation.pendingCount +
           mutation.sendingCount +
@@ -2236,6 +2271,16 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
         if (owed > 0) {
           throw new Error(
             `destroy() refused: ${owed} mutation(s) still owed to the server. Flush them first or call destroy({ force: true }).`,
+          );
+        }
+        // ADR-0053 decision 8, the Event lane's half of the same refusal. It rides the diagnostics round
+        // trip already taken above rather than a second one: the tab has no local Outbox (exactly as it has
+        // no local journal), and a destroy must not add a network-shaped hop it can avoid. Absent `outbox`
+        // means the engine has no Event lane, which is not a reason to block a destroy.
+        if (outbox?.empty === false) {
+          throw new Error(
+            "destroy() refused: the Outbox still holds staged event(s) awaiting a server verdict. " +
+              "Flush them first (`flushEvents()`) or call destroy({ force: true }).",
           );
         }
       }
@@ -2253,6 +2298,40 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
       await runStoreDestruction(effects);
     },
     dropReadCache: notSupported("client.dropReadCache"),
+    // The Event lane (ADR-0053) over the bridge. `appendEvent` is ONE round trip — the validation, the
+    // stamps, and the durable insert all run on the worker's engine, so both client forms share one
+    // implementation and one Outbox; a refusal rebuilds tab-side as the same name-tagged error.
+    appendEvent: (stream, payload) => rpc<EventAppendResult>("appendEvent", [stream, payload]),
+    flushEvents: () => rpc<void>("flushEvents", []),
+    outboxStatus: () => rpc<OutboxStatus>("outboxStatus", []),
+    onOutboxStatus: (listener) => {
+      outboxStatusListeners.add(listener);
+      // Current state on subscribe, matching the in-process contract. The engine broadcasts TRANSITIONS
+      // only, so a tab that attached after the last one has nothing to fold — pull it (the `bootReport`
+      // pull/push pattern). A cached broadcast, when we have one, answers synchronously-enough without a
+      // round trip. A failed pull (detached, or a lane-less engine) leaves the subscription silent rather
+      // than throwing at an observer.
+      if (lastOutboxStatus != null) {
+        listener(lastOutboxStatus);
+      } else {
+        void client
+          .outboxStatus()
+          .then((status) => {
+            lastOutboxStatus ??= status;
+            if (outboxStatusListeners.has(listener)) listener(status);
+          })
+          .catch(() => undefined);
+      }
+      return () => {
+        outboxStatusListeners.delete(listener);
+      };
+    },
+    onEventLaneReport: (listener) => {
+      eventLaneReportListeners.add(listener);
+      return () => {
+        eventLaneReportListeners.delete(listener);
+      };
+    },
     flush: (table) => rpc<void>("flush", [table]),
     reconcile: (table) => rpc<void>("reconcile", [table]),
     retryFailed: (table) => rpc<void>("retryFailed", [table]),
@@ -2275,7 +2354,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     },
     discardConflict: (table, entityKey) => rpc<void>("discardConflict", [table, entityKey]),
     discardQuarantined: (table, entityKey) => rpc<void>("discardQuarantined", [table, entityKey]),
-    diagnostics: (table) => rpc<{ mutation: MutationDiagnostics }>("diagnostics", [table]),
+    diagnostics: (table) => rpc<{ mutation: MutationDiagnostics; outbox?: OutboxStatus }>("diagnostics", [table]),
     // The registry-wide mutation-status API (slice 4) over the SAME factory the in-process client uses,
     // wired to this facade's shared seams: the live-rows bridge (`subscribeLiveRows`) and the one-shot
     // `rawQuery` RPC. No new bridge message — `client.mutations` behaves identically to the in-process client.

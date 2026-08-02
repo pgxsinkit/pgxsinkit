@@ -5,7 +5,9 @@ import { defineConfig } from "drizzle-kit";
 // board registry's server tables (RLS policies travel with them via drizzle `pgPolicy`).
 export default defineConfig({
   dialect: "postgresql",
-  schema: ["./packages/board-schema/src/schema.ts"],
+  // The registry's synced tables, plus the Event lane's server-side archive (event-archive.ts) — a plain
+  // table the consumer runner writes, never a sync entry, so it lives beside the schema rather than in it.
+  schema: ["./packages/board-schema/src/schema.ts", "./packages/board-schema/src/event-archive.ts"],
   out: "./infra/board-drizzle",
   dbCredentials: {
     // Matches the board compose stack (infra/compose/board-compose.yml): the `postgres` role on host

@@ -29,6 +29,7 @@ import {
 import { type ConvergenceTrigger, createIntervalConvergenceTrigger } from "../convergence";
 import { setSyncDebugSink, syncDebug } from "../debug";
 import { describeErrorChain } from "../error-chain";
+import type { EventLaneOptions } from "../event-lane";
 import {
   type ClientPGlite,
   createClientPGlite,
@@ -143,6 +144,17 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
   storePath?: string;
   maxMutationAttempts?: number;
   syncEnabled?: boolean;
+  /**
+   * The **Event lane**'s ingestion endpoint (ADR-0053 decision 3). Omit it and the worker derives it from
+   * {@link batchWriteUrl} (`…/api/mutations` → `…/api/events`). See `createSyncClient`'s `batchEventUrl`.
+   */
+  batchEventUrl?: string;
+  /**
+   * The Event lane's client-level flush policy (ADR-0053): batch caps, the fallback interval, backoff, and
+   * per-Event-stream overrides. A worker-ENTRY option, never an attach option — flush cadence is one
+   * engine-wide policy, and the Outbox it drains is shared by every attached tab.
+   */
+  events?: EventLaneOptions;
   /**
    * How close to expiry (ms) a cached token may be before a read/write that needs it triggers a pull
    * broadcast (ADR-0032 decision 3). Default 30s — comfortably ahead of a long-poll cycle.
@@ -621,6 +633,10 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       ...(options.requestHeaders ? { requestHeaders: options.requestHeaders } : {}),
       ...(options.writeRequestHeaders ? { writeRequestHeaders: options.writeRequestHeaders } : {}),
       ...(options.maxMutationAttempts != null ? { maxMutationAttempts: options.maxMutationAttempts } : {}),
+      // The Event lane (ADR-0053): endpoint + flush policy are worker-entry config, exactly like the write
+      // path's. The Outbox is engine-wide, so one policy governs every attached tab's appends.
+      ...(options.batchEventUrl ? { batchEventUrl: options.batchEventUrl } : {}),
+      ...(options.events ? { events: options.events } : {}),
       onStatusChange: (status) => emitStatus(status),
       onConflict: (details) => broadcastEvent({ kind: "conflict", details }),
       onQuarantine: (details) => broadcastEvent({ kind: "quarantine", details }),
@@ -642,6 +658,25 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   };
 
   const whenBooted = () => bootedPromise;
+
+  // ─── Event-lane broadcast bridge (ADR-0053 decision 2) ───────────────────────────────────────────
+  // ONE Outbox lives in the worker, so the engine's two observation surfaces are subscribed ONCE here and
+  // fanned out to every attached port. The drain signal's push carries only TRANSITIONS (the engine's own
+  // semantics); a tab attaching later folds the current state from the `outboxStatus` pull instead, exactly
+  // as a late attach folds the boot report. Subscribing here also means the ENGINE always has a report
+  // subscriber, so its no-subscriber warn never fires in the worker's invisible console — the tab-side
+  // surface owns that default logging, where a developer can actually see it.
+  const wireEventLaneBroadcast = (booted: SyncClient<TRegistry>): void => {
+    try {
+      booted.onOutboxStatus((status) => broadcastEvent({ kind: "outbox-status", status }));
+      booted.onEventLaneReport((report) => broadcastEvent({ kind: "event-lane-report", report }));
+    } catch (error) {
+      // A client with no Event lane (a non-canonical write URL, or a caller-owned PGlite) refuses these
+      // subscriptions. Nothing to bridge then — the RPCs refuse identically, so the tab still gets the
+      // honest error at its own call site.
+      syncDebug("worker: no Event lane to bridge", { error });
+    }
+  };
 
   // ─── Write / mutation-state RPC dispatch ─────────────────────────────────────────────────────────
   const dispatchRpc = async (active: SyncClient<TRegistry>, op: RpcOp, args: unknown[]): Promise<unknown> => {
@@ -707,6 +742,18 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         return active.desync(args[0] as TableKey);
       case "discardEphemeral":
         return active.discardEphemeral(args[0] as TableKey);
+      case "appendEvent":
+        // The Event lane (ADR-0053 decision 2) in ONE round trip: validation (the registered zod schema +
+        // the payload-size cap), the uuid/`occurredAtUs` stamps, and the durable Outbox insert all happen
+        // HERE, on the engine that owns the store — so the attach client and the in-process client share one
+        // implementation. A refusal rejects the RPC and rebuilds tab-side as the same name-tagged error.
+        return active.appendEvent(args[0] as string, args[1]);
+      case "flushEvents":
+        return active.flushEvents();
+      case "outboxStatus":
+        // The drain signal's PULL: a tab attaching after the engine's last transition has no broadcast to
+        // fold, so its first `onOutboxStatus` subscriber is served from this (the `bootReport` pattern).
+        return active.outboxStatus();
       case "ensureSynced":
         // Lazy activation (ADR-0021) on the worker's real client. Engine-wide but additive/idempotent — a tab
         // activating a group another tab already started is a no-op, so no cross-tab revert hazard (cf. desync).
@@ -1152,6 +1199,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
             // and fold the current set into every subsequent ack for late attachers.
             if (!milestonesWired) {
               milestonesWired = true;
+              wireEventLaneBroadcast(booted);
               void booted.writeReady.then(
                 () => markMilestone("writeReady"),
                 (error: unknown) => failMilestone("writeReady", error),

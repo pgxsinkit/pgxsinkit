@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "bun build ./src/runtime/bun.ts --target=bun --outfile dist/server.js",
+    "consumer": "bun --env-file=../../.env src/runtime/bun-consumer.ts",
     "dev": "bun --env-file=../../.env --hot src/runtime/bun.ts",
     "test": "bun test src"
   },

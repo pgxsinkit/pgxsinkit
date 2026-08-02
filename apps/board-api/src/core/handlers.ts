@@ -2,7 +2,7 @@ import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 
 import { boardSyncRegistry } from "@pgxsinkit/board-schema";
 import type { JwtClaims, RegistryRelations } from "@pgxsinkit/contracts";
-import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
+import { createSyncServer, proxyElectricShapeRequest, type EventsEnqueuedHook } from "@pgxsinkit/server";
 
 import { stripFunctionPrefix } from "./routing";
 
@@ -17,6 +17,12 @@ export interface BoardHandlerOptions {
 
 export interface BoardWriteHandlerOptions extends BoardHandlerOptions {
   db: BoardDb;
+  /**
+   * The Event lane's ingest-side nudge (pgxsinkit ADR-0053, amendment 2026-08-02). Wired only on the cloud
+   * stack, where the drain is a scheduled function rather than a long-lived process; see
+   * `core/events-drain.ts`. Absent locally, where the runner polls anyway.
+   */
+  onEventsEnqueued?: EventsEnqueuedHook;
 }
 
 export interface BoardSyncHandlerOptions extends BoardHandlerOptions {
@@ -34,6 +40,7 @@ export function createBoardWriteHandler(options: BoardWriteHandlerOptions): Fetc
     },
     logTimings: true,
     allowedOrigins: options.allowedOrigins,
+    ...(options.onEventsEnqueued ? { onEventsEnqueued: options.onEventsEnqueued } : {}),
   });
 
   return (request) => server.fetch(stripFunctionPrefix(request, "board-write"));

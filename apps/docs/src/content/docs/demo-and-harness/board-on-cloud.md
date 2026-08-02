@@ -23,12 +23,12 @@ For a public, always-on, browser-ready instance of this same setup — served at
 #   • create a Supabase project          • create an Electric Cloud source on its database
 cp board.cloud.env.example board.cloud.env   # fill in your project + Electric Cloud values
 
-bun run board:cloud:deploy   # migrate → set the Electric secret → deploy the two edge functions → seed
+bun run board:cloud:deploy   # migrate → secrets → deploy the three edge functions → cron → seed
 bun run dev:board            # local Vite, pointed at the cloud backend
 ```
 
 `board:cloud:deploy` is a thin wrapper over the repeatable steps; each is also its own
-`board:cloud:migrate` / `:secrets` / `:functions` / `:seed` script.
+`board:cloud:migrate` / `:secrets` / `:functions` / `:cron` / `:seed` script.
 
 Use `bun run board:cloud:preview` to build the board with the cloud browser configuration and serve the
 compiled artifact locally at `http://localhost:5173`. `board:cloud:dev` remains the source-mode Vite server.
@@ -51,6 +51,13 @@ separate.
   [ADR-0008](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0008-board-on-managed-baas.md).
 - **The client sends its publishable key** via `@pgxsinkit/client`'s `requestHeaders` option, alongside
   the per-request `Authorization`.
+- **The Event lane drains through a third function on this stack.** Locally the board runs the toolkit's
+  long-lived consumer runner (`bun run dev:board:consumer`); managed Supabase has no process to host one, so
+  the cloud deploy adds `board-events-drain` — an edge function that runs one bounded
+  [`drainOnce()`](/start/deploying-the-server/) pass per invocation. A **Supabase Cron schedule (every 10s)
+  is the delivery guarantee**, and `board-write` **nudges** the function on enqueue so a click archives
+  immediately; a lost nudge costs latency only. Its callers are machines with no session, so the gate is a
+  shared secret (`BOARD_EVENTS_DRAIN_SECRET`) compared in constant time — set it in `board.cloud.env`.
 
 :::caution[Activate subqueries on your Electric Cloud source]
 The board's membership-scoped shapes use a cross-table `where` subquery — a flagged Electric preview. On

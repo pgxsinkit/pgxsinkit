@@ -290,6 +290,14 @@ export type RpcOp =
   | "discardQuarantined"
   | "desync"
   | "discardEphemeral"
+  // The Event lane (ADR-0053 decision 2). `appendEvent` is ONE round trip carrying `[stream, payload]`: the
+  // registered zod validation, the size cap, and the uuid/timestamp stamps all run WORKER-side on the shared
+  // engine, so both client forms share one implementation and one Outbox. It rejects with the same typed
+  // refusals (name-tagged across the bridge). `flushEvents` is the manual drain; `outboxStatus` is the PULL
+  // that gives a newly-attached tab the drain signal's CURRENT state (the push is the `outbox-status` event).
+  | "appendEvent"
+  | "flushEvents"
+  | "outboxStatus"
   // Lazy activation (ADR-0021): start the consistency groups of the given relation keys on the shared engine.
   // Engine-WIDE but additive/idempotent (unlike `desync`), so it is a plain fire-and-await RPC — carries
   // `[keys]`, resolves once the streams are started (catch-up may still be in flight).
@@ -467,6 +475,12 @@ export type BridgeEvent =
   | { kind: "conflict"; details: unknown }
   | { kind: "quarantine"; details: unknown }
   | { kind: "reject"; details: unknown }
+  // The Event lane's two observation surfaces (ADR-0053 decision 2), broadcast from the engine's single
+  // Outbox to every attached tab. `outbox-status` is the drain signal's TRANSITION push (a tab that attaches
+  // later folds the current state from the `outboxStatus` pull instead); `event-lane-report` carries one
+  // flush pass's terminal verdicts, deferred verdicts, and backoff transitions.
+  | { kind: "outbox-status"; status: unknown }
+  | { kind: "event-lane-report"; report: unknown }
   | { kind: "schema-change"; event: unknown }
   | { kind: "sync-error"; message: string }
   | { kind: "timing"; label: string; ms: number; data?: Record<string, unknown> }

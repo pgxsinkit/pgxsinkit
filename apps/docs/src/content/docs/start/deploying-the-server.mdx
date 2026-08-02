@@ -108,6 +108,105 @@ the server from a **Supabase cookie session** (rather than a bearer token), that
 extension: terminate credentialled CORS at your own gateway and turn the cookie into a bearer token (or
 into `JwtClaims`) inside `resolveAuthClaims`.
 
+### Deploying the event lane
+
+If your registry declares `streams`, you get a second lane to deploy alongside the two above (the whole
+model is in [The event lane](/concepts/event-lane/)). Three concrete obligations:
+
+**1. The ingestion route mounts itself.** `createSyncServer` registers `POST /api/events` only when the
+registry registers at least one event stream — with no streams the path stays a 404. Nothing is probed at
+startup, so the zero-startup-query posture is unchanged, and because the route is a sibling of
+`/api/mutations` under `/api/`, the same function-name path rewrite (step 1 above) serves it. Two options are
+yours:
+
+```ts
+createSyncServer({
+  registry,
+  db,
+  resolveAuthClaims,
+  // Consent / entitlement refusal, keyed by stream name. ABSENT = every well-formed event is allowed.
+  // Called per event, after its payload validated and its identity resolved, before anything is enqueued;
+  // a refusal is a per-event `refused` verdict. A gate that THROWS fails the whole batch retryably —
+  // a gate that cannot decide is never read as "allow".
+  eventGate: ({ stream, identity }) => allowed(stream, identity["viewerId"]),
+  // Defaults to the shipped pgmq backend over this server's own `db`, which is what lets an enqueue join
+  // the endpoint's transaction. Override for another backend, or a fake in tests.
+  eventQueue: createPgmqEventQueue({ db }),
+});
+```
+
+**2. The queues are deploy-time DDL.** Generate the migration and apply it through your normal flow — never
+at runtime, because the endpoint may enqueue long before any consumer runner first starts:
+
+```bash
+bun run pgxsinkit-generate --events --registry ./sync-registry.ts --export registry \
+  --project-dir ./db --config drizzle.config.ts --name event_lane_artifact
+```
+
+It lands in its own migration folder and carries a fingerprint of the registry's stream set. Add
+`--events --check` to CI beside the apply-function check: adding or removing a stream without regenerating
+then fails before deploy, instead of at the first enqueue onto a queue that does not exist.
+
+**3. The consumer runner is a long-lived process, not a function.** `defineEventConsumer` returns a
+`start()`/`stop()` handle your app runs in its own Bun process — deliberately apart from the serverless
+posture the routes above run under, because it polls. There is no CLI entrypoint and no signal handling
+inside it; wire `stop()` (graceful: no new reads, in-flight callbacks awaited) from wherever you already
+handle shutdown. Size `visibilityTimeoutSeconds` (default 60) above your callback's worst case: it is both
+the processing budget and the redelivery delay.
+
+#### No process to host it? Drain on a schedule instead
+
+Some platforms give you no long-lived compute at all — a managed backend whose only server-side unit is a
+per-request function. There the runner has nowhere to live, and the queue would simply never drain. The
+**same handle** answers a second, bounded mode for exactly that:
+
+```ts
+// Inside your scheduled (or nudged) function. Construction is query-free, so building the consumer
+// per invocation costs nothing — and the handle is one-way, so each invocation builds its own.
+const consumer = defineEventConsumer({ registry, queue: createPgmqEventQueue({ db }), callback });
+const { delivered, deadLettered, empty } = await consumer.drainOnce({ budgetMs: 20_000 });
+```
+
+One pass reads → delivers → acks across every configured stream until they all read **empty** or the
+**wall-clock budget** runs out. Everything else is identical to the loop mode — same delivery path, same
+lease renewal, same retry, same dead-lettering — because pacing was always internal.
+
+- **Set `budgetMs` under your platform's invocation cap, with head-room for one callback.** The budget is
+  checked _between_ sub-batches and never inside one: a callback already running is awaited and acked as
+  normal, so a pass can overrun by that much.
+- **`empty: false` means "there is more"** — the budget cut the pass short, or a read faulted. A scheduler
+  reading that can invoke again immediately instead of waiting out its period.
+- **Overlapping invocations are safe.** Two functions draining the same queue are arbitrated by the
+  visibility timeout, exactly as two long-lived runners would be. (Two passes on _one_ handle are not: a
+  `drainOnce` beside a live `start()`, beside another pass, or after `stop()`, throws.)
+- **A sub-batch whose callback throws near the budget edge is not lost.** It is left unacked, its lease
+  lapses, and the next pass redelivers it — at-least-once, working as designed.
+
+Pair the schedule with the ingest-side nudge so an interactive append does not wait for the next tick:
+
+```ts
+createSyncServer({
+  registry,
+  db,
+  // Fired after a request ENQUEUED something, with its deduplicated stream names. Fire-and-forget: the
+  // library owns no transport, the throw is caught and warn-logged, and the response is never affected.
+  onEventsEnqueued: ({ streams }) => void fetch(drainUrl, { method: "POST", headers: drainAuth(streams) }),
+});
+```
+
+<Aside type="note" title="The schedule is the guarantee; the nudge is only latency">
+  Wire both, and lean on the schedule. A nudge can be lost, refused, or fired at a cold function — all of which cost
+  nothing but time, because the next sweep drains the queue anyway. Do not build a design where a missed nudge means a
+  missed event. Keep the long-lived runner wherever you _can_ run one: it remains the primary mode.
+</Aside>
+
+<Aside type="caution" title="The consumer callback must be idempotent">
+  Delivery is at-least-once. Dedupe on the library-stamped `eventId` against your own durable store — an `INSERT … ON
+  CONFLICT (event_id) DO NOTHING` composes at-least-once delivery into effectively-exactly-once handling. Events arrive
+  in append order *within* one delivered sub-batch and in no promised order across sub-batches, so re-sort from your
+  archive on `occurredAtUs` if you need temporal order.
+</Aside>
+
 ### The gateway must speak HTTP/2 — one long-poll connection per shape
 
 Electric's client holds **one live long-poll connection open per synced shape**. A client that

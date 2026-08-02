@@ -4,6 +4,7 @@ import { useMemo } from "react";
 
 import { useAuth } from "../auth/auth";
 import { useIssueActions } from "../board/use-issue-actions";
+import { useIssueViewEvents } from "../board/use-issue-view-events";
 import { TeamPageShell } from "../components/team-page-shell";
 import {
   buildAssignableByTeam,
@@ -24,6 +25,7 @@ export function TeamBoardRoute() {
   const { memberships } = useTeamMemberships();
   const { teams } = useTeams();
   const actions = useIssueActions();
+  const onIssueOpened = useIssueViewEvents();
   const { convergence: convergenceById } = useIssueConvergence();
   const { serverValues: serverValueById } = useServerIssueValues();
 
@@ -47,6 +49,7 @@ export function TeamBoardRoute() {
           convergenceById={convergenceById}
           serverValueById={serverValueById}
           moveTeams={moveTeams}
+          onIssueOpened={onIssueOpened}
         />
       )}
     </TeamPageShell>

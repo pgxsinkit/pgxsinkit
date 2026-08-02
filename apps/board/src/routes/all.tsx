@@ -4,6 +4,7 @@ import { useEffect, useMemo } from "react";
 
 import { useAuth } from "../auth/auth";
 import { useIssueActions } from "../board/use-issue-actions";
+import { useIssueViewEvents } from "../board/use-issue-view-events";
 import {
   buildAssignableByTeam,
   useAllIssues,
@@ -28,6 +29,7 @@ export function AllRoute() {
   const { memberships } = useTeamMemberships();
   const { teams } = useTeams();
   const actions = useIssueActions();
+  const onIssueOpened = useIssueViewEvents();
   const { convergence: convergenceById } = useIssueConvergence();
   const { serverValues: serverValueById } = useServerIssueValues();
 
@@ -60,6 +62,7 @@ export function AllRoute() {
           serverValueById={serverValueById}
           teamNameById={teamNameById}
           moveTeams={teams}
+          onIssueOpened={onIssueOpened}
         />
       )}
     </Stack>

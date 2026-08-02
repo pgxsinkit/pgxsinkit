@@ -24,4 +24,8 @@ achieves, and when to use it. And [Worker mode](/concepts/worker-mode/) covers t
 which tabs attach through a SharedWorker and capability placement chooses a Safari SW-direct or elected
 Chromium/Firefox engine (`defineSyncWorker` / `attachSyncClient`) instead of the calling thread.
 
+Not everything is sync state. [The event lane](/concepts/event-lane/) is the second lane beside the sync
+rail, for high-volume append-only facts that nothing ever reads back down: `appendEvent` into a local
+Outbox, flushed to an ingestion endpoint, delivered through a queue to a consumer callback you write.
+
 The canonical vocabulary for all of these lives in the repository's `CONTEXT.md`.
