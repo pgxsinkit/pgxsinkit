@@ -40,6 +40,16 @@ function. See
 - **Synced tables are replication targets.** Application code must never mutate a synced table
   directly — those rows are owned by the read path. All writes go through the mutation runtime.
 
+## Not everything is sync state
+
+The two paths above are the **sync rail**, and they are what this page is about. Beside them sits a third,
+non-sync lane for data that was never sync state: high-volume, append-only client facts (view logs,
+interaction events) that are never edited, never conflict, and are never read back down. Those go on
+[the event lane](/concepts/event-lane/) — an append into a local Outbox, flushed to an ingestion endpoint
+and handed to a queue and your own consumer callback. It has no overlay, no echo and no conflict
+resolution, so the asymmetry above simply does not arise for it. Everything that _is_ sync state still
+obeys the one rule.
+
 ## The one rule
 
 > Read from PGlite. Write through the write route. Never write to a synced table directly, and never

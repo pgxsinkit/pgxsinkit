@@ -112,6 +112,11 @@ issue_viewed: defineEventStream({
 It is the same obligation `rowFilter.revision` carries for a `customWhere` closure, for the same reason: a
 hash can only see what it can serialize.
 
+The lock diff grades the three stream-level changes differently: **adding** a stream is `compatible` (it
+provisions a queue and nothing else), **changing** one's payload or identity is `risky` (the change above),
+and **removing** one is `breaking` — clients still holding events for that name get `deferred` verdicts that
+will never clear, so a removal has to outlive every client that could still be appending to it.
+
 ## The Outbox
 
 `client.appendEvent(stream, payload)` validates the payload against the registered schema, stamps an
@@ -124,8 +129,10 @@ await client.appendEvent("issue_viewed", { issueId });
 
 The promise resolves on **durable local enqueue, not on delivery**. Appending never waits for the network,
 and an append made offline survives a reload and drains when connectivity returns. Four failures are
-possible, and all four are call-site bugs that throw synchronously rather than runtime conditions: no
-streams registered, an unknown stream name, a payload the schema refuses, and an oversized payload.
+possible, and all four are call-site bugs rather than runtime conditions: no streams registered, an unknown
+stream name, a payload the schema refuses, and an oversized payload. `appendEvent` is `async`, so each one
+**rejects the returned promise** with a typed error — `await` it (or attach a `.catch`) or the refusal
+surfaces as an unhandled rejection instead of at your call site.
 
 The Outbox's shape is public contract, not an internal detail — get the typed table with
 `getOutboxTable(registry)` — because apps legitimately compose pending events with down-synced aggregates
@@ -153,20 +160,32 @@ drives everything itself.
 
 Every well-formed event comes back with its own verdict:
 
-| Verdict    | Terminal? | What it means                                                            |
-| ---------- | --------- | ------------------------------------------------------------------------ |
-| `acked`    | yes       | Enqueued. The Outbox row is deleted.                                     |
-| `refused`  | yes       | Your server-side gate declined it (consent, entitlement). Row deleted.   |
-| `rejected` | yes       | Schema-invalid or oversized payload for a **known** stream. Row deleted. |
-| `deferred` | **no**    | The server does not (yet) know this stream. The row stays and retries.   |
+| Verdict    | Terminal? | What it means                                                                          |
+| ---------- | --------- | -------------------------------------------------------------------------------------- |
+| `acked`    | yes       | Enqueued. The Outbox row is deleted.                                                   |
+| `refused`  | yes       | Your server-side gate declined it (consent, entitlement). Row deleted.                 |
+| `rejected` | yes       | The server refused this event on a **known** stream (three causes below). Row deleted. |
+| `deferred` | **no**    | The server does not (yet) know this stream. The row stays and retries.                 |
 
 `deferred` is the one to understand. A client deployed ahead of its server is ordinary rollout skew, not a
 bug — deleting those events would be data loss on a completely normal path. So they stay in the Outbox,
 retry with backoff, and drain the moment the server deploy lands. A burst of `deferred` right after a client
 release is the deploy order; a burst that never clears means the server's registry is missing that stream.
 
-`rejected`, on the other hand, should be rare enough to treat as a defect: the library validates at append,
-so a rejected event means a non-library caller or a broken deployment.
+`rejected` has exactly three causes, and each one names itself in the verdict's `reason`:
+
+1. **The payload failed the stream's registered schema** — or the schema's parse produced something JSON
+   cannot carry (a `BigInt`, `undefined`), which is its own reason rather than a size complaint.
+2. **The serialized payload exceeds the 64 KiB per-event limit.**
+3. **A declared identity field could not be stamped** from the verified claims — the claim is absent, or
+   `null`, or an object/array, or an empty/whitespace string. Identity is fail-closed: there is no partial
+   stamp and no empty-string fallback, so the whole event is refused, naming the field and its claim path.
+   A burst of these after an auth change means the issuer stopped minting that claim (or started minting it
+   at a different path), not that the client is malformed.
+
+Causes 1 and 2 should be rare enough to treat as a defect — the library validates both at append, so they
+mean a non-library caller or a broken deployment. Cause 3 the client cannot pre-empt at all: the envelope
+carries no identity, so only the server can discover it.
 
 ```ts
 client.onEventLaneReport((report) => {
@@ -190,6 +209,49 @@ ceiling, honouring `Retry-After`, paused while offline) and auth (refresh once, 
 There is **no attempt cap and no client-side quarantine**. A row leaves the Outbox only on a server-issued
 verdict — that is what at-least-once means on this edge. The Outbox is designed to hold offline weeks, so a
 failing lane presents as a growing Outbox backing off observably, never as silently discarded events.
+
+### Tuning the flush (client config, never the registry)
+
+Cadence and batching live on the client (`createSyncClient` / `defineSyncWorker`), deliberately not on the
+registry: the registry is the contract, and a batch-size tweak must not surface as a registry diff.
+
+```ts
+const client = await createSyncClient({
+  registry,
+  // …
+  events: {
+    batchSize: 200, // default 200, clamped to the wire limit of 1000
+    intervalMs: 5_000, // default: the FALLBACK trigger (appends nudge a pass; boot/reconnect run one)
+    backoff: { baseMs: 1_000, ceilingMs: 300_000 }, // defaults: 1s first retry, 5min ceiling
+    streams: {
+      issue_viewed: { batchSize: 50 }, // fairness: this stream may take at most 50 slots of any batch
+    },
+  },
+});
+```
+
+- **`batchSize`** caps events per flush request; the server enforces the toolkit's 1000-per-batch limit
+  independently, so a higher value is clamped rather than honoured (it would only ever produce `413`s).
+- **`intervalMs`** is the fallback trigger, not the primary one. An append nudges a pass, and boot or
+  reconnect runs one, so the interval only has to catch retries and recovery — hence a deliberately slower
+  default than the convergence driver's.
+- **`backoff`** is jittered exponential (equal jitter around the doubling ceiling, so a recovering fleet does
+  not stampede) and applies both to rows the server `deferred` and to batch-level faults.
+- **A per-stream `batchSize` is a fairness knob, and it is applied in SQL.** One batch is a mixed slice
+  ordered by append sequence across every stream, so without a cap a chatty stream's backlog occupies every
+  slot and a quieter stream stays invisible until that backlog drains. The cap ranks each stream's eligible
+  rows and drops the over-cap ones _before_ the global ordering, so the slots it frees genuinely go to other
+  streams instead of just shrinking the request. A per-stream `backoff` is available for the same reason (a
+  stream mid-rollout may want a shorter retry); an unset bound inherits the lane-wide one.
+
+**Nonsense tuning fails at construction, not at runtime.** Every value is validated when the client is
+built, and every offender is named in one error. That is deliberate: the failure mode of a typo here is
+silence, not an exception — a per-stream `batchSize` of `0` would hold every row of that stream back forever
+while appends kept piling up, with no request and no report to show for it. Counts must be integers ≥ 1, and
+a backoff bound is judged on the **resolved pair**, with defaults (and, per stream, the lane-wide tuning)
+filled in first: `{ baseMs: 600_000 }` on its own is refused, because the omitted ceiling takes the 300,000 ms
+default and every delay would be clamped below the base that was asked for. The error names both numbers and
+where each came from.
 
 ## Consuming: the delivery contract
 

@@ -362,18 +362,19 @@ survives a reload. Two observation surfaces, identical on both client forms:
   Outbox drains, the aggregate is authoritative again. It carries **no count** deliberately (one updated only
   on transitions is stale by construction) — query `getOutboxTable(registry)` when you need one.
 - **`onEventLaneReport(cb)` — the verdicts.** Per flush pass: terminal non-`acked` verdicts, `deferred` ones,
-  and batch-level backoff transitions. `acked` is never reported (a high-volume lane would drown you in its
-  own success). It is **EPHEMERAL** — a durable client-side verdict table would be retention-bearing state for
-  a debugging need — so with **nothing subscribed the library warn-logs each report**. Subscribe for the app's
-  lifetime, not per-screen: once a row is deleted the Outbox cannot answer for it.
+  and batch-level backoff transitions. `acked` is never reported (a high-volume lane would drown you), and it
+  is **EPHEMERAL** — with **nothing subscribed the library warn-logs each report**. Subscribe for the app's
+  lifetime: once a row is deleted the Outbox cannot answer for it.
 
-**Read the verdicts correctly — one of the four is not a failure.** `acked` is enqueued server-side.
-`refused` (your `eventGate` said no) and `rejected` (a schema-invalid or oversized payload for a KNOWN
-stream) are **terminal**: the row is deleted. `refused` is expected, not an error; `rejected` — since the
-library validates at append — in practice means a non-library caller or a broken deployment, so treat it as a
-**bug**. `deferred` is **NOT terminal**: the server does not (yet) know that Event stream — ordinary rollout
-skew — so the rows stay, retry with backoff, and drain once the deploy lands. A burst right after a release
-is the deploy order, not data loss; one that never clears means the server's registry LACKS that stream.
+**Read the verdicts correctly — one of the four is not a failure.** `acked` is enqueued server-side. `refused`
+(your `eventGate` said no) and `rejected` are **terminal**: the row is deleted, and `refused` is expected, not
+an error. `rejected` has THREE causes on a KNOWN stream — a payload the schema refuses (or a parse output JSON
+cannot carry), an oversized payload, and an **identity claim the stream declares that the verified claims
+cannot resolve** (absent/null/object/array/empty — fail-closed, no partial stamp). The first two mean a
+non-library caller or a broken deployment (the library validates at append) — a **bug**; the third means the
+ISSUER stopped minting that claim, or moved its path. `deferred` is **NOT terminal**: the server does not
+(yet) know that stream — rollout skew — so the rows stay, retry with backoff, and drain once the deploy lands.
+A burst after a release is deploy order; one that never clears means the registry LACKS it.
 
 **There is no attempt cap and no client-side quarantine, by design.** Retry has two classes: retryable
 (network, 5xx, 408/425/429 — jittered backoff with a ceiling, honouring `Retry-After`, paused offline) and
@@ -384,13 +385,12 @@ batch: check the `--events` migration is applied (no queue, no enqueue), then DB
 caps are client config (`events`, validated at construction — a bad `batchSize` throws instead of wedging a
 stream), clamped by the contracts limits; `flushEvents()` is the manual hatch without `autoSync`.
 
-**The Outbox's position on every lifecycle surface** (durable owned state, so each one takes one): `destroy()`
-**refuses** while it is non-empty, exactly as on owed mutations — the refusal names which of the two blocked
-it, and `{ force: true }` is the escape hatch. `dropReadCache()` never touches it (not read cache).
-`exportStore()` and `exportDiagnostics()` include it; `exportData()` (synced tables only) excludes it. And
-**restore does NOT quarantine restored Outbox rows** — the deliberate asymmetry with the mutation journal:
-they resume flushing normally, because event delivery is idempotent end-to-end (`eventId` dedupe is the
-design), which mutation replay is not.
+**The Outbox on every lifecycle surface** (durable owned state): `destroy()` **refuses** while it is
+non-empty, exactly as on owed mutations — the refusal names which of the two blocked it, and `{ force: true }`
+is the escape hatch. `dropReadCache()` never touches it (not read cache). `exportStore()` and
+`exportDiagnostics()` include it; `exportData()` (synced tables only) excludes it. And **restore does NOT
+quarantine restored Outbox rows** — the deliberate asymmetry with the mutation journal: they resume flushing
+normally, because event delivery is idempotent end-to-end (`eventId` dedupe), which mutation replay is not.
 
 ## Proxying Electric: force `cache-control: no-store`
 

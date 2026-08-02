@@ -50,8 +50,22 @@ mis-written.
 
 Putting the apply logic in PL/pgSQL was the toolkit's central finding: it minimises round-trips,
 keeps the batch atomic, and lets row-level security and managed-field logic run where the data lives.
-The function is the **mutation applier**; provisioning it is a migration step
-(`bun run sync:function:generate`).
+The function is the **mutation applier**; provisioning it is a migration step you generate from your
+registry with the `pgxsinkit-generate` CLI (`bunx pgxsinkit-generate …`, see
+[Getting started](/start/getting-started/)).
+
+### Who may execute it: deny-by-default
+
+The applier takes the request's claims as an argument and **trusts them** — correct for your server, which
+verified them, and catastrophic for any other caller, who would simply choose its own. So the generated
+migration revokes `EXECUTE` from `PUBLIC` and from the Supabase roles (`anon`, `authenticated`,
+`service_role`) immediately after creating the function, and grants it only to the roles you name with
+`--grant-execute-to`; the default is owner-only. Those statements live **inside the fingerprinted body**, so
+a stale, still-PUBLIC install cannot pass the self-verification, and the grant list has to match in three
+places (generate, CI `--check`, and `applyFunctionGrantExecuteTo`). See
+[ADR-0054](/decisions/) for the rationale, and
+[Deploying the server](/start/deploying-the-server/#the-apply-function-is-deny-by-default--name-your-servers-database-role)
+for the naming and the `42501` failure mode.
 
 The applier **verifies itself on every call** (ADR-0030). The migration stamps it with a fingerprint of
 its own DDL (a `COMMENT ON FUNCTION`); on each apply the server passes the fingerprint it expects for its
@@ -131,6 +145,21 @@ const client = await createSyncClient({
 Because quarantine now has a real rollback, route a **permanent policy denial (e.g. RLS `42501`) to
 `quarantined`** — there is no longer any reason to mis-route it to `conflicted` just to borrow a discard
 affordance. Reserve `conflicted` for genuine stale-write conflicts under `reject-if-stale`.
+
+#### `42501` is two different failures
+
+The same SQLSTATE covers a row-level denial and a function-level one, and they are diagnosed in opposite
+directions:
+
+- **Row-level (RLS): a policy declined this write, for _specific_ rows and this actor** (the message names
+  the table — a row-level-security violation). Other writes succeed. This is the per-mutation denial routed
+  to `quarantined` above.
+- **Function-level (ACL): `permission denied for function pgxsinkit_apply_mutations`, on _every_ write.**
+  Nothing about the row or the actor's claims is involved — the database role your **server** connects as
+  simply may not execute the applier. Fix it by regenerating the migration with `--grant-execute-to <that
+role>` (see [Deploying the server](/start/deploying-the-server/)), never by granting it by hand.
+
+"Some writes are denied" versus "all writes are denied" is the whole discriminator.
 
 ## Blind pessimistic update
 

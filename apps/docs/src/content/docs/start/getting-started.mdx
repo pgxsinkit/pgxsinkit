@@ -20,6 +20,10 @@ This page gets you from zero to a working read + write path. For what each packa
   Without it, sync fails closed (no rows stream). See
   [The Electric subquery requirement](/concepts/electric-subqueries/).
 
+- **The `pgmq` extension**, but only if you use the [event lane](/concepts/event-lane/). Its generated
+  migration runs `CREATE EXTENSION IF NOT EXISTS pgmq`, so the extension has to be present in the PostgreSQL
+  image you deploy — Supabase's images ship it; a stock `postgres` image does not. Registries with no
+  `streams` need nothing.
 - **A runtime that serves a web `fetch` handler** for the pgxsinkit server — Bun, Deno, **Supabase Edge
   Functions**, Cloudflare Workers, etc. The server core is runtime-neutral and framework-free
   (web-standard `Request`/`Response`, with the DB client injected); only the optional `server.start()`
@@ -360,6 +364,15 @@ export const learnerRegistry = defineSyncRegistry({ posting_restriction: asReado
 assertReadContractPreserved(authoritativeRegistry, teacherRegistry, { label: "teacher" });
 assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "learner" });
 ```
+
+<Aside type="caution" title="A projection that must append events has to re-declare its streams">
+  The bare-registry-map overload used above (`defineSyncRegistry({ posting_restriction: … })`) has nowhere to declare
+  event streams, and a registry's streams ride a **non-enumerable symbol** — so spreading a table map (or a registry)
+  into a projection carries the tables and silently leaves the streams behind, and that client's `appendEvent` throws
+  "no Event streams registered". If a projection is meant to serve the event lane, build it with the definition-object
+  form and re-declare them: `defineSyncRegistry({ tables: { … }, streams })`. Re-declaring is cheap and safe — a stream
+  provisions a queue and touches no synced table, no local schema and no apply function.
+</Aside>
 
 <Aside type="note" title="Generate the server from the authoritative registry">
   The apply function emits a write branch for **every** table and stamps managed fields / reject-if-stale from the

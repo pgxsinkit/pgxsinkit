@@ -411,7 +411,7 @@ that engine — and its attempt — alive.
 The overlap is measurable: an adopted store reports its pre-open in the `BootReport` `provision` block —
 `provision.initdbMs` is the create cost that ran off-thread before this boot, and
 `provision.provisionedMsBeforeBoot` is how long the store sat ready before the attach claimed it. See
-[The structured BootReport](/start/operating-in-production/#the-structured-bootreport-measure-before-you-optimize).
+[The structured BootReport](/start/operating-in-production/#the-structured-bootreport--measure-before-you-optimize).
 
 ## Debugging a worker: the forwarded rail
 

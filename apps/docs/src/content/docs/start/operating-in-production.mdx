@@ -217,7 +217,10 @@ How it recovers depends on _why_ it degraded:
 ## Watching the event lane's Outbox
 
 If your app appends events (the model is in [The event lane](/concepts/event-lane/)), the client gives you
-two surfaces to operate it with, and neither is optional reading before you ship one.
+two surfaces to operate it with, and neither is optional reading before you ship one. The knobs on the other
+side of them — batch caps, the fallback interval, backoff bounds, and the per-stream fairness cap — are the
+client's `events` option, documented under
+[Tuning the flush](/concepts/event-lane/#tuning-the-flush-client-config-never-the-registry).
 
 **The drain signal** is `client.onOutboxStatus(({ empty }) => …)` — the empty ↔ non-empty transitions, with
 the current state delivered on subscribe (`await client.outboxStatus()` is the one-shot pull). Use it to

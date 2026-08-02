@@ -3,13 +3,14 @@ name: core
 description: >-
   Load when writing or reviewing code that uses @pgxsinkit/* (client, server, contracts, react) — the
   offline-first sync toolkit for the Postgres -> ElectricSQL -> PGlite read path and the client -> write
-  API -> Postgres write path. Teaches the mental model the source does not make obvious: the two paths
-  are separate and asymmetric, there is exactly one write path (an in-database apply function, not
-  per-table CRUD), the Electric subquery flag is mandatory and fails closed, local PGlite schema is not
-  full DDL parity, writable tables must declare a conflict policy plus managed fields, ordinary writes
-  self-activate their lazy group, and authenticated groups must not activate before claims exist. Load
-  this before wiring sync, defining a registry, or debugging "writes don't appear" / "an acked write stays
-  pending" / "no rows stream" / "a removed member still sees rows".
+  API -> Postgres write path. Teaches the mental model the source does not make obvious: the two sync
+  paths are separate and asymmetric, there is exactly one write path (an in-database apply function, not
+  per-table CRUD), a third non-sync Event lane carries append-only facts, the Electric subquery flag is
+  mandatory and fails closed, local PGlite schema is not full DDL parity, writable tables must declare a
+  conflict policy plus managed fields, ordinary writes self-activate their lazy group, and authenticated
+  groups must not activate before claims exist. Load this before wiring sync, defining a registry, adding
+  an Event stream, or debugging "writes don't appear" / "an acked write stays pending" / "no rows stream"
+  / "a removed member still sees rows".
 metadata:
   type: core
   library: "@pgxsinkit/client"
@@ -24,12 +25,16 @@ are the product: `contracts` (the registry + shared types), `server` (the write 
 proxy), `client` (local PGlite store + mutation runtime + convergence), and `react` (hooks). A consumer
 installs these and wires them; they do not "run pgxsinkit".
 
-## The one idea everything else follows from: two separate, asymmetric paths
+## The one idea everything else follows from: two separate, asymmetric sync paths
 
 - **Read path:** Postgres → ElectricSQL → a server-side shape **proxy** (ownership-filtered) → local
   **PGlite**. Reads are served from PGlite.
 - **Write path:** client stages an optimistic local write → flushes a batch to the **write API** → one
   **in-database apply function** (`pgxsinkit_apply_mutations`) applies it under RLS → Postgres.
+
+Those two are the **sync rail**, and almost everything below is about it. Beside them sits one more,
+deliberately non-sync lane — the **Event lane** — for data that was never sync state (see below). So the
+accurate count is two sync paths plus one event lane, not three paths.
 
 **Writes do not travel back to the writer through Electric.** The loop closes through Postgres: your
 write lands in Postgres, then streams back to _every_ subscriber (including you) as a normal Electric
@@ -53,6 +58,34 @@ base version); `updateBlind` skips that — it plans a **journal row only**, wri
 acked row **retires without a synced echo** (nothing local ever converges for it). It is **pessimistic-only**
 and throws at enqueue on an optimistic route. Never seed a phantom base row to satisfy `update` for an
 invisible target — that row + its overlay would linger forever behind the echo barrier; use `updateBlind`.
+
+## The third lane: Event streams are NOT the write path
+
+High-volume, append-only client facts — "viewed this", interaction logs, review grades — are never edited,
+never conflict, and are never read back down. They do not belong on a synced table (every client would
+re-download its own log, and the conflict/overlay machinery would tax rows that cannot conflict). They go on
+the **Event lane**, registered on the SAME registry under `streams` (the record key IS the stream name):
+
+```
+appendEvent() → Outbox (durable, local-only) → flush → POST /api/events → queue → your consumer callback
+```
+
+- **It is not a mutation.** No overlay, no echo, no conflict policy, no convergence — nothing comes back
+  down, and `appendEvent` resolves on **durable local enqueue, not on delivery** (it is `async`; its four
+  refusals — no streams registered, unknown stream, schema-invalid payload, oversized payload — REJECT the
+  promise, so `await`/`catch` it). Delivery is **at-least-once**: the server-side callback must be
+  idempotent, and deduping on the library-stamped `eventId` composes that to effectively-exactly-once.
+- **Choose it over a writable table when the data is queue-shaped**: append-only, no client ever reads it
+  back, no per-row conflict, and volume high enough that syncing it would be self-inflicted. Choose a
+  `readwrite` table the moment anything needs to edit the row, resolve a conflict, show it optimistically,
+  or read it on another client. "Write-only table" (a `readwrite` entry that never streams) is the write
+  path's answer, not this lane's — that one still applies under RLS and acks per mutation.
+- **Identity is server-stamped from verified claims** (`identity: { viewerId: { claimPath: ["sub"] } }`);
+  the client's envelope carries none, so never put an actor id in the payload. Object payloads must be
+  strict (`z.strictObject`), and a payload schema may evolve only backward-compatibly.
+- The client-side surfaces are `onOutboxStatus` (drain signal) and `onEventLaneReport` (per-pass verdicts:
+  `acked` / `refused` / `rejected` / `deferred`, of which only `deferred` is non-terminal). Flush cadence
+  and batch caps are client config (`events`), never registry.
 
 ## Reading the local store: base table vs overlay view
 
@@ -233,6 +266,11 @@ Backups, the SQL exports, and `restoreFrom` are there too.
 
 - Concepts: the two paths, read path, write path, Electric subqueries, local-schema DDL parity, and
   timestamps (microsecond BIGINT, decimal strings across the boundary).
+- For the Event lane in full — the Outbox, verdicts, backpressure, the delivery contract and the limits —
+  read <https://pgxsinkit.github.io/concepts/event-lane/>, then load the skill for the half you are
+  writing: `operating` (@pgxsinkit/client) for the Outbox surfaces and flush tuning, `deploying`
+  (@pgxsinkit/server) for the ingest route, the pgmq/queue DDL and the consumer runner, and
+  `registry-authoring` (@pgxsinkit/contracts) for declaring a stream.
 - For deployment and runtime/operational behavior (cold starts, convergence cadence, the HTTP/2
   connection budget, the `globalThis.__pgxsinkitDebug` latency instrumentation), load the `operating`
   skill.

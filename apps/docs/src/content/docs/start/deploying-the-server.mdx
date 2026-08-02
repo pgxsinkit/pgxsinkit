@@ -135,6 +135,13 @@ bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
   migration too: it hardens `public.pgxsinkit_clock_us()` the same way, keeping its grants to
   `anon`/`authenticated`/`service_role` (a column DEFAULT calling the clock runs as the writing role).
 
+The failure mode when the grant is missing is loud and total, by design. A server connecting as a role that
+is **neither the function's owner nor named in `--grant-execute-to`** fails **every** write with SQLSTATE
+`42501`, `permission denied for function pgxsinkit_apply_mutations` — not some writes, not some rows, and no
+degraded mode. The fix is never a `GRANT` typed into a psql session — the next regenerate's `DROP FUNCTION`
+resets it. Regenerate the migration with `--grant-execute-to` naming the role your **server** connects as,
+and add that role to the CI `--check` command and to `applyFunctionGrantExecuteTo` in the same change.
+
 pgxsinkit itself needs **no PostgREST**, and leaving it out is good practice — it removes the
 `/rest/v1/rpc/*` surface that would otherwise expose every `public` function over HTTP. Treat that as
 defence in depth, though: the ACL is the control, and it holds whatever your topology looks like.
@@ -166,8 +173,11 @@ createSyncServer({
 });
 ```
 
-**2. The queues are deploy-time DDL.** Generate the migration and apply it through your normal flow — never
-at runtime, because the endpoint may enqueue long before any consumer runner first starts:
+**2. pgmq is a cluster prerequisite, and the queues are deploy-time DDL.** The generated migration begins
+with `CREATE EXTENSION IF NOT EXISTS pgmq`, so the extension must be **available in the PostgreSQL image you
+deploy** (Supabase's images ship it; a stock `postgres` image does not). Generate the migration and apply it
+through your normal flow — never at runtime, because the endpoint may enqueue long before any consumer runner
+first starts:
 
 ```bash
 bun run pgxsinkit-generate --events --registry ./sync-registry.ts --export registry \
@@ -181,9 +191,44 @@ then fails before deploy, instead of at the first enqueue onto a queue that does
 **3. The consumer runner is a long-lived process, not a function.** `defineEventConsumer` returns a
 `start()`/`stop()` handle your app runs in its own Bun process — deliberately apart from the serverless
 posture the routes above run under, because it polls. There is no CLI entrypoint and no signal handling
-inside it; wire `stop()` (graceful: no new reads, in-flight callbacks awaited) from wherever you already
-handle shutdown. Size `visibilityTimeoutSeconds` (default 60) above your callback's worst case: it is both
-the processing budget and the redelivery delay.
+inside it; wire `stop()` from wherever you already handle shutdown.
+
+```ts
+const consumer = defineEventConsumer({
+  registry,
+  queue: createPgmqEventQueue({ db }), // required — the runner is backend-agnostic by construction
+  streams: ["issue_viewed"], // optional: the knob that splits streams across processes (unknown name → throws)
+  callback: async ({ stream, events }) => archive(stream, events),
+  onDeadLetter: (report) => alert(report), // the runner ALSO warn-logs every one, unconditionally
+});
+consumer.start();
+process.on("SIGTERM", () => void consumer.stop());
+```
+
+Its defaults are sized for a small deployment, and each is a knob:
+
+- **`batchSize` (default 10)** — messages one read delivers, each message being one single-stream sub-batch.
+- **`maxAttempts` (default 5)** — deliveries a sub-batch gets before a further callback failure dead-letters
+  it into the queue backend's own archive (requeueing from there is always a deliberate act).
+- **Polling is adaptive and internal**: a non-empty read is followed immediately by another, and consecutive
+  empty reads grow the wait from ~250 ms toward a ~5 s idle ceiling. The floor/ceiling/factor are tuning
+  (`poll`), never contract — the mechanism itself may change.
+- **`concurrency` (default 1, strictly sequential)** — the max callbacks in flight per stream. Values above 1
+  are safe precisely because delivery is at-least-once with no promised order across sub-batches, which is
+  what your idempotent callback already assumes; reads stay serial, only one read's callbacks run in
+  parallel.
+- **`visibilityTimeoutSeconds` (default 60)** is **not** a processing budget. While the runner is working
+  through a read it renews the lease on every unsettled message of that read — the one in flight and the ones
+  queued behind it — at half the window, so a long callback cannot let its own siblings resurface. What the
+  timeout actually sets is the **redelivery delay of a sub-batch whose callback threw** (a throw drops it from
+  renewal at once, and that lapse _is_ the retry pacing) and the **crash-recovery bound** — how long a dead
+  runner's messages stay stuck. So size it above **one** callback's worst case, never the whole batch's; too
+  short redelivers a callback that is merely slower than one renewal interval.
+
+A graceful `stop()` starts no new read and no new callback, but the callbacks already in flight are awaited
+**and keep their leases renewed** until they settle — otherwise every ordinary rollout would hand a second
+runner the very message this one is finishing. The rest of that read (messages no callback had started) is
+released immediately, so those redeliver promptly rather than waiting out the window.
 
 #### No process to host it? Drain on a schedule instead
 
