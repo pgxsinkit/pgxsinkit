@@ -62,6 +62,24 @@ async function peerDepsFromManifests(): Promise<Record<string, string>> {
 }
 
 /**
+ * The workspace's `@electric-sql/pglite` fork alias, applied to the fixture as well.
+ *
+ * The published peer range admits plain upstream — semver ranks a release above any `-pgx`
+ * prerelease — but upstream 0.5.5 restores a saved `undefined` to `process.exitCode`, which is a
+ * no-op under bun. The engine's `proc_exit(99)` boot sentinel therefore survives and a fully
+ * successful `bun smoke.ts` exits 99. The fork carries that fix, plus the transaction-end sync fix
+ * the packages deliberately rely on (docs/runbooks/pglite-fork-override.md), so the fixture must
+ * install the host pgxsinkit actually supports rather than a plain upstream build we know is
+ * broken for bun consumers. Read from the root manifest so the two pins can never drift.
+ */
+async function pgliteForkAlias(): Promise<string | undefined> {
+  const rootManifest = JSON.parse(await readFile(resolve(repoRoot, "package.json"), "utf8")) as {
+    overrides?: Record<string, string>;
+  };
+  return rootManifest.overrides?.["@electric-sql/pglite"];
+}
+
+/**
  * Tooling the downstream consumer itself needs (kept off the peer table — none of this is a peer of
  * the published packages): the Vite production build, the react renderer for the render smoke, and
  * the TypeScript toolchain for the consumer typecheck. react-dom reuses react's peer range so the
@@ -325,6 +343,10 @@ async function main(): Promise<void> {
     for (const [name, tarball] of Object.entries(tarballs)) {
       pkgDeps[name] = `file:${tarball}`;
       overrides[name] = `file:${tarball}`;
+    }
+    const pgliteAlias = await pgliteForkAlias();
+    if (pgliteAlias !== undefined) {
+      overrides["@electric-sql/pglite"] = pgliteAlias;
     }
 
     await writeFile(
