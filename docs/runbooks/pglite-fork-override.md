@@ -62,12 +62,31 @@ The root `package.json` therefore aliases the dependency for the whole workspace
 }
 ```
 
-The `@pgxsinkit/client` and `@pgxsinkit/react` peer ranges are widened to
-`">=0.5.5-pgx.0 <0.5.6"` so the pre-release satisfies them without warnings. **This range must be
-re-widened on every upstream rebase**: semver only lets a prerelease satisfy a comparator carrying
-the same `major.minor.patch` tuple, so `">=0.5.4-pgx.0 <0.5.5"` does _not_ admit `0.5.5-pgx.1`.
-(`@pgxsinkit/pglite-opfs-repacked` deliberately keeps a plain `">=0.5.4 <0.6.0"` peer range — it
-targets plain upstream host semantics and must never require the fork.)
+**Every publishable package requires the fork, and its peer range says so.** All three
+(`@pgxsinkit/client`, `@pgxsinkit/react`, `@pgxsinkit/pglite-opfs-repacked`) pin
+`"@electric-sql/pglite": ">=0.5.5-pgx.0 <0.5.5"`. That range is not a typo: a prerelease sorts
+_below_ its release, so `<0.5.5` admits `0.5.5-pgx.N` while excluding plain `0.5.5`. It therefore
+matches fork builds only, and a consumer who installs a released upstream build gets a loud peer
+violation instead of silent breakage.
+
+**pgxsinkit does not run on any released upstream.** Until every fix it needs ships upstream — today
+that is the transaction-end sync fix — plain upstream is a broken configuration, not a supported
+fallback, and **nothing may be tested against it**. That includes the packed downstream fixture
+smoke (`scripts/fixture-smoke.ts`), which applies this repo's `@electric-sql/pglite` alias to the
+fixture so the published-install-path check runs on the same host we support. A peer range can
+constrain the version but cannot force the `npm:@pgxsinkit/pglite@…` alias, so consumers must set
+that override themselves — the range exists to make its absence fail loudly.
+
+**Both bounds move on every upstream rebase**: semver only lets a prerelease satisfy a comparator
+carrying the same `major.minor.patch` tuple, so `">=0.5.4-pgx.0 <0.5.4"` does _not_ admit
+`0.5.5-pgx.1`. When the base becomes `0.5.6`, the range becomes `">=0.5.6-pgx.0 <0.5.6"`.
+
+Note that "needs no fork-_only_ behaviour" and "runs on current upstream" are different claims.
+`pglite-opfs-repacked` requires no fork-specific hooks (no `#fsSyncFailure` latch, no
+`#pendingFsSync` drain, no `syncRequiresExclusiveExecution`) — but it still depends on the
+transaction-end sync fix for its durability contract, and that fix is not released upstream, so it
+requires the fork today like everything else. When the fix lands upstream, the override and these
+ranges relax together.
 
 ## Policy: no package may require fork-only behavior
 
@@ -88,10 +107,12 @@ stays true:
   non-exclusive relaxed-sync rejection latch. These improve drivers we bench or fall back to, but
   **no pgxsinkit package may depend on them** — they are not API surface.
 
-In particular, `pglite-opfs-repacked` (ADR-0048) must run correctly against **plain upstream host
-semantics**: its factory always constructs PGlite with `relaxedDurability: false` (the host awaits
-every sync) and owns failed-init cleanup itself, so it needs no fork host hooks — no
-`#fsSyncFailure` latch, no `#pendingFsSync` drain, no `syncRequiresExclusiveExecution`. The
+In particular, `pglite-opfs-repacked` (ADR-0048) is written against **plain upstream host
+semantics** — its factory always constructs PGlite with `relaxedDurability: false` (the host awaits
+every sync) and owns failed-init cleanup itself, so it needs no fork host hooks: no
+`#fsSyncFailure` latch, no `#pendingFsSync` drain, no `syncRequiresExclusiveExecution`. That is a
+statement about which _APIs_ it uses, **not** a claim that it runs on a released upstream: it needs
+the transaction-end sync fix, so it requires the fork until that ships. The
 rejection latch is an upstream PR candidate (it fixes a genuine swallowed-background-rejection bug
 for every filesystem); if upstream merges it, detached relaxed host sync becomes an optional
 performance mode — never a correctness requirement, never a pin.

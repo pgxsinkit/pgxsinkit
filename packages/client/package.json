@@ -40,7 +40,7 @@
     "@pgxsinkit/pglite-opfs-repacked": "workspace:*"
   },
   "peerDependencies": {
-    "@electric-sql/pglite": ">=0.5.5-pgx.0 <0.5.6",
+    "@electric-sql/pglite": ">=0.5.5-pgx.0 <0.5.5",
     "drizzle-orm": "1.0.0-rc.4",
     "zod": "^4.4.3"
   }

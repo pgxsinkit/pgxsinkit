@@ -27,6 +27,6 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "peerDependencies": {
-    "@electric-sql/pglite": ">=0.5.4 <0.6.0"
+    "@electric-sql/pglite": ">=0.5.5-pgx.0 <0.5.5"
   }
 }

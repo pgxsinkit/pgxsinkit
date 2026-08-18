@@ -64,13 +64,12 @@ async function peerDepsFromManifests(): Promise<Record<string, string>> {
 /**
  * The workspace's `@electric-sql/pglite` fork alias, applied to the fixture as well.
  *
- * The published peer range admits plain upstream — semver ranks a release above any `-pgx`
- * prerelease — but upstream 0.5.5 restores a saved `undefined` to `process.exitCode`, which is a
- * no-op under bun. The engine's `proc_exit(99)` boot sentinel therefore survives and a fully
- * successful `bun smoke.ts` exits 99. The fork carries that fix, plus the transaction-end sync fix
- * the packages deliberately rely on (docs/runbooks/pglite-fork-override.md), so the fixture must
- * install the host pgxsinkit actually supports rather than a plain upstream build we know is
- * broken for bun consumers. Read from the root manifest so the two pins can never drift.
+ * pgxsinkit does not run on any released upstream pglite (docs/runbooks/pglite-fork-override.md):
+ * the peer ranges pin fork builds only (`>=<base>-pgx.0 <<base>`), and a real consumer satisfies
+ * them with exactly this alias in their own `overrides`. The fixture mirrors that consumer setup.
+ * A peer range can constrain the version but cannot itself force the `npm:@pgxsinkit/pglite@…`
+ * alias, which is why this is applied explicitly. Read from the root manifest so the two pins can
+ * never drift.
  */
 async function pgliteForkAlias(): Promise<string | undefined> {
   const rootManifest = JSON.parse(await readFile(resolve(repoRoot, "package.json"), "utf8")) as {
