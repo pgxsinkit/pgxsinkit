@@ -26,7 +26,7 @@ ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries
 ```
 
 Any deployment consuming pgxsinkit must run Electric with this flag. The repo's `infra/compose`
-pins `electricsql/electric:1.7.7` and sets it.
+pins `electricsql/electric:1.7.11` and sets it.
 
 ## On managed Electric Cloud
 

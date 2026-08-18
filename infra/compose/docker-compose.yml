@@ -19,7 +19,7 @@ services:
       retries: 20
 
   electric:
-    image: docker.io/electricsql/electric:1.7.7
+    image: docker.io/electricsql/electric:1.7.11
     environment:
       DATABASE_URL: postgresql://supabase_admin:your-super-secret-and-long-postgres-password@postgres:5432/postgres?sslmode=disable
       ELECTRIC_INSECURE: "true"
@@ -33,7 +33,10 @@ services:
     depends_on:
       - postgres
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
+      # curl, not wget: the electric image dropped wget somewhere between 1.7.7 and 1.7.11, so a
+      # wget-based probe exits 127 ("not found") on every interval and the container is reported
+      # unhealthy forever even though it is serving fine.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:3000/ || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
