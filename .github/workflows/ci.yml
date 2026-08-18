@@ -45,6 +45,11 @@ jobs:
   # suites stay release-gated in github-packages.yml — only this browser lane runs on every PR here.
   browser-lane:
     runs-on: ubuntu-latest
+    # The lane normally completes in 6–7 minutes; a healthy run has no business near this cap. Without
+    # it, a wedged compose bring-up (e.g. board-db stuck "Waiting" on a healthcheck that never reports —
+    # run 32122545547 sat 30+ minutes in silence) holds the runner for GitHub's 6-hour default. Fail
+    # fast and visibly instead, and treat approaching this budget as a regression in the lane itself.
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -80,6 +85,25 @@ jobs:
           SOCK="/run/user/$(id -u)/podman/podman.sock"
           for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.5; done
           [ -S "$SOCK" ] || { echo "podman API socket never appeared at $SOCK"; exit 1; }
+      # Rootless podman fires container healthchecks via transient systemd USER timers. The 20260810
+      # runner image broke hosting them (podman itself is unchanged at 4.9.3): containers stayed in
+      # health=starting forever, so compose's service_healthy waits never resolved — board-db "Waiting"
+      # wedged the lane for 30+ silent minutes twice on 2026-08-18 (runs 32119355281, 32122545547; the
+      # 20260720 image was fine). Drive pending healthchecks by hand instead: `healthcheck run` executes
+      # the check and updates status, so a passing container goes healthy and compose proceeds — while a
+      # genuinely failing check still exhausts its retries, marks unhealthy, and compose still aborts
+      # loudly. Only the broken timer delivery is bypassed, never the check itself.
+      - name: Drive rootless podman healthchecks (runner-image timer regression)
+        run: |
+          (
+            while true; do
+              for c in $(podman ps --filter health=starting --format '{{.Names}}' 2>/dev/null); do
+                podman healthcheck run "$c" >/dev/null 2>&1 || true
+              done
+              sleep 2
+            done
+          ) &
+          echo "healthcheck watchdog started (pid $!)"
       # The compose stacks publish host ports 54321–54343 — inside Linux's ephemeral range (32768–60999),
       # so any outbound connection the runner happens to open can transiently occupy one and `compose up`
       # then fails to bind ("rootlessport listen tcp 0.0.0.0:54334: address already in use",

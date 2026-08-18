@@ -70,6 +70,22 @@ jobs:
           SOCK="/run/user/$(id -u)/podman/podman.sock"
           for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.5; done
           [ -S "$SOCK" ] || { echo "podman API socket never appeared at $SOCK"; exit 1; }
+      # Same fix as ci.yml's browser-lane: the 20260810 runner image broke hosting rootless podman's
+      # transient systemd healthcheck timers, leaving containers in health=starting forever and wedging
+      # compose's service_healthy waits. Drive pending healthchecks by hand; a genuinely failing check
+      # still goes unhealthy and aborts the bring-up loudly.
+      - name: Drive rootless podman healthchecks (release only)
+        if: github.ref_type == 'tag'
+        run: |
+          (
+            while true; do
+              for c in $(podman ps --filter health=starting --format '{{.Names}}' 2>/dev/null); do
+                podman healthcheck run "$c" >/dev/null 2>&1 || true
+              done
+              sleep 2
+            done
+          ) &
+          echo "healthcheck watchdog started (pid $!)"
       # The compose stacks publish host ports 54321–54343 — inside Linux's ephemeral range — so a runner's
       # own outbound connections can transiently occupy one and `compose up` fails to bind. Same fix as
       # ci.yml's browser-lane (flake reference: run 29227659330).
