@@ -7,7 +7,7 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
@@ -26,7 +26,7 @@ jobs:
   # TypeDoc API reference) must build, and a packed downstream fixture must install the
   # public tarballs and exercise the published entry points. Neither needs Postgres/Electric.
   docs-and-fixture:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
@@ -44,7 +44,7 @@ jobs:
   # Chromium drives the worker-mode bridge over the board's caddy TLS front. The remaining integration
   # suites stay release-gated in github-packages.yml — only this browser lane runs on every PR here.
   browser-lane:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The lane normally completes in 6–7 minutes; a healthy run has no business near this cap. Without
     # it, a wedged compose bring-up (e.g. board-db stuck "Waiting" on a healthcheck that never reports —
     # run 32122545547 sat 30+ minutes in silence) holds the runner for GitHub's 6-hour default. Fail

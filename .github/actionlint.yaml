@@ -1,0 +1,8 @@
+# actionlint's baked-in hosted-runner label list lags GitHub's preview labels: `ubuntu-26.04` is a
+# real GitHub-hosted image (actions/runner-images README + issue #14226, "public preview"), but
+# actionlint 1.7.12 still rejects it. `self-hosted-runner.labels` is actionlint's documented
+# extension point for extra labels (despite the name, it is the general allowlist). Remove this
+# entry once actionlint learns the label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
