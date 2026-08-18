@@ -100,8 +100,8 @@
     "jose": "6.2.6"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.4",
-    "@electric-sql/pglite-prepopulatedfs": "0.5.4",
+    "@electric-sql/pglite": "0.5.5",
+    "@electric-sql/pglite-prepopulatedfs": "0.5.5",
     "@pgxsinkit/board-schema": "workspace:*",
     "@playwright/test": "^1.62.1",
     "@tanstack/intent": "^0.3.6",
@@ -126,8 +126,8 @@
     "zod": "4.4.3"
   },
   "overrides": {
-    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.4-pgx.11"
+    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.2"
   },
   "packageManager": "bun@1.3.14",
-  "//overrides": "TEMPORARY: alias @electric-sql/pglite to the @pgxsinkit fork carrying the initdb-fs-leak fix (upstream 0.5.4 leaks the inner-instance fs during initdb, breaking the OPFS `options.fs` lane). Remove once upstream ships branch fix/initdb-inner-instance-fs-leak. See docs/runbooks/pglite-fork-override.md."
+  "//overrides": "TEMPORARY: alias @electric-sql/pglite to the @pgxsinkit fork, rebased onto upstream 0.5.5. Upstream shipped the initdb-fs-leak (#1060) and formatQuery positional-params (#1056) fixes, so the sole load-bearing reason left is the transaction-end sync fix — transaction() resolves without performing or scheduling a filesystem sync for its terminal COMMIT/ROLLBACK, which pglite-opfs-repacked's durability contract depends on (upstream PR pending). The fork also carries internal IDBFS/opfs-ahp reliability work that no package may depend on. Remove once upstream ships the transaction-end sync fix. See docs/runbooks/pglite-fork-override.md."
 }

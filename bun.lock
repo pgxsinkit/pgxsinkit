@@ -9,8 +9,8 @@
         "jose": "6.2.6",
       },
       "devDependencies": {
-        "@electric-sql/pglite": "0.5.4",
-        "@electric-sql/pglite-prepopulatedfs": "0.5.4",
+        "@electric-sql/pglite": "0.5.5",
+        "@electric-sql/pglite-prepopulatedfs": "0.5.5",
         "@pgxsinkit/board-schema": "workspace:*",
         "@playwright/test": "^1.62.1",
         "@tanstack/intent": "^0.3.6",
@@ -128,7 +128,7 @@
         "@pgxsinkit/pglite-opfs-repacked": "workspace:*",
       },
       "peerDependencies": {
-        "@electric-sql/pglite": ">=0.5.4-pgx.0 <0.5.5",
+        "@electric-sql/pglite": ">=0.5.5-pgx.0 <0.5.6",
         "drizzle-orm": "1.0.0-rc.4",
         "zod": "^4.4.3",
       },
@@ -156,7 +156,7 @@
         "@pgxsinkit/contracts": "workspace:*",
       },
       "peerDependencies": {
-        "@electric-sql/pglite": ">=0.5.4-pgx.0 <0.5.5",
+        "@electric-sql/pglite": ">=0.5.5-pgx.0 <0.5.6",
         "drizzle-orm": "1.0.0-rc.4",
         "react": ">=19.2.8",
       },
@@ -190,7 +190,7 @@
     },
   },
   "overrides": {
-    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.4-pgx.11",
+    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.2",
   },
   "packages": {
     "@astrojs/compiler-binding": ["@astrojs/compiler-binding@0.3.2", "", { "optionalDependencies": { "@astrojs/compiler-binding-darwin-arm64": "0.3.2", "@astrojs/compiler-binding-darwin-x64": "0.3.2", "@astrojs/compiler-binding-linux-arm64-gnu": "0.3.2", "@astrojs/compiler-binding-linux-arm64-musl": "0.3.2", "@astrojs/compiler-binding-linux-x64-gnu": "0.3.2", "@astrojs/compiler-binding-linux-x64-musl": "0.3.2", "@astrojs/compiler-binding-wasm32-wasi": "0.3.2", "@astrojs/compiler-binding-win32-arm64-msvc": "0.3.2", "@astrojs/compiler-binding-win32-x64-msvc": "0.3.2" } }, "sha512-8w/9CWmYrAJJ8N0SY3O43ws2BgxoW6u3QsD8u2mE140lMYAlwh+tlNoUeSBq22wVheFuiBbR212l6ixZ2IIgCQ=="],
@@ -291,9 +291,9 @@
 
     "@electric-sql/experimental": ["@electric-sql/experimental@6.0.24", "", { "optionalDependencies": { "@rollup/rollup-darwin-arm64": "^4.18.1" }, "peerDependencies": { "@electric-sql/client": "1.5.24" } }, "sha512-GmYKNYqChe7voJxqb4Z4ygEtZhqAPVWDRRoIRi9brmW2laA7CPKP/WB71Rs6KbAQX/jGgQe1YA+3RHtcKld+4g=="],
 
-    "@electric-sql/pglite": ["@pgxsinkit/pglite@0.5.4-pgx.11", "", {}, "sha512-gI/Jr5Jp24vw9BXabipRIeOWZo0qc2MVpA+9ot8eXdT1GE3K2IyW1qovfJqHNoq59zmjvgsBK34uv1CzTVPDKA=="],
+    "@electric-sql/pglite": ["@pgxsinkit/pglite@0.5.5-pgx.2", "", {}, "sha512-K9piqBQpcsTo87BqnvOOy901umYpDQPcq/rtZQCvDfn6LfLCuzvLbvKYB0LnBfF/FRBVnmVZpL4B/RX7wwVsYg=="],
 
-    "@electric-sql/pglite-prepopulatedfs": ["@electric-sql/pglite-prepopulatedfs@0.5.4", "", { "peerDependencies": { "@electric-sql/pglite": "0.5.4" } }, "sha512-N6OmCmGKkmPmjfNmydhdX+YTSwO5ww2LIHxPHQt9DPMmD6+UOxvGBajsGMBP4OcYHXA79xiFrGI/kNxAghXdiw=="],
+    "@electric-sql/pglite-prepopulatedfs": ["@electric-sql/pglite-prepopulatedfs@0.5.5", "", { "peerDependencies": { "@electric-sql/pglite": "0.5.5" } }, "sha512-XYM0SPq+cPPqme37DzKOcSPlwoXTqrGt+Jod/BRCrRfXWk6HU/i7M9NAkxN+JYbXE+s5QsQSf0MzEp+u3Rws1A=="],
 
     "@electric-sql/pglite-react": ["@electric-sql/pglite-react@0.4.4", "", { "peerDependencies": { "@electric-sql/pglite": "0.5.4", "react": "^18.0.0 || ^19.0.0 || ^19.0.0-rc" } }, "sha512-pN/ThnV2/WV+6HFNwgPYjn1OzLEN6NGFrh8R+OLtbFoYql6yxZs8pp9vUhnGX6KRElkRF2LZpsKf4JRZZnPxwA=="],
 

@@ -1,19 +1,25 @@
 # Runbook: temporary `@electric-sql/pglite` fork override
 
-**Status: TEMPORARY.** Remove once upstream `@electric-sql/pglite` releases the initdb-fs-leak fix
-(upstream PR [#1060](https://github.com/electric-sql/pglite/pull/1060), from branch
-`fix/initdb-inner-instance-fs-leak`) and the transaction-end sync fix (branch
-`fix/transaction-end-sync`, upstream PR pending). Those two fixes are the **only** fork changes any
-pgxsinkit code is allowed to depend on; see the policy section below.
+**Status: TEMPORARY.** Upstream 0.5.5 shipped the initdb-fs-leak fix
+([#1060](https://github.com/electric-sql/pglite/pull/1060), from branch
+`fix/initdb-inner-instance-fs-leak`) and the `formatQuery` positional-params fix
+([#1056](https://github.com/electric-sql/pglite/pull/1056)); both are now **dropped** from the fork.
+Remove this override once upstream also releases the transaction-end sync fix (branch
+`fix/transaction-end-sync`, upstream PR pending) — the **only** fork change any pgxsinkit code is
+still allowed to depend on; see the policy section below.
 
 ## Why
 
-An OPFS `options.fs` lane opens PGlite via `PGlite.create({ fs })`. Plain upstream
-`@electric-sql/pglite@0.5.4` leaks the user-provided `fs` into the inner initdb instance, whose
-second `init()` collides with resources the outer instance already holds (fatal for OPFS sync
-access handles), which breaks that path on fresh stores. The maintained fix is published as `@pgxsinkit/pglite@0.5.4-pgx.11`
-(dist-tag `pgx`), consumed from **public npm** (`registry.npmjs.org`). Beyond the initdb-fs-leak fix, `-pgx.5`
-also carries: the `close()` drain of the
+The fork tracks upstream's version with a hand-bumped `-pgx.N` suffix, is published as
+`@pgxsinkit/pglite` (dist-tag `pgx`), and is consumed from **public npm** (`registry.npmjs.org`).
+**`0.5.5-pgx.2` is the version to pin.**
+
+The override's original reason no longer applies: an OPFS `options.fs` lane opens PGlite via
+`PGlite.create({ fs })`, and plain upstream `0.5.4` leaked the user-provided `fs` into the inner
+initdb instance, whose second `init()` collided with resources the outer instance already held
+(fatal for OPFS sync access handles), breaking that path on fresh stores. **Upstream 0.5.5 ships
+that fix ([#1060](https://github.com/electric-sql/pglite/pull/1060)).** The rest of the fork
+history: `-pgx.5` carries the `close()` drain of the
 in-flight relaxed-durability sync (the uncaught `InvalidStateError` / flaky idb hang the bench exposed), and the
 opfs-ahp diagnosability work — fail-fast pool init (silent wedge → catchable error), debug-gated `[opfs-ahp]`
 init tracing reachable from the `opfs-ahp://` dataDir path via PGlite's `debug` option, and a
@@ -35,33 +41,48 @@ entirely: it had made every query — reads included — wait out the in-flight 
 snapshot, collapsing relaxed to strict (~80ms/op measured, bulk lanes timing out). Relaxed IDBFS is
 back on upstream's contract (background snapshots race queries; a crash mid-snapshot can lose the
 tail), keeping the Web Locks single-owner lock, failed-init cleanup, detached-failure latch, close()
-drain + final strict sync, and the distinct-mtime snapshot guard. `-pgx.11` is the version to pin.
+drain + final strict sync, and the distinct-mtime snapshot guard. **`0.5.5-pgx.1`** rebases that
+whole stack onto upstream 0.5.5: the initdb-fs-leak and `formatQuery` commits are dropped (merged
+upstream), and two conflicts were re-applied — upstream #1059's `process.exitCode` save/restore
+folded into the hardened `close()`, and upstream #1062's closed-transaction guards (`checkClosed()`,
+`closed = true` before `ROLLBACK`) alongside the transaction-end sync fix. **`0.5.5-pgx.2`** repairs
+a regression `-pgx.1` inherited from upstream #1059: PGlite saves/restores `process.exitCode` around
+engine calls that may `proc_exit(XX)`, but on a clean host the saved value is `undefined` and **under
+bun `process.exitCode = undefined` is a no-op** — so the restore silently failed. `close()` had been
+masking it by calling `_emscripten_force_exit(0)` (an explicit `0`); once #1059 replaced that with a
+faithful restore, the engine's `proc_exit(99)` boot sentinel survived and force-exited every green
+bun lane with code 99 (six pgxsinkit unit shards "failed" with zero failing tests). All three restore
+sites now write an explicit `0` when the saved value was `undefined`. Upstream PR candidate.
 
 The root `package.json` therefore aliases the dependency for the whole workspace:
 
 ```jsonc
 "overrides": {
-  "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.4-pgx.11"
+  "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.2"
 }
 ```
 
 The `@pgxsinkit/client` and `@pgxsinkit/react` peer ranges are widened to
-`">=0.5.4-pgx.0 <0.5.5"` so the pre-release satisfies them without warnings.
+`">=0.5.5-pgx.0 <0.5.6"` so the pre-release satisfies them without warnings. **This range must be
+re-widened on every upstream rebase**: semver only lets a prerelease satisfy a comparator carrying
+the same `major.minor.patch` tuple, so `">=0.5.4-pgx.0 <0.5.5"` does _not_ admit `0.5.5-pgx.1`.
+(`@pgxsinkit/pglite-opfs-repacked` deliberately keeps a plain `">=0.5.4 <0.6.0"` peer range — it
+targets plain upstream host semantics and must never require the fork.)
 
 ## Policy: no package may require fork-only behavior
 
 The fork carries two classes of change, and the distinction is load-bearing for whether "temporary"
 stays true:
 
-- **Load-bearing bugfixes with open upstream PRs.** The initdb-fs-leak fix
-  ([#1060](https://github.com/electric-sql/pglite/pull/1060)) — required for the custom-`fs` lane;
-  the transaction-end sync fix (branch `fix/transaction-end-sync`, PR pending) — required for
-  transaction durability on **every** lane, `pglite-opfs-repacked` included: it is a plain host
-  correctness bug that will almost certainly merge short-term, so per the no-workaround policy the
-  packages deliberately rely on the pinned fork host instead of shipping local shims; and the `formatQuery`
-  positional-params fix ([#1056](https://github.com/electric-sql/pglite/pull/1056)). These are
-  expected to merge; each one shipping upstream shrinks the override's reason to exist, and #1060
-  plus the transaction fix shipping removes it.
+- **Load-bearing bugfixes with open upstream PRs.** Exactly one remains: the transaction-end sync
+  fix (branch `fix/transaction-end-sync`, PR pending) — required for transaction durability on
+  **every** lane, `pglite-opfs-repacked` included: it is a plain host correctness bug that will
+  almost certainly merge short-term, so per the no-workaround policy the packages deliberately rely
+  on the pinned fork host instead of shipping local shims. The other two in this class shipped in
+  upstream 0.5.5 and are gone from the fork: the initdb-fs-leak fix
+  ([#1060](https://github.com/electric-sql/pglite/pull/1060)) and the `formatQuery` positional-params
+  fix ([#1056](https://github.com/electric-sql/pglite/pull/1056)). **The transaction-end sync fix
+  shipping upstream removes this override entirely.**
 - **Internal reliability improvements to other drivers and host paths.** The IDBFS durability
   hardening, the opfs-ahp instrumentation, the `close()` drain of in-flight relaxed sync, and the
   non-exclusive relaxed-sync rejection latch. These improve drivers we bench or fall back to, but
@@ -86,8 +107,10 @@ in the fork checkout (`~/dev/pgxsinkit/pglite`, branch `pgx-publish`).
 Both legs are scripted in the fork (`packages/pglite/scripts/publish-pgx.mjs`, committed on
 `pgx-publish`). Prerequisites:
 
-- `packages/pglite/release/` contains the WASM build artifacts (`build:js` only bundles JS/DTS and
-  copies these; no WASM rebuild).
+- `packages/pglite/release/` contains the WASM build artifacts **matching the upstream base**
+  (`build:js` only bundles JS/DTS and copies these; no WASM rebuild). `release/` is **gitignored**,
+  so a rebase onto a new upstream version does _not_ update it — see "Rebasing onto a new upstream
+  release" below. Stale artifacts silently ship a mismatched engine.
 - `tmp/agents/npmrc-ghpackages` (fork repo, gitignored) — two lines:
   `@pgxsinkit:registry=https://npm.pkg.github.com` and
   `//npm.pkg.github.com/:_authToken=<PAT with packages:write>`.
@@ -108,8 +131,43 @@ Steps, from `packages/pglite` on `pgx-publish`:
    registries. bun is load-bearing here: `pnpm publish <tarball>` ignores the tarball and re-packs
    the source directory (observed on `-pgx.7`: unrewritten manifest, dropped LICENSE — that npm
    version is content-safe but non-canonical; never pin it).
-4. Consume: bump the alias in this repo's root `package.json` `overrides` to the new version (the
-   `>=0.5.4-pgx.0 <0.5.5` peer ranges already cover it) and `bun install`.
+4. Consume: bump the alias in this repo's root `package.json` `overrides` to the new version, widen
+   the `@pgxsinkit/client` + `@pgxsinkit/react` peer ranges to the new `major.minor.patch` tuple
+   (see the peer-range note above — an unchanged range will _not_ admit the new prerelease), bump
+   the `@electric-sql/pglite` + `@electric-sql/pglite-prepopulatedfs` devDependencies to the new
+   upstream base, then `bun install` and `bun run validate:full`.
+
+### Rebasing onto a new upstream release
+
+1. `git fetch upstream --tags` in the fork, then
+   `git rebase --onto upstream/main <old-merge-base> pgx-publish`. Commits whose fixes merged
+   upstream do **not** auto-drop — `git cherry`/`--cherry-mark` marks them `=`, and they replay as
+   source-empty commits still carrying their `.changeset/*.md`. Excise them with a follow-up
+   `git rebase --onto <keep> <drop-range>` rather than leaving no-op "fix:" commits in the history.
+2. **Refresh `packages/pglite/release/` from upstream CI.** It is gitignored and will still hold the
+   _previous_ base's artifacts. Upstream's `build_and_test.yml` uploads them per run (60-day
+   retention):
+
+   ```bash
+   gh run list --repo electric-sql/pglite --branch main --limit 10 \
+     --json databaseId,headSha,conclusion,displayTitle       # find the run for the release commit
+   gh run download <runId> --repo electric-sql/pglite \
+     --name pglite-interim-build-files-node-v20.x --dir <tmp>
+   ```
+
+   Then replace `packages/pglite/release/` with the download and re-run `pnpm build:js`.
+
+3. Verify before publishing: `pnpm typecheck` and `pnpm test:basic` from `packages/pglite`. **The
+   tests import `../dist/…`, not `src/`**, so a stale `dist/` (or stale `release/`) fails loudly and
+   misleadingly — 0.5.5 surfaced this as 26 `basic.test.ts` failures that looked like rebase
+   breakage but were purely an unrebuilt bundle missing upstream's new `rowCount`/`command` fields.
+   The fork's husky pre-commit hook runs `pnpm -r stylecheck`, so `pnpm` must be on PATH
+   (`mise use -g pnpm@<version in the root package.json packageManager field>`).
+4. After bumping this repo, run `bun run validate:full` and read the **exit code**, not just the test
+   tallies. A shard reported as `FAILED` with `0 fail` means the bun process exited non-zero while
+   every test passed — the signature of a leaked engine exit code (see `-pgx.2` above), not a test
+   regression. `bun run validate:full | tail` hides this: a pipeline's status is the last command's,
+   so the script's failure is masked.
 
 (`pgx` is the authoritative channel tag; the scripts always pass `--tag pgx`, so publishes never
 move `latest`. On **npm** the registry refuses to delete `latest` — an early publish left it on
