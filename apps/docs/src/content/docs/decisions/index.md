@@ -67,5 +67,8 @@ complete as ADRs are added.
 - [ADR-0052 — Row classification and registry invariants](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0052-row-classification-and-registry-invariants.md)
 - [ADR-0053 — Queue-shaped event ingestion as a first-class lane](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0053-queue-shaped-event-ingestion.md)
 - [ADR-0054 — The apply function is deny-by-default](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0054-apply-function-deny-by-default.md)
+- [ADR-0055 — A Circuits-native sync core, with a shared read tier](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0055-circuits-native-sync-core.md)
+- [ADR-0056 — Catch-up alignment on stream offsets and the engine convergence barrier](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0056-catchup-alignment-on-stream-offsets.md)
+- [ADR-0057 — Retiring tagged-subquery reconciliation](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0057-retiring-tagged-subquery-reconciliation.md)
 
 <!-- adr:list:end -->
