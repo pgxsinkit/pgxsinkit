@@ -135,7 +135,14 @@ executes.
 7. **The edge holds entitlements in memory, kept live as a Circuits shape, and fails closed.**
    The entitlement relation syncs into the edge through the same engine that serves everything else.
    Checks are an in-memory lookup with no database on the read path, and freshness is engine
-   propagation rather than a cache TTL. While that subscription is catching up, degraded, or stale,
+   propagation rather than a cache TTL.
+
+   Because the edge is TypeScript (decision 8), an entitlement rule is **an ordinary typed function**
+   over those synced relations — authored in Drizzle terms beside the registry it belongs to. No
+   expression mini-language, no derived entitlement tables, and no triggers maintaining a
+   denormalised copy that could drift from its source. Circuits shapes can only source from base
+   tables carrying a primary key (`pg.rs`: base tables with `indisprimary`), so the relations synced
+   are the membership tables themselves, which already satisfy that. While that subscription is catching up, degraded, or stale,
    the edge **denies**: an unavailable entitlement set is never a permit.
 
 8. **The edge is a thin stateless process in front of a stock durable-streams server. We fork
@@ -145,6 +152,21 @@ executes.
    - The edge verifies the token, checks the scope against the entitlement set, and proxies bytes.
      With redaction pre-computed and predicates resolved at shape creation, there is no per-read
      filtering and no per-read rewriting: it is a gate, not a pipeline.
+   - **It is TypeScript, in the existing `packages/server` process, alongside the control plane.**
+     Because there is no per-byte work, CPU is irrelevant here — the only axis on which a native
+     implementation wins is memory per held long-poll connection, and that crossover sits far above
+     the target scale (order 4 GB fleet-wide at ten thousand concurrent subscribers, against roughly
+     0.8 GB; it only dominates near a hundred thousand). Against that, co-locating with the control
+     plane — which MUST be TypeScript, since it interprets the Drizzle registry and builds the
+     predicate AST — collapses two services into one, turns ADR-0056's barrier read into a local
+     call, makes the registry directly available for shapeKey resolution, and keeps token minting
+     and verification in one process sharing key material.
+
+     The costs are named rather than hidden: the read path's availability depends on a Node/Bun
+     process, and GC pauses sit in the path of held long-polls. Neither binds at this scale. The
+     edge is roughly 500–1500 lines of gate logic, so moving it to a native implementation later is
+     a contained rewrite, not an architecture change — which is what makes choosing the simpler
+     option now cheap to reverse.
    - durable-streams runs as its own workload from the **official published image**
      (`electricax/durable-streams-server-rust`), pinned **by digest** and mirrored rather than
      rebuilt. It is stateful — WAL, shard files, object-store tier; the edge is stateless and
@@ -244,8 +266,11 @@ evaluation.
   serves one stream per request, and the Rust server is HTTP/1.1-only with no TLS. A gateway
   speaking HTTP/2 to browsers is therefore **mandatory**, not optional — without it a subject with
   several scopes hits the browser's ~6-connection-per-origin ceiling and stalls.
-- **We take on a small Rust service** (~500–1500 lines) plus its deployment, in exchange for not
-  forking a 16k-line protocol implementation and not putting TypeScript on the hot read path.
+- **No new service and no new language.** The edge is ~500–1500 lines added to the existing
+  TypeScript server beside the control plane, rather than a second process to build, deploy and
+  observe. What we accept in exchange is a Node/Bun process on the read path — GC pauses in the path
+  of held long-polls, and connection memory roughly 5× a native implementation's, which only becomes
+  the binding constraint an order of magnitude above the target scale.
 - **Two eviction paths exist on the client** — predicate move-out and shape-level revocation — and
   both must be tested. A revocation path that silently fails is a disclosure, not a stale row.
 - **Redaction changes shape from code to schema.** Changing a `RedactionSpec` becomes a migration
@@ -277,10 +302,16 @@ evaluation.
   stateless authorization tier with a stateful storage tier, so authorization could then only scale
   by sharding storage.
 - **A Caddy auth module in front of the stock `durable_streams` handler.** Genuinely viable — the
-  plugin is an ordinary `caddyhttp.MiddlewareHandler` and composes cleanly. Rejected for language
-  coherence with the rest of the edge, and because istio already terminates TLS/h2 in our
-  deployments so Caddy's protocol features earn nothing here. Recorded as the fallback if the Rust
-  edge proves a poor investment.
+  plugin is an ordinary `caddyhttp.MiddlewareHandler` and composes cleanly. Rejected because it puts
+  the gate in a third language and a separate process, away from the registry and the token-minting
+  key material it has to agree with, while istio already terminates TLS/h2 so Caddy's protocol
+  features earn nothing here.
+- **A native (Rust) edge as its own service.** Rejected for v1: the edge does no per-byte work at
+  all — no filtering, no rewriting, no parsing of stream content — so CPU is irrelevant and the only
+  axis on which it wins is connection memory, well above the target scale. It also forgoes
+  co-location with the control plane, which must be TypeScript regardless. Recorded as the answer if
+  held-connection memory ever becomes binding; the gate is small enough that the move is a contained
+  rewrite rather than an architecture change.
 - **Per-request origin authorization for the shared tier.** Rejected: it is precisely what makes
   every read an origin read. Correct and available for the private tier, where nothing is cacheable
   anyway.
