@@ -1,0 +1,72 @@
+# The Circuits-native substrate for pgxsinkit's integration lane (ADR-0055).
+#
+#   postgres — the system of record, shared with the Electric lane's compose file
+#   ds       — durable-streams: the log the client actually READS from
+#   engine   — the Rust engine: replication ingest, shape maintenance, and the control plane
+#              pgxsinkit's server talks to (POST /shapes, GET /replication/lsn)
+#
+# The edge is NOT here. It is TypeScript in `packages/server` (ADR-0055 decision 8), so the
+# integration lane runs it in-process — which is also what makes a test able to revoke an entitlement
+# between one poll and the next.
+#
+# `ds` runs the OFFICIAL published image, pinned and mirrored rather than rebuilt (decision 8). The
+# `engine` is our fork, so it is built from a checkout: set PGXSINKIT_CIRCUITS_REPO to it. That build
+# is expensive and is deliberately not implicit — see `bun run infra:circuits:up`.
+name: pgxsinkit-circuits
+
+services:
+  postgres:
+    image: docker.io/supabase/postgres:17.6.1.116
+    # wal_level=logical is not optional here: the engine creates its own replication slot at startup
+    # and fails closed without it, rather than degrading to polling.
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10"]
+    environment:
+      POSTGRES_USER: ${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}
+      POSTGRES_PASSWORD: ${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}
+      POSTGRES_DB: ${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
+    ports:
+      - "${PGXSINKIT_CIRCUITS_POSTGRES_PORT:-54331}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin} -d ${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ds:
+    image: docker.io/electricax/durable-streams-server-rust:0.1.5
+    environment:
+      DS_PORT: 8791
+      DS_DATA_DIR: /data
+      # In-memory: the integration lane replays from Postgres on every run, so paying
+      # fsync-per-append would buy durability nothing here reads.
+      DS_MEMORY: "1"
+    ports:
+      - "${PGXSINKIT_CIRCUITS_DS_PORT:-8791}:8791"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8791 || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  engine:
+    build:
+      context: ${PGXSINKIT_CIRCUITS_REPO:?set PGXSINKIT_CIRCUITS_REPO to an electric-circuits checkout}
+      dockerfile: docker/Dockerfile.engine
+    environment:
+      ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
+      ELECTRIC_CIRCUITS_PG_URL: postgres://${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}:${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}@postgres:5432/${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
+      # Explicit table list, never `*`: `docs/research/0001` records that `*` introspects every public
+      # table with a primary key, which sweeps in the operations log and pgmq's own relations.
+      ELECTRIC_CIRCUITS_PG_TABLES: ${PGXSINKIT_CIRCUITS_PG_TABLES:?set the explicit table list}
+      ELECTRIC_CIRCUITS_BIND: 0.0.0.0:7010
+    ports:
+      - "${PGXSINKIT_CIRCUITS_ENGINE_PORT:-7010}:7010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ds:
+        condition: service_healthy
+    # The engine exits if Postgres has no tables yet; a restart is the retry.
+    restart: unless-stopped

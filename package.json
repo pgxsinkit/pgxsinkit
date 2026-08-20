@@ -50,6 +50,8 @@
     "format": "oxfmt --config .oxfmtrc.jsonc --check .",
     "format:write": "oxfmt --config .oxfmtrc.jsonc --write .",
     "guard:tmp-files": "bun scripts/check-temp-file-placement.ts",
+    "infra:circuits:down": "bun scripts/circuits-down.ts",
+    "infra:circuits:up": "bun scripts/circuits-up.ts",
     "infra:down": "bun scripts/infra-down.ts",
     "infra:harness:down": "bun scripts/harness-down.ts",
     "infra:harness:up": "bun scripts/harness-up.ts",
