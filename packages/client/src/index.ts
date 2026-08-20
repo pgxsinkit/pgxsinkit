@@ -310,6 +310,8 @@ export { createShapeGroup } from "./circuits/shape-group";
 export type { GroupShapeSpec, ShapeGroup, ShapeGroupBatch, ShapeGroupOptions } from "./circuits/shape-group";
 export { envelopeToChange, primaryKeyFromStreamKey } from "./circuits/envelope-to-change";
 export type { ChangeLike } from "./circuits/envelope-to-change";
+export { StreamInbox } from "./circuits/stream-inbox";
+export type { BufferedBatch } from "./circuits/stream-inbox";
 export {
   type AllMutationsView,
   getAllMutationsView,
