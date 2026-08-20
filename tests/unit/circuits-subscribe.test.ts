@@ -5,6 +5,9 @@ import { boolean, text, uuid } from "drizzle-orm/pg-core";
 import { DENY_ALL_PREDICATE, defineSyncRegistry, defineSyncTable, p } from "@pgxsinkit/contracts";
 import {
   authorizeStreamRead,
+  CircuitsEngineError,
+  createBarrierHandler,
+  createSubscribeHandler,
   importStreamTokenKey,
   subscribeToShapes,
   type CircuitsEngineClient,
@@ -68,7 +71,7 @@ function stubEngine(): CircuitsEngineClient & { created: unknown[] } {
       };
     },
     releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0 }),
+    replicationState: async () => ({ lsn: "0/0", sequencedLsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
   } as CircuitsEngineClient & { created: unknown[] };
 }
 
@@ -141,5 +144,84 @@ describe("subscribe", () => {
     expect(result.token).toBeUndefined();
     expect(result.granted).toEqual([]);
     expect(engine.created).toEqual([]);
+  });
+});
+
+// A degraded engine refuses shape creation (503). The route must NOT relay that as a denial: a
+// client told "not entitled" truncates that scope and unsubscribes, so reporting an outage that way
+// would turn a transient engine fault into client-side data loss.
+describe("subscribe under engine failure", () => {
+  function failingEngine(status: number): CircuitsEngineClient {
+    return {
+      createShape: async () => {
+        throw new CircuitsEngineError(status, "degraded", "engine degraded");
+      },
+      releaseShape: async () => {},
+      replicationState: async () => ({ lsn: null, sequencedLsn: null, sync: false, pendingFlips: 0, flipFailures: 1 }),
+    } as unknown as CircuitsEngineClient;
+  }
+
+  it("answers 503 rather than denying the subscriptions", async () => {
+    const handle = createSubscribeHandler({
+      registry,
+      engine: failingEngine(503),
+      entitlements,
+      key,
+      resolveAuthClaims: () => ({ sub: "person-a" }),
+    });
+
+    const response = await handle(
+      new Request("http://cp/sync/v1/subscribe", {
+        method: "POST",
+        body: JSON.stringify({ subscriptions: [{ shapeKey: "offering_content", scope: ["off-1"] }] }),
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    // Critically NOT a denial: nothing in the body may read as lost entitlement.
+    expect(await response.json()).toEqual({ error: "sync engine unavailable" });
+  });
+});
+
+// The barrier's cache is sound for `sync`/`pendingFlips` because staleness only moves the barrier
+// backwards. `flipFailures` inverts that — a cached pre-poisoning zero would license exactly the
+// alignment the term exists to refuse — so a poisoned reading is never cached.
+describe("barrier cache", () => {
+  function engineReporting(states: { sync: boolean; pendingFlips: number; flipFailures: number }[]) {
+    let index = 0;
+    const reads = { count: 0 };
+    const engine = {
+      replicationState: async () => {
+        reads.count += 1;
+        const state = states[Math.min(index++, states.length - 1)]!;
+        return { lsn: "0/0", sequencedLsn: "0/0", ...state };
+      },
+    } as unknown as CircuitsEngineClient;
+    return { engine, reads };
+  }
+
+  const get = () => new Request("http://cp/sync/v1/barrier");
+
+  it("caches a healthy reading", async () => {
+    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0, flipFailures: 0 }]);
+    const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
+
+    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 0 });
+    await handle(get());
+    expect(reads.count).toBe(1);
+  });
+
+  // A poisoned reading is never CACHED — with the same generous window that just cached a healthy
+  // answer, every poisoned read still goes to the engine. That keeps a restart visible immediately
+  // instead of being masked for a window, and is what stops a stale zero from ever being served in
+  // its place.
+  it("never caches a poisoned reading", async () => {
+    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0, flipFailures: 1 }]);
+    const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
+
+    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 1 });
+    await handle(get());
+    await handle(get());
+    expect(reads.count).toBe(3);
   });
 });

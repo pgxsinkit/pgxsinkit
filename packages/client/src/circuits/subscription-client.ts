@@ -1,5 +1,7 @@
 import type { PredicateValue } from "@pgxsinkit/contracts";
 
+import type { ConvergenceBarrier } from "./sync-engine";
+
 /** One shape the client wants to follow, by declared identity and (shared tier) scope values. */
 export interface ShapeSubscriptionRequest {
   shapeKey: string;
@@ -169,10 +171,14 @@ export async function openSubscriptionSession(
  * An unreachable barrier throws, and the engine treats that as a DELAY rather than a failure
  * (ADR-0056): the group stays on the pre-alignment gate and tries again on the next delivery. So a
  * control plane that is briefly down costs boot latency, not correctness.
+ *
+ * `flipFailures` is read defensively rather than trusted to be present: a control plane older than
+ * the poison gate omits it, and defaulting it to zero there is right — that deployment cannot report
+ * a poisoning, so inventing one would degrade every group on it.
  */
 export function createBarrierReader(
   options: Pick<SubscriptionClientOptions, "controlPlaneUrl" | "authHeaders" | "fetch">,
-): () => Promise<{ sync: boolean; pendingFlips: number }> {
+): () => Promise<ConvergenceBarrier> {
   const doFetch = options.fetch ?? fetch;
   const controlPlane = options.controlPlaneUrl.replace(/\/+$/, "");
 
@@ -182,6 +188,7 @@ export function createBarrierReader(
     if (!response.ok) {
       throw new Error(`[pgxsinkit] barrier → ${response.status}`);
     }
-    return (await response.json()) as { sync: boolean; pendingFlips: number };
+    const body = (await response.json()) as Partial<ConvergenceBarrier>;
+    return { sync: body.sync === true, pendingFlips: body.pendingFlips ?? 0, flipFailures: body.flipFailures ?? 0 };
   };
 }

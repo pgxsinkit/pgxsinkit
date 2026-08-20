@@ -2,7 +2,7 @@ import type { JwtClaims, PredicateValue, SyncTableRegistry } from "@pgxsinkit/co
 
 import { compileShapeRequest } from "./compile";
 import type { EntitlementSet } from "./edge";
-import type { CircuitsEngineClient } from "./engine-client";
+import { CircuitsEngineError, type CircuitsEngineClient } from "./engine-client";
 import { DEFAULT_STREAM_TOKEN_TTL_SECONDS, mintStreamToken, verifyStreamToken, type StreamGrant } from "./stream-token";
 
 /** One shape a client wants to follow. */
@@ -57,6 +57,11 @@ export interface SubscribeOptions {
  * legitimately have lost one of them, and failing the whole batch on that would deny them the K-1
  * they still hold — so a denial is reported per subscription and the rest proceed.
  *
+ * That partiality covers AUTHORIZATION only. An engine that cannot answer — degraded, unreachable —
+ * is not a denial and must never be reported as one: a client told "not entitled" truncates that
+ * scope and unsubscribes, so reporting an outage that way would turn a transient engine fault into
+ * client-side data loss. Engine failures propagate, and the route answers 503.
+ *
  * Entitlement is checked HERE as well as at the edge, and the duplication is deliberate: this is
  * what stops a shape being created and a capability minted for a scope the subject never held. The
  * edge's check bounds how long an already-minted one keeps working.
@@ -106,6 +111,7 @@ export async function subscribeToShapes(
       }
     }
 
+    // Deliberately unguarded: see the note above on why an engine fault is not a denial.
     const handle = await options.engine.createShape(compiled.request);
     granted.push({ shapeKey: request.shapeKey, ...scoped, shapeId: handle.shapeId, streamPath: handle.streamPath });
     grants.push({ path: handle.streamPath, shapeKey: request.shapeKey, ...scoped });
@@ -142,7 +148,18 @@ export function createSubscribeHandler(
     }
 
     const claims = options.resolveAuthClaims ? await options.resolveAuthClaims(request) : null;
-    const result = await subscribeToShapes(options, claims, body.subscriptions, Math.floor(Date.now() / 1000));
+
+    let result: SubscribeResult;
+    try {
+      result = await subscribeToShapes(options, claims, body.subscriptions, Math.floor(Date.now() / 1000));
+    } catch (error) {
+      // A degraded engine refuses shape creation outright (503). Answering with the engine's own
+      // status keeps the client retrying rather than treating an outage as lost entitlement.
+      if (error instanceof CircuitsEngineError) {
+        return Response.json({ error: "sync engine unavailable" }, { status: 503 });
+      }
+      throw error;
+    }
 
     // 200 even when everything was denied: the per-subscription reasons ARE the response, and
     // collapsing them to a status code would tell a client that lost one scope out of K nothing
@@ -256,16 +273,20 @@ export const refreshPath = "/sync/v1/refresh";
  * client-reachable, so surfacing the barrier on our own authenticated endpoint costs nothing and
  * keeps the trust boundary intact.
  *
- * `maxAgeSeconds` may cache the answer briefly. Staleness is safe in exactly one direction — it
- * moves the barrier backwards, so a stale reading can only DELAY an alignment, never satisfy one
- * falsely.
+ * `maxAgeSeconds` may cache the answer briefly, but only a HEALTHY one. For the `sync` and
+ * `pendingFlips` terms staleness is safe in one direction — it moves the barrier backwards, so a
+ * stale reading can only delay an alignment, never satisfy one falsely. `flipFailures` inverts that:
+ * a cached pre-poisoning zero would let a group align against an engine that has already lost
+ * membership effects, which is precisely the alignment the term exists to refuse. So a poisoned
+ * reading is never cached and never served from cache, and the cache window is exactly the bound on
+ * how long a client may align against a freshly-poisoned engine — which is why the default is 0.
  */
 export function createBarrierHandler(options: {
   engine: CircuitsEngineClient;
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
   maxAgeSeconds?: number;
 }) {
-  let cached: { at: number; body: { sync: boolean; pendingFlips: number } } | null = null;
+  let cached: { at: number; body: BarrierBody } | null = null;
   const maxAge = options.maxAgeSeconds ?? 0;
 
   return async function handleBarrier(request: Request): Promise<Response> {
@@ -280,10 +301,17 @@ export function createBarrierHandler(options: {
     if (cached && now - cached.at < maxAge) return Response.json(cached.body);
 
     const state = await options.engine.replicationState();
-    const body = { sync: state.sync, pendingFlips: state.pendingFlips };
-    cached = { at: now, body };
+    const body = { sync: state.sync, pendingFlips: state.pendingFlips, flipFailures: state.flipFailures };
+    cached = body.flipFailures > 0 ? null : { at: now, body };
     return Response.json(body);
   };
 }
 
 export const barrierPath = "/sync/v1/barrier";
+
+/** The barrier as the client reads it — the engine's LSNs are operator detail and stay server-side. */
+interface BarrierBody {
+  sync: boolean;
+  pendingFlips: number;
+  flipFailures: number;
+}

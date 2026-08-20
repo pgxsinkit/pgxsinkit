@@ -102,7 +102,7 @@ describe("circuits sync engine", () => {
 
   // The shared tier's whole point: one local table fed by several scope-keyed streams.
   it("applies two scope shapes into one local table", async () => {
-    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0 };
+    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0, flipFailures: 0 };
     const handle = await syncCircuitsShapes({
       pg,
       registry,
@@ -150,7 +150,7 @@ describe("circuits sync engine", () => {
       registry,
       key: null,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 2 }),
+      readBarrier: async () => ({ sync: true, pendingFlips: 2, flipFailures: 0 }),
       token: () => "t",
       fetch: parkAfter([dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true)]),
       shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
@@ -173,7 +173,7 @@ describe("circuits sync engine", () => {
       key: null,
       metadataSchema: METADATA_SCHEMA,
       // Unsatisfied on the first read, converged on every one after it.
-      readBarrier: async () => ({ sync: true, pendingFlips: ++reads === 1 ? 2 : 0 }),
+      readBarrier: async () => ({ sync: true, pendingFlips: ++reads === 1 ? 2 : 0, flipFailures: 0 }),
       token: () => "t",
       fetch: parkAfter([
         dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true),
@@ -193,6 +193,39 @@ describe("circuits sync engine", () => {
     await drizzleOver(pg).delete(content);
   });
 
+  // A poisoned engine is the one barrier reading that is NOT a delay. An abandoned flip batch
+  // releases its permit on the way out, so `pendingFlips` is back to zero and `sync` is true — every
+  // other term reports converged, forever — while the membership effect it carried is gone. Holding
+  // would be indistinguishable from a slow engine, so the group refuses instead.
+  //
+  // Note the barrier here satisfies BOTH other terms: delete the flipFailures check and the gate
+  // opens, the row lands, and no error is raised.
+  it("refuses terminally when the engine reports lost membership effects", async () => {
+    const errors: Error[] = [];
+    const handle = await syncCircuitsShapes({
+      pg,
+      registry,
+      key: null,
+      metadataSchema: METADATA_SCHEMA,
+      readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 1 }),
+      token: () => "t",
+      onSyncError: (error) => errors.push(error),
+      fetch: parkAfter([dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true)]),
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
+    });
+
+    await settle();
+
+    expect(await drizzleOver(pg).select({ id: content.id }).from(content)).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toMatch(/lost 1 membership flip batch/);
+    // And it stays refused — a degraded group must never report a consistent store.
+    expect(handle.isUpToDate).toBe(false);
+
+    handle.unsubscribe();
+    await drizzleOver(pg).delete(content);
+  });
+
   // The same condition the Electric engine's per-table lock enforced, stated as the requirement it
   // always was: co-tenant shapes need a scoped clear, because the default truncate takes the table.
   it("refuses shapes sharing a table without a scoped clear", async () => {
@@ -202,7 +235,7 @@ describe("circuits sync engine", () => {
       key: null,
       live: false,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 0 }),
+      readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 0 }),
       token: () => "t",
       fetch: stubEdge({}),
       shapes: {

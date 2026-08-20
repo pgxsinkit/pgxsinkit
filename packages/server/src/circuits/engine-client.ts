@@ -72,19 +72,30 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
     },
 
     /**
-     * The engine's convergence barrier (ADR-0056): replication position, whether the tailer has
-     * caught up, and how many computed-but-undelivered subquery flips remain. All three are the
-     * barrier — `pendingFlips > 0` means a revocation has been computed and not yet written to any
-     * stream, which no wire-format watermark can see.
+     * The engine's convergence barrier (ADR-0056): where replication is, whether the tailer has
+     * caught up, how many computed-but-undelivered subquery flips remain, and how many were lost.
+     *
+     * `pendingFlips > 0` means a revocation has been computed and not yet written to any stream,
+     * which no wire-format watermark can see. `flipFailures > 0` means one was **abandoned** — the
+     * engine has poisoned its own frontier and `sequencedLsn` is frozen at whatever it last proved.
+     * That distinction matters because an abandoned batch releases its barrier permit, so the other
+     * counters recover and only this one still says anything happened.
      */
-    async replicationState(): Promise<{ lsn: string | null; sync: boolean; pendingFlips: number }> {
-      return (await call("/replication/lsn", { method: "GET" })) as {
-        lsn: string | null;
-        sync: boolean;
-        pendingFlips: number;
-      };
+    async replicationState(): Promise<CircuitsReplicationState> {
+      return (await call("/replication/lsn", { method: "GET" })) as CircuitsReplicationState;
     },
   };
 }
 
 export type CircuitsEngineClient = ReturnType<typeof createCircuitsEngineClient>;
+
+/** What `GET /replication/lsn` answers. */
+export interface CircuitsReplicationState {
+  /** The ingest head — where the replication tailer has read to. */
+  lsn: string | null;
+  /** The fan-out frontier: the highest commit whose every effect has reached the shape streams. */
+  sequencedLsn: string | null;
+  sync: boolean;
+  pendingFlips: number;
+  flipFailures: number;
+}
