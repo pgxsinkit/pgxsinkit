@@ -468,3 +468,11 @@ export {
 } from "./events/ddl";
 export { resolveEventIdentity } from "./events/identity";
 export type { IdentityResolution } from "./events/identity";
+
+// The Circuits-native read path (ADR-0055) — shape lifecycle only. Reads terminate on
+// durable-streams and never traverse the engine.
+export { compileShapeRequest, resolveEntryByShapeKey } from "./circuits/compile";
+export type { CompiledShapeRequest, ShapeRequest } from "./circuits/compile";
+export { CircuitsEngineError, createCircuitsEngineClient } from "./circuits/engine-client";
+export type { CircuitsEngineClient, CircuitsEngineOptions } from "./circuits/engine-client";
+export type { CircuitsShapeHandle, CreateShapeRequest } from "./circuits/wire";

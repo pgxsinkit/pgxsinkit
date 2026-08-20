@@ -1,4 +1,4 @@
-import type { ColumnBuilderBase, InferInsertModel, InferSelectModel } from "drizzle-orm";
+import type { AnyColumn, ColumnBuilderBase, InferInsertModel, InferSelectModel } from "drizzle-orm";
 import {
   bigint,
   getTableConfig,
@@ -33,6 +33,7 @@ import {
   isStorageDurability,
   isSubscriptionTiming,
   isWriteMode,
+  readShapeTier,
   RETENTIONS,
   STORAGE_BACKENDS,
   STORAGE_DURABILITIES,
@@ -64,6 +65,7 @@ import {
   isZodSchema,
   type EventStreamRegistry,
 } from "./event-stream";
+import type { Predicate } from "./predicate";
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
 
@@ -315,12 +317,34 @@ export type RowFilterInput<TColumns extends Record<string, ColumnBuilderBase>> =
   columns: PgBuildExtraConfigColumns<TColumns>,
 ) => RowFilterSpec;
 
-/** {@link ShapeSpecInput} whose `rowFilter` is authored from the built columns (typed by `TColumns`). */
+/**
+ * The scope declaration for a SHARED-tier shape (ADR-0055), authored from the built, typed columns —
+ * the columns whose values key the shape family, in the order they parameterize it.
+ *
+ * Returning real column objects rather than names is what makes the family rename-safe: a renamed
+ * column moves the scope with it, where a string would have gone on naming a column that no longer
+ * exists and silently produced a predicate over nothing.
+ */
+export type ScopeInput<TColumns extends Record<string, ColumnBuilderBase>> = (
+  columns: PgBuildExtraConfigColumns<TColumns>,
+) => readonly AnyColumn[];
+
+/**
+ * The static, subscriber-independent half of a shape's native predicate, authored from the built,
+ * typed columns. Build it with {@link p} — `(c) => p.eq(c.published, true)`.
+ */
+export type ShapeWhereInput<TColumns extends Record<string, ColumnBuilderBase>> = (
+  columns: PgBuildExtraConfigColumns<TColumns>,
+) => Predicate;
+
+/** {@link ShapeSpecInput} whose callbacks are authored from the built columns (typed by `TColumns`). */
 export type ShapeSpecInputFor<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
   ShapeSpecInput,
-  "rowFilter"
+  "rowFilter" | "scope" | "where"
 > & {
   rowFilter?: RowFilterInput<TColumns>;
+  scope?: ScopeInput<TColumns>;
+  where?: ShapeWhereInput<TColumns>;
 };
 
 /**
@@ -719,9 +743,10 @@ export function defineSyncTable<
 
   // Resolve `shape.rowFilter` against the built typed columns so all authoring uses rename-safe
   // Drizzle column objects rather than hand-written column-name strings.
-  const resolvedRowFilter = shape?.rowFilter?.(
-    getColumns(table) as unknown as PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>,
-  );
+  const shapeColumns = getColumns(table) as unknown as PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>;
+  const resolvedRowFilter = shape?.rowFilter?.(shapeColumns);
+  const resolvedScope = shape?.scope?.(shapeColumns).map((column) => column.name);
+  const resolvedWhere = shape?.where?.(shapeColumns);
   const resolvedShape: ShapeSpec | undefined =
     resolvedMode !== "writeonly" || shape != null
       ? {
@@ -731,8 +756,15 @@ export function defineSyncTable<
           // own table. It is filled by `attachSyncRegistrySchema` (schema qualification) or by
           // `defineReadProjection` (which points a projection at the owning physical table).
           ...(resolvedRowFilter != null ? { rowFilter: resolvedRowFilter } : {}),
+          ...(resolvedScope != null ? { scope: resolvedScope } : {}),
+          ...(resolvedWhere != null ? { where: resolvedWhere } : {}),
         }
       : undefined;
+
+  // Read the tier for its side effect: a shape declaring both `scope` and `rowFilter` is refused
+  // HERE, at definition time, rather than at the first shape creation — the two are contradictory
+  // by construction, so there is no input for which it could later turn out to be fine.
+  if (resolvedShape != null) readShapeTier(resolvedShape);
 
   const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
   const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);

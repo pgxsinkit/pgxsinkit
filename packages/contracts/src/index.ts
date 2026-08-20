@@ -9,6 +9,7 @@ export * from "./registry";
 export * from "./registry-diff";
 export * from "./registry-invariant";
 export * from "./mutation";
+export * from "./predicate";
 export * from "./projection";
 export * from "./runtime";
 export * from "./sql-defaults";

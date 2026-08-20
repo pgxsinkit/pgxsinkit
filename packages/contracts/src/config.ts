@@ -2,6 +2,8 @@ import { sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
+import type { Predicate } from "./predicate";
+
 const pgDialect = new PgDialect();
 
 export type TableMode = "readonly" | "writeonly" | "readwrite";
@@ -275,6 +277,59 @@ export interface ShapeSpec {
    */
   electricTable?: string;
   rowFilter?: RowFilterSpec;
+  /**
+   * SHARED TIER (ADR-0055) — the scope columns, resolved to column names, whose values key this
+   * shape family. The predicate is *generated* as an `AND` of equalities over them, so disjointness
+   * is a property of the construction rather than something a checker has to enforce: a row carries
+   * exactly one value per scope column, so it falls in exactly one shape of the family, and an
+   * overlapping pair is not expressible at all.
+   *
+   * `NULL` is a legal scope value and compiles to `IS NULL` — which is how an offering-wide row gets
+   * its own scope `(O, null)` rather than appearing in every group's shape. The tempting
+   * `group_id IS NULL OR group_id = $G` form is not merely disallowed here; it is wrong, because it
+   * places one row in every group shape at once.
+   *
+   * Its presence is what makes this a shared-tier shape. Declaring it alongside `rowFilter` is
+   * refused at definition time — see {@link readShapeTier}.
+   */
+  scope?: readonly string[];
+  /**
+   * The **static** half of the shape's predicate: subscriber-independent, identical for every
+   * reader, and therefore safe in either tier. On the shared tier it is conjoined with the generated
+   * scope equalities; on the private tier, with whatever `rowFilter` resolves to for the subject.
+   *
+   * Native AST, not SQL text — see {@link Predicate}.
+   */
+  where?: Predicate;
+}
+
+/** Which read tier a shape belongs to (ADR-0055 decision 2). */
+export type ShapeTier = "shared" | "private";
+
+/**
+ * The tier a shape declares, or a refusal.
+ *
+ * The tier is not configured; it is *read off* which field the author declared — `scope` for shared,
+ * `rowFilter` for private. That makes a shape's tier evident from its authoring and impossible to
+ * leave ambiguous, which matters because the two differ in whether their bytes are user-independent,
+ * and so in whether they may be shared and cached at all.
+ *
+ * Declaring both is refused rather than resolved by precedence. A `rowFilter` fuses the subject into
+ * the predicate, which is exactly what makes a stream unshareable; silently letting it ride along on
+ * a shape declared as shared would produce a stream that is cached under a scope key while carrying
+ * subject-dependent bytes — a disclosure, not a stale row.
+ */
+export function readShapeTier(shape: ShapeSpec): ShapeTier {
+  if (shape.scope != null && shape.rowFilter != null) {
+    throw new Error(
+      `[pgxsinkit] shape "${shape.shapeKey}" declares both scope and rowFilter — a shape is shared ` +
+        `(scope: the predicate is a function of scope values only) or private (rowFilter: the subject ` +
+        `is fused into the predicate), never both. A rowFilter makes the stream's bytes ` +
+        `subject-dependent, so it cannot be served from a scope-keyed shared stream. Move the ` +
+        `subject-dependent part into the entitlement rule, or drop scope and keep this private.`,
+    );
+  }
+  return shape.scope != null ? "shared" : "private";
 }
 
 /** Input variant of {@link ShapeSpec} where `tableName` and `shapeKey` are optional.
@@ -443,6 +498,21 @@ export interface RowFilterSpec {
    * {@link isClaimsDependentRowFilter}). Do not memoize, mutate external state, or assume it runs once.
    */
   customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | SQL | null;
+  /**
+   * The PRIVATE-TIER filter on the Circuits-native path (ADR-0055): the same job as `customWhere`,
+   * returning a {@link Predicate} instead of SQL text. `null` bypasses filtering (all rows);
+   * {@link DENY_ALL_PREDICATE} denies.
+   *
+   * It exists as a sibling rather than a replacement only because both read paths are present while
+   * the native one is being built. `customWhere` goes when the Electric path does — the native path
+   * cannot use it, since a compiled `SQL` fragment is text and the native API takes an AST, and
+   * re-lexing that text in the control plane would reintroduce in TypeScript exactly the parser
+   * ADR-0055 declines to depend on.
+   *
+   * **Must be pure**, for the same reasons `customWhere` must: it is called fresh per shape
+   * creation, and probed with empty claims to detect claims-dependence.
+   */
+  customPredicate?: (claims: JwtClaims, params?: Record<string, unknown>) => Predicate | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
   /**
@@ -476,6 +546,22 @@ export function c(column: AnyColumn): SQL {
  * matches nothing; Electric accepts it (verified) exactly as it accepts `1 = 0`.
  */
 export const DENY_ALL: SQL = sql`false`;
+
+/**
+ * The deny-all **predicate** — the native-path counterpart to {@link DENY_ALL}, returned by a
+ * `customPredicate` that makes no rows visible.
+ *
+ * An empty `OR` rather than a synthetic always-false comparison: the engine evaluates it as FALSE by
+ * construction (`Or` starts at FALSE and only TRUE dominates), it needs no column to name, and it
+ * cannot be made accidentally true by a NULL cell the way `col <> col` can.
+ *
+ * The control plane recognises it **by reference identity** and declines to create the shape at all,
+ * so a denied subject holds no handle and no stream is materialised — a stronger outcome than an
+ * empty stream, and the reason this is a frozen singleton rather than a shape a caller might
+ * reconstruct. A structurally equal but distinct `{ or: [] }` is still correct on the wire; it just
+ * costs an empty shape instead of a refusal.
+ */
+export const DENY_ALL_PREDICATE: Predicate = Object.freeze({ or: [] as Predicate[] });
 
 /**
  * Whether a row filter denies (or cannot serve) an unauthenticated caller — a *claims-dependent*

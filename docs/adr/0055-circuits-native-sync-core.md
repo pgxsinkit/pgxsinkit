@@ -93,11 +93,24 @@ executes.
    ```ts
    shape: {
      scope: (c) => [c.offeringId, c.groupId],
-     where: (c) => eq(c.published, true),        // optional; static, subscriber-independent
+     where: (c) => p.eq(c.published, true),      // optional; static, subscriber-independent
      entitledBy: /* decision 7 */,
    }
    // → offering_id = $1 AND group_id = $2 AND published = true
    ```
+
+   `p` is pgxsinkit's own predicate builder, not Drizzle's operators, and the difference is forced by
+   decision 1 rather than chosen: Drizzle's `eq` returns an `SQL` fragment, which compiles to *text*,
+   and the native API takes an AST. Re-deriving the AST from that text would put in the control plane
+   the very SQL lexer this ADR declines to depend on. `p` takes the same real column objects and
+   emits the AST directly, so authoring stays at tier ① — no SQL string exists at any point — and the
+   call sites read as they did (`p.eq(c.published, true)`). It is namespaced rather than exported as
+   bare `eq`/`and`/`or` precisely because a registry file legitimately uses both these and Drizzle's,
+   for RLS policies, and two same-named operators returning different things is a trap.
+
+   The private tier needs the same treatment for the same reason: `rowFilter.customPredicate` is
+   `customWhere`'s native sibling, claims in and a `Predicate` out. Neither tier emits SQL text on
+   the native path.
 
    There is deliberately no syntax for anything else. Disjointness is then a property of the
    construction, not a rule some checker enforces: a row carries exactly one value per scope column,
@@ -321,6 +334,11 @@ evaluation.
 - **Redaction changes shape from code to schema.** Changing a `RedactionSpec` becomes a migration
   with a backfill, rather than a deploy. This is a real cost, accepted because it removes redaction
   from every read.
+- **The engine sees the `public` schema only.** It introspects `information_schema` with
+  `table_schema = 'public'` and keys tables by bare name (`pg.rs`), so a schema-qualified registry has
+  no engine-side spelling for its target. The control plane refuses such a shape with that reason
+  rather than sending a name that would fail deep inside shape creation. It is a real limitation of
+  the engine and belongs on the fork's list, not in an app-layer workaround.
 - **We depend on alpha software in two places.** Circuits is 0.x; the Rust ds server is 0.1.5 with
   271 total downloads. Mitigations: we run our own fork of Circuits, we pin ds by digest, and
   conformance is an acceptance gate rather than an assumption.
