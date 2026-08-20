@@ -1,6 +1,14 @@
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import type { RowFilterSpec } from "./config";
+import {
+  isAndPredicate,
+  isInSubqueryPredicate,
+  isIsNullPredicate,
+  isNotPredicate,
+  isOrPredicate,
+  type Predicate,
+} from "./predicate";
 import type { SyncTableEntry, SyncTableRegistry } from "./registry";
 
 /**
@@ -41,6 +49,16 @@ export interface CanonicalTable {
     shapeKey: string;
     electricTable: string | null;
     rowFilter: CanonicalRowFilter | null;
+    /** Shared-tier scope columns, in declaration order — the order parameterizes the family. */
+    scope: string[] | null;
+    /**
+     * The native static predicate, canonicalized in full.
+     *
+     * Unlike `customWhere`, this one is *visible*: an AST can be hashed, where a closure could only
+     * ever be fingerprinted by its presence. So the `revision` footgun does not apply here — editing
+     * a native `where` shifts the fingerprint by itself, and a consumer cannot forget to say so.
+     */
+    where: string | null;
   } | null;
   managedFields: Array<{ field: string; strategy: string; applyOn: string[] }>;
   /**
@@ -108,6 +126,36 @@ function canonicalizeManagedFields(entry: SyncTableEntry): CanonicalTable["manag
     .sort((a, b) => asString(a.field, b.field));
 }
 
+/**
+ * A stable string form of a native predicate.
+ *
+ * Keys are emitted in a fixed order rather than serialized as authored, so two predicates that
+ * differ only in how their object literals were written fingerprint identically — otherwise a
+ * cosmetic edit would force every client to rebuild its local cache.
+ */
+function canonicalizePredicate(node: Predicate | undefined): string | null {
+  if (node === undefined) return null;
+  const render = (current: Predicate): unknown => {
+    if (isAndPredicate(current)) return { and: current.and.map(render) };
+    if (isOrPredicate(current)) return { or: current.or.map(render) };
+    if (isNotPredicate(current)) return { not: render(current.not) };
+    if (isInSubqueryPredicate(current)) {
+      return {
+        col: current.col,
+        in: {
+          table: current.in.table,
+          project: current.in.project,
+          where: current.in.where ? render(current.in.where) : null,
+        },
+        negated: current.negated === true,
+      };
+    }
+    if (isIsNullPredicate(current)) return { col: current.col, isNull: current.isNull };
+    return { col: current.col, op: current.op, value: current.value };
+  };
+  return JSON.stringify(render(node));
+}
+
 function canonicalizeRowFilter(filter: RowFilterSpec | undefined): CanonicalRowFilter | null {
   if (!filter) {
     return null;
@@ -135,6 +183,8 @@ function canonicalizeTable(key: string, entry: SyncTableEntry): CanonicalTable {
         shapeKey: entry.shape.shapeKey,
         electricTable: entry.shape.electricTable ?? null,
         rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
+        scope: entry.shape.scope ? [...entry.shape.scope] : null,
+        where: canonicalizePredicate(entry.shape.where),
       }
     : null;
 
@@ -224,6 +274,16 @@ export interface CanonicalReadContract {
     shapeKey: string;
     electricTable: string | null;
     rowFilter: CanonicalRowFilter | null;
+    /** Shared-tier scope columns, in declaration order — the order parameterizes the family. */
+    scope: string[] | null;
+    /**
+     * The native static predicate, canonicalized in full.
+     *
+     * Unlike `customWhere`, this one is *visible*: an AST can be hashed, where a closure could only
+     * ever be fingerprinted by its presence. So the `revision` footgun does not apply here — editing
+     * a native `where` shifts the fingerprint by itself, and a consumer cannot forget to say so.
+     */
+    where: string | null;
   } | null;
 }
 
@@ -235,6 +295,8 @@ export function canonicalizeReadContract(entry: SyncTableEntry): CanonicalReadCo
         shapeKey: entry.shape.shapeKey,
         electricTable: entry.shape.electricTable ?? null,
         rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
+        scope: entry.shape.scope ? [...entry.shape.scope] : null,
+        where: canonicalizePredicate(entry.shape.where),
       }
     : null;
 

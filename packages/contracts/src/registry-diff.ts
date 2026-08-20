@@ -281,6 +281,17 @@ function diffShape(
   if (JSON.stringify(previous?.rowFilter ?? null) !== JSON.stringify(next?.rowFilter ?? null)) {
     changes.push({ severity: "risky", table, detail: "row filter changed (re-sync required)" });
   }
+
+  // A change of scope columns re-partitions the whole family: rows that were in one shape land in
+  // another, and a client holding the old partition cannot reconcile itself to the new one.
+  if (JSON.stringify(previous?.scope ?? null) !== JSON.stringify(next?.scope ?? null)) {
+    changes.push({ severity: "risky", table, detail: "shape scope changed (re-sync required)" });
+  }
+  // Unlike `customWhere`, this one IS visible — so a change confined to the static predicate is
+  // caught here rather than needing a consumer to remember to bump a revision.
+  if ((previous?.where ?? null) !== (next?.where ?? null)) {
+    changes.push({ severity: "risky", table, detail: "shape predicate changed (re-sync required)" });
+  }
 }
 
 /**
