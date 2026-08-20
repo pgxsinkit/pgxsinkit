@@ -491,3 +491,11 @@ export type {
 } from "./circuits/stream-token";
 export { authorizeStreamRead, createStreamGate, readStreamToken } from "./circuits/edge";
 export type { EntitlementSet, GateDecision, StreamGateOptions } from "./circuits/edge";
+export { createSubscribeHandler, subscribeToShapes } from "./circuits/subscribe";
+export type {
+  DeniedSubscription,
+  GrantedSubscription,
+  SubscribeOptions,
+  SubscribeResult,
+  SubscriptionRequest,
+} from "./circuits/subscribe";
