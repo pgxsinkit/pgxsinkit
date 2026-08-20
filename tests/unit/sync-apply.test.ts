@@ -32,9 +32,24 @@ const todosEntry = defineSyncTable({
   }),
 });
 
-const registry = defineSyncRegistry({ authors: authorsEntry, todos: todosEntry });
+// A table whose primary-key PROPERTY KEY differs from its COLUMN NAME, declared by property key —
+// a form `defineSyncTable` explicitly accepts ("spec entries may be given as the SQL column name or
+// the property key"). Every other registry in this repo uses `id`, where the two coincide, which is
+// what kept the mismatch below invisible.
+const readStateEntry = defineSyncTable({
+  tableName: "read_state",
+  makeColumns: () => ({
+    personId: text("person_id"),
+    itemId: text("item_id"),
+    seen: boolean("seen").notNull(),
+  }),
+  primaryKey: ["personId", "itemId"],
+});
+
+const registry = defineSyncRegistry({ authors: authorsEntry, todos: todosEntry, readState: readStateEntry });
 const authors = authorsEntry.localTable;
 const todos = todosEntry.localTable;
+const readState = readStateEntry.localTable;
 
 interface TestInsertMessage {
   headers: { operation: "insert" };
@@ -64,11 +79,58 @@ describe("sync apply", () => {
 
   beforeAll(async () => {
     pg = await measureTiming("suite:PGlite.create", () => createFreshTestPGlite());
-    await measureTiming("suite:createTablesFromSchema", () => createTablesFromSchema(pg, { authors, todos }));
+    await measureTiming("suite:createTablesFromSchema", () =>
+      createTablesFromSchema(pg, { authors, todos, readState }),
+    );
   });
 
   afterAll(async () => {
     await pg.close();
+  });
+
+  // Regression: `ApplyTarget.primaryKey` is documented as column NAMES, but `defineSyncTable` stores
+  // the primary-key spec verbatim as authored — so a table declaring it by property key handed the
+  // applier `personId` while `columnByName` is keyed `person_id`, and every update and delete threw
+  // "column not found". Found while building the Circuits envelope translation (ADR-0055), which has
+  // to reconstruct exactly these columns from a body-less delete key.
+  it("updates and deletes a table whose pk property key differs from its column name", async () => {
+    const target = resolveApplyTarget(registry, "readState");
+    expect(target.primaryKey).toEqual(["person_id", "item_id"]);
+
+    await applyMessageToTable({
+      pg,
+      target,
+      message: {
+        headers: { operation: "insert" },
+        key: "person-1",
+        value: { person_id: "person-1", item_id: "item-1", seen: false },
+      } as never,
+      debug: false,
+    });
+
+    await applyMessageToTable({
+      pg,
+      target,
+      message: {
+        headers: { operation: "update" },
+        key: "person-1",
+        value: { person_id: "person-1", item_id: "item-1", seen: true },
+      } as never,
+      debug: false,
+    });
+    expect(await drizzleOver(pg).select({ seen: readState.seen }).from(readState)).toEqual([{ seen: true }]);
+
+    await applyMessageToTable({
+      pg,
+      target,
+      message: {
+        headers: { operation: "delete" },
+        key: "person-1",
+        value: { person_id: "person-1", item_id: "item-1" },
+      } as never,
+      debug: false,
+    });
+    expect(await drizzleOver(pg).select({ seen: readState.seen }).from(readState)).toEqual([]);
   });
 
   it("applies bulk inserts operation-faithfully; a replayed primary key fails instead of upserting", async () => {
