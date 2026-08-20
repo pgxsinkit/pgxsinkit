@@ -53,8 +53,14 @@ This is a fifth defect in the same file as the four already fixed and contribute
 belongs in the same report — it is a wrong-rows disclosure on the compat path, which is a
 sharper class of bug than the four ordering and header fixes.
 
-**It is not on our path.** ADR-0055 decision 1 puts us on the native API, which never reaches
-`electric.rs`. Recorded because the upstream report should carry it, not because we are exposed to it.
+**Fixed in the fork** (`84c068c`, "reject a non-public schema qualifier instead of stripping it`") —
+but note what that fix is and is not. It removes the **disclosure**: a qualified name for a schema the
+engine cannot serve now errors instead of silently answering with a different table's rows. It does
+not add **schema support**, which is what this item is about and what remains open below.
+
+**Neither half is on our path.** ADR-0055 decision 1 puts us on the native API, which never reaches
+`electric.rs`. The disclosure is recorded because the upstream report should carry it; the capability
+gap is recorded because the native path hits it too, from the other side.
 
 ## Why it is almost certainly an alpha shortcut, not a decision
 
