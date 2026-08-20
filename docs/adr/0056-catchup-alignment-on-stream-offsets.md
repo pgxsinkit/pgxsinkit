@@ -113,6 +113,12 @@ while a computed revocation was still undelivered, which is silent staleness on 
 - **`headers.lsn` stops being load-bearing.** Its absence on backfill and retraction rows, which
   would otherwise have forced engine-core changes to the dataflow emission path, becomes a
   non-issue. Nothing in this design reads it.
+
+  That turned out to be worth more than the engine work it avoided. The compat path's B6/B10 defect
+  (`docs/research/0001`) is exactly this hazard realised: a real watermark plus unstamped flip
+  emissions makes an LSN-flooring consumer discard every membership move-in and move-out as
+  already-seen. A frontier built on `headers.lsn` would have been vulnerable by construction; this
+  one cannot be, because there is no code path that reads the field.
 - **Boot acquires a control-plane dependency.** Alignment cannot complete while the barrier endpoint
   is unreachable. Failure is a delay, not a correctness break — the client stays on the
   pre-alignment gate — but staged boot (ADR-0041) must treat it as a degraded rather than failed
