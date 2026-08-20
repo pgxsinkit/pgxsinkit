@@ -80,19 +80,46 @@ executes.
      ref-counted sharing.
 
    The library ships both permanently. Neither is a migration target for the other, and the private
-   tier is not deprecated.
+   tier is not deprecated. The tier is discriminated by which field a shape declares — `scope` for
+   shared, `rowFilter` for private — and declaring both is refused at definition time, so a shape's
+   tier is evident from its authoring and cannot be ambiguous.
 
-3. **The shared tier requires disjoint scopes, enforced at definition time.**
-   A shared shape's predicate must be equality over declared scope columns that are present on the
-   row; anything else is refused when the registry is defined — the posture `serverProjection`'s
-   mandatory invariant already takes.
+3. **A shared shape's predicate is generated from its scope columns, so disjointness is structural
+   rather than validated.**
+   The author declares which columns are scope keys and, optionally, a static conjunct that is
+   identical for every subscriber. The predicate is generated as an `AND` of equalities over the
+   scope columns, with `NULL` a legal scope value (`group_id = NULL` compiles to `IS NULL`):
+
+   ```ts
+   shape: {
+     scope: (c) => [c.offeringId, c.groupId],
+     where: (c) => eq(c.published, true),        // optional; static, subscriber-independent
+     entitledBy: /* decision 7 */,
+   }
+   // → offering_id = $1 AND group_id = $2 AND published = true
+   ```
+
+   There is deliberately no syntax for anything else. Disjointness is then a property of the
+   construction, not a rule some checker enforces: a row carries exactly one value per scope column,
+   so it belongs to exactly one shape of a family, and an overlapping pair cannot be expressed at
+   all. That is worth more than the expressiveness it costs — a validator that admits one
+   overlapping predicate reintroduces ambiguous deletes silently, which is the failure class that
+   concealed a real revocation-loss defect during the evaluation.
+
+   Two things fall out of it. Offering-wide rows become their own scope `(O, null)` instead of
+   appearing in every group's shape: the tempting `group_id IS NULL OR group_id = $G` form is not
+   merely disallowed but *wrong*, since it places one row in every group shape at once. And a
+   posture difference stops being a predicate difference — a moderator entitled to every group of an
+   offering reads the same shapes a member reads, only more of them, so the disjunction that made
+   such filters unshareable dissolves rather than needing decomposition.
+
+   A predicate that cannot be expressed this way uses the private tier.
 
    Disjointness is what keeps the client simple. A row satisfies at most one of a subject's shared
    shapes, so deletes are unambiguous, unsubscribing from a scope is
    `DELETE … WHERE scope_col = $k` derived from the scope key itself with no bookkeeping column, and
-   the generated local schema is untouched. A predicate that cannot be made disjoint — an
-   irreducibly per-person disjunct, or overlapping scopes — uses the private tier. That is a
-   supported outcome, not a failure, and it is why the private tier is permanent.
+   the generated local schema is untouched. Falling back to the private tier is a supported outcome,
+   not a failure, and it is why that tier is permanent.
 
 4. **Sharing moves multiplicity from the server to the client. That is the trade, stated plainly.**
    A subject in K scopes holds K subscriptions feeding one local table; the multiplicity does not
@@ -138,8 +165,26 @@ executes.
    propagation rather than a cache TTL.
 
    Because the edge is TypeScript (decision 8), an entitlement rule is **an ordinary typed function**
-   over those synced relations — authored in Drizzle terms beside the registry it belongs to. No
-   expression mini-language, no derived entitlement tables, and no triggers maintaining a
+   over those synced relations — authored in Drizzle terms beside the registry it belongs to:
+
+   ```ts
+   entitledBy: {
+     relations: [offeringMembership, groupMembership],
+     scopesFor: (claims, r) => {
+       const person = readPersonId(claims);
+       if (person === null) return [];                       // deny: no scopes
+       return r.offeringMembership.byPerson(person).flatMap((m) => [
+         { offeringId: m.offeringId, groupId: null },         // offering-wide
+         ...(isTeaching(m.membershipRole)
+           ? r.groups.byOffering(m.offeringId).map((g) => ({ offeringId: m.offeringId, groupId: g.id }))
+           : r.groupMembership.byPerson(person).map((g) => ({ offeringId: m.offeringId, groupId: g.groupId }))),
+       ]);
+     },
+   }
+   ```
+
+   Returning `[]` denies, so the anonymous and unentitled cases are the same code path as any other.
+   No expression mini-language, no derived entitlement tables, and no triggers maintaining a
    denormalised copy that could drift from its source. Circuits shapes can only source from base
    tables carrying a primary key (`pg.rs`: base tables with `indisprimary`), so the relations synced
    are the membership tables themselves, which already satisfy that. While that subscription is catching up, degraded, or stale,
