@@ -23,6 +23,7 @@ import {
   applyUpsertsToTableWithJson,
 } from "./apply";
 import { drizzleOverPg } from "./drizzle-executor";
+import { assertValidMetadataSchema, DEFAULT_METADATA_SCHEMA } from "./metadata-tables";
 import {
   NUDGE_HOLD_GRACE_MS,
   NUDGE_MAX_ROUNDS,
@@ -38,15 +39,7 @@ import {
   type SubscriptionState,
   updateSubscriptionState,
 } from "./subscription-state";
-import {
-  addShapeRowTags,
-  applyShapeMoveOut,
-  applyShapeTagSync,
-  assertValidMetadataSchema,
-  clearShapeTags,
-  DEFAULT_METADATA_SCHEMA,
-  shapeTableId,
-} from "./tags";
+import { addShapeRowTags, applyShapeMoveOut, applyShapeTagSync, clearShapeTags, shapeTableId } from "./tags";
 import {
   DEFAULT_MAX_COMMIT_RETRIES,
   type ElectricSyncOptions,

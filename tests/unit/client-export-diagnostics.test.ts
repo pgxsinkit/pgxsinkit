@@ -10,8 +10,8 @@ import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
 import { createSyncClient, LifecycleBusyError, type SyncClient } from "../../packages/client/src/index";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
-import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/tags";
 import { memoryStoreForTests } from "../../packages/client/src/testing";
 
 // A persistent readwrite table (todos) alongside an EPHEMERAL readwrite table (exam_answer). The ephemeral

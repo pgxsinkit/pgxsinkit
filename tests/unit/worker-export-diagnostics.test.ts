@@ -17,8 +17,8 @@ import {
   defineSyncWorker,
   type SyncWorkerHost,
 } from "../../packages/client/src/index";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
-import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/tags";
 import { testStoreAcknowledgment } from "../../packages/client/src/testing";
 
 const todosRegistry = defineSyncRegistry({
