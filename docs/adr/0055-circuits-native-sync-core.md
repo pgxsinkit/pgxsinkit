@@ -388,8 +388,10 @@ These are deliberately not decided here.
    This is the largest remaining piece of client work and needs its own ADR.
 2. **Registry syntax** for declaring scope parameters, the claims-free predicate, and the entitlement
    rule — and where the disjointness checker runs.
-3. **Whether ADR-0023's tag reconstruction can be retired** now that the engine emits explicit
-   deletes on catch-up, or whether it must remain for cases the explicit delete does not cover.
+3. ~~**Whether ADR-0023's tag reconstruction can be retired.**~~ **Resolved** by
+   [ADR-0057](0057-retiring-tagged-subquery-reconciliation.md): retired entirely. The shared tier has
+   no subqueries to reconcile, and the private tier's evictions arrive as explicit deletes, verified
+   across the offline gap on a native stack.
 4. **The shape of the entitlement relation** the edge subscribes to: one canonical `(subject, scope)`
    projection, or per-shape-family relations.
 5. **Migration sequencing** for existing consumers. Clients resync from scratch at cutover, which

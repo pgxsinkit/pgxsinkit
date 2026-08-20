@@ -2,6 +2,8 @@
 
 Status: accepted (2026-06-29) — Slices 1 & 2 implemented and tested (Electric 1.7.4)
 
+**Superseded (2026-08-20) by [ADR-0057](0057-retiring-tagged-subquery-reconciliation.md).** Tag reconciliation existed because Electric emitted nothing when a subquery membership changed. On the Circuits-native read path (ADR-0055) the engine emits an explicit delete for a feed retraction, verified across the offline gap, and the shared tier has no subqueries at all — so the inference this ADR describes has nothing left to infer.
+
 ## Context
 
 [ADR-0023](0023-subquery-move-out-tagged-reconciliation.md) fixed the **move-out** half of Electric's
