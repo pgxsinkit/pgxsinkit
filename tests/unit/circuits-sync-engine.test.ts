@@ -193,6 +193,55 @@ describe("circuits sync engine", () => {
     await drizzleOver(pg).delete(content);
   });
 
+  // The native must-refetch (ADR-0056 d6). The client is handed a different stream for the same
+  // shape — an eviction, a deletion, a close, all end here — and the offset it persisted addresses
+  // the OLD stream, where it means nothing. So it re-snapshots, and the previous stream's rows are
+  // cleared in the same transaction the new ones land in.
+  //
+  // Delete the handle comparison and this fails twice over: the stale row survives, and the offset
+  // from a foreign stream is replayed against the new one.
+  it("re-snapshots when the granted handle differs from the persisted one", async () => {
+    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0, flipFailures: 0 };
+    const common = {
+      pg,
+      registry,
+      key: "sub-handle",
+      live: false as const,
+      metadataSchema: METADATA_SCHEMA,
+      readBarrier: async () => barrier,
+      token: () => "t",
+    };
+
+    const first = await syncCircuitsShapes({
+      ...common,
+      fetch: stubEdge({ "/shape/s1": [envelope(ROW_1, OFF_A)] }),
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
+    });
+    await settle();
+    expect((await drizzleOver(pg).select({ id: content.id }).from(content)).map((r) => r.id)).toEqual([ROW_1]);
+    first.unsubscribe();
+
+    // Same subscription, same shape name — a NEW stream path.
+    const offsets: (string | null)[] = [];
+    const second = await syncCircuitsShapes({
+      ...common,
+      fetch: (async (input: URL | string) => {
+        offsets.push(new URL(String(input)).searchParams.get("offset"));
+        return dsResponse([envelope(ROW_2, OFF_B)], "0000000000000009");
+      }) as unknown as typeof fetch,
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s2", tableKey: "content" } },
+    });
+    await settle();
+
+    // The old stream's row is gone, not merged with the new one's.
+    expect((await drizzleOver(pg).select({ id: content.id }).from(content)).map((r) => r.id)).toEqual([ROW_2]);
+    // And it read the new stream from the start rather than replaying a foreign offset.
+    expect(offsets[0]).toBe("-1");
+
+    second.unsubscribe();
+    await drizzleOver(pg).delete(content);
+  });
+
   // A poisoned engine is the one barrier reading that is NOT a delay. An abandoned flip batch
   // releases its permit on the way out, so `pendingFlips` is back to zero and `sync` is true — every
   // other term reports converged, forever — while the membership effect it carried is gone. Holding

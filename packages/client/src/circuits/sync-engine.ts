@@ -151,6 +151,29 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
   const subState =
     key === null ? null : await getSubscriptionState({ pg, metadataSchema, subscriptionKey: key, sessionScoped });
 
+  /**
+   * Which shapes may resume, and which must re-snapshot (ADR-0056 decision 6).
+   *
+   * The native must-refetch trigger is **the handle**, and it is discovered here rather than
+   * received. The persisted handle is the stream this shape was reading; the granted one is the
+   * stream the control plane has just named for it. When they differ the stored offset addresses a
+   * *different stream*, and ds offsets carry no meaning across streams (PROTOCOL.md §10.2) — so
+   * resuming from it is not stale, it is undefined.
+   *
+   * Every native reset funnels through this one check. A shape the engine evicted, a stream deleted
+   * (404) or soft-deleted (410) underneath a live read, a stream that closed — each one ends with
+   * the client re-subscribing, and re-subscribing is what produces a new path. That is the whole
+   * mechanism: Electric needed an out-of-band `must-refetch` control message because its handles
+   * were opaque server state the client could not compare, and here the client simply notices.
+   */
+  const resumable = new Set(
+    shapeNames.filter((shapeName) => {
+      const persisted = subState?.shape_metadata[shapeName];
+      return persisted?.offset != null && persisted.handle === shapes[shapeName]!.streamUrl;
+    }),
+  );
+  const rehydrating = shapeNames.filter((shapeName) => !resumable.has(shapeName) && subState !== null);
+
   // Per shape, the backfill strategy: an explicit override, else the registry's build-time
   // classification. Resolved per shape rather than per group so one shape's column profile never
   // forces its siblings onto a slower path.
@@ -162,13 +185,18 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
     ]),
   );
   // A resume starts in plain-insert mode: the bulk backfill path is only ever correct onto an empty
-  // table, which is a fresh subscription or a post-must-refetch re-snapshot.
+  // table, which is a fresh subscription or a post-must-refetch re-snapshot. A shape whose handle
+  // changed is the second of those — its rows are about to be cleared — so it takes the bulk path
+  // too, rather than being penalised for a reset it did not cause.
   const useBulkBackfill = new Map<string, boolean>(
-    shapeNames.map((shapeName) => [shapeName, subState === null && insertMethod.get(shapeName) !== "insert"]),
+    shapeNames.map((shapeName) => [shapeName, !resumable.has(shapeName) && insertMethod.get(shapeName) !== "insert"]),
   );
 
   const inbox = new StreamInbox(shapeNames);
-  const truncateNeeded = new Set<string>();
+  // Seeded, not merely declared: a shape re-hydrating onto a store that still holds the previous
+  // stream's rows must clear them in the same transaction the new snapshot lands in, or the two
+  // memberships merge and every row the shape lost stays visible forever.
+  const truncateNeeded = new Set<string>(rehydrating);
   let unsubscribed = false;
   let degraded = false;
   let commitInFlight: Promise<void> | null = null;
@@ -400,9 +428,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
         shapeName,
         {
           url: shapes[shapeName]!.streamUrl,
-          ...(subState?.shape_metadata[shapeName]?.offset
-            ? { offset: String(subState.shape_metadata[shapeName]!.offset) }
-            : {}),
+          ...(resumable.has(shapeName) ? { offset: String(subState!.shape_metadata[shapeName]!.offset) } : {}),
         },
       ]),
     ),

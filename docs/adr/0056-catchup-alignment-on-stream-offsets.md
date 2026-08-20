@@ -60,18 +60,37 @@ while a computed revocation was still undelivered, which is silent staleness on 
    arriving afterwards is affected, because alignment is one-time.
 
 3. **The predicate is the whole barrier, never a bare LSN.** Alignment requires `sync` caught up
-   **and** per-table offsets at tail **and** `pendingFlips == 0`. Dropping the last term reintroduces
-   exactly the undelivered-revocation window described above. The `pendingFlips` term is read
-   **engine-global** — conservative by construction: another table's pending flips can *delay* a
-   group's alignment, never falsely satisfy it. Per-shape granularity would be an upstream engine
-   change and is deferred until measured boot latency shows the delay matters. If the barrier is
-   unsatisfied the client does not align; it retries with backoff and stays on the pre-alignment
-   gate, which is correct if slower.
+   **and** per-table offsets at tail **and** `pendingFlips == 0` **and** `flipFailures == 0`.
+   Dropping the third term reintroduces exactly the undelivered-revocation window described above.
+   The `pendingFlips` term is read **engine-global** — conservative by construction: another table's
+   pending flips can *delay* a group's alignment, never falsely satisfy it. Per-shape granularity
+   would be an upstream engine change and is deferred until measured boot latency shows the delay
+   matters. If the barrier is unsatisfied the client does not align; it retries with backoff and
+   stays on the pre-alignment gate, which is correct if slower.
+
+   *(Amended 2026-08-21, `flipFailures`.)* The first three terms all describe work that is still
+   coming, so waiting is the right response to each. `flipFailures` describes work that is **gone**,
+   and is therefore the one term the client must not wait on. The engine abandons a flip batch only
+   after exhausting its retries, and abandonment releases that batch's barrier permit on the way out
+   — so `pendingFlips` returns to zero and `sync` stays true while the membership effect the batch
+   carried never lands. Every waiting term reports converged, permanently. The engine records this by
+   poisoning its own frontier, freezing `sequencedLsn`, and reporting `degraded` on `/v1/health`;
+   `flipFailures` is how a client reads the same fact, and a group that sees it **refuses
+   terminally** rather than holding. Holding would be indistinguishable from a slow engine while
+   quietly never aligning, and the condition is unrecoverable in-process by the engine's own design:
+   recovery is a restart, which is a deliberate act, not something a client can wait out.
 
 4. **The barrier is read through the control plane, not the engine.** Clients never address the
    engine's control-plane HTTP directly — it is unauthenticated and not exposed. The control plane
-   surfaces the barrier on its own authenticated endpoint and MAY cache it briefly; a stale barrier
-   can only *delay* alignment, never falsely satisfy it, because staleness moves it backwards.
+   surfaces the barrier on its own authenticated endpoint and MAY cache it briefly.
+
+   *(Amended 2026-08-21.)* This decision originally justified the cache with "a stale barrier can
+   only *delay* alignment, never falsely satisfy it, because staleness moves it backwards". That
+   holds for `sync` and `pendingFlips`, and **inverts** for `flipFailures`: a cached pre-poisoning
+   zero licenses precisely the alignment the term exists to refuse. So a poisoned reading is never
+   cached and never served from cache, and the cache window is restated for what it actually is —
+   the bound on how long a client may align against a freshly-poisoned engine. That is why the
+   default is zero.
 
 5. **The steady-state commit gate is "every shape currently reports up-to-date". ADR-0031's commit
    floor is deleted, not ported.**
@@ -106,6 +125,29 @@ while a computed revocation was still undelivered, which is silent staleness on 
    carrying the barrier that satisfied it — including `pendingFlips` — so an alignment that fired on
    a half-converged engine is one grep away rather than an inference from stale data.
 
+7. **The native `must-refetch` trigger is the handle, discovered rather than received.** The client
+   persists the stream it was reading alongside the offset. At every subscribe it compares the
+   persisted handle with the one the control plane has just granted for that shape; when they differ
+   the stored offset addresses a *different stream*, where ds offsets carry no meaning at all
+   (PROTOCOL.md §10.2). Such a shape rewinds to the start of its stream, clears its rows in the same
+   transaction the new snapshot lands in, and re-arms alignment — decision 5's surviving ADR-0031
+   invariant, now with a trigger.
+
+   Every native reset funnels through that single check. A shape the engine evicted, a stream
+   deleted (`404`) or soft-deleted (`410`) under a live read, a stream that closed (`Stream-Closed`)
+   — each ends with the client re-subscribing, and re-subscribing is what produces a new path. There
+   is no separate control message and no reset opcode on the wire.
+
+   This is where the substrate change pays off rather than costs. Electric needed an out-of-band
+   `must-refetch` because its handles were opaque server state a client could not reason about, so
+   the server had to *tell* it. Here the client already holds both handles and can simply compare
+   them, which makes the trigger a local, total, synchronous check instead of a message that can be
+   missed, duplicated, or arrive against the wrong generation.
+
+   Two conditions are deliberately **not** resets. A `403` that survives a re-mint is a revocation:
+   the scope is truncated and unsubscribed (ADR-0055 decision 6), not re-snapshotted. A `503` from a
+   degraded engine is decision 3's terminal refusal.
+
 ## Consequences
 
 - **The frontier and the resume token unify.** One persisted value per shape instead of an LSN
@@ -132,6 +174,14 @@ while a computed revocation was still undelivered, which is silent staleness on 
 - **Alignment can now fail closed on a real condition.** `pendingFlips > 0` is a genuine
   not-yet-converged signal that Electric's wire format could not express at all, so this design can
   detect a case its predecessor silently mis-committed.
+- **Alignment can also fail *terminally*, which is new.** `flipFailures > 0` has no Electric
+  counterpart in either direction: the engine could not previously report lost membership effects,
+  and the client had no state in which it stopped rather than retried. Runtimes must surface it —
+  a group in this state never becomes up-to-date and never will without an engine restart.
+- **`must-refetch` stops being a wire concern.** No reset opcode, no control message, no handling for
+  one arriving against a superseded generation. The cost is that a reset is only ever *noticed* at
+  subscribe: a shape whose stream is deleted mid-session detects it on the read failure and must
+  re-subscribe to learn its new handle, rather than being told inline.
 
 ## Alternatives considered
 
@@ -157,7 +207,11 @@ while a computed revocation was still undelivered, which is silent staleness on 
 
 ## Open questions
 
-1. **How long may the control plane cache the barrier?** Staleness is safe in one direction only;
-   the bound should come from measured alignment latency rather than being picked.
-2. **Does `must-refetch` have a native equivalent?** ADR-0031 re-arms alignment on reset. The
-   trigger's native form — stream closed, epoch change, 409 — is not yet pinned down.
+1. **How long may the control plane cache the barrier?** Still open, but the question changed shape
+   under decision 4's amendment. It is no longer only "how stale may an alignment signal be" — a
+   healthy cached reading also masks a subsequent poisoning for the length of the window, so the
+   bound is the smaller of measured alignment latency and the tolerable delay in noticing an engine
+   that has lost membership effects. The default stays zero until both are measured.
+2. ~~**Does `must-refetch` have a native equivalent?**~~ **Resolved** by decision 7: it is the
+   handle comparison at subscribe, and every other candidate trigger (eviction, `404`, `410`,
+   `Stream-Closed`) reaches the client through it.
