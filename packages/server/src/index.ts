@@ -476,3 +476,18 @@ export type { CompiledShapeRequest, ShapeRequest } from "./circuits/compile";
 export { CircuitsEngineError, createCircuitsEngineClient } from "./circuits/engine-client";
 export type { CircuitsEngineClient, CircuitsEngineOptions } from "./circuits/engine-client";
 export type { CircuitsShapeHandle, CreateShapeRequest } from "./circuits/wire";
+export {
+  DEFAULT_STREAM_TOKEN_TTL_SECONDS,
+  findGrant,
+  importStreamTokenKey,
+  mintStreamToken,
+  verifyStreamToken,
+} from "./circuits/stream-token";
+export type {
+  MintStreamTokenOptions,
+  StreamGrant,
+  StreamTokenClaims,
+  StreamTokenVerification,
+} from "./circuits/stream-token";
+export { authorizeStreamRead, createStreamGate, readStreamToken } from "./circuits/edge";
+export type { EntitlementSet, GateDecision, StreamGateOptions } from "./circuits/edge";

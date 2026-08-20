@@ -1,0 +1,163 @@
+import type { PredicateValue } from "@pgxsinkit/contracts";
+
+/**
+ * One stream a token admits its bearer to.
+ *
+ * The grant is **self-describing**: it carries the durable-streams path together with the shape and
+ * scope that path serves. That is what keeps the edge stateless. Shape creation happened on whichever
+ * replica the client reached, and the edge is replica-scaled, so a path→scope map held in memory
+ * would have to be shared between replicas — a second piece of distributed state on the read path,
+ * to answer a question the token can simply carry.
+ */
+export interface StreamGrant {
+  /** The durable-streams path, e.g. `shape/s1`. */
+  path: string;
+  /** The shape this path serves — the entitlement rule's binding key. */
+  shapeKey: string;
+  /**
+   * Scope values, positionally matching the shape's declared scope columns. Shared tier only; a
+   * private-tier grant has none, and its authorization is the token itself.
+   */
+  scope?: readonly PredicateValue[];
+}
+
+/** The verified body of a stream token. */
+export interface StreamTokenClaims {
+  /** The subject the token was minted for. */
+  sub: string;
+  grants: StreamGrant[];
+  /** Issued-at and expiry, seconds since the epoch. */
+  iat: number;
+  exp: number;
+}
+
+export interface MintStreamTokenOptions {
+  sub: string;
+  grants: readonly StreamGrant[];
+  /**
+   * Lifetime in seconds. The ADR-0055 default is 5 minutes, which is also the revocation bound when
+   * a hit-serving third-party CDN sits in front: shorten it where that bound matters more than the
+   * re-mint traffic, lengthen it where it does not.
+   */
+  ttlSeconds?: number;
+  /** Seconds since the epoch. Injected so minting is testable and so a batch shares one issue time. */
+  now: number;
+}
+
+export const DEFAULT_STREAM_TOKEN_TTL_SECONDS = 300;
+
+export type StreamTokenVerification = { ok: true; claims: StreamTokenClaims } | { ok: false; reason: string };
+
+/**
+ * The signing key. HMAC-SHA256 over a compact JWS: the same process mints and verifies, so there is
+ * one trust domain and no reason to pay for asymmetric keys — and no reason to take a JWT dependency
+ * into a published library for what Web Crypto already does.
+ *
+ * The token still IS a JWT, so it stays readable by ordinary tooling when someone has to debug one.
+ */
+export async function importStreamTokenKey(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+    "verify",
+  ]);
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
+  const padded = value
+    .replaceAll("-", "+")
+    .replaceAll("_", "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+const HEADER = base64UrlEncode(new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
+
+/**
+ * Mint one token for a whole batch of grants.
+ *
+ * Batched by design, not as an optimisation: a subject in K scopes holds K subscriptions, and
+ * re-minting per subscription would put K requests on every TTL boundary for every subject. One
+ * token covering all K collapses that to one request per subject per window.
+ */
+export async function mintStreamToken(key: CryptoKey, options: MintStreamTokenOptions): Promise<string> {
+  const ttl = options.ttlSeconds ?? DEFAULT_STREAM_TOKEN_TTL_SECONDS;
+  const claims: StreamTokenClaims = {
+    sub: options.sub,
+    grants: options.grants.map((grant) => ({
+      path: grant.path,
+      shapeKey: grant.shapeKey,
+      ...(grant.scope !== undefined ? { scope: [...grant.scope] } : {}),
+    })),
+    iat: options.now,
+    exp: options.now + ttl,
+  };
+
+  const body = base64UrlEncode(new TextEncoder().encode(JSON.stringify(claims)));
+  const signingInput = `${HEADER}.${body}`;
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
+  return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+/**
+ * Verify a token and read its grants back.
+ *
+ * `now` is the request-start time, and is passed rather than read here so that a long-poll held open
+ * across the expiry is judged by when it started — the alternative silently kills connections
+ * mid-flight at the TTL boundary, which presents as a stall rather than as the re-auth it is.
+ *
+ * Signature verification goes through `crypto.subtle.verify`, so the comparison is the platform's
+ * constant-time one rather than a string equality that leaks by how early it diverges.
+ */
+export async function verifyStreamToken(key: CryptoKey, token: string, now: number): Promise<StreamTokenVerification> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return { ok: false, reason: "malformed token" };
+  const [header, body, signature] = parts as [string, string, string];
+  if (header !== HEADER) return { ok: false, reason: "unexpected token header" };
+
+  let valid: boolean;
+  try {
+    valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      base64UrlDecode(signature),
+      new TextEncoder().encode(`${header}.${body}`),
+    );
+  } catch {
+    return { ok: false, reason: "malformed signature" };
+  }
+  if (!valid) return { ok: false, reason: "bad signature" };
+
+  let claims: StreamTokenClaims;
+  try {
+    claims = JSON.parse(new TextDecoder().decode(base64UrlDecode(body))) as StreamTokenClaims;
+  } catch {
+    return { ok: false, reason: "malformed payload" };
+  }
+  if (typeof claims.sub !== "string" || !Array.isArray(claims.grants) || typeof claims.exp !== "number") {
+    return { ok: false, reason: "malformed payload" };
+  }
+  if (claims.exp <= now) return { ok: false, reason: "expired" };
+
+  return { ok: true, claims };
+}
+
+/**
+ * The grant covering a requested stream path, if the token carries one.
+ *
+ * Exact path match, deliberately: durable-streams paths are a monotonic counter (`shape/s1`,
+ * `shape/s2`, …), so they are enumerable rather than capability-bearing, and any prefix or pattern
+ * match over them would hand the bearer streams the control plane never granted.
+ */
+export function findGrant(claims: StreamTokenClaims, path: string): StreamGrant | undefined {
+  return claims.grants.find((grant) => grant.path === path);
+}

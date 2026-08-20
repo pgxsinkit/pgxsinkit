@@ -168,7 +168,7 @@ it("posts the compiled body to the engine and returns its handle", async () => {
   const client = createCircuitsEngineClient({
     baseUrl: "http://engine:4000/",
     fetch: (async (url: string, init: RequestInit) => {
-      seen = { url, body: JSON.parse(String(init.body)) };
+      seen = { url, body: JSON.parse(init.body as string) };
       return new Response(
         JSON.stringify({
           shapeId: "s1",
