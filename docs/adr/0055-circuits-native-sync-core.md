@@ -334,11 +334,28 @@ evaluation.
 - **Redaction changes shape from code to schema.** Changing a `RedactionSpec` becomes a migration
   with a backfill, rather than a deploy. This is a real cost, accepted because it removes redaction
   from every read.
-- **The engine sees the `public` schema only.** It introspects `information_schema` with
-  `table_schema = 'public'` and keys tables by bare name (`pg.rs`), so a schema-qualified registry has
-  no engine-side spelling for its target. The control plane refuses such a shape with that reason
-  rather than sending a name that would fail deep inside shape creation. It is a real limitation of
-  the engine and belongs on the fork's list, not in an app-layer workaround.
+- **Schema-bound registries cannot cut over until the engine gains qualified table names.** This is
+  a **blocker**, not a limitation to note. Circuits keys a table by its bare name end to end: it
+  introspects `information_schema` with `table_schema = 'public'`, and its replication decoder
+  *parses* the relation namespace off the wire and then discards it (`replication.rs:233`), so two
+  same-named tables in different schemas collide silently rather than erroring. But
+  `SyncRegistryDefinition.schema` is the **Postgres source** schema — `attachSyncRegistrySchema`
+  validates it against the Drizzle table's own schema and qualifies the shape target from it — so a
+  non-`public` registry is a shipped pgxsinkit feature, and Electric supports it today. Cutting over
+  without the engine change is therefore a **regression**, not a deferral.
+
+  Until then the control plane refuses such a shape and names the reason, rather than sending a name
+  that would fail deep inside shape creation. The engine change is scoped in
+  [backlog/0009](../backlog/0009-circuits-schema-qualified-tables.md) — roughly a day, mostly
+  mechanical, since the namespace is already on the wire. Nothing in this ADR's design depends on the
+  answer; the predicate AST references columns of one already-resolved table either way.
+
+  No rationale for the restriction exists anywhere upstream — no ADR, note, or commit message — and
+  the maintainers have not replied. The code reads as an alpha shortcut rather than a decision (a
+  namespace decoded and thrown away; a compat adapter that silently *strips* a foreign schema instead
+  of rejecting it), which suggests a fix would be welcome upstream. That is inference from the source,
+  not something we have been told, and it should not be relied on when planning the fork's
+  maintenance burden.
 - **We depend on alpha software in two places.** Circuits is 0.x; the Rust ds server is 0.1.5 with
   271 total downloads. Mitigations: we run our own fork of Circuits, we pin ds by digest, and
   conformance is an acceptance gate rather than an assumption.

@@ -26,3 +26,4 @@ Rules:
 - [0006 — Revisit making strict (non-relaxed) durability the default again](0006-restore-strict-durability-default.md) — parked
 - [0007 — OPFS storage model (two-tier VFS, Safari open-file ceiling)](0007-opfs-storage-model.md) — candidate
 - [0008 — Lazy ephemeral schema at activation (split the all-mutations view first)](0008-lazy-ephemeral-schema-at-activation.md) — candidate
+- [0009 — Circuits keys tables by bare name (schema-bound registries)](0009-circuits-schema-qualified-tables.md) — candidate
