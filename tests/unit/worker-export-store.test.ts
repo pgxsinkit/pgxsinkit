@@ -43,7 +43,8 @@ async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
   const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry: todosRegistry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     // The precreated store is a prepopulated MEMORY PGlite (test only) — acknowledge it past the BYO
     // refusal the worker's `createSyncClient` boot would otherwise raise (ADR-0036).

@@ -2,13 +2,18 @@ import { drizzle } from "drizzle-orm/bun-sql";
 import { defineRelations } from "drizzle-orm/relations";
 
 import { demoMembershipSyncRegistry } from "@pgxsinkit/schema";
-import { buildRegistrySchema, createSyncServer } from "@pgxsinkit/server";
+import {
+  buildRegistrySchema,
+  createCircuitsEngineClient,
+  createSyncServer,
+  importStreamTokenKey,
+} from "@pgxsinkit/server";
 
 import { parseDemoAuthClaimsFromRequest } from "./demo-auth";
 import { writeApiEnv } from "./env";
 
 const databaseUrl = writeApiEnv.DATABASE_URL;
-const electricUrl = writeApiEnv.ELECTRIC_URL;
+const circuitsEngineUrl = writeApiEnv.CIRCUITS_ENGINE_URL;
 const allowedOrigins = ["http://localhost:5173", "http://localhost:5174"];
 const operationsLogEnabled = writeApiEnv.WRITE_API_OPS_LOG_ENABLED;
 const idleTimeoutSeconds = writeApiEnv.WRITE_API_IDLE_TIMEOUT_SECONDS;
@@ -32,7 +37,7 @@ function redactDatabaseUrl(raw: string): string {
 
 console.log("Starting write-api...", {
   databaseUrl: redactDatabaseUrl(databaseUrl),
-  electricUrl,
+  circuitsEngineUrl,
   operationsLogEnabled,
   idleTimeoutSeconds,
 });
@@ -41,10 +46,10 @@ const schema = buildRegistrySchema(demoMembershipSyncRegistry);
 const relations = defineRelations(schema);
 const db = drizzle({ connection: databaseUrl, relations });
 
-// One server owns both ingress paths: the write route (POST /api/mutations) and the
-// read-path Electric shape proxy, both resolving identity through the single
-// resolveAuthClaims adapter (ADR-0003). The proxy fails closed on tables absent from
-// the registry. The path stays /v1/electric-proxy for client/env compatibility.
+// One server owns both ingress paths: the write route (POST /api/mutations) and the native
+// read path's control plane (subscribe / re-mint / barrier), both resolving identity through
+// the single resolveAuthClaims adapter (ADR-0003). No route here serves shape DATA — reads
+// terminate on durable-streams through the edge (ADR-0055).
 const server = createSyncServer({
   registry: demoMembershipSyncRegistry,
   db,
@@ -52,8 +57,10 @@ const server = createSyncServer({
     const claims = parseDemoAuthClaimsFromRequest(request);
     return claims ? { ...claims } : null;
   },
-  electricUrl,
-  shapeProxyPath: "/v1/electric-proxy",
+  readPath: {
+    engine: createCircuitsEngineClient({ baseUrl: circuitsEngineUrl }),
+    key: await importStreamTokenKey(writeApiEnv.STREAM_TOKEN_SECRET),
+  },
   operationsLog: {
     enabled: operationsLogEnabled,
   },

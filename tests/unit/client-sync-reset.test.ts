@@ -15,12 +15,12 @@ const itemsTable = pgTable("items", {
 
 const order: string[] = [];
 
-const initMetadataTablesMock = mock(async (): Promise<void> => {
-  order.push("initMetadataTables");
+const migrateMetadataTablesMock = mock(async (): Promise<void> => {
+  order.push("migrateSubscriptionMetadataTables");
 });
 
-const deleteSubscriptionMock = mock(async (key: string): Promise<void> => {
-  order.push(`deleteSubscription:${key}`);
+const deleteSubscriptionStateMock = mock(async ({ subscriptionKey }: { subscriptionKey: string }): Promise<void> => {
+  order.push(`deleteSubscriptionState:${subscriptionKey}`);
 });
 
 // Slice 3 (durable-schema fingerprint fast path) split the single boot schema exec into TWO crossings —
@@ -31,18 +31,19 @@ const execMock = mock(async (_sql: string): Promise<void> => {
   order.push("applyLocalSchema");
 });
 
-type StartConfiguredSyncInput = {
-  // ADR-0013: header values may be async functions resolved per request (the Authorization token),
-  // not just frozen strings.
-  shapeHeaders?: Record<string, string | (() => string | Promise<string>)>;
+type StartCircuitsSyncInput = {
+  // ADR-0013: ONE adapter resolved per request, rather than per-header values frozen at boot. The
+  // native control plane is asked for headers on every call it makes, so a token that refreshed
+  // mid-subscription is picked up without the subscription noticing.
+  authHeaders?: () => Record<string, string> | Promise<Record<string, string>>;
 };
 
-const startConfiguredSyncMock = mock(
+const startCircuitsSyncMock = mock(
   async (
     _pglite: unknown,
-    _input: StartConfiguredSyncInput,
+    _input: StartCircuitsSyncInput,
   ): Promise<{ unsubscribe: () => void; tables: Record<string, never> }> => {
-    order.push("startConfiguredSync");
+    order.push("startCircuitsSync");
     return {
       unsubscribe: () => undefined,
       tables: {},
@@ -71,23 +72,18 @@ describe("createSyncClient subscription reset", () => {
       drizzle: () => ({ mocked: true }),
     }));
 
-    // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so the recording namespace
-    // (init + deleteSubscription mocks the reset assertions inspect) now lives on `createSyncEngine`'s
-    // return rather than on the mocked `PGlite.create` instance.
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: initMetadataTablesMock,
-          deleteSubscription: deleteSubscriptionMock,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The reset path calls the subscription metadata store DIRECTLY (there is no engine namespace to
+    // route through any more), so this is the module the ordering assertions observe. Every export
+    // index.ts and the sync engine bind must be named, or the client fails to link.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: migrateMetadataTablesMock,
+      deleteSubscriptionState: deleteSubscriptionStateMock,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
 
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
 
     await mock.module("../../packages/client/src/local-store", () => ({
@@ -131,6 +127,10 @@ describe("createSyncClient subscription reset", () => {
     }));
 
     await mock.module("../../packages/client/src/schema", () => ({
+      // The native read path's subscription metadata store (ADR-0055) reaches this module directly
+      // rather than through the mocked `./sync` barrel, so the partial mock must carry the DDL
+      // renderer, or the whole client fails to load.
+      renderCreateTableSql: () => [],
       generateLocalSchemaSql: () => "SELECT 1;",
       generateDurableLocalSchemaSql: () => "SELECT 1;",
       generateEphemeralLocalSchemaSql: () => "",
@@ -159,9 +159,9 @@ describe("createSyncClient subscription reset", () => {
   beforeEach(() => {
     order.length = 0;
     execMock.mockClear();
-    initMetadataTablesMock.mockClear();
-    deleteSubscriptionMock.mockClear();
-    startConfiguredSyncMock.mockClear();
+    migrateMetadataTablesMock.mockClear();
+    deleteSubscriptionStateMock.mockClear();
+    startCircuitsSyncMock.mockClear();
     recoverSendingMock.mockClear();
   });
 
@@ -183,7 +183,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-test"),
       resetSubscriptionKeys: ["schema.items", "schema.items", "  "],
@@ -191,16 +192,16 @@ describe("createSyncClient subscription reset", () => {
     await client.bootSettled;
 
     expect(execMock).toHaveBeenCalledTimes(2);
-    expect(initMetadataTablesMock).toHaveBeenCalledTimes(1);
-    expect(deleteSubscriptionMock).toHaveBeenCalledTimes(1);
-    expect(deleteSubscriptionMock).toHaveBeenCalledWith("schema.items");
-    expect(startConfiguredSyncMock).toHaveBeenCalledTimes(1);
+    expect(migrateMetadataTablesMock).toHaveBeenCalledTimes(1);
+    expect(deleteSubscriptionStateMock).toHaveBeenCalledTimes(1);
+    expect(deleteSubscriptionStateMock.mock.calls[0]?.[0]?.subscriptionKey).toBe("schema.items");
+    expect(startCircuitsSyncMock).toHaveBeenCalledTimes(1);
     expect(order).toEqual([
       "applyLocalSchema",
       "applyLocalSchema",
-      "initMetadataTables",
-      "deleteSubscription:schema.items",
-      "startConfiguredSync",
+      "migrateSubscriptionMetadataTables",
+      "deleteSubscriptionState:schema.items",
+      "startCircuitsSync",
     ]);
     expect(recoverSendingMock).toHaveBeenCalledTimes(1);
   });
@@ -226,7 +227,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-prepare-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -240,9 +242,9 @@ describe("createSyncClient subscription reset", () => {
       "applyLocalSchema",
       "applyLocalSchema",
       "prepareLocalDbAfterSchema",
-      "initMetadataTables",
-      "deleteSubscription:schema.items",
-      "startConfiguredSync",
+      "migrateSubscriptionMetadataTables",
+      "deleteSubscriptionState:schema.items",
+      "startCircuitsSync",
     ]);
   });
 
@@ -267,7 +269,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-prepare-before-schema-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -281,13 +284,13 @@ describe("createSyncClient subscription reset", () => {
       "prepareLocalDbBeforeSchema",
       "applyLocalSchema",
       "applyLocalSchema",
-      "initMetadataTables",
-      "deleteSubscription:schema.items",
-      "startConfiguredSync",
+      "migrateSubscriptionMetadataTables",
+      "deleteSubscriptionState:schema.items",
+      "startCircuitsSync",
     ]);
   });
 
-  it("sets a per-request Authorization header function from getAuthToken, not a boot-frozen token (ADR-0013)", async () => {
+  it("resolves Authorization from getAuthToken per request, not from a boot-frozen token (ADR-0013)", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const getAuthTokenMock = mock(async (): Promise<string | undefined> => "token-from-get-auth-token");
 
@@ -306,7 +309,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-get-auth-token-shape-header-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -316,17 +320,17 @@ describe("createSyncClient subscription reset", () => {
 
     // Boot does NOT consult the provider: the token is resolved per request, not frozen up front.
     expect(getAuthTokenMock).not.toHaveBeenCalled();
-    const syncInput = startConfiguredSyncMock.mock.calls[0]?.[1] as StartConfiguredSyncInput | undefined;
-    const authorization = syncInput?.shapeHeaders?.["Authorization"];
-    expect(typeof authorization).toBe("function");
+    const syncInput = startCircuitsSyncMock.mock.calls[0]?.[1] as StartCircuitsSyncInput | undefined;
+    const authHeaders = syncInput?.authHeaders;
+    expect(typeof authHeaders).toBe("function");
 
-    // Electric resolves the function on each request → a fresh `Bearer <token>`, consulting the provider.
-    if (typeof authorization !== "function") throw new Error("expected an async header function");
-    expect(await authorization()).toBe("Bearer token-from-get-auth-token");
+    // The control plane calls the adapter on each request → a fresh `Bearer <token>`, consulting the provider.
+    if (typeof authHeaders !== "function") throw new Error("expected an auth-header adapter");
+    expect((await authHeaders())["Authorization"]).toBe("Bearer token-from-get-auth-token");
     expect(getAuthTokenMock).toHaveBeenCalledTimes(1);
   });
 
-  it("still installs the Authorization function when the token is momentarily undefined (resolves empty, resumes on re-auth)", async () => {
+  it("still installs the auth adapter when the token is momentarily undefined (omits the header, resumes on re-auth)", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const getAuthTokenMock = mock(async (): Promise<string | undefined> => undefined);
 
@@ -345,7 +349,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-no-auth-token-shape-header-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -353,14 +358,16 @@ describe("createSyncClient subscription reset", () => {
     });
     await client.bootSettled;
 
-    // The header is a function regardless of the token's current value — it is resolved per request,
-    // so a later re-auth is picked up without rebuilding the header (unlike a boot-time freeze, which
+    // The adapter is installed regardless of the token's current value — it is resolved per request,
+    // so a later re-auth is picked up without rebuilding anything (unlike a boot-time freeze, which
     // would have omitted the header forever).
-    const syncInput = startConfiguredSyncMock.mock.calls[0]?.[1] as StartConfiguredSyncInput | undefined;
-    const authorization = syncInput?.shapeHeaders?.["Authorization"];
-    expect(typeof authorization).toBe("function");
-    if (typeof authorization !== "function") throw new Error("expected an async header function");
-    expect(await authorization()).toBe(""); // no token yet → unauthenticated, not "Bearer undefined"
+    const syncInput = startCircuitsSyncMock.mock.calls[0]?.[1] as StartCircuitsSyncInput | undefined;
+    const authHeaders = syncInput?.authHeaders;
+    expect(typeof authHeaders).toBe("function");
+    if (typeof authHeaders !== "function") throw new Error("expected an auth-header adapter");
+    // No token yet → the header is ABSENT, not "Bearer undefined". An unauthenticated subscribe is
+    // refused with a 401 the client can retry through, which is what makes re-auth recoverable.
+    expect((await authHeaders())["Authorization"]).toBeUndefined();
   });
 
   // #4 + audit finding 5: the read-stream degraded status surfaced through createSyncClient.
@@ -378,36 +385,38 @@ describe("createSyncClient subscription reset", () => {
   }
 
   type DegradedSyncCallbacks = {
-    onReadStreamError?: (error: Error) => void;
-    onReadStreamStalled?: () => void;
+    onSubscribeError?: (error: Error) => void;
+    onAuthError?: (error: Error) => void;
     onSyncActivity?: () => void;
     onSyncError?: (error: Error) => void;
     onInitialSync?: () => void;
   };
 
-  it("refreshes lastError on each new read-stream fault, then clears the stream-degraded status on recovery", async () => {
+  it("refreshes lastError on each new subscribe fault, then clears the stream-degraded status on recovery", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
 
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-degraded-refresh"),
     });
     await client.bootSettled;
 
-    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+    const input = startCircuitsSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
 
-    // First non-auth read-stream fault → degraded, carrying its message.
-    input.onReadStreamError?.(new Error("blip-1"));
+    // First non-auth subscribe fault → degraded, carrying its message.
+    input.onSubscribeError?.(new Error("blip-1"));
     expect(client.status.phase).toBe("degraded");
-    expect(client.status.lastError).toBe("blip-1");
+    expect(client.status.lastError).toContain("blip-1");
 
     // A *different* fault while still degraded must refresh lastError (finding 5: not frozen at the
     // first), staying degraded.
-    input.onReadStreamError?.(new Error("blip-2"));
+    input.onSubscribeError?.(new Error("blip-2"));
     expect(client.status.phase).toBe("degraded");
-    expect(client.status.lastError).toBe("blip-2");
+    expect(client.status.lastError).toContain("blip-2");
+    expect(client.status.lastError).not.toContain("blip-1");
 
     // A delivered batch clears a stream-degraded status (initial sync never completed here, so it
     // returns to `syncing`, not `ready`).
@@ -415,86 +424,90 @@ describe("createSyncClient subscription reset", () => {
     expect(client.status.phase).toBe("syncing");
   });
 
-  it("a stalled read stream degrades ONCE (never per retry), and a delivered batch clears it", async () => {
+  it("a refused credential surfaces auth-needed once, and a delivered batch clears it (ADR-0013)", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
 
     const emissions: string[] = [];
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
-      ...memoryStoreForTests("client-sync-reset-stream-stall"),
+      ...memoryStoreForTests("client-sync-reset-auth-needed"),
       onStatusChange: (status) => emissions.push(status.phase),
+      // Only wired when a token provider exists — without one there is no auth lifecycle to track.
+      getAuthToken: async () => "stale-token",
     });
     await client.bootSettled;
 
-    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+    const input = startCircuitsSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
     emissions.length = 0;
 
-    // Board ADR-0010: a shape fetch that keeps failing inside Electric's backoff never reaches
-    // `onError`, so this is the ONLY signal an outage produces. It must move the runtime off `syncing`.
-    input.onReadStreamStalled?.();
-    expect(client.status.phase).toBe("degraded");
-    expect(emissions).toEqual(["degraded"]);
+    // A control plane that refused the subject's own credential. The subscription keeps retrying, so
+    // this fires on every attempt for as long as the token stays stale.
+    input.onAuthError?.(new Error("401"));
+    expect(client.status.phase).toBe("auth-needed");
+    expect(emissions).toEqual(["auth-needed"]);
 
-    // Electric retries forever (`maxRetries: Infinity`), so this fires on every attempt for as long as
-    // the outage lasts — the runtime must transition, not re-emit to every listener on each tick.
-    input.onReadStreamStalled?.();
-    input.onReadStreamStalled?.();
-    expect(client.status.phase).toBe("degraded");
-    expect(emissions).toEqual(["degraded"]);
+    // TRANSITION-only: re-entering would re-emit to every status listener (and, in worker mode,
+    // re-broadcast to every attached tab) on every retry tick, forever.
+    input.onAuthError?.(new Error("401"));
+    input.onAuthError?.(new Error("401"));
+    expect(emissions).toEqual(["auth-needed"]);
 
-    // Recovery is unchanged and shared with every other stream-degraded flavour: the next delivered
-    // batch clears it (initial sync never completed here, so it returns to `syncing`, not `ready`).
+    // Re-auth: the next delivered batch is proof the fresh token works, with no restart and no manual
+    // re-subscribe (initial sync never completed here, so it returns to `syncing`, not `ready`).
     input.onSyncActivity?.();
     expect(client.status.phase).toBe("syncing");
-    expect(emissions).toEqual(["degraded", "syncing"]);
+    expect(emissions).toEqual(["auth-needed", "syncing"]);
   });
 
-  it("a stall never masks auth-needed, nor a sticky commit-failure degraded", async () => {
+  it("a subscribe outage never masks auth-needed, nor a sticky commit-failure degraded", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
 
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-stall-precedence"),
     });
     await client.bootSettled;
 
-    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+    const input = startCircuitsSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
 
-    // A commit that exhausted its retries is the more serious cause: a stall must not overwrite its
-    // `lastError`, and the delivered-batch recovery must not lift it.
+    // A commit that exhausted its retries is the more serious cause: a subscribe outage must not
+    // overwrite its `lastError`, and the delivered-batch recovery must not lift it.
     input.onSyncError?.(new Error("commit-dead"));
-    input.onReadStreamStalled?.();
+    input.onSubscribeError?.(new Error("control-plane-down"));
     expect(client.status.phase).toBe("degraded");
     expect(client.status.lastError).toBe("commit-dead");
     input.onSyncActivity?.();
     expect(client.status.phase).toBe("degraded");
   });
 
-  it("a read-stream fault never overwrites a sticky commit-failure degraded status", async () => {
+  it("a subscribe fault never overwrites a sticky commit-failure degraded status", async () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
 
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-degraded-commit"),
     });
     await client.bootSettled;
 
-    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+    const input = startCircuitsSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
 
     // A commit exhausted its retries → degraded with the more-serious commit cause.
     input.onSyncError?.(new Error("commit-dead"));
     expect(client.status.phase).toBe("degraded");
     expect(client.status.lastError).toBe("commit-dead");
 
-    // A transient stream blip must NOT mask the commit cause, and a delivered batch must NOT clear a
-    // commit-failure degraded (only a clean commit lifts it).
-    input.onReadStreamError?.(new Error("stream-blip"));
+    // A transient control-plane blip must NOT mask the commit cause, and a delivered batch must NOT
+    // clear a commit-failure degraded (only a clean commit lifts it).
+    input.onSubscribeError?.(new Error("control-plane-blip"));
     expect(client.status.lastError).toBe("commit-dead");
     input.onSyncActivity?.();
     expect(client.status.phase).toBe("degraded");
@@ -512,14 +525,15 @@ describe("createSyncClient subscription reset", () => {
     const emissions: string[] = [];
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-read-silence"),
       readSilenceMs: 40,
       onStatusChange: (status) => emissions.push(status.phase),
     });
     await client.bootSettled;
-    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+    const input = startCircuitsSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
 
     input.onSyncActivity?.();
     input.onInitialSync?.();
@@ -549,14 +563,15 @@ describe("createSyncClient subscription reset", () => {
     const emissions: string[] = [];
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-read-silence-stop"),
       readSilenceMs: 40,
       onStatusChange: (status) => emissions.push(status.phase),
     });
     await client.bootSettled;
-    const input = startConfiguredSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
+    const input = startCircuitsSyncMock.mock.calls.at(-1)?.[1] as DegradedSyncCallbacks;
 
     input.onSyncActivity?.();
     input.onInitialSync?.();

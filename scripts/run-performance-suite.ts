@@ -85,26 +85,26 @@ async function main() {
   registerSignalHandlers();
 
   const postgresPort = await allocatePort();
-  let electricPort = await allocatePort();
-
-  while (electricPort === postgresPort) {
-    electricPort = await allocatePort();
-  }
+  let dsPort = await allocatePort();
+  while (dsPort === postgresPort) dsPort = await allocatePort();
+  let enginePort = await allocatePort();
+  while (enginePort === postgresPort || enginePort === dsPort) enginePort = await allocatePort();
 
   const composeProject = buildProjectName();
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
-    PGXSINKIT_ELECTRIC_PORT: String(electricPort),
+    PGXSINKIT_DS_PORT: String(dsPort),
+    PGXSINKIT_CIRCUITS_ENGINE_PORT: String(enginePort),
   };
   cleanupEnv = composeEnv;
 
   const databaseUrl = composeCredentials.buildLocalDatabaseUrl("127.0.0.1", postgresPort);
-  const electricUrl = `http://127.0.0.1:${electricPort}/v1/shape`;
   const testEnv: NodeJS.ProcessEnv = {
     ...composeEnv,
     DATABASE_URL: databaseUrl,
-    ELECTRIC_URL: electricUrl,
+    CIRCUITS_ENGINE_URL: `http://127.0.0.1:${enginePort}`,
+    DURABLE_STREAMS_URL: `http://127.0.0.1:${dsPort}`,
     PGXSINKIT_PERF_RESULTS_DIR: process.env["PGXSINKIT_PERF_RESULTS_DIR"] ?? PERF_RESULTS_DIR,
   };
 
@@ -117,7 +117,8 @@ async function main() {
   console.log("[performance] Launching isolated containers", {
     composeProject,
     postgresPort,
-    electricPort,
+    dsPort,
+    enginePort,
   });
 
   try {
@@ -126,9 +127,12 @@ async function main() {
 
     await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL", SERVICE_START_TIMEOUT_MS);
     await waitForPgReady(databaseUrl);
-    await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL", SERVICE_START_TIMEOUT_MS);
+    await waitForTcpService("127.0.0.1", dsPort, "durable-streams", SERVICE_START_TIMEOUT_MS);
 
+    // Before the engine wait: the engine exits when its declared tables are absent, and its compose
+    // `restart` is the retry.
     await runCommand("bun", ["run", "db:migrate"], testEnv);
+    await waitForTcpService("127.0.0.1", enginePort, "circuits-engine", SERVICE_START_TIMEOUT_MS);
     // The perf suites are bun:test files (each sets its own multi-minute per-test timeout). Run them
     // through `bun test`, not a vitest binary the repo does not ship.
     await runCommand("bun", ["test", ...testFiles], testEnv);

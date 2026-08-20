@@ -10,8 +10,8 @@ import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
 import { createSyncClient, LifecycleBusyError, type SyncClient } from "../../packages/client/src/index";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
-import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/tags";
 import { memoryStoreForTests } from "../../packages/client/src/testing";
 
 // A persistent readwrite table (todos) alongside an EPHEMERAL readwrite table (exam_answer). The ephemeral
@@ -60,7 +60,8 @@ afterEach(async () => {
 async function makeClient(storePath: string): Promise<SyncClient<Registry>> {
   return createSyncClient({
     registry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     ...memoryStoreForTests(storePath),

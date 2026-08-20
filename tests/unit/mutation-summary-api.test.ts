@@ -73,7 +73,8 @@ const multiRegistry = defineSyncRegistry({ todos, notes });
 
 type LooseClient = SyncClient<SyncTableRegistry>;
 
-const DEAD_ELECTRIC = "http://127.0.0.1:1/v1/electric-proxy";
+const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
+const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const DEAD_WRITE = "http://127.0.0.1:1/api/mutations";
 const TMP_ROOT = path.resolve(process.cwd(), "tmp/agents/mutation-summary");
 
@@ -106,7 +107,8 @@ async function freshStorePath(label: string): Promise<string> {
 async function bootFsClient(registry: SyncTableRegistry, storePath: string): Promise<LooseClient> {
   const client = (await createSyncClient({
     registry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     syncEnabled: false,
     storePath,
@@ -119,7 +121,8 @@ async function bootFsClient(registry: SyncTableRegistry, storePath: string): Pro
 async function bootMemoryClient(registry: SyncTableRegistry, label: string): Promise<LooseClient> {
   const client = (await createSyncClient({
     registry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     syncEnabled: false,
     ...memoryStoreForTests(label),
@@ -333,7 +336,8 @@ describe("registry-wide mutation-status API — worker parity (slice 4)", () => 
     const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: multiRegistry,
-      electricUrl: DEAD_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: DEAD_WRITE,
       ...testStoreAcknowledgment(),
       precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),

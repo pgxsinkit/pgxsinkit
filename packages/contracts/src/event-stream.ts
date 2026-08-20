@@ -72,7 +72,7 @@ export interface EventStreamEntry<TPayload extends z.ZodType = z.ZodType> {
   identity: Record<string, EventStreamIdentityField>;
   /**
    * An opaque version counter for the part of this payload contract the lock's hash cannot see — the same
-   * role `RowFilterSpec.revision` plays for a `customWhere` closure. The lock hashes the payload schema as
+   * role `RowFilterSpec.revision` plays for a `customPredicate` closure. The lock hashes the payload schema as
    * a **JSON Schema**, and refinements/transforms are simply not representable there: a reviewer
    * demonstrated that `z.string().refine(v => v.length >= 3)` and the INCOMPATIBLE `>= 10` version produce
    * the identical stream hash, so the `risky` diff the ADR relies on never fires.

@@ -43,7 +43,8 @@ const registry = defineSyncRegistry({
 });
 type Registry = typeof registry;
 
-const DEAD_ELECTRIC = "http://127.0.0.1:1/v1/electric-proxy";
+const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
+const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const DEAD_WRITE = "http://127.0.0.1:1/api/mutations";
 
 const clients: SyncClient<Registry>[] = [];
@@ -58,7 +59,8 @@ async function makeClient(
 ): Promise<SyncClient<Registry>> {
   const client = await createSyncClient<Registry>({
     registry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     syncEnabled: false,
     ...memoryStoreForTests(storePath),
@@ -89,7 +91,8 @@ describe("appendEvent on the client (ADR-0053 decision 2)", () => {
     // assembly skip every row of that stream forever, with no request, no report and no error.
     const refusal = await createSyncClient<Registry>({
       registry,
-      electricUrl: DEAD_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: DEAD_WRITE,
       syncEnabled: false,
       events: { streams: { board_issue_viewed: { batchSize: 0 } } },

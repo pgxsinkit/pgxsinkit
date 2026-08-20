@@ -9,16 +9,19 @@ export type PerfLabConnectionMode = "live" | "offline";
 export interface PerfLabConnectionOptions {
   mode: PerfLabConnectionMode;
   batchWriteUrl: string;
-  electricUrl: string;
+  /** The pgxsinkit control plane (ADR-0055). Defaults to the write origin's own `/sync` mount. */
+  controlPlaneUrl: string;
+  /** The edge serving durable-streams reads. */
+  streamBaseUrl: string;
   getAuthToken?: () => Promise<string | null | undefined>;
   syncEnabled?: boolean;
 }
 
 export interface PerfLabConnectionDefaults {
   liveBatchWriteUrl: string;
-  liveElectricUrl: string;
+  liveControlPlaneUrl: string;
+  liveStreamBaseUrl: string;
   offlineBatchWriteUrl: string;
-  offlineElectricUrl: string;
 }
 
 export interface LoadPerfClientOptions {
@@ -28,17 +31,21 @@ export interface LoadPerfClientOptions {
 
 const offlineConnectionDefaults = {
   offlineBatchWriteUrl: "http://127.0.0.1:1/api/mutations",
-  offlineElectricUrl: "http://127.0.0.1:1/v1/shape",
 } as const;
 
 export function getPerfLabConnectionDefaults(): PerfLabConnectionDefaults {
   const writeApiOrigin = (import.meta.env["VITE_WRITE_API_ORIGIN"] ?? "http://127.0.0.1:3101").replace(/\/+$/, "");
   const liveBatchWriteUrl = `${writeApiOrigin}/api/mutations`;
-  const liveElectricUrl = import.meta.env["VITE_ELECTRIC_URL"] ?? `${writeApiOrigin}/v1/electric-proxy`;
+  // The control plane is the write origin by default: `createSyncServer` mounts /sync/v1/* beside
+  // /api/mutations, so one deployment answers both. The stream edge is separate by construction —
+  // it is the CDN-frontable surface, so it has no sensible same-origin default.
+  const liveControlPlaneUrl = import.meta.env["VITE_CONTROL_PLANE_URL"] ?? writeApiOrigin;
+  const liveStreamBaseUrl = import.meta.env["VITE_STREAM_BASE_URL"] ?? "http://127.0.0.1:8791/v1/stream";
 
   return {
     liveBatchWriteUrl,
-    liveElectricUrl,
+    liveControlPlaneUrl,
+    liveStreamBaseUrl,
     ...offlineConnectionDefaults,
   };
 }
@@ -52,7 +59,8 @@ export async function loadPerfClient(
   const resolved = await resolveConnectionOptions(connectionOptions);
   const client = await createSyncClient({
     registry,
-    electricUrl: resolved.electricUrl,
+    controlPlaneUrl: resolved.controlPlaneUrl,
+    streamBaseUrl: resolved.streamBaseUrl,
     batchWriteUrl: resolved.batchWriteUrl,
     ...(resolved.getAuthToken ? { getAuthToken: resolved.getAuthToken } : {}),
     syncEnabled: resolved.syncEnabled,
@@ -81,14 +89,16 @@ async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOpti
   if (connectionOptions.mode === "offline") {
     return {
       batchWriteUrl: offlineConnectionDefaults.offlineBatchWriteUrl,
-      electricUrl: offlineConnectionDefaults.offlineElectricUrl,
+      controlPlaneUrl: "",
+      streamBaseUrl: "",
       getAuthToken: undefined,
       syncEnabled: false,
     };
   }
 
   const batchWriteUrl = connectionOptions.batchWriteUrl.trim();
-  const electricUrl = connectionOptions.electricUrl.trim() || `${batchWriteUrl}/v1/electric-proxy`;
+  const controlPlaneUrl = connectionOptions.controlPlaneUrl.trim() || batchWriteUrl;
+  const streamBaseUrl = connectionOptions.streamBaseUrl.trim();
   const getAuthToken = connectionOptions.getAuthToken
     ? async () => {
         const token = await connectionOptions.getAuthToken?.();
@@ -99,7 +109,8 @@ async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOpti
 
   return {
     batchWriteUrl,
-    electricUrl,
+    controlPlaneUrl,
+    streamBaseUrl,
     getAuthToken,
     syncEnabled: Boolean(connectionOptions.syncEnabled && initialAuthToken),
   };

@@ -49,7 +49,8 @@ describe("awaited live-query teardown (ADR-0040 Slice 1)", () => {
     const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...testStoreAcknowledgment(),
       precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
@@ -93,7 +94,8 @@ describe("awaited live-query teardown (ADR-0040 Slice 1)", () => {
   it("in-process client.stop() immediately after unsubscribe resolves cleanly (no macrotask tick)", async () => {
     const client = await createSyncClient({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       ...testStoreAcknowledgment(),

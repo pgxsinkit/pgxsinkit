@@ -1,6 +1,5 @@
 // Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
 // Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
-import type { Offset } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 
@@ -19,7 +18,8 @@ export interface SubscriptionState {
 
 export interface ShapeSubscriptionState {
   handle: string;
-  offset: Offset;
+  /** Opaque, per-stream, lexicographically ordered. Never compared across streams. */
+  offset: string;
 }
 
 export interface GetSubscriptionStateOptions {

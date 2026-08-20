@@ -93,11 +93,24 @@ executes.
    ```ts
    shape: {
      scope: (c) => [c.offeringId, c.groupId],
-     where: (c) => eq(c.published, true),        // optional; static, subscriber-independent
+     where: (c) => p.eq(c.published, true),      // optional; static, subscriber-independent
      entitledBy: /* decision 7 */,
    }
    // → offering_id = $1 AND group_id = $2 AND published = true
    ```
+
+   `p` is pgxsinkit's own predicate builder, not Drizzle's operators, and the difference is forced by
+   decision 1 rather than chosen: Drizzle's `eq` returns an `SQL` fragment, which compiles to *text*,
+   and the native API takes an AST. Re-deriving the AST from that text would put in the control plane
+   the very SQL lexer this ADR declines to depend on. `p` takes the same real column objects and
+   emits the AST directly, so authoring stays at tier ① — no SQL string exists at any point — and the
+   call sites read as they did (`p.eq(c.published, true)`). It is namespaced rather than exported as
+   bare `eq`/`and`/`or` precisely because a registry file legitimately uses both these and Drizzle's,
+   for RLS policies, and two same-named operators returning different things is a trap.
+
+   The private tier needs the same treatment for the same reason: `rowFilter.customPredicate` is
+   `customWhere`'s native sibling, claims in and a `Predicate` out. Neither tier emits SQL text on
+   the native path.
 
    There is deliberately no syntax for anything else. Disjointness is then a property of the
    construction, not a rule some checker enforces: a row carries exactly one value per scope column,
@@ -123,10 +136,28 @@ executes.
 
 4. **Sharing moves multiplicity from the server to the client. That is the trade, stated plainly.**
    A subject in K scopes holds K subscriptions feeding one local table; the multiplicity does not
-   vanish, it relocates. The apply path gains shape→table K:1 routing, per-scope deletion, and a
-   boot gate across K shapes — the last being ADR-0031's existing *group* catch-up alignment with a
-   larger group. Local DDL, the `_synced`/`_overlay`/read-model triple, and per-query cost are
-   unchanged.
+   vanish, it relocates. Local DDL, the `_synced`/`_overlay`/read-model triple, and per-query cost
+   are unchanged.
+
+   **The apply path already admits K:1 — measured, not assumed.** Shapes are keyed by shape name with
+   a `tableKey` pointer, and every per-shape structure in the engine is keyed by shape already
+   (`shapeInsertMethod`, `useInsert`, `truncateNeeded`, `messagesToCommit`, `moveInsToCommit`). No
+   routing layer is missing. The apparent barrier — `"Already syncing shape for table"` in
+   `packages/client/src/sync/index.ts` — is not a general one-shape-per-table rule: it guards exactly
+   one thing, the default must-refetch `TRUNCATE ${target.table}`, which would wipe a co-tenant's
+   rows. Its own filter already exempts a shape that brings `onMustRefetch`, and a test pins three
+   shapes into one table under that exemption.
+
+   The shared tier satisfies it **by construction**: the scope key derives the scoped clear
+   (`DELETE … WHERE scope_col = $k`) with no bookkeeping column and no refcounting. So the client
+   cost of this decision is a clear function, not a routing layer.
+
+   Two provisos. The tag store was the remaining table-keyed structure — `clearShapeTags` keys by
+   the synced table, so a must-refetch on one shape would have dropped a co-tenant's tags —
+   which makes [ADR-0057](0057-retiring-tagged-subquery-reconciliation.md)'s retirement a
+   *precondition* for K:1, not merely an adjacent simplification. And the boot gate across K shapes
+   already exists: `isUpToDate` gates `onInitialSync` group-wide, which is ADR-0031's existing group
+   alignment over a larger group, exactly as anticipated.
 
 5. **Redaction is pre-computed in Postgres, and its specification is declarative.**
    `RedactionSpec` — a predicate over the row (and where required, claims), a null-out column set,
@@ -158,6 +189,24 @@ executes.
    - Losing entitlement means losing the *subscription*, not losing rows. The client receives 403 on
      its next poll and must **truncate that scope and unsubscribe**. This is a different eviction
      path from predicate-driven move-out (ADR-0023), and the client implements both.
+   - **The client names a shape; the control plane expands it to the subject's scopes.** *(Amended
+     2026-08-21. Subscribe originally took `(shapeKey, scope)` per subscription, leaving the client
+     to supply scope values it had no sanctioned way to learn.)* A subscription request carries a
+     shape key and nothing else, and a shared-tier shape fans out to one grant — one stream, one
+     entry in the token — per scope the subject holds. The expansion belongs on this side because
+     this side holds the entitlement set: a client naming its own scopes can only restate that set
+     redundantly or contradict it, and every contradiction is a denial it then has to reconcile at
+     boot. It also removes the last thing a client could have got wrong about what it may read.
+
+     Two consequences worth stating. **K requests can return more than K streams**, so a client
+     keying its subscriptions by shape key alone loses all but one of a fan-out. And **a subject
+     holding no scope of a shape is refused, not granted an empty set** — returning zero grants
+     silently would leave the client waiting on streams that were never created.
+
+     `EntitlementSet` therefore enumerates as well as decides (`scopesFor` beside `permits`), and
+     the two are required to agree. Where they disagree, subscribe refuses the scope: the edge
+     checks `permits` on every read, so a scope only enumeration believes in would mint a capability
+     for a stream that then 403s forever.
 
 7. **The edge holds entitlements in memory, kept live as a Circuits shape, and fails closed.**
    The entitlement relation syncs into the edge through the same engine that serves everything else.
@@ -321,6 +370,28 @@ evaluation.
 - **Redaction changes shape from code to schema.** Changing a `RedactionSpec` becomes a migration
   with a backfill, rather than a deploy. This is a real cost, accepted because it removes redaction
   from every read.
+- **Schema-bound registries cannot cut over until the engine gains qualified table names.** This is
+  a **blocker**, not a limitation to note. Circuits keys a table by its bare name end to end: it
+  introspects `information_schema` with `table_schema = 'public'`, and its replication decoder
+  *parses* the relation namespace off the wire and then discards it (`replication.rs:233`), so two
+  same-named tables in different schemas collide silently rather than erroring. But
+  `SyncRegistryDefinition.schema` is the **Postgres source** schema — `attachSyncRegistrySchema`
+  validates it against the Drizzle table's own schema and qualifies the shape target from it — so a
+  non-`public` registry is a shipped pgxsinkit feature, and Electric supports it today. Cutting over
+  without the engine change is therefore a **regression**, not a deferral.
+
+  Until then the control plane refuses such a shape and names the reason, rather than sending a name
+  that would fail deep inside shape creation. The engine change is scoped in
+  [backlog/0009](../backlog/0009-circuits-schema-qualified-tables.md) — roughly a day, mostly
+  mechanical, since the namespace is already on the wire. Nothing in this ADR's design depends on the
+  answer; the predicate AST references columns of one already-resolved table either way.
+
+  No rationale for the restriction exists anywhere upstream — no ADR, note, or commit message — and
+  the maintainers have not replied. The code reads as an alpha shortcut rather than a decision (a
+  namespace decoded and thrown away; a compat adapter that silently *strips* a foreign schema instead
+  of rejecting it), which suggests a fix would be welcome upstream. That is inference from the source,
+  not something we have been told, and it should not be relied on when planning the fork's
+  maintenance burden.
 - **We depend on alpha software in two places.** Circuits is 0.x; the Rust ds server is 0.1.5 with
   271 total downloads. Mitigations: we run our own fork of Circuits, we pin ds by digest, and
   conformance is an acceptance gate rather than an assumption.
@@ -393,6 +464,10 @@ These are deliberately not decided here.
    no subqueries to reconcile, and the private tier's evictions arrive as explicit deletes, verified
    across the offline gap on a native stack.
 4. **The shape of the entitlement relation** the edge subscribes to: one canonical `(subject, scope)`
-   projection, or per-shape-family relations.
+   projection, or per-shape-family relations. Decision 6's amendment sharpens rather than settles
+   this: the set must now **enumerate** a subject's scopes, not only answer yes/no about one, and a
+   canonical `(subject, shapeKey, scope)` projection supports that directly while a per-family rule
+   computed on demand has to be invertible to. The invalidation question underneath it is untouched
+   — a rule reading a relation *transitively* has no subject to key a memo by.
 5. **Migration sequencing** for existing consumers. Clients resync from scratch at cutover, which
    removes most of the difficulty, but the order of server, edge, and client rollout is unspecified.

@@ -1,7 +1,8 @@
 import type { SQL } from "drizzle-orm";
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 
-import { buildRowFilterShape, type JwtClaims, type RowFilterShape } from "./config";
+import { DENY_ALL_PREDICATE, type JwtClaims } from "./config";
+import { isOrPredicate, type Predicate } from "./predicate";
 import { getSyncRegistryRowClasses, type SyncTableEntry, type SyncTableRegistry } from "./registry";
 
 /**
@@ -12,7 +13,7 @@ import { getSyncRegistryRowClasses, type SyncTableEntry, type SyncTableRegistry 
  * It exists because a privacy/visibility invariant spanning many entries drifts in two structural ways that
  * per-entry review cannot catch:
  *
- * 1. **Read/write asymmetry** — the Electric row filter and the Postgres RLS policies are two engines, so one
+ * 1. **Read/write asymmetry** — the shape's row filter and the Postgres RLS policies are two engines, so one
  *    can be tightened (or loosened) without the other. The assertion audits BOTH surfaces of every bound
  *    entry in one predicate, so "readable but unwritable" (or the reverse) is a test failure, not a bug report.
  * 2. **Under-enumeration** — an invariant expressed over a hand-maintained list of tables silently stops
@@ -20,10 +21,22 @@ import { getSyncRegistryRowClasses, type SyncTableEntry, type SyncTableRegistry 
  *    inverts that: with a declared `rowClasses` vocabulary, a new entry cannot even be registered without
  *    being classified, so it joins its class's invariants by construction.
  *
- * It audits RENDERED output, so it sees things the fingerprint structurally cannot (the `customWhere` BODY
- * is a closure — only its presence and `RowFilterSpec.revision` are hashed). The trade: it sees exactly the
- * claims fixtures you give it, and nothing else.
+ * It audits RESOLVED output, so it sees things the fingerprint structurally cannot (the `customPredicate`
+ * BODY is a closure — only its presence and `RowFilterSpec.revision` are hashed). The trade: it sees exactly
+ * the claims fixtures you give it, and nothing else.
  */
+
+/**
+ * Whether a predicate admits no row at all — the read half of "this persona sees nothing".
+ *
+ * Recognises the {@link DENY_ALL_PREDICATE} singleton by reference AND any structurally empty `or`,
+ * because both are always-FALSE on the wire and an invariant is asking about the outcome, not about
+ * which spelling produced it.
+ */
+export function deniesAllRows(predicate: Predicate | null): boolean {
+  if (predicate === DENY_ALL_PREDICATE) return true;
+  return predicate != null && isOrPredicate(predicate) && predicate.or.length === 0;
+}
 
 /** One rendered write policy on a bound entry's Postgres table, as the invariant predicate sees it. */
 export interface RenderedPolicy {
@@ -48,16 +61,19 @@ export interface RegistryInvariantCell {
   fixtureName: string;
   claims: JwtClaims;
   /**
-   * The read filter this entry sends to Electric FOR THESE CLAIMS — the real read pipeline's output
-   * (`buildRowFilterShape`, exactly what the proxy calls per shape request).
+   * The read predicate this entry resolves to FOR THESE CLAIMS — the real read pipeline's output, exactly
+   * what the control plane compiles into the shape at subscribe.
    *
    * `null` means **unfiltered**, and covers both ways that arises: the entry declares no shape/`rowFilter`
-   * at all, or its `customWhere` returned `null` for these claims (the documented "bypass filtering, every
-   * row is visible" answer — e.g. an admin persona). Both are the same statement about what the client
-   * receives, which is what an invariant reasons about; distinguish them via `entry.shape?.rowFilter` if a
-   * predicate genuinely needs to.
+   * at all, or its `customPredicate` returned `null` for these claims (the documented "bypass filtering,
+   * every row is visible" answer — e.g. an admin persona). Both are the same statement about what the
+   * client receives, which is what an invariant reasons about; distinguish them via
+   * `entry.shape?.rowFilter` if a predicate genuinely needs to.
+   *
+   * An AST, not SQL text: an invariant matches on structure ({@link deniesAllRows}, the `isXPredicate`
+   * guards) rather than on a rendered string that could drift on formatting alone.
    */
-  renderedWhere: RowFilterShape | null;
+  readPredicate: Predicate | null;
   /** Every RLS policy attached to the entry's Postgres table, rendered to inline SQL text. */
   renderedPolicies: RenderedPolicy[];
 }
@@ -111,10 +127,9 @@ function renderPolicies(entry: SyncTableEntry): RenderedPolicy[] {
   }));
 }
 
-/** The read filter for these claims, through the real pipeline the proxy uses. */
-function renderWhere(entry: SyncTableEntry, claims: JwtClaims): RowFilterShape | null {
-  const rowFilter = entry.shape?.rowFilter;
-  return rowFilter == null ? null : buildRowFilterShape(rowFilter, claims);
+/** The read predicate for these claims, through the real pipeline the control plane uses. */
+function resolvePredicate(entry: SyncTableEntry, claims: JwtClaims): Predicate | null {
+  return entry.shape?.rowFilter?.customPredicate?.(claims) ?? null;
 }
 
 function boundEntries(
@@ -142,8 +157,8 @@ function boundEntries(
  *   name: "private rows are never visible to an anonymous caller",
  *   appliesTo: ["private"],
  *   claimsFixtures: { anonymous: {}, member: { sub: "u-1" } },
- *   holds: ({ fixtureName, renderedWhere }) =>
- *     fixtureName !== "anonymous" || renderedWhere?.where === "false" || "anonymous read is not denied",
+ *   holds: ({ fixtureName, readPredicate }) =>
+ *     fixtureName !== "anonymous" || deniesAllRows(readPredicate) || "anonymous read is not denied",
  * });
  * ```
  *
@@ -199,7 +214,7 @@ export function assertRegistryInvariant(registry: SyncTableRegistry, spec: Regis
         rowClass: entry.rowClass,
         fixtureName,
         claims,
-        renderedWhere: renderWhere(entry, claims),
+        readPredicate: resolvePredicate(entry, claims),
         renderedPolicies,
       });
       if (verdict === true) {

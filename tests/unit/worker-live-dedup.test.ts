@@ -74,7 +74,8 @@ async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
 
   const host = defineSyncWorker({
     registry: todosRegistry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...testStoreAcknowledgment(),
     precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),

@@ -2,50 +2,64 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 import { count, eq } from "drizzle-orm";
 
-import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
-  buildMembershipFanoutSyncConfig,
   membershipFanoutSyncRegistry,
   workItemsTable,
   workspaceMembersTable,
   workspacesTable,
 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
 
+import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createCircuitsTestPGlite } from "../support/circuits-pglite";
+import { claimsFromTestHeader } from "../support/claims";
 import { drizzleOver } from "../support/drizzle";
-import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
 const env = readIntegrationEnv();
 const localSchemaSql = generateLocalSchemaSql(membershipFanoutSyncRegistry);
 
 // Identities + container fixtures (A & B share workspace 1; C is in workspace 2 only).
-const MEMBER_A = "1b3f0d2a-0000-4000-8000-000000000a01";
-const MEMBER_B = "1b3f0d2a-0000-4000-8000-000000000b02";
-const NON_MEMBER_C = "1b3f0d2a-0000-4000-8000-000000000c03";
-const OUTSIDER_D = "1b3f0d2a-0000-4000-8000-000000000d04";
-const WORKSPACE_1 = "2c4e1e3b-0000-4000-8000-000000000111";
-const WORKSPACE_2 = "2c4e1e3b-0000-4000-8000-000000000222";
-const ITEM_A_IN_W1 = "3d5f2f4c-0000-4000-8000-000000000a11";
+//
+// EVERY id in this file is generated per run, and must stay that way. A sync engine keeps a per-shape
+// log; reusing a fixed id across runs leaves that key's earlier inserts/deletes in the log, and a
+// resume then folds a key set that already contains the key. That accumulated history MASKS
+// move-out/move-in defects — a revocation that is silently dropped still passes, because the stale
+// history makes the eviction reconstructible. It presents as an intermittent failure (the worst
+// signature: real data loss that looks like flake), and it is exactly how a silent revocation-loss bug
+// survived undetected. Per-test id families are not enough — they isolate tests from each other WITHIN
+// a run, not successive runs from each other. Never reintroduce a literal UUID here.
+const uuid = () => crypto.randomUUID();
 
-// Per-request identity from a test header (the proxy + write-API both resolve claims this way).
-function claimsFromHeader(request: Request): JwtClaims | null {
-  const sub = request.headers.get("x-test-sub");
-  return sub ? { role: "authenticated", sub } : null;
-}
+const MEMBER_A = uuid();
+const MEMBER_B = uuid();
+const NON_MEMBER_C = uuid();
+const OUTSIDER_D = uuid();
+const WORKSPACE_1 = uuid();
+const WORKSPACE_2 = uuid();
+const ITEM_A_IN_W1 = uuid();
+const MEMBERSHIP_A_W1 = uuid();
+const MEMBERSHIP_B_W1 = uuid();
+const MEMBERSHIP_C_W2 = uuid();
 
 async function createLocalWorkItemStore() {
-  const pg = await createSyncEngineTestPGlite();
+  const pg = await createCircuitsTestPGlite();
   await pg.exec(localSchemaSql);
   return pg;
 }
 
 async function startMemberSync(
   localPg: Awaited<ReturnType<typeof createLocalWorkItemStore>>,
-  proxyUrl: string,
+  urls: Pick<NativeSyncStack<unknown>, "controlPlaneUrl" | "streamBaseUrl">,
   sub: string,
 ) {
   let markInitialSyncDone: (() => void) | null = null;
@@ -53,10 +67,12 @@ async function startMemberSync(
     markInitialSyncDone = resolve;
   });
 
-  const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
-    syncConfig: buildMembershipFanoutSyncConfig(proxyUrl),
+  const sync = await startCircuitsSync(localPg, {
     registry: membershipFanoutSyncRegistry,
-    shapeHeaders: { "x-test-sub": sub },
+    controlPlaneUrl: urls.controlPlaneUrl,
+    streamBaseUrl: urls.streamBaseUrl,
+    metadataSchema: DEFAULT_METADATA_SCHEMA,
+    authHeaders: () => ({ "x-test-sub": sub }),
     onInitialSync: () => {
       markInitialSyncDone?.();
       markInitialSyncDone = null;
@@ -75,9 +91,8 @@ const itemCount = async (pg: Awaited<ReturnType<typeof createLocalWorkItemStore>
   (await drizzleOver(pg).select({ count: count() }).from(workItemsTable))[0]?.count ?? 0;
 
 describe("membership fan-out (readwrite) integration", () => {
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>;
-  let httpServer!: ReturnType<typeof Bun.serve>;
-  let proxyUrl!: string;
   const serverDb = createServerDb(membershipFanoutSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
@@ -91,18 +106,19 @@ describe("membership fan-out (readwrite) integration", () => {
       await provisioningServer.stop();
     }
 
-    // createSyncServer serves both the write route and the shape proxy from the one server,
+    // createSyncServer serves both the write route and the native control plane from the one server,
     // each resolving the test identity from the x-test-sub header via the shared adapter.
-    server = createSyncServer({
-      registry: membershipFanoutSyncRegistry,
-      db: serverDb.db,
-      resolveAuthClaims: (request) => claimsFromHeader(request),
-      electricUrl: env.electricUrl,
-      shapeProxyPath: "/v1/electric-proxy",
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: membershipFanoutSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: claimsFromTestHeader,
+          readPath,
+        }),
     });
-
-    httpServer = Bun.serve({ port: 0, fetch: server.fetch });
-    proxyUrl = `http://127.0.0.1:${httpServer.port}/v1/electric-proxy`;
+    server = stack.server;
   });
 
   beforeEach(async () => {
@@ -115,15 +131,14 @@ describe("membership fan-out (readwrite) integration", () => {
       { id: WORKSPACE_2, ownerId: NON_MEMBER_C },
     ]);
     await server.drizzle.insert(workspaceMembersTable).values([
-      { id: "4e60305d-0000-4000-8000-0000000000a1", workspaceId: WORKSPACE_1, memberId: MEMBER_A, role: "member" },
-      { id: "4e60305d-0000-4000-8000-0000000000b2", workspaceId: WORKSPACE_1, memberId: MEMBER_B, role: "member" },
-      { id: "4e60305d-0000-4000-8000-0000000000c3", workspaceId: WORKSPACE_2, memberId: NON_MEMBER_C, role: "member" },
+      { id: MEMBERSHIP_A_W1, workspaceId: WORKSPACE_1, memberId: MEMBER_A, role: "member" },
+      { id: MEMBERSHIP_B_W1, workspaceId: WORKSPACE_1, memberId: MEMBER_B, role: "member" },
+      { id: MEMBERSHIP_C_W2, workspaceId: WORKSPACE_2, memberId: NON_MEMBER_C, role: "member" },
     ]);
   });
 
   afterAll(async () => {
-    await httpServer.stop(true);
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
@@ -135,8 +150,8 @@ describe("membership fan-out (readwrite) integration", () => {
 
     const coMemberPg = await createLocalWorkItemStore();
     const nonMemberPg = await createLocalWorkItemStore();
-    const coMember = await startMemberSync(coMemberPg, proxyUrl, MEMBER_B);
-    const nonMember = await startMemberSync(nonMemberPg, proxyUrl, NON_MEMBER_C);
+    const coMember = await startMemberSync(coMemberPg, stack, MEMBER_B);
+    const nonMember = await startMemberSync(nonMemberPg, stack, NON_MEMBER_C);
 
     try {
       await coMember.initialSyncDone;
@@ -168,10 +183,10 @@ describe("membership fan-out (readwrite) integration", () => {
     // Fully-isolated identities so Electric serves this subject a BRAND-NEW shape (a unique `sub` →
     // unique where-params → no cached handle from the fan-out test, whose churn would otherwise mask the
     // result). The only thing under test is: live shape + delete the subquery's SOURCE row → move-out.
-    const REV_WS = "2c4e1e3b-0000-4000-8000-0000000009ff";
-    const REV_MEMBER = "1b3f0d2a-0000-4000-8000-0000000009ff";
-    const REV_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000009ff";
-    const REV_ITEM = "3d5f2f4c-0000-4000-8000-0000000009ff";
+    const REV_WS = uuid();
+    const REV_MEMBER = uuid();
+    const REV_MEMBERSHIP = uuid();
+    const REV_ITEM = uuid();
 
     await server.drizzle.insert(workspacesTable).values({ id: REV_WS, ownerId: REV_MEMBER });
     await server.drizzle
@@ -182,7 +197,7 @@ describe("membership fan-out (readwrite) integration", () => {
       .values({ id: REV_ITEM, workspaceId: REV_WS, ownerId: REV_MEMBER, body: "revoke me" });
 
     const memberPg = await createLocalWorkItemStore();
-    const member = await startMemberSync(memberPg, proxyUrl, REV_MEMBER);
+    const member = await startMemberSync(memberPg, stack, REV_MEMBER);
 
     try {
       await member.initialSyncDone;
@@ -212,10 +227,10 @@ describe("membership fan-out (readwrite) integration", () => {
   // board + tickets. The SAME local store is reused across the two sessions so the second resumes from
   // the first's persisted subscription offset/handle (not a fresh snapshot).
   it("revokes a member's rows across an OFFLINE gap: removed while unsubscribed, evicted on resume (ADR-0023 Slice 2)", async () => {
-    const RES_WS = "2c4e1e3b-0000-4000-8000-0000000008ff";
-    const RES_MEMBER = "1b3f0d2a-0000-4000-8000-0000000008ff";
-    const RES_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000008ff";
-    const RES_ITEM = "3d5f2f4c-0000-4000-8000-0000000008ff";
+    const RES_WS = uuid();
+    const RES_MEMBER = uuid();
+    const RES_MEMBERSHIP = uuid();
+    const RES_ITEM = uuid();
 
     await server.drizzle.insert(workspacesTable).values({ id: RES_WS, ownerId: RES_MEMBER });
     await server.drizzle
@@ -229,7 +244,7 @@ describe("membership fan-out (readwrite) integration", () => {
 
     // Session 1: sync, receive the item, persist the tag-set + offset, then go OFFLINE (unsubscribe)
     // while keeping the local store.
-    const first = await startMemberSync(memberPg, proxyUrl, RES_MEMBER);
+    const first = await startMemberSync(memberPg, stack, RES_MEMBER);
     await first.initialSyncDone;
     await waitFor(async () => {
       expect(await itemCount(memberPg)).toBe(1);
@@ -240,7 +255,7 @@ describe("membership fan-out (readwrite) integration", () => {
     await server.drizzle.delete(workspaceMembersTable).where(eq(workspaceMembersTable.id, RES_MEMBERSHIP));
 
     // Session 2: resume on the SAME store. Catch-up from the persisted offset must deliver the move-out.
-    const second = await startMemberSync(memberPg, proxyUrl, RES_MEMBER);
+    const second = await startMemberSync(memberPg, stack, RES_MEMBER);
     try {
       await second.initialSyncDone;
       await waitFor(async () => {
@@ -259,10 +274,10 @@ describe("membership fan-out (readwrite) integration", () => {
   // guards: those snapshot inserts carry no LSN, so the engine's change dedup dropped them and the rows
   // only showed after a full re-snapshot (tab reload).
   it("fans a newly-added member's rows into their LIVE shape (move-in, ADR-0024)", async () => {
-    const MVI_WS = "2c4e1e3b-0000-4000-8000-0000000007ff";
-    const MVI_MEMBER = "1b3f0d2a-0000-4000-8000-0000000007ff";
-    const MVI_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000007ff";
-    const MVI_ITEM = "3d5f2f4c-0000-4000-8000-0000000007ff";
+    const MVI_WS = uuid();
+    const MVI_MEMBER = uuid();
+    const MVI_MEMBERSHIP = uuid();
+    const MVI_ITEM = uuid();
 
     // The workspace + item exist, but the member has NO membership yet → their shape must be empty.
     await server.drizzle.insert(workspacesTable).values({ id: MVI_WS, ownerId: MVI_MEMBER });
@@ -271,7 +286,7 @@ describe("membership fan-out (readwrite) integration", () => {
       .values({ id: MVI_ITEM, workspaceId: MVI_WS, ownerId: MVI_MEMBER, body: "appear on join" });
 
     const memberPg = await createLocalWorkItemStore();
-    const member = await startMemberSync(memberPg, proxyUrl, MVI_MEMBER);
+    const member = await startMemberSync(memberPg, stack, MVI_MEMBER);
 
     try {
       await member.initialSyncDone;
@@ -299,10 +314,10 @@ describe("membership fan-out (readwrite) integration", () => {
   // rows and materialise the now-visible board + tickets. The SAME local store is reused across the two
   // sessions so the second resumes from the first's persisted offset/handle (not a fresh snapshot).
   it("fans a member's rows in across an OFFLINE gap: added while unsubscribed, materialised on resume (ADR-0024 Slice 2)", async () => {
-    const MIN_WS = "2c4e1e3b-0000-4000-8000-0000000006ff";
-    const MIN_MEMBER = "1b3f0d2a-0000-4000-8000-0000000006ff";
-    const MIN_MEMBERSHIP = "4e60305d-0000-4000-8000-0000000006ff";
-    const MIN_ITEM = "3d5f2f4c-0000-4000-8000-0000000006ff";
+    const MIN_WS = uuid();
+    const MIN_MEMBER = uuid();
+    const MIN_MEMBERSHIP = uuid();
+    const MIN_ITEM = uuid();
 
     await server.drizzle.insert(workspacesTable).values({ id: MIN_WS, ownerId: MIN_MEMBER });
     await server.drizzle
@@ -313,7 +328,7 @@ describe("membership fan-out (readwrite) integration", () => {
 
     // Session 1: sync as a non-member (sees nothing), persist the offset, then go OFFLINE (unsubscribe)
     // while keeping the local store.
-    const first = await startMemberSync(memberPg, proxyUrl, MIN_MEMBER);
+    const first = await startMemberSync(memberPg, stack, MIN_MEMBER);
     await first.initialSyncDone;
     expect(await itemCount(memberPg)).toBe(0);
     first.sync.unsubscribe();
@@ -324,7 +339,7 @@ describe("membership fan-out (readwrite) integration", () => {
       .values({ id: MIN_MEMBERSHIP, workspaceId: MIN_WS, memberId: MIN_MEMBER, role: "member" });
 
     // Session 2: resume on the SAME store. Catch-up from the persisted offset must deliver the move-in.
-    const second = await startMemberSync(memberPg, proxyUrl, MIN_MEMBER);
+    const second = await startMemberSync(memberPg, stack, MIN_MEMBER);
     try {
       await second.initialSyncDone;
       await waitFor(async () => {
@@ -337,6 +352,11 @@ describe("membership fan-out (readwrite) integration", () => {
   }, 30_000);
 
   it("lets a member write into their workspace but rejects a non-member (RLS WITH CHECK)", async () => {
+    const A_ITEM = uuid();
+    const A_MUTATION = uuid();
+    const D_ITEM = uuid();
+    const D_MUTATION = uuid();
+
     const memberWrite = await server.request("/api/mutations", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-test-sub": MEMBER_A },
@@ -344,11 +364,11 @@ describe("membership fan-out (readwrite) integration", () => {
         mutations: [
           {
             tableName: "work_items",
-            entityKey: { id: "5f713f6e-0000-4000-8000-000000000a99" },
-            mutationId: "6a824a7f-0000-4000-8000-000000000a99",
+            entityKey: { id: A_ITEM },
+            mutationId: A_MUTATION,
             mutationSeq: 1,
             kind: "create",
-            payload: { id: "5f713f6e-0000-4000-8000-000000000a99", workspace_id: WORKSPACE_1, body: "A writes" },
+            payload: { id: A_ITEM, workspace_id: WORKSPACE_1, body: "A writes" },
             clientTimestampUs: String(Date.now() * 1000),
           },
         ],
@@ -368,11 +388,11 @@ describe("membership fan-out (readwrite) integration", () => {
         mutations: [
           {
             tableName: "work_items",
-            entityKey: { id: "5f713f6e-0000-4000-8000-000000000d99" },
-            mutationId: "6a824a7f-0000-4000-8000-000000000d99",
+            entityKey: { id: D_ITEM },
+            mutationId: D_MUTATION,
             mutationSeq: 1,
             kind: "create",
-            payload: { id: "5f713f6e-0000-4000-8000-000000000d99", workspace_id: WORKSPACE_1, body: "D intrudes" },
+            payload: { id: D_ITEM, workspace_id: WORKSPACE_1, body: "D intrudes" },
             clientTimestampUs: String(Date.now() * 1000),
           },
         ],

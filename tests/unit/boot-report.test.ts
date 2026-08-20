@@ -1,19 +1,27 @@
 /**
  * Boot observability (ADR-0034) — the in-process BootReport. Drives the REAL boot pipeline (real PGlite,
- * real engine, real ShapeInbox/commit queue) through a `MultiShapeStream` MOCK, exactly as
- * sync-expired-handle-recovery does, so the report is built from a genuine boot rather than a stubbed one.
+ * real engine, real ShapeInbox/commit queue) against a stubbed NETWORK rather than a stubbed engine: the
+ * ambient `fetch` answers the real control-plane handlers and a gated durable-streams response, so the
+ * report is built from a genuine boot and the test still decides WHEN catch-up completes.
  * Covers: the finalized report's shape + phase durations + per-group rows/requests/fetch/apply; that
  * `bootReport()` is null until initial sync completes; and that `onBootReport` fires exactly once with the
- * same object the method returns. Runs in its own process (ISOLATED) — `mock.module` is process-global.
+ * same object the method returns. Runs in its own process (ISOLATED) — the fetch stub is process-global.
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 
 import { integer, text } from "drizzle-orm/pg-core";
 
-import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { defineSyncRegistry, defineSyncTable, type StreamEnvelope } from "@pgxsinkit/contracts";
+import {
+  barrierPath,
+  createBarrierHandler,
+  createSubscribeHandler,
+  importStreamTokenKey,
+  subscribePath,
+  type CircuitsEngineClient,
+} from "@pgxsinkit/server";
 
 import { createBootReportBuilder } from "../../packages/client/src/boot-report";
-import type { MultiShapeMessages, Row } from "../../packages/client/src/sync/types";
 
 const registry = defineSyncRegistry({
   widget: defineSyncTable({
@@ -22,73 +30,110 @@ const registry = defineSyncRegistry({
   }),
 });
 
-type MultiShapeMessage = MultiShapeMessages<Record<string, Row<unknown>>>;
-type SubscribeCallback = (messages: MultiShapeMessage[]) => Promise<void>;
+const key = await importStreamTokenKey("boot-report-test-secret");
 
-let capturedCb: SubscribeCallback | null = null;
+const engine: CircuitsEngineClient = {
+  createShape: async (request) => ({
+    shapeId: "shape/s1",
+    table: request.table,
+    streamPath: "shape/s1",
+    streamUrl: "http://ds/shape/s1",
+  }),
+  releaseShape: async () => {},
+  replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
+} as CircuitsEngineClient;
 
-const makeShape = (handle: string) => ({
-  subscribe: mock(),
-  unsubscribeAll: mock(),
-  shapeHandle: handle,
-  lastOffset: "0_inf",
-});
+const resolveAuthClaims = () => ({ sub: "boot-report-subject" });
+const subscribe = createSubscribeHandler({ registry, engine, key, resolveAuthClaims });
+const barrier = createBarrierHandler({ engine, resolveAuthClaims });
 
-const MockMultiShapeStream = mock(() => ({
-  subscribe: (cb: SubscribeCallback) => {
-    capturedCb = cb;
+/**
+ * The catch-up the boot is waiting on, held until a test releases it.
+ *
+ * The report's whole point is the boundary between "streams subscribed" and "initial sync done", so
+ * the stub must be able to sit inside that gap rather than racing through it. Each boot installs a
+ * fresh gate; `releaseCatchUp` is what `driveInitialSync` opens.
+ */
+let catchUpGate: { promise: Promise<void>; release: () => void };
+function newCatchUpGate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  catchUpGate = { promise, release };
+}
+newCatchUpGate();
+
+const snapshotEnvelope: StreamEnvelope = {
+  type: "widget",
+  key: "1",
+  value: { id: 1, name: "alpha" },
+  headers: { operation: "upsert" },
+};
+
+/**
+ * The control plane and the edge, served for real on a loopback port.
+ *
+ * A `globalThis.fetch` stub would be lighter but not sound: the durable-streams client is imported
+ * before this file's first line runs, so a swap here is invisible to whatever reference it captured.
+ * Two real routes cost a millisecond and cannot go stale that way.
+ */
+const server = Bun.serve({
+  port: 0,
+  idleTimeout: 0,
+  fetch: async (request) => {
+    const { pathname } = new URL(request.url);
+    if (pathname === subscribePath) return subscribe(request);
+    if (pathname === barrierPath) return barrier(request);
+
+    // Anything else is the edge. Hold the first delivery until the test opens the gate, then answer
+    // with the one snapshot row and a tail offset — a complete catch-up in a single request, which is
+    // what makes `requests: 1` / `rows: 1` deterministic.
+    await catchUpGate.promise;
+    return new Response(JSON.stringify([snapshotEnvelope]), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "Stream-Next-Offset": "0000000000000001",
+        "Stream-Up-To-Date": "true",
+      },
+    });
   },
-  unsubscribeAll: mock(),
-  isUpToDate: true,
-  shapes: { widget: makeShape("widget-handle") },
-}));
-await mock.module("@electric-sql/experimental", () => ({ MultiShapeStream: MockMultiShapeStream }));
+});
+const origin = `http://127.0.0.1:${server.port}`;
 
 const { createSyncClient } = await import("../../packages/client/src/index");
 const { memoryStoreForTests } = await import("../../packages/client/src/testing");
-
-const snapshotRow = (shape: string, value: Record<string, unknown>): MultiShapeMessage => ({
-  headers: { operation: "insert" },
-  key: `${shape}/${String(value["id"])}`,
-  value,
-  shape,
-});
-const upToDate = (shape: string, lsn: number): MultiShapeMessage => ({
-  shape,
-  headers: { control: "up-to-date", global_last_seen_lsn: String(lsn) },
-});
 
 let bootId = 0;
 // Track booted clients so each is stopped (closing its PGlite) after the test — an un-closed PGlite heap
 // leaks and bun force-exits the process rc=99 (see tests/support/setup.ts).
 const openClients: Array<{ stop: () => Promise<void> }> = [];
 async function bootClient(extra: Record<string, unknown> = {}) {
-  capturedCb = null;
+  newCatchUpGate();
   const client = await createSyncClient({
     registry: registry as never,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
-    batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+    controlPlaneUrl: origin,
+    streamBaseUrl: `${origin}/v1/stream`,
+    batchWriteUrl: `${origin}/api/mutations`,
     ...memoryStoreForTests(`boot-report-${++bootId}`),
     ...extra,
   } as Parameters<typeof createSyncClient>[0]);
   openClients.push(client);
-  // ADR-0041: `createSyncClient` resolves at `localReadReady`; the sync engine (its mock subscribe callback
-  // `capturedCb`) is wired in the background tail. Await `bootSettled` so the test can drive initial sync.
-  await client.bootSettled;
+  // Deliberately NOT awaiting `bootSettled`: it means "sync START done" (ADR-0041), and a start is not
+  // done until the group's first catch-up response arrives — which is the very thing the gate is
+  // holding. `createSyncClient` has already resolved at `localReadReady`, which is the boundary these
+  // tests care about.
   return client;
 }
 
-/** Deliver the eager group's catch-up snapshot + up-to-date, then wait for boot to finalize. */
+/** Open the gate so the held catch-up lands, then wait for boot to finalize. */
 async function driveInitialSync(client: { ready: Promise<void> }) {
-  await capturedCb!([snapshotRow("widget", { id: 1, name: "alpha" }), upToDate("widget", 10)]);
+  catchUpGate.release();
   await client.ready;
 }
 
 describe("BootReport — in-process boot (ADR-0034)", () => {
-  beforeEach(() => {
-    MockMultiShapeStream.mockClear();
-  });
-
   afterEach(async () => {
     while (openClients.length > 0)
       await openClients
@@ -172,7 +217,7 @@ describe("BootReport — in-process boot (ADR-0034)", () => {
 
   it("stamps storeKind='fresh' when the caller proves the store a fresh spare", async () => {
     // The fresh-store hint marks a schemaless spare. Boot offline (syncEnabled:false) so the report finalizes
-    // at `ready` without driving the mock stream — storeKind derivation does not depend on sync being online.
+    // at `ready` without driving the stream — storeKind derivation does not depend on sync being online.
     const client = await bootClient({ freshStore: true, syncEnabled: false });
     await client.ready;
 
@@ -183,7 +228,7 @@ describe("BootReport — in-process boot (ADR-0034)", () => {
 
   it("bootReport() is null before initial sync completes, and the report thereafter", async () => {
     const client = await bootClient();
-    // Boot pipeline has run (streams subscribed) but no batch has been delivered — no initial sync yet.
+    // The local-read core is up but no batch has been delivered — no initial sync, so no report yet.
     expect(await client.bootReport()).toBeNull();
 
     await driveInitialSync(client);
@@ -245,4 +290,8 @@ describe("BootReport — engine-placement diagnostics (ADR-0049 decision 12)", (
     // No fallback on the granted opfs home — the reason field stays absent (never set on a non-fallback boot).
     expect(report.storageFallbackReason).toBeUndefined();
   });
+});
+
+afterAll(async () => {
+  await server.stop(true);
 });

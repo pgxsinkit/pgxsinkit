@@ -1,14 +1,14 @@
 import { describe, expect, it } from "bun:test";
 
-import { sql } from "drizzle-orm";
 import { bigint, pgTable, uuid, varchar } from "drizzle-orm/pg-core";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 
 import {
   authoritativeWriteRequestSchema,
-  buildOwnershipShapeWhere,
-  DENY_ALL,
+  buildOwnershipShapePredicate,
+  DENY_ALL_PREDICATE,
+  p,
   defineReadProjection,
   defineSyncRegistry,
   defineSyncTable,
@@ -22,7 +22,7 @@ import {
   mutationEnvelopeSchema,
   type SyncTableEntry,
 } from "@pgxsinkit/contracts";
-import { buildDemoSyncConfig, buildSyntheticRegistry, buildSyntheticRegistrySchemaName } from "@pgxsinkit/schema";
+import { buildSyntheticRegistry, buildSyntheticRegistrySchemaName, demoSyncRegistry } from "@pgxsinkit/schema";
 
 const makeProjectedContractsColumns = () => ({
   id: uuid("id").primaryKey(),
@@ -68,11 +68,9 @@ describe("sync config contracts", () => {
     expect(Object.keys(wrapped)).toEqual(["perf_items_000"]);
   });
 
-  it("exports a shared todo table spec and demo sync config", () => {
-    const config = buildDemoSyncConfig("http://localhost:3000/v1/shape");
-
-    expect(config.tables.authors?.clientProjection?.syncedTable).toBe("authors");
-    expect(config.tables.todos?.clientProjection?.journalTable).toBe("todos_mutations");
+  it("exports shared table specs carrying their client projections", () => {
+    expect(demoSyncRegistry.authors?.clientProjection?.syncedTable).toBe("authors");
+    expect(demoSyncRegistry.todos?.clientProjection?.journalTable).toBe("todos_mutations");
   });
 
   // ─── Registry storage declaration (ADR-0049 decision 1 / ADR-0047) ───────────────────────────────────
@@ -374,7 +372,7 @@ describe("sync config contracts", () => {
       columns: ["title", "updatedAtUs"], // PK ("id") is always kept; ownerId/heavyBlob dropped locally
       rowFilter: (cols) => {
         callbackKeys = Object.keys(cols);
-        return { customWhere: () => null, revision: "admin-summary-1" };
+        return { customPredicate: () => null, revision: "admin-summary-1" };
       },
     });
 
@@ -387,7 +385,7 @@ describe("sync config contracts", () => {
     expect(getTableConfig(projection.localTable).name).toBe("assessment_definition_admin_summary");
     expect(projection.shape?.tableName).toBe("assessment_definition_admin_summary");
     expect(projection.shape?.shapeKey).toBe("assessment_definition_admin_summary");
-    expect(projection.shape?.electricTable).toBe("assessment_definition");
+    expect(projection.shape?.physicalTable).toBe("assessment_definition");
 
     // The local table + client metadata are the SUBSET (PK + requested), heavy column dropped. The
     // registry-facing helpers take a loose `SyncTableEntry`, so view the precisely-typed projection as
@@ -406,7 +404,7 @@ describe("sync config contracts", () => {
     expect(projection.shape?.rowFilter?.columns?.slice().sort()).toEqual(["id", "title", "updated_at_us"].sort());
     expect(projection.shape?.rowFilter?.revision).toBe("admin-summary-1");
 
-    // The rowFilter callback receives the OWNER's FULL columns (customWhere runs in Electric on the
+    // The rowFilter callback receives the OWNER's FULL columns (the predicate is evaluated against the
     // physical table) — including a column the local subset omits.
     expect(callbackKeys).toContain("ownerId");
     expect(callbackKeys).toContain("heavyBlob");
@@ -439,35 +437,39 @@ describe("sync config contracts", () => {
 });
 
 describe("isClaimsDependentRowFilter (ADR-0039 anonymous-activation probe)", () => {
-  // A real owner column so buildOwnershipShapeWhere can render the authenticated branch when a subject
-  // exists (the deny branch — which returns the DENY_ALL sentinel — is what an empty-claims probe hits).
+  // A real owner column so buildOwnershipShapePredicate can build the authenticated branch when a subject
+  // exists (the deny branch — which returns the sentinel — is what an empty-claims probe hits).
   const ownedThings = pgTable("owned_things", { id: uuid("id").primaryKey(), ownerId: uuid("owner_id").notNull() });
 
-  it("is true for an ownership filter (returns the DENY_ALL sentinel for a missing subject)", () => {
-    const filter = { customWhere: (claims: JwtClaims) => buildOwnershipShapeWhere(ownedThings.ownerId, claims.sub) };
+  it("is true for an ownership filter (returns the deny sentinel for a missing subject)", () => {
+    const filter = {
+      customPredicate: (claims: JwtClaims) => buildOwnershipShapePredicate(ownedThings.ownerId, claims.sub),
+    };
     expect(isClaimsDependentRowFilter(filter)).toBe(true);
   });
 
-  it("is true for a filter that returns DENY_ALL directly under empty claims", () => {
-    const filter = { customWhere: (claims: JwtClaims) => (claims.sub ? sql`"owner_id" = ${claims.sub}` : DENY_ALL) };
+  it("is true for a filter that returns the deny sentinel directly under empty claims", () => {
+    const filter = {
+      customPredicate: (claims: JwtClaims) => (claims.sub ? p.eq(ownedThings.ownerId, claims.sub) : DENY_ALL_PREDICATE),
+    };
     expect(isClaimsDependentRowFilter(filter)).toBe(true);
   });
 
   it("is true for a filter that throws under empty claims", () => {
     const filter = {
-      customWhere: (claims: JwtClaims) => {
+      customPredicate: (claims: JwtClaims) => {
         if (!claims.sub) throw new Error("no subject");
-        return sql`"owner_id" = ${claims.sub}`;
+        return p.eq(ownedThings.ownerId, claims.sub);
       },
     };
     expect(isClaimsDependentRowFilter(filter)).toBe(true);
   });
 
-  it("is false for a static null-returning filter, a string-returning filter, and an absent filter", () => {
-    expect(isClaimsDependentRowFilter({ customWhere: () => null })).toBe(false);
-    expect(isClaimsDependentRowFilter({ customWhere: () => "1 = 1" })).toBe(false);
-    // A different SQL fragment (not the DENY_ALL reference) is not claims-dependent as far as the probe sees.
-    expect(isClaimsDependentRowFilter({ customWhere: () => sql`false` })).toBe(false);
+  it("is false for a static null-returning filter and an absent filter", () => {
+    expect(isClaimsDependentRowFilter({ customPredicate: () => null })).toBe(false);
+    // A structurally-equal but distinct deny (not the DENY_ALL_PREDICATE reference) is not
+    // claims-dependent as far as the probe sees — recognition is by reference identity.
+    expect(isClaimsDependentRowFilter({ customPredicate: () => ({ or: [] }) })).toBe(false);
     expect(isClaimsDependentRowFilter({})).toBe(false);
     expect(isClaimsDependentRowFilter(undefined)).toBe(false);
   });

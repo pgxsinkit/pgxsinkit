@@ -69,7 +69,8 @@ const ephemeralRegistry = defineSyncRegistry({ todos, exam });
 
 type LooseClient = SyncClient<SyncTableRegistry>;
 
-const DEAD_ELECTRIC = "http://127.0.0.1:1/v1/electric-proxy";
+const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
+const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const DEAD_WRITE = "http://127.0.0.1:1/api/mutations";
 
 const TMP_ROOT = path.resolve(process.cwd(), "tmp/agents/schema-fingerprint");
@@ -106,7 +107,8 @@ async function bootFsClient(
 ): Promise<LooseClient> {
   const client = (await createSyncClient({
     registry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     syncEnabled: false,
     storePath,

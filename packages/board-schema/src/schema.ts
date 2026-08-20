@@ -1,8 +1,15 @@
-import { sql, type SQL } from "drizzle-orm";
 import { bigint, pgEnum, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
-import { c, clockMicrosecondsSql, defineSyncTable, DENY_ALL, type JwtClaims } from "@pgxsinkit/contracts";
+import {
+  clockMicrosecondsSql,
+  defineSyncTable,
+  DENY_ALL_PREDICATE,
+  p,
+  type JwtClaims,
+  type Predicate,
+  type SubqueryRef,
+} from "@pgxsinkit/contracts";
 
 import {
   buildChannelPolicies,
@@ -36,8 +43,12 @@ function isAdmin(claims: JwtClaims): boolean {
 
 // This closes over the resolved membership entry but runs only when a request is filtered, after every
 // entry below has been initialized.
-function memberTeams(sub: string): SQL {
-  return sql`select ${c(teamMemberSyncEntry.table.teamId)} from ${teamMemberSyncEntry.table} where ${c(teamMemberSyncEntry.table.userId)} = ${sub}`;
+//
+// A `SubqueryRef` rather than a rendered SELECT: the engine maintains the inner set incrementally and
+// shares it across every shape that references it, so the five filters below cost ONE membership index
+// between them rather than one apiece.
+function memberTeams(sub: string): SubqueryRef<string> {
+  return p.subquery(teamMemberSyncEntry.table.teamId, p.eq(teamMemberSyncEntry.table.userId, sub));
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -60,7 +71,7 @@ const profileSyncEntry = defineSyncTable({
   mode: "readonly",
   rowClass: "directory",
   shape: {
-    rowFilter: () => ({ customWhere: (claims): SQL | null => (claims.sub ? null : DENY_ALL) }),
+    rowFilter: () => ({ customPredicate: (claims): Predicate | null => (claims.sub ? null : DENY_ALL_PREDICATE) }),
   },
 });
 
@@ -84,10 +95,10 @@ const teamSyncEntry = defineSyncTable({
   consistencyGroup: TEAM_SCOPE,
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => {
+      customPredicate: (claims): Predicate | null => {
         if (isAdmin(claims)) return null;
-        if (!claims.sub) return DENY_ALL;
-        return sql`${c(columns.id)} in (${memberTeams(claims.sub)})`;
+        if (!claims.sub) return DENY_ALL_PREDICATE;
+        return p.in(columns.id, memberTeams(claims.sub));
       },
     }),
   },
@@ -120,10 +131,10 @@ const teamMemberSyncEntry = defineSyncTable({
   consistencyGroup: TEAM_SCOPE,
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => {
+      customPredicate: (claims): Predicate | null => {
         if (isAdmin(claims)) return null;
-        if (!claims.sub) return DENY_ALL;
-        return sql`${c(columns.teamId)} in (${memberTeams(claims.sub)})`;
+        if (!claims.sub) return DENY_ALL_PREDICATE;
+        return p.in(columns.teamId, memberTeams(claims.sub));
       },
     }),
   },
@@ -152,10 +163,12 @@ const channelSyncEntry = defineSyncTable({
   consistencyGroup: TEAM_SCOPE,
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => {
+      customPredicate: (claims): Predicate | null => {
         if (isAdmin(claims)) return null;
-        if (!claims.sub) return DENY_ALL;
-        return sql`${c(columns.kind)}::text = 'global' or ${c(columns.teamId)} in (${memberTeams(claims.sub)})`;
+        if (!claims.sub) return DENY_ALL_PREDICATE;
+        // No `::text` cast on the enum: the native path carries a typed JSON scalar, so there is no
+        // text round-trip to re-type it for (the cast was an Electric-grammar requirement).
+        return p.or(p.eq(columns.kind, "global"), p.in(columns.teamId, memberTeams(claims.sub)));
       },
     }),
   },
@@ -201,12 +214,20 @@ const messageSyncEntry = defineSyncTable({
   subscription: "lazy",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => {
+      customPredicate: (claims): Predicate | null => {
         if (isAdmin(claims)) return null;
-        if (!claims.sub) return DENY_ALL;
+        if (!claims.sub) return DENY_ALL_PREDICATE;
         const channel = channelSyncEntry.table;
-        const visibleChannels = sql`select ${c(channel.id)} from ${channel} where ${c(channel.kind)}::text = 'global' or ${c(channel.teamId)} in (${memberTeams(claims.sub)})`;
-        return sql`${c(columns.channelId)} in (${visibleChannels}) and ${c(columns.createdAtUs)} >= ${memberChatWindowCutoffMicros()}`;
+        // Nested, and still uncorrelated at both levels — the inner `where` reads only the inner
+        // table's own columns, which is what the engine requires to maintain the set incrementally.
+        const visibleChannels = p.subquery(
+          channel.id,
+          p.or(p.eq(channel.kind, "global"), p.in(channel.teamId, memberTeams(claims.sub))),
+        );
+        return p.and(
+          p.in(columns.channelId, visibleChannels),
+          p.gte(columns.createdAtUs, memberChatWindowCutoffMicros()),
+        );
       },
     }),
   },
@@ -244,10 +265,10 @@ const issueSyncEntry = defineSyncTable({
   consistencyGroup: TEAM_SCOPE,
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => {
+      customPredicate: (claims): Predicate | null => {
         if (isAdmin(claims)) return null;
-        if (!claims.sub) return DENY_ALL;
-        return sql`${c(columns.teamId)} in (${memberTeams(claims.sub)})`;
+        if (!claims.sub) return DENY_ALL_PREDICATE;
+        return p.in(columns.teamId, memberTeams(claims.sub));
       },
     }),
   },

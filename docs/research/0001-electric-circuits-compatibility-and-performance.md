@@ -111,13 +111,13 @@ headers: electric-schema"_, delivers zero messages and never reaches up-to-date.
 
 **3. What source/configuration changes are required?**
 
-| #   | Change                                                                                                    | Where           | Size      | Load-bearing?                                                |
-| --- | --------------------------------------------------------------------------------------------------------- | --------------- | --------- | ------------------------------------------------------------ |
-| 1   | `StreamFold` dedup — a key that leaves and re-enters a shape was emitted twice, duplicating snapshot rows | `electric.rs`   | ~6 lines  | **Yes** — caused total data loss via the COPY tier           |
-| 2   | Real `lsn` / `global_last_seen_lsn` instead of hardcoded `"0"`                                            | `electric.rs`   | ~25 lines | **No** — correctness hygiene; A/B showed no test requires it |
-| 3   | `electric-schema` on every non-live response, not only the snapshot                                       | `electric.rs`   | ~6 lines  | **Yes** — blocks all warm-store resume                       |
-| 4   | Snapshot-aware key-set rebuild                                                                            | `electric.rs`   | ~20 lines | **Yes** — silent revocation loss                             |
-| —   | `::text` cast shim (`stripCastsForCircuits`)                                                              | pgxsinkit proxy | 72 lines  | Workaround; belongs upstream in `where_sql.rs`               |
+| #   | Change                                                                                                    | Where           | Size       | Load-bearing?                                                   |
+| --- | --------------------------------------------------------------------------------------------------------- | --------------- | ---------- | --------------------------------------------------------------- |
+| 1   | `StreamFold` dedup — a key that leaves and re-enters a shape was emitted twice, duplicating snapshot rows | `electric.rs`   | ~6 lines   | **Yes** — caused total data loss via the COPY tier              |
+| 2   | Real `lsn` / `global_last_seen_lsn` **plus** flip stamping and a fan-out frontier                         | engine          | ~120 lines | **Yes, as a set** — the LSN change ALONE loses revocations (B6) |
+| 3   | `electric-schema` on every non-live response, not only the snapshot                                       | `electric.rs`   | ~6 lines   | **Yes** — blocks all warm-store resume                          |
+| 4   | Key-set rebuild by suffix subtraction (**not** snapshot-aware — see B1)                                   | `electric.rs`   | ~330 lines | **Yes** — silent revocation loss                                |
+| —   | `::text` cast shim (`stripCastsForCircuits`)                                                              | pgxsinkit proxy | 72 lines   | Workaround; belongs upstream in `where_sql.rs`                  |
 
 Configuration: set `ELECTRIC_CIRCUITS_PG_TABLES` explicitly (not `*`) and
 `ELECTRIC_CIRCUITS_SUBQ_STORAGE_DIR` to physical storage.
@@ -277,25 +277,65 @@ and are not released. pgxsinkit should not ship a backend that depends on a loca
 
 **26. What exact blockers remain?**
 
-| #   | Blocker                                                       | Severity                               | Owner    |
-| --- | ------------------------------------------------------------- | -------------------------------------- | -------- |
-| B1  | Snapshot-aware key-set rebuild — silent revocation loss       | **Critical** (stale authorization)     | Circuits |
-| B2  | `electric-schema` missing on non-snapshot responses           | **Critical** (no warm resume)          | Circuits |
-| B3  | `StreamFold` churn duplicates                                 | **Critical** (data loss via COPY tier) | Circuits |
-| B4  | `::text` casts rejected by `where_sql.rs`                     | High (shimmable)                       | Circuits |
-| B5  | `/v1/health` green while replication is dead                  | High (operational)                     | Circuits |
-| B6  | LSN headers hardcoded `"0"`                                   | Medium (hygiene)                       | Circuits |
-| B7  | Per-handle live-poll head-of-line blocking                    | Medium (bounded)                       | Circuits |
-| B8  | `REPLICA IDENTITY FULL` on every table incl. `operations_log` | Medium                                 | config   |
-| B9  | `cache-control: no-store` blocks a CDN tier                   | Medium (future)                        | Circuits |
+| #   | Blocker                                                                    | Severity                               | Owner    |
+| --- | -------------------------------------------------------------------------- | -------------------------------------- | -------- |
+| B1  | Key-set rebuild folds to the TAIL at every offset — silent revocation loss | **Critical** (stale authorization)     | Circuits |
+| B2  | `electric-schema` missing on non-snapshot responses                        | **Critical** (no warm resume)          | Circuits |
+| B3  | `StreamFold` churn duplicates                                              | **Critical** (data loss via COPY tier) | Circuits |
+| B4  | `::text` casts rejected by `where_sql.rs`                                  | High (shimmable)                       | Circuits |
+| B5  | `/v1/health` green while replication is dead                               | High (operational)                     | Circuits |
+| B6  | LSN headers hardcoded `"0"` — **and unfixable in isolation**               | **Critical** (see below)               | Circuits |
+| B10 | Flip emissions (move-in/move-out) carry no `lsn` at all                    | **Critical** (with B6)                 | Circuits |
+| B11 | `private.users` served as `public.users` — schema qualifier stripped       | **Critical** (wrong rows, no error)    | Circuits |
+| B7  | Per-handle live-poll head-of-line blocking                                 | Medium (bounded)                       | Circuits |
+| B8  | `REPLICA IDENTITY FULL` on every table incl. `operations_log`              | Medium                                 | config   |
+| B9  | `cache-control: no-store` blocks a CDN tier                                | Medium (future)                        | Circuits |
+
+**Corrections (2026-08-20, after the fixes were implemented).** Three entries above were diagnosed
+wrongly in the original report, and the errors ran in the dangerous direction — they understated a
+data-loss defect and recommended deferring a fix that is harmful when shipped alone.
+
+- **B1's root cause was not the snapshot offset.** `keys_as_of` gated its fold on
+  `env.headers.offset`, a field **nothing ever populates**: every envelope construction site in
+  `engine/output.rs` passes `offset: None`, and durable-streams cannot supply it — JSON messages are
+  stored verbatim and a read serves a raw byte range. The gate could therefore never fire, so the
+  fold ran to the **tail at every offset**, not merely at the wrong one. `apply_changes` gates its
+  delete arm on `keys.remove(..)`, so every delete for a key already absent at the tail was dropped:
+  a client resuming from any persisted offset never evicted a row whose access had been revoked while
+  it was away. The original unit coverage passed because its fixtures invented offset stamps the
+  server never sends — a fixture asserting a property of itself.
+
+- **The remedy in §27 step 1 is not implementable as written.** "A `keys_as_of` that reconstructs
+  membership at an arbitrary offset" needs per-envelope positions that do not exist. The
+  implementable form is **suffix subtraction**: a read is an exact suffix from the requested offset,
+  which is the only positional answer the substrate offers, so count the envelopes past the client's
+  offset and fold the stream holding that many back. Exact at any offset, no stamps required, and it
+  removes rather than adds per-handle state.
+
+- **B6 is not hygiene, and must not be deferred.** Shipping real LSNs _alone_ is **worse than the
+  hardcoded `"0"`**. A consumer positions its dedup frontier on the advertised watermark and discards
+  anything at or below it — pgxsinkit's own ADR-0031 does exactly this — so with a real watermark and
+  unstamped flip emissions (B10), every membership move-in and move-out floors to LSN 0 and is dropped
+  as already-seen. That silently loses precisely the revocations B1 was fixed to deliver. The
+  hardcoded `"0"` was harmless only because no consumer frontier ever moved. B6, B10 and the fan-out
+  frontier are **one change**: the watermark must come from the sequencer (published per transaction,
+  after its appends flush, and only while pending flips are drained), not from the ingest head.
+
+- **B11 is not merely the packaging nit it looks like.** A qualified `table=private.users` was served
+  as `public.users` — a different table's rows, with no error. Rejecting the qualifier removes the
+  disclosure but does **not** add schema support: the engine keys tables by bare name throughout, so
+  a schema-bound registry still has nowhere to land. That capability gap is scoped separately in
+  [backlog/0009](../backlog/0009-circuits-schema-qualified-tables.md).
+
+The measurements in this report are unaffected — all four are defects in the compatibility adapter
+and the emission path, not in what was measured.
 
 **27. Smallest concrete engineering plan to remove them.**
 
-1. **Upstream B1–B3 as bug reports with the reproductions already written.** Each has a minimal
-   failing case independent of pgxsinkit (`w9-keyset-probe.py` three-arm probe; the vanilla-ShapeStream
-   resume; the churn duplicate repro). Offer the four patches; note that B1's proper fix is a
-   `keys_as_of` that reconstructs membership at an arbitrary offset — the patch here repairs only the
-   snapshot-offset case, which is the failing one.
+1. **Upstream B1–B3, B10 and B11 as bug reports with the reproductions already written.** Each has a
+   minimal failing case independent of pgxsinkit (`w9-keyset-probe.py` three-arm probe; the
+   vanilla-ShapeStream resume; the churn duplicate repro). B1's fix is **suffix subtraction**, not the
+   `keys_as_of` variant this step originally proposed — see the corrections above.
 2. **Upstream B4** as a `where_sql.rs` lexer change accepting and discarding `::type` — then delete the
    pgxsinkit shim rather than committing it.
 3. **Upstream B5** — make `/v1/health` reflect replicator liveness.
@@ -304,7 +344,9 @@ and are not released. pgxsinkit should not ship a backend that depends on a loca
    signature, and the reason B1 went unnoticed for the first six waypoints.
 5. **Only once B1–B4 are released**, add a `PGXSINKIT_SYNC_BACKEND` seam with a Circuits lane in the
    integration matrix. Do not commit a backend that requires a patched engine.
-6. Defer B6–B9; none blocks adoption, and B9 only matters once a CDN tier is real.
+6. **Ship B6 + B10 + the fan-out frontier together, or ship none of them.** They are one change; the
+   LSN half alone makes consumers discard revocations (see the corrections above). Defer B7–B9 only;
+   none of those blocks adoption, and B9 only matters once a CDN tier is real.
 
 ---
 

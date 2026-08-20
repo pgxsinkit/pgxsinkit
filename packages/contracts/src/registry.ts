@@ -1,4 +1,4 @@
-import type { ColumnBuilderBase, InferInsertModel, InferSelectModel } from "drizzle-orm";
+import type { AnyColumn, ColumnBuilderBase, InferInsertModel, InferSelectModel } from "drizzle-orm";
 import {
   bigint,
   getTableConfig,
@@ -33,6 +33,8 @@ import {
   isStorageDurability,
   isSubscriptionTiming,
   isWriteMode,
+  assertShapeFilterIsEnforceable,
+  readShapeTier,
   RETENTIONS,
   STORAGE_BACKENDS,
   STORAGE_DURABILITIES,
@@ -64,6 +66,7 @@ import {
   isZodSchema,
   type EventStreamRegistry,
 } from "./event-stream";
+import type { Predicate } from "./predicate";
 
 type PgSchemaType = ReturnType<typeof pgSchema>;
 
@@ -133,12 +136,19 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
   mode: TableMode;
   primaryKey: PrimaryKeySpec;
   /**
-   * CDC insert-apply policy (ADR-0045). Default `"insert"`: a server CDC `insert` is applied as a plain
-   * INSERT, so a genuine primary-key collision surfaces (the ADR-0014 collision-surfacing invariant).
-   * `"upsert"`: this table legitimately receives locally-derived provisional rows (e.g. written by a
-   * local trigger from another synced table), so server CDC inserts are applied idempotently as
-   * `INSERT … ON CONFLICT (pk) DO UPDATE` — the authoritative server row overwrites the provisional
-   * local row instead of failing the commit. Resolved to `"insert"` when omitted.
+   * **Backfill** conflict policy (ADR-0045). Resolved to `"insert"` when omitted.
+   *
+   * This no longer selects how steady-state changes apply. The engine emits `upsert`, which states a
+   * row's value without claiming it is new, so every streamed change now applies as `INSERT … ON
+   * CONFLICT (pk) DO UPDATE` regardless of this setting. ADR-0014's plain-INSERT collision surfacing
+   * went with the `insert` verb it depended on.
+   *
+   * What survives is the **initial load**, which is a different question: a fresh subscription or a
+   * post-must-refetch re-snapshot lands on a table assumed empty, which is what lets it use COPY or a
+   * plain multi-row INSERT — neither of which can express `ON CONFLICT`. Set `"upsert"` when that
+   * assumption does not hold for this table, i.e. it legitimately receives locally-DERIVED provisional
+   * rows (e.g. a local trigger on another synced table inserts one here) that a backfill could meet.
+   * The backfill then takes the conflict-tolerant applier instead, at the cost of the faster path.
    */
   applyMode: "insert" | "upsert";
   /**
@@ -308,19 +318,41 @@ export type SyncTableInputProjection<
 /**
  * A row filter for {@link defineSyncTable}'s `shape`, authored from the table's built, typed columns.
  * Reference columns through `c(columns.x)` exactly as `extras` does with its `self` argument, so
- * `customWhere` builds parameterized Electric `where`s from real, rename-safe column objects instead
+ * `customPredicate` builds the shape's predicate from real, rename-safe column objects instead
  * of hand-written column-name strings.
  */
 export type RowFilterInput<TColumns extends Record<string, ColumnBuilderBase>> = (
   columns: PgBuildExtraConfigColumns<TColumns>,
 ) => RowFilterSpec;
 
-/** {@link ShapeSpecInput} whose `rowFilter` is authored from the built columns (typed by `TColumns`). */
+/**
+ * The scope declaration for a SHARED-tier shape (ADR-0055), authored from the built, typed columns —
+ * the columns whose values key the shape family, in the order they parameterize it.
+ *
+ * Returning real column objects rather than names is what makes the family rename-safe: a renamed
+ * column moves the scope with it, where a string would have gone on naming a column that no longer
+ * exists and silently produced a predicate over nothing.
+ */
+export type ScopeInput<TColumns extends Record<string, ColumnBuilderBase>> = (
+  columns: PgBuildExtraConfigColumns<TColumns>,
+) => readonly AnyColumn[];
+
+/**
+ * The static, subscriber-independent half of a shape's native predicate, authored from the built,
+ * typed columns. Build it with {@link p} — `(c) => p.eq(c.published, true)`.
+ */
+export type ShapeWhereInput<TColumns extends Record<string, ColumnBuilderBase>> = (
+  columns: PgBuildExtraConfigColumns<TColumns>,
+) => Predicate;
+
+/** {@link ShapeSpecInput} whose callbacks are authored from the built columns (typed by `TColumns`). */
 export type ShapeSpecInputFor<TColumns extends Record<string, ColumnBuilderBase>> = Omit<
   ShapeSpecInput,
-  "rowFilter"
+  "rowFilter" | "scope" | "where"
 > & {
   rowFilter?: RowFilterInput<TColumns>;
+  scope?: ScopeInput<TColumns>;
+  where?: ShapeWhereInput<TColumns>;
 };
 
 /**
@@ -364,14 +396,13 @@ export type SyncTableInput<
    */
   primaryKey?: string[] | { name: string; columns: string[] };
   /**
-   * CDC insert-apply policy (ADR-0045). **Default `"insert"`** — a CDC insert is a plain INSERT, so a
-   * genuine PK collision must surface (the ADR-0014 collision-surfacing invariant; a synced cache table
-   * is server-authoritative and a duplicate insert is a real bug). Set `"upsert"` **only** when this
-   * table legitimately receives locally-DERIVED provisional rows — e.g. a local trigger on another
-   * synced table inserts a provisional row here, and the server independently creates the same row so
-   * its CDC insert would collide (23505). With `"upsert"`, server CDC inserts are applied idempotently
-   * as `INSERT … ON CONFLICT (pk) DO UPDATE`; the authoritative server row overwrites the provisional
-   * local row. Declare the exception here, where it lives — do not weaken the invariant repo-wide.
+   * **Backfill** conflict policy (ADR-0045). **Default `"insert"`** — the initial load assumes an empty
+   * table (fresh subscription or post-must-refetch re-snapshot) and takes the fast path, COPY or a plain
+   * multi-row INSERT, neither of which can express `ON CONFLICT`. Set `"upsert"` **only** when this table
+   * legitimately receives locally-DERIVED provisional rows a backfill could land on top of — e.g. a local
+   * trigger on another synced table inserts a provisional row here, and the server independently creates
+   * the same row (23505). Steady-state changes are unaffected: the engine emits `upsert`, so they apply
+   * as `INSERT … ON CONFLICT (pk) DO UPDATE` for every table. See {@link SyncTableEntry.applyMode}.
    */
   applyMode?: "insert" | "upsert";
   /**
@@ -657,12 +688,13 @@ export function defineSyncTable<
   const columnLevelPkKeys = Object.entries(probeColumns)
     .filter(([, col]) => col.primary === true)
     .map(([key]) => key);
-  const specPropertyKeys = primaryKeyColumns.map((key) => {
+  const toPropertyKey = (key: string, label: string) => {
     if (probeColumns[key]) return key;
     const byColumnName = Object.entries(probeColumns).find(([, col]) => col.name === key);
     if (byColumnName) return byColumnName[0];
-    throw new Error(`[pgxsinkit] ${tableName}: primaryKey column "${key}" not found among the table's columns`);
-  });
+    throw new Error(`[pgxsinkit] ${tableName}: ${label} column "${key}" not found among the table's columns`);
+  };
+  const specPropertyKeys = primaryKeyColumns.map((key) => toPropertyKey(key, "primaryKey"));
 
   if (columnLevelPkKeys.length > 1) {
     throw new Error(
@@ -719,25 +751,59 @@ export function defineSyncTable<
 
   // Resolve `shape.rowFilter` against the built typed columns so all authoring uses rename-safe
   // Drizzle column objects rather than hand-written column-name strings.
-  const resolvedRowFilter = shape?.rowFilter?.(
-    getColumns(table) as unknown as PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>,
-  );
+  const shapeColumns = getColumns(table) as unknown as PgBuildExtraConfigColumns<ReturnType<typeof makeColumns>>;
+  const resolvedRowFilter = shape?.rowFilter?.(shapeColumns);
+  const resolvedScope = shape?.scope?.(shapeColumns).map((column) => column.name);
+  const resolvedWhere = shape?.where?.(shapeColumns);
   const resolvedShape: ShapeSpec | undefined =
     resolvedMode !== "writeonly" || shape != null
       ? {
           tableName: shape?.tableName ?? tableName,
           shapeKey: shape?.shapeKey ?? shape?.tableName ?? tableName,
-          // `electricTable` is never set from input (it is not in ShapeSpecInput) — an owner reads its
+          // `physicalTable` is never set from input (it is not in ShapeSpecInput) — an owner reads its
           // own table. It is filled by `attachSyncRegistrySchema` (schema qualification) or by
           // `defineReadProjection` (which points a projection at the owning physical table).
           ...(resolvedRowFilter != null ? { rowFilter: resolvedRowFilter } : {}),
+          ...(resolvedScope != null ? { scope: resolvedScope } : {}),
+          ...(resolvedWhere != null ? { where: resolvedWhere } : {}),
         }
       : undefined;
 
+  // Read the tier for its side effect: a shape declaring both `scope` and `rowFilter` is refused
+  // HERE, at definition time, rather than at the first shape creation — the two are contradictory
+  // by construction, so there is no input for which it could later turn out to be fine.
+  if (resolvedShape != null) {
+    readShapeTier(resolvedShape);
+    assertShapeFilterIsEnforceable(resolvedShape);
+  }
+
   const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
   const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);
+
+  // The local synced table carries its OWN primary key, mirroring exactly what the local-schema
+  // generator emits for it (`getLocalSyncPrimaryKeyColumns` → `buildTableColumnSql`) — including a
+  // `clientProjection.localPrimaryKey` narrowing, where the server's key columns may not even be
+  // projected. Stating it here keeps the drizzle object and the physical table in agreement; a
+  // localTable that claimed no key while its table had one stayed invisible only while the apply path
+  // was a plain INSERT plus `UPDATE … WHERE pk`, and became a 42P10 the moment anything said
+  // `ON CONFLICT (pk)` (ADR-0058 decision 3). Skipped when a single column already carries the flag
+  // itself, since drizzle would then render two primary keys.
+  const localPkPropertyKeys = (clientProjection?.localPrimaryKey?.columns ?? primaryKeyColumns).map((key) =>
+    toPropertyKey(key, "localPrimaryKey"),
+  );
+  const localPkIsColumnLevel =
+    localPkPropertyKeys.length === 1 && probeColumns[localPkPropertyKeys[0]!]?.primary === true;
+  const localExtrasFn = localPkIsColumnLevel
+    ? undefined
+    : (self: PgBuildExtraConfigColumns<Record<string, ColumnBuilderBase>>) => {
+        const selfCols = self as unknown as Record<string, AnyPgColumn>;
+        const pkColumns = localPkPropertyKeys.map((k) => selfCols[k]!) as [AnyPgColumn, ...AnyPgColumn[]];
+        return [pgPrimaryKey({ name: primaryKeyConstraintName, columns: pkColumns })];
+      };
   const localTable = (
-    schema ? schema.table(tableName, projectedCols) : pgTable(tableName, projectedCols)
+    schema
+      ? schema.table(tableName, projectedCols, localExtrasFn as never)
+      : pgTable(tableName, projectedCols, localExtrasFn as never)
   ) as ProjectedLocalTable<TName, TColumns, TOmittedColumns>;
 
   const viewColumns = viewColumnsForProjection(makeColumns(), omittedColumns);
@@ -789,7 +855,7 @@ export function defineSyncTable<
  * not the jsonb), while the learner keeps reading the full table through the owner's shape.
  *
  * It is the *obvious, DRY* way to express "another shape over this table", versus the bare
- * `shape.electricTable` string it replaces (a footgun — config that silently un-asserts table
+ * `shape.physicalTable` string it replaces (a footgun — config that silently un-asserts table
  * ownership):
  *
  * - **Owns nothing.** The returned entry's `table` IS `owner.table` (the same object), so there is no
@@ -800,14 +866,14 @@ export function defineSyncTable<
  *   Electric `columns` allow-list so an omitted (e.g. heavy jsonb) column never crosses the wire. The
  *   primary key is always kept. Omit `columns` to sync every column.
  * - **Source is derived, never named.** The physical Electric target is taken from the owner — there is
- *   no consumer-facing source field to get wrong (see {@link ShapeSpec.electricTable}).
+ *   no consumer-facing source field to get wrong (see {@link ShapeSpec.physicalTable}).
  * - **Readonly.** A projection has no write path; the engine resolves an incoming shape request by its
  *   unique `shapeKey` (= `as`) and consults the derived physical target only on egress.
  *
- * The `rowFilter` callback receives the OWNER's full columns — `customWhere` runs in Electric against
+ * The `rowFilter` callback receives the OWNER's full columns — the predicate is evaluated against
  * the physical table, so it may reference a column the local subset omits. RLS for the projection's
  * reads lives on the OWNER's table (a projection adds no DDL to a table it does not own); its
- * `customWhere` must be a subset of what that RLS allows.
+ * `customPredicate` must be a subset of what that RLS allows.
  *
  * The `owner` may be a `defineSyncTable` entry OR an `asReadonly` of one — an `asReadonly` projection
  * preserves the full read contract (physical table, columns, primary key) and only drops the write path,
@@ -1024,7 +1090,7 @@ export function defineReadProjection<
     ...(opts.retention != null ? { retention: opts.retention } : {}),
   });
 
-  // Resolve the row filter against the OWNER's full columns (the customWhere runs in Electric on the
+  // Resolve the row filter against the OWNER's full columns (the predicate is evaluated on the
   // physical table, so it may reference a column the subset omits).
   const resolvedRowFilter = opts.rowFilter?.(getColumns(owner.table) as unknown as TableColumnsShape<TOwnerTable>);
 
@@ -1051,9 +1117,13 @@ export function defineReadProjection<
   const shape: ShapeSpec = {
     tableName: opts.as,
     shapeKey: opts.as,
-    electricTable: physicalTable,
+    physicalTable: physicalTable,
     ...(rowFilter != null ? { rowFilter } : {}),
   };
+
+  // Same definition-time refusal the owning `defineSyncTable` performs: a projection's filter is a
+  // filter, and one that cannot run here is the same unfiltered stream it would be there.
+  assertShapeFilterIsEnforceable(shape);
 
   // Point `table` at the owner's physical table and flag `readProjection` — that flag (not the absence of
   // a column factory) is what generators/appliers key on to skip owning-table work (see plpgsql-apply's
@@ -1145,7 +1215,7 @@ function localShapeIdentity(entry: SyncTableEntry<AnyPgTable>): string {
  * ({@link localShapeIdentity}) — the PGlite table a client reads and the `shapeKey` the proxy resolves a
  * request by — so two entries sharing it would collide locally (one shadows the other) and make the
  * shape unresolvable. A read PROJECTION over a shared physical table does NOT trip this: it carries a
- * DISTINCT local identity (`as`) and points at the owning table via the derived `shape.electricTable`,
+ * DISTINCT local identity (`as`) and points at the owning table via the derived `shape.physicalTable`,
  * so several shapes read one physical table while their local identities stay unique. Fails closed at
  * module-eval, for every consumer.
  */
@@ -1365,10 +1435,10 @@ export function attachSyncRegistrySchema<TRegistry extends SyncTableRegistry>(re
     const qualifiedTableName = `${normalizedSchema}.${entry.shape.tableName}`;
     entry.shape = {
       ...entry.shape,
-      // A read projection sets electricTable to the owner's (bare) physical name; qualify it the same
+      // A read projection sets physicalTable to the owner's (bare) physical name; qualify it the same
       // way the owner's own target is qualified, so both shapes hit one schema-qualified table on egress.
-      // An owner (no electricTable) qualifies its own tableName. An already-qualified value is left as-is.
-      electricTable: entry.shape.electricTable ? qualify(entry.shape.electricTable) : qualifiedTableName,
+      // An owner (no physicalTable) qualifies its own tableName. An already-qualified value is left as-is.
+      physicalTable: entry.shape.physicalTable ? qualify(entry.shape.physicalTable) : qualifiedTableName,
       ...(entry.shape.shapeKey === entry.shape.tableName ? { shapeKey: qualifiedTableName } : {}),
     };
   }

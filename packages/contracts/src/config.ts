@@ -1,8 +1,7 @@
-import { sql, type AnyColumn, type SQL } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
+import type { AnyColumn } from "drizzle-orm";
 import { z } from "zod";
 
-const pgDialect = new PgDialect();
+import { p, type Predicate } from "./predicate";
 
 export type TableMode = "readonly" | "writeonly" | "readwrite";
 
@@ -273,16 +272,100 @@ export interface ShapeSpec {
    * wrong about, the table you are reading), so it is omitted from {@link ShapeSpecInput}. The
    * combinator derives it from the owner; `defineSyncTable` never sets it from input.
    */
-  electricTable?: string;
+  physicalTable?: string;
   rowFilter?: RowFilterSpec;
+  /**
+   * SHARED TIER (ADR-0055) — the scope columns, resolved to column names, whose values key this
+   * shape family. The predicate is *generated* as an `AND` of equalities over them, so disjointness
+   * is a property of the construction rather than something a checker has to enforce: a row carries
+   * exactly one value per scope column, so it falls in exactly one shape of the family, and an
+   * overlapping pair is not expressible at all.
+   *
+   * `NULL` is a legal scope value and compiles to `IS NULL` — which is how an offering-wide row gets
+   * its own scope `(O, null)` rather than appearing in every group's shape. The tempting
+   * `group_id IS NULL OR group_id = $G` form is not merely disallowed here; it is wrong, because it
+   * places one row in every group shape at once.
+   *
+   * Its presence is what makes this a shared-tier shape. Declaring it alongside `rowFilter` is
+   * refused at definition time — see {@link readShapeTier}.
+   */
+  scope?: readonly string[];
+  /**
+   * The **static** half of the shape's predicate: subscriber-independent, identical for every
+   * reader, and therefore safe in either tier. On the shared tier it is conjoined with the generated
+   * scope equalities; on the private tier, with whatever `rowFilter` resolves to for the subject.
+   *
+   * Native AST, not SQL text — see {@link Predicate}.
+   */
+  where?: Predicate;
+}
+
+/** Which read tier a shape belongs to (ADR-0055 decision 2). */
+export type ShapeTier = "shared" | "private";
+
+/**
+ * The tier a shape declares, or a refusal.
+ *
+ * The tier is not configured; it is *read off* which field the author declared — `scope` for shared,
+ * `rowFilter` for private. That makes a shape's tier evident from its authoring and impossible to
+ * leave ambiguous, which matters because the two differ in whether their bytes are user-independent,
+ * and so in whether they may be shared and cached at all.
+ *
+ * Declaring both is refused rather than resolved by precedence. A `rowFilter` fuses the subject into
+ * the predicate, which is exactly what makes a stream unshareable; silently letting it ride along on
+ * a shape declared as shared would produce a stream that is cached under a scope key while carrying
+ * subject-dependent bytes — a disclosure, not a stale row.
+ */
+export function readShapeTier(shape: ShapeSpec): ShapeTier {
+  if (shape.scope != null && shape.rowFilter != null) {
+    throw new Error(
+      `[pgxsinkit] shape "${shape.shapeKey}" declares both scope and rowFilter — a shape is shared ` +
+        `(scope: the predicate is a function of scope values only) or private (rowFilter: the subject ` +
+        `is fused into the predicate), never both. A rowFilter makes the stream's bytes ` +
+        `subject-dependent, so it cannot be served from a scope-keyed shared stream. Move the ` +
+        `subject-dependent part into the entitlement rule, or drop scope and keep this private.`,
+    );
+  }
+  return shape.scope != null ? "shared" : "private";
+}
+
+/**
+ * Refuse a shape whose `rowFilter` cannot actually filter.
+ *
+ * The control plane compiles a private-tier shape from `customPredicate` alone, so a filter that does
+ * not supply one is created with no subject test and streams **every** row to whoever subscribed. That
+ * is the precise shape of a silent authorization bypass: the registry says "filtered", the wire says
+ * "all rows", and nothing anywhere reports a discrepancy.
+ *
+ * The way to land there is a `rowFilter` that filters nothing at all — no predicate and no column
+ * allow-list — so it asserts a restriction it does not carry. (A filter holding *only* `columns` is
+ * legitimate: that is how `defineReadProjection` narrows a projection's wire columns without
+ * restricting its rows.)
+ *
+ * Refused at DEFINITION time, not at the first subscribe: declaring a `rowFilter` asserts that these
+ * rows are not for everyone, and there is no input for which a filter that cannot run could later turn
+ * out to be fine. A shape that genuinely serves every row omits `rowFilter` entirely — the difference
+ * between "no filter" and "a filter that does nothing" is exactly what this keeps expressible.
+ */
+export function assertShapeFilterIsEnforceable(shape: ShapeSpec): void {
+  const filter = shape.rowFilter;
+  if (filter == null || filter.customPredicate != null) return;
+
+  if (filter.columns == null) {
+    throw new Error(
+      `[pgxsinkit] shape "${shape.shapeKey}" declares a rowFilter that restricts nothing — no ` +
+        `customPredicate and no column allow-list. Declare customPredicate, or drop the rowFilter if ` +
+        `the rows really are for everyone (an absent rowFilter is how a shape says so).`,
+    );
+  }
 }
 
 /** Input variant of {@link ShapeSpec} where `tableName` and `shapeKey` are optional.
  * When omitted, both default to the top-level `tableName` of the `defineSyncTable` call.
- * `electricTable` is deliberately absent — it is a resolved/internal field, never a consumer input
- * (see {@link ShapeSpec.electricTable}); a read projection over an existing table is authored with
+ * `physicalTable` is deliberately absent — it is a resolved/internal field, never a consumer input
+ * (see {@link ShapeSpec.physicalTable}); a read projection over an existing table is authored with
  * `defineReadProjection`, which derives it from the owner. */
-export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey" | "electricTable"> & {
+export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey" | "physicalTable"> & {
   tableName?: string;
   shapeKey?: string;
 };
@@ -404,12 +487,6 @@ export interface TableSpecInput {
   writeMode?: WriteMode;
 }
 
-export interface SyncConfigInput<TTables extends Record<string, TableSpecInput> = Record<string, TableSpecInput>> {
-  electricUrl: string;
-  localSchema?: string;
-  tables: TTables;
-}
-
 export function getLocalSyncPrimaryKey(source: {
   primaryKey: PrimaryKeySpec;
   clientProjection?: Pick<ClientProjectionSpec, "localPrimaryKey">;
@@ -426,56 +503,47 @@ export function getLocalSyncPrimaryKeyColumns(source: {
 
 export interface RowFilterSpec {
   /**
-   * The row filter: returns the Electric shape `where` for this request, or `null` to bypass
-   * filtering (e.g. admin access). **Prefer returning a Drizzle `SQL` fragment** built from the
-   * table's columns: reference each column through {@link c} (a bare, rename-safe identifier) and
-   * embed request-derived values directly — they become **bound `$n` params**, never hand-escaped
-   * literals. Enum columns must be cast to text (`${c(col)}::text = 'x'`) for Electric's grammar,
-   * and subqueries must be self-contained (not correlated), since Electric needs plain column refs.
+   * The PRIVATE-TIER row filter (ADR-0055): the predicate fused with the caller's claims, compiled
+   * into the shape at subscribe. `null` bypasses filtering (all rows); {@link DENY_ALL_PREDICATE}
+   * denies.
    *
-   * Returning a raw **string** is the escape hatch for a predicate Drizzle can't express. SECURITY:
-   * a string is interpolated verbatim into the `where` — it is NOT escaped, so any request-derived
-   * value you embed must be escaped/validated (`escapeSqlLiteral`) inside this function, or it is a
-   * SQL-injection vector. Reach for the string form only when the Drizzle fragment cannot express it.
+   * Authored with the `p.*` builders over real Drizzle column objects, so a comparison is checked
+   * against the column's own TypeScript type — a mistyped enum label, a `null` against a NOT NULL
+   * column, or a `jsonb`/`Date` column with no scalar wire form are all compile errors rather than
+   * silently-wrong filters.
    *
-   * **Must be pure.** The proxy already calls this fresh on every shape request; the client also
-   * *probes* it with empty claims (`{}`) to detect claims-dependence (ADR-0039 —
-   * {@link isClaimsDependentRowFilter}). Do not memoize, mutate external state, or assume it runs once.
+   * **Must be pure**: it is called fresh per shape creation, and probed with empty claims to detect
+   * claims-dependence (ADR-0039 — {@link isClaimsDependentRowFilter}).
    */
-  customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | SQL | null;
+  customPredicate?: (claims: JwtClaims, params?: Record<string, unknown>) => Predicate | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
   /**
-   * An opaque version tag for the part of this filter the fingerprint cannot see — the `customWhere`
-   * body (you cannot hash a closure; only its *presence* is fingerprinted). Bump this (any new
-   * string/number) whenever you change that logic so the fingerprint shifts and the local read cache
-   * rebuilds + the shape subscription resets. Leaving it unchanged after a `customWhere`
-   * authorization change would silently serve the stale shape.
+   * An opaque version tag for the part of this filter the fingerprint cannot see — the
+   * `customPredicate` body (you cannot hash a closure; only its *presence* is fingerprinted). Bump
+   * this (any new string/number) whenever you change that logic so the fingerprint shifts and the
+   * local read cache rebuilds + the shape subscription resets. Leaving it unchanged after a
+   * `customPredicate` authorization change would silently serve the stale shape.
    */
   revision?: string | number;
 }
 
 /**
- * A **bare** (table-unqualified) quoted identifier for a Drizzle column — `"workspace_id"`, never
- * `"work_items"."workspace_id"`. Electric's shape `where` grammar requires *plain* column references
- * (it rejects a qualified one with "Expected a plain column reference"), and Drizzle qualifies columns
- * by default — so reference columns through `c()` when authoring a `customWhere` Drizzle fragment. The
- * column object keeps the reference rename-safe and existence-checked at compile time; only the bare
- * name reaches the wire. Subqueries must stay self-contained (not correlated), since bare names then
- * resolve unambiguously to each FROM — a correlated subquery would need qualification Electric rejects.
- */
-export function c(column: AnyColumn): SQL {
-  return sql`${sql.identifier(column.name)}`;
-}
-
-/**
- * The deny-all row filter: a `customWhere` returns this to make **no** rows visible (e.g. an
+ * The deny-all predicate: a `customPredicate` returns this to make **no** rows visible (e.g. an
  * unauthenticated request), the counterpart to returning `null` (which bypasses filtering — all rows
- * visible). It is a Drizzle `SQL` fragment (`false`), so it stays on the typed/parameterized path
- * with the rest of the filter rather than being a hand-written `"1 = 0"` string. `WHERE false`
- * matches nothing; Electric accepts it (verified) exactly as it accepts `1 = 0`.
+ * visible).
+ *
+ * An empty `OR` rather than a synthetic always-false comparison: the engine evaluates it as FALSE by
+ * construction (`Or` starts at FALSE and only TRUE dominates), it needs no column to name, and it
+ * cannot be made accidentally true by a NULL cell the way `col <> col` can.
+ *
+ * The control plane recognises it **by reference identity** and declines to create the shape at all,
+ * so a denied subject holds no handle and no stream is materialised — a stronger outcome than an
+ * empty stream, and the reason this is a frozen singleton rather than a shape a caller might
+ * reconstruct. A structurally equal but distinct `{ or: [] }` is still correct on the wire; it just
+ * costs an empty shape instead of a refusal.
  */
-export const DENY_ALL: SQL = sql`false`;
+export const DENY_ALL_PREDICATE: Predicate = Object.freeze({ or: [] as Predicate[] });
 
 /**
  * Whether a row filter denies (or cannot serve) an unauthenticated caller — a *claims-dependent*
@@ -483,65 +551,35 @@ export const DENY_ALL: SQL = sql`false`;
  * claims-dependent, activated with no auth token, opens an empty subscription by construction, so
  * the client warns.
  *
- * A filter is claims-dependent when its `customWhere`, evaluated with **empty claims** (`{}` —
- * exactly what the proxy passes for an unauthenticated request) and no params, either **throws** or
- * returns the {@link DENY_ALL} sentinel by **reference identity** (which every contracts helper —
- * {@link buildOwnershipShapeWhere} and friends — returns for a missing subject, and which is already
- * the documented deny-anonymous pattern). Any other result — `null` (no filtering), a string, or a
- * different `SQL` fragment — is not claims-dependent as far as this probe can tell.
+ * A filter is claims-dependent when its `customPredicate`, evaluated with **empty claims** (`{}` —
+ * exactly what the control plane passes for an unauthenticated request) and no params, either
+ * **throws** or returns the {@link DENY_ALL_PREDICATE} sentinel by **reference identity** (which every
+ * contracts helper — {@link buildOwnershipShapePredicate} and friends — returns for a missing subject,
+ * and which is already the documented deny-anonymous pattern). Any other result — `null` (no
+ * filtering) or a different predicate — is not claims-dependent as far as this probe can tell.
  *
- * Requires `customWhere` to be pure (its contract; see {@link RowFilterSpec.customWhere}).
+ * Requires `customPredicate` to be pure (its contract; see {@link RowFilterSpec.customPredicate}).
  */
 export function isClaimsDependentRowFilter(filter: RowFilterSpec | undefined): boolean {
-  if (!filter?.customWhere) {
+  if (!filter?.customPredicate) {
     return false;
   }
 
   try {
-    return filter.customWhere({}, undefined) === DENY_ALL;
+    return filter.customPredicate({}, undefined) === DENY_ALL_PREDICATE;
   } catch {
     return true;
   }
 }
 
 /**
- * The ownership shape `where` — the read-path mirror of an owner-column RLS policy: rows whose owner
- * column equals the caller's subject, {@link DENY_ALL} for an unauthenticated caller. Takes the real
- * Drizzle owner column (bare via {@link c}, rename-safe); the subject rides as a typed interpolation —
- * a bound param through `buildRowFilterShape`, or a drizzle-escaped literal when a proxy renders it
- * inline for a shape URL.
+ * The ownership **predicate** — the native-path counterpart to {@link buildOwnershipShapeWhere}: rows
+ * whose owner column equals the caller's subject, {@link DENY_ALL_PREDICATE} for an unauthenticated
+ * caller (by reference, so a `customPredicate` built on it probes claims-dependent).
+ *
+ * Takes the real Drizzle owner column, so the reference is rename-safe, and the subject rides as a
+ * typed JSON scalar rather than text that has to be escaped and re-parsed.
  */
-export function buildOwnershipShapeWhere(ownerColumn: AnyColumn, subject: string | null | undefined): SQL {
-  return subject == null || subject === "" ? DENY_ALL : sql`${c(ownerColumn)} = ${subject}`;
-}
-
-/** The parameterized shape filter the proxy sends to Electric: a `where` and its positional params. */
-export interface RowFilterShape {
-  where: string;
-  params: string[];
-}
-
-/**
- * The shape filter the proxy sends to Electric: the `where` plus its positional `params` (`$1`, `$2`,
- * …). A `customWhere` returning a Drizzle `SQL` fragment is serialized here, so request-derived values
- * become **bound params** — never hand-escaped literals; a string `customWhere` is the raw escape
- * hatch (no params). Returns `null` when there is no filter (all rows visible).
- */
-export function buildRowFilterShape(
-  filter: RowFilterSpec,
-  claims: JwtClaims | null,
-  params?: Record<string, unknown>,
-): RowFilterShape | null {
-  const custom = filter.customWhere?.(claims ?? {}, params);
-
-  if (custom == null) {
-    return null;
-  }
-
-  if (typeof custom === "string") {
-    return custom ? { where: custom, params: [] } : null;
-  }
-
-  const compiled = pgDialect.sqlToQuery(custom);
-  return { where: compiled.sql, params: compiled.params.map((value) => String(value)) };
+export function buildOwnershipShapePredicate(ownerColumn: AnyColumn, subject: string | null | undefined): Predicate {
+  return subject == null || subject === "" ? DENY_ALL_PREDICATE : p.eq(ownerColumn, subject);
 }

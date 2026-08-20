@@ -557,7 +557,14 @@ export function resolveApplyTarget<TRegistry extends SyncTableRegistry, TKey ext
     table: table as AnyPgTable,
     columnByName,
     propertyKeyByName,
-    primaryKey: getLocalSyncedTablePrimaryKeyColumns(entry),
+    // Normalized to DB COLUMN NAMES. `defineSyncTable` accepts a primary-key spec written either way
+    // (property key or column name) and stores it verbatim on the entry — so on a table whose two
+    // differ, the un-normalized form reaches `columnByName`/`propertyKeyByName`, which are keyed by
+    // column name, and every update and delete throws "column not found". Resolving here, where the
+    // table's own columns are in hand, makes the field match what it has always claimed to be.
+    primaryKey: getLocalSyncedTablePrimaryKeyColumns(entry).map((declared) =>
+      columns[declared] ? columns[declared].name : declared,
+    ),
     applyMode: entry.applyMode,
     columnTypes: deriveSyncColumnTypes(entry),
     insertRenderCache: new Map(),

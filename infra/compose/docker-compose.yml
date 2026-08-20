@@ -1,6 +1,11 @@
 services:
   postgres:
     image: docker.io/supabase/postgres:17.6.1.116
+    # No `command:` override here, deliberately. The image's default CMD is `postgres -D /etc/postgresql`
+    # — it keeps its configuration OUTSIDE the data directory, so replacing the command drops the `-D`
+    # and postgres exits before it can start. And there is nothing to override: this image already ships
+    # `wal_level = logical` (Realtime needs it) plus replication slots, which is all the engine's slot
+    # requires. Verify with `postgres -C wal_level` rather than re-adding flags.
     volumes:
       - ./entrypoint-masks/init-scripts:/docker-entrypoint-initdb.d:ro
     environment:
@@ -18,25 +23,49 @@ services:
       timeout: 3s
       retries: 20
 
-  electric:
-    image: docker.io/electricsql/electric:1.7.11
-    environment:
-      DATABASE_URL: postgresql://supabase_admin:your-super-secret-and-long-postgres-password@postgres:5432/postgres?sslmode=disable
-      ELECTRIC_INSECURE: "true"
-      ELECTRIC_ENABLE_INTEGRATION_TESTING: "true"
-      # Preview feature: cross-table subquery `where` clauses in shapes (Electric 1.6+).
-      # Required for membership-style row filters of the form
-      # `container_id IN (SELECT container_id FROM memberships WHERE member_id = <sub>)`.
-      ELECTRIC_FEATURE_FLAGS: allow_subqueries,tagged_subqueries
+  # The log the client actually READS from. Official published image, pinned — only the engine is
+  # built from source, and only because it needs the repo's Dockerfile.
+  ds:
+    image: docker.io/electricax/durable-streams-server-rust:0.1.5
+    # FLAGS, not environment. This binary reads no env vars at all — `DS_PORT`/`DS_DATA_DIR`/`DS_MEMORY`
+    # were invented here and silently ignored, leaving it on its own default (4437) while the engine
+    # dialled ds:8791 and got ECONNREFUSED. Nothing caught it: podman's rootlessport accepts the HOST
+    # connection whether or not anything is behind it, so a TCP readiness probe passes regardless.
+    # In-memory because the lane replays from Postgres on every run, so fsync-per-append would buy
+    # durability nothing here reads (`--durability` takes wal|memory and rejects anything else).
+    command: ["--host", "0.0.0.0", "--port", "8791", "--durability", "memory"]
     ports:
-      - "${PGXSINKIT_ELECTRIC_PORT:-3000}:3000"
+      - "${PGXSINKIT_DS_PORT:-8791}:8791"
+    # No healthcheck: this image is scratch — a static Rust binary with no shell and no curl, so
+    # `CMD-SHELL` (which runs `/bin/sh -c`) can never execute and the container would sit "starting"
+    # until compose gave up. Dependents wait on `service_started` instead, and readiness is gated from
+    # the HOST, where a TCP probe can actually run.
+
+  # The Circuits engine: replication ingest, shape maintenance, and the control plane the pgxsinkit
+  # server talks to (POST /shapes, GET /replication/lsn). Built from an electric-circuits checkout —
+  # a Rust release build, which is why `infra:harness:up` requires an explicit `--build`.
+  #
+  # The EDGE is deliberately absent: it is TypeScript in `packages/server` (ADR-0055 decision 8), so
+  # the lane runs it in-process, which is also what lets a test revoke an entitlement between polls.
+  engine:
+    build:
+      context: ${PGXSINKIT_CIRCUITS_REPO:?set PGXSINKIT_CIRCUITS_REPO to an electric-circuits checkout}
+      dockerfile: docker/Dockerfile.engine
+    environment:
+      ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
+      ELECTRIC_CIRCUITS_PG_URL: postgres://${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}:${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}@postgres:5432/${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
+      # Explicit table list, never `*`: `*` introspects every public table with a primary key, which
+      # sweeps in the operations log and pgmq's own relations (docs/research/0001).
+      ELECTRIC_CIRCUITS_PG_TABLES: ${PGXSINKIT_CIRCUITS_PG_TABLES:?set the explicit table list}
+      ELECTRIC_CIRCUITS_BIND: 0.0.0.0:7010
+    ports:
+      - "${PGXSINKIT_CIRCUITS_ENGINE_PORT:-7010}:7010"
     depends_on:
-      - postgres
-    healthcheck:
-      # curl, not wget: the electric image dropped wget somewhere between 1.7.7 and 1.7.11, so a
-      # wget-based probe exits 127 ("not found") on every interval and the container is reported
-      # unhealthy forever even though it is serving fine.
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:3000/ || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
+      postgres:
+        condition: service_healthy
+      ds:
+        # `service_started`, not `service_healthy`: the ds image can express no healthcheck (see above).
+        # A start race is covered by this service's own `restart` — the same retry the table check uses.
+        condition: service_started
+    # The engine exits if its tables are absent; a restart is the retry, and migrations land between.
+    restart: unless-stopped

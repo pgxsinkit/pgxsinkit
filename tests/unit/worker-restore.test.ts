@@ -35,7 +35,8 @@ const todosRegistry = defineSyncRegistry({
 });
 type TodosRegistry = typeof todosRegistry;
 
-const DEAD_ELECTRIC = "http://127.0.0.1:1/v1/electric-proxy";
+const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
+const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const DEAD_WRITE = "http://127.0.0.1:1/api/mutations";
 const STAGED_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 
@@ -59,7 +60,8 @@ afterEach(async () => {
 function makeHost(): SyncWorkerHost<TodosRegistry> {
   const host = defineSyncWorker({
     registry: todosRegistry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     // Acknowledge the memory backend the attach selects (ADR-0036); the worker's own boot honours it.
     ...memoryStoreForTests("worker-restore-store"),
@@ -75,7 +77,8 @@ function makeHost(): SyncWorkerHost<TodosRegistry> {
 async function makeBackupWithStagedWrite(): Promise<Blob> {
   const source = await createSyncClient<TodosRegistry>({
     registry: todosRegistry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     syncEnabled: false,
     ...memoryStoreForTests("worker-restore-src"),

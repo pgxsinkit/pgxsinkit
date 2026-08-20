@@ -65,7 +65,8 @@ type FailedMutationSample = {
 type ConnectionInput = {
   mode: PerfLabConnectionMode;
   batchWriteUrl: string;
-  electricUrl: string;
+  controlPlaneUrl: string;
+  streamBaseUrl: string;
   authIdentity: DemoAuthIdentity;
   syncEnabled: boolean;
 };
@@ -120,7 +121,8 @@ const defaultPresetKey =
 const defaultConnection: ConnectionInput = {
   mode: "live",
   batchWriteUrl: connectionDefaults.liveBatchWriteUrl,
-  electricUrl: connectionDefaults.liveElectricUrl,
+  controlPlaneUrl: connectionDefaults.liveControlPlaneUrl,
+  streamBaseUrl: connectionDefaults.liveStreamBaseUrl,
   authIdentity: "user1",
   syncEnabled: true,
 };
@@ -493,7 +495,8 @@ export function App() {
         {
           mode: nextConnection.mode,
           batchWriteUrl: nextConnection.batchWriteUrl,
-          electricUrl: nextConnection.electricUrl,
+          controlPlaneUrl: nextConnection.controlPlaneUrl,
+          streamBaseUrl: nextConnection.streamBaseUrl,
           getAuthToken: async () => authToken,
           syncEnabled: nextConnection.syncEnabled,
         },
@@ -717,11 +720,18 @@ export function App() {
                 placeholder={connectionDefaults.liveBatchWriteUrl}
               />
               <TextField
-                label="Electric URL"
-                value={connection.electricUrl}
-                onChange={(value) => updateConnection("electricUrl", value)}
+                label="Control plane URL"
+                value={connection.controlPlaneUrl}
+                onChange={(value) => updateConnection("controlPlaneUrl", value)}
                 disabled={connection.mode === "offline"}
-                placeholder={connectionDefaults.liveElectricUrl}
+                placeholder={connectionDefaults.liveControlPlaneUrl}
+              />
+              <TextField
+                label="Stream edge URL"
+                value={connection.streamBaseUrl}
+                onChange={(value) => updateConnection("streamBaseUrl", value)}
+                disabled={connection.mode === "offline"}
+                placeholder={connectionDefaults.liveStreamBaseUrl}
               />
               <SelectField
                 label="Sync echo"

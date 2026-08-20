@@ -351,8 +351,8 @@ describe("Convergence model — the <table>_sync_state view (ADR-0011)", () => {
     const events = CONVERGENCE_EVENTS.map((entry) => entry.event);
     expect(events).toContain("local create/update/delete enqueued");
     expect(events).toContain("mutation acked");
-    expect(events).toContain("Electric insert/update observed");
-    expect(events).toContain("Electric delete observed");
+    expect(events).toContain("synced upsert observed");
+    expect(events).toContain("synced delete observed");
     expect(events).toContain("resolution");
     expect(events).toContain("conflict detected");
     expect(events).toContain("mutation quarantined");

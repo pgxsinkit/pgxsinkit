@@ -85,7 +85,8 @@ async function makeHost(executionLimit?: { maxDispatchMs?: number }): Promise<Sy
   const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry: todosRegistry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     // The precreated store is a prepopulated MEMORY PGlite (test only) — acknowledge it past the BYO
     // refusal the worker's `createSyncClient` boot would otherwise raise (ADR-0036).
@@ -142,7 +143,8 @@ describe("memory-override store over the bridge (ADR-0036)", () => {
     // wire field (a symbol does not survive structured clone) → `createClientPGlite(storePath, "memory")`.
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -188,7 +190,8 @@ describe("app-schema prepare hooks run IN THE WORKER (consumer app-level schema)
     const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...testStoreAcknowledgment(),
       precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
@@ -238,7 +241,8 @@ describe("attach handshake (ADR-0032 decision 4)", () => {
         // Declared `backend: "idbfs"` → no probe, deterministic `shared-worker` engine home (ADR-0049 D1), which is
         // exactly where executionLimit is unsupported and must be rejected before boot.
         registry: idbfsTodosRegistry,
-        electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+        controlPlaneUrl: "http://127.0.0.1:1",
+        streamBaseUrl: "http://127.0.0.1:1/v1/stream",
         batchWriteUrl: "http://127.0.0.1:1/api/mutations",
         executionLimit: { maxDispatchMs: 1_000 },
         createPglite: async () => {
@@ -338,7 +342,8 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       pgliteInstance: poison,
       syncEnabled: false,
@@ -398,7 +403,8 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       pgliteInstance: poison,
       syncEnabled: false,
@@ -447,7 +453,8 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       pgliteInstance: poison,
       syncEnabled: false,
@@ -780,7 +787,8 @@ describe("boot observability (ADR-0034)", () => {
     // half of boot that used to vanish (ADR-0034).
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // The worker mints a MEMORY store here (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),

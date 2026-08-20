@@ -1,9 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { sql } from "drizzle-orm";
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
-import { DENY_ALL, type JwtClaims, type SyncTableRegistry } from "@pgxsinkit/contracts";
+import { buildOwnershipShapePredicate, type JwtClaims, type SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { memoryStoreForTests } from "../../packages/client/src/testing";
 
@@ -16,7 +15,7 @@ const secretTable = pgTable("secret", { id: uuid("id").primaryKey(), owner: text
 const publicTable = pgTable("public_notes", { id: uuid("id").primaryKey(), body: text("body") });
 const boardTable = pgTable("board", { id: uuid("id").primaryKey(), title: text("title") });
 
-// `secret` denies anonymous callers via the DENY_ALL sentinel (claims-dependent); `public_notes` has no
+// `secret` denies anonymous callers via the DENY_ALL_PREDICATE sentinel (claims-dependent); `public_notes` has no
 // filter (not claims-dependent). Both are lazy so activation is deferred to first reference. `board` is
 // eager (default) — a registry key that is NOT a lazy activation target, so a write to it activates nothing.
 function diagnosticRegistry(): SyncTableRegistry {
@@ -29,7 +28,9 @@ function diagnosticRegistry(): SyncTableRegistry {
       shape: {
         tableName: "secret",
         shapeKey: "schema.secret",
-        rowFilter: { customWhere: (claims: JwtClaims) => (claims.sub ? sql`"owner" = ${claims.sub}` : DENY_ALL) },
+        rowFilter: {
+          customPredicate: (claims: JwtClaims) => buildOwnershipShapePredicate(secretTable.owner, claims.sub),
+        },
       },
       clientProjection: { syncedTable: "secret" },
     },
@@ -55,7 +56,7 @@ const started = new Set<string>();
 // When true, the NEXT ensureGroupStarted rejects once (then self-clears) — to prove a failed activation
 // is swallowed by the client's fire-and-forget `.catch` and never becomes an unhandled rejection.
 let failNextActivation = false;
-const startConfiguredSyncMock = mock(async () => ({
+const startCircuitsSyncMock = mock(async () => ({
   unsubscribe: () => undefined,
   tables: {},
   ensureGroupStarted: async (groupKey: string) => {
@@ -98,19 +99,16 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
     }));
     await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async () => undefined,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the reset path now calls directly (there is no engine
+    // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async () => undefined,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => undefined,
@@ -150,6 +148,10 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
       },
     }));
     await mock.module("../../packages/client/src/schema", () => ({
+      // The native read path's subscription metadata store (ADR-0055) reaches this module directly
+      // rather than through the mocked `./sync` barrel, so the partial mock must carry the DDL
+      // renderer, or the whole client fails to load.
+      renderCreateTableSql: () => [],
       generateLocalSchemaSql: () => "SELECT 1;",
       generateDurableLocalSchemaSql: () => "SELECT 1;",
       generateEphemeralLocalSchemaSql: () => "",
@@ -174,7 +176,7 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
 
   beforeEach(() => {
     started.clear();
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
     capturedOnOrdinaryEnqueue = undefined;
     failNextActivation = false;
     warnings = [];
@@ -192,7 +194,8 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const client = await createSyncClient({
       registry: diagnosticRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...(getAuthToken ? { getAuthToken } : {}),
       ...memoryStoreForTests(storePath),

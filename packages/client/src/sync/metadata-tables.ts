@@ -3,6 +3,43 @@ import { index, jsonb, pgSchema, primaryKey, text } from "drizzle-orm/pg-core";
 import type { ShapeSubscriptionState } from "./subscription-state";
 
 /**
+ * The pgxsinkit-owned metadata schema (ADR-0009 decision 6) — where the subscription cursor and the
+ * sync-origin GUC live. Ours, not the sync substrate's, which is why it is not named after one.
+ *
+ * The sync engine defaults its `metadataSchema` to this and `createSyncClient` never overrides it, so
+ * paths outside the engine can address the same relations by this constant.
+ */
+export const DEFAULT_METADATA_SCHEMA = "pgxsinkit";
+
+/**
+ * A bare, lowercase, unqualified SQL identifier: begins with a lowercase letter or underscore, then
+ * lowercase letters, digits, and underscores.
+ */
+const METADATA_SCHEMA_PATTERN = /^[a-z_][a-z0-9_]*$/;
+
+/**
+ * Validate the metadata schema name at engine construction. The name is interpolated RAW into two
+ * positions a double-quoted identifier cannot cover:
+ *  - GUC space — `SET LOCAL <schema>.syncing` (sync/index.ts) and `SET <schema>.syncing = false`
+ *    (the metadata migration). GUC grammar takes a `namespace.name` of bare identifiers; it does not
+ *    accept a quoted identifier the way a table/column position does, so the name cannot be safely
+ *    quoted there.
+ *  - the `CREATE SCHEMA <schema>` DDL identifier position.
+ * Rather than trust arbitrary caller input in those raw positions, restrict the name to a bare
+ * lowercase identifier and reject uppercase/exotic names outright. The default "pgxsinkit" passes.
+ */
+export function assertValidMetadataSchema(metadataSchema: string): void {
+  if (!METADATA_SCHEMA_PATTERN.test(metadataSchema)) {
+    throw new Error(
+      `Invalid metadataSchema ${JSON.stringify(metadataSchema)}: it must be a bare lowercase SQL ` +
+        `identifier matching ${String(METADATA_SCHEMA_PATTERN)}. The name is interpolated unquoted into ` +
+        `GUC (\`SET <schema>.syncing\`) and \`CREATE SCHEMA\` identifier positions where a quoted ` +
+        `identifier is not accepted, so uppercase and exotic names are rejected at construction.`,
+    );
+  }
+}
+
+/**
  * The two metadata-store relations the sync engine provisions at boot (ADR-0028 decision 4). The
  * metadata schema name is dynamic (per-client config) but fixed at engine construction, so the tables
  * are built per schema string and memoized.

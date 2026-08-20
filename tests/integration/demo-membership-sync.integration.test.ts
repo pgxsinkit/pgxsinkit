@@ -2,9 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 import { count } from "drizzle-orm";
 
-import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
-  buildDemoMembershipSyncConfig,
   DEMO_USER1_ID,
   DEMO_USER2_ID,
   DEMO_WORKSPACE_AURORA_ID,
@@ -17,38 +15,47 @@ import {
   workspacesTable,
 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
 
+import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createCircuitsTestPGlite } from "../support/circuits-pglite";
+import { claimsFromTestHeader } from "../support/claims";
 import { drizzleOver } from "../support/drizzle";
-import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
 const env = readIntegrationEnv();
 const localSchemaSql = generateLocalSchemaSql(membershipFanoutSyncRegistry);
 
-function claimsFromHeader(request: Request): JwtClaims | null {
-  const sub = request.headers.get("x-test-sub");
-  return sub ? { role: "authenticated", sub } : null;
-}
-
 async function createLocalStore() {
-  const pg = await createSyncEngineTestPGlite();
+  const pg = await createCircuitsTestPGlite();
   await pg.exec(localSchemaSql);
   return pg;
 }
 
-async function startClient(pg: Awaited<ReturnType<typeof createLocalStore>>, proxyUrl: string, sub: string) {
+async function startClient(
+  pg: Awaited<ReturnType<typeof createLocalStore>>,
+  urls: Pick<NativeSyncStack<unknown>, "controlPlaneUrl" | "streamBaseUrl">,
+  sub: string,
+) {
   let markDone: (() => void) | null = null;
   const initialSyncDone = new Promise<void>((resolve) => {
     markDone = resolve;
   });
 
-  const sync = await startConfiguredSync(pg as Parameters<typeof startConfiguredSync>[0], {
-    syncConfig: buildDemoMembershipSyncConfig(proxyUrl),
+  const sync = await startCircuitsSync(pg, {
     registry: membershipFanoutSyncRegistry,
-    shapeHeaders: { "x-test-sub": sub },
+    controlPlaneUrl: urls.controlPlaneUrl,
+    streamBaseUrl: urls.streamBaseUrl,
+    metadataSchema: DEFAULT_METADATA_SCHEMA,
+    authHeaders: () => ({ "x-test-sub": sub }),
     onInitialSync: () => {
       markDone?.();
       markDone = null;
@@ -59,9 +66,8 @@ async function startClient(pg: Awaited<ReturnType<typeof createLocalStore>>, pro
 }
 
 describe("demo membership sync (readonly workspaces + members + work_items) integration", () => {
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>;
-  let httpServer!: ReturnType<typeof Bun.serve>;
-  let proxyUrl!: string;
   const serverDb = createServerDb(membershipFanoutSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
@@ -72,18 +78,19 @@ describe("demo membership sync (readonly workspaces + members + work_items) inte
       await provisioningServer.stop();
     }
 
-    // createSyncServer serves the shape proxy itself at a chosen path, sharing the one
-    // resolveAuthClaims adapter with the write route (ADR-0003) — no framework wrapper needed.
-    server = createSyncServer({
-      registry: membershipFanoutSyncRegistry,
-      db: serverDb.db,
-      resolveAuthClaims: (request) => claimsFromHeader(request),
-      electricUrl: env.electricUrl,
-      shapeProxyPath: "/v1/electric-proxy",
+    // createSyncServer serves the native control plane itself, sharing the one resolveAuthClaims
+    // adapter with the write route (ADR-0003) — no framework wrapper needed.
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: membershipFanoutSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: claimsFromTestHeader,
+          readPath,
+        }),
     });
-
-    httpServer = Bun.serve({ port: 0, fetch: server.fetch });
-    proxyUrl = `http://127.0.0.1:${httpServer.port}/v1/electric-proxy`;
+    server = stack.server;
   });
 
   beforeEach(async () => {
@@ -120,16 +127,15 @@ describe("demo membership sync (readonly workspaces + members + work_items) inte
   });
 
   afterAll(async () => {
-    await httpServer.stop(true);
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
   it("fans the demo fixture down to each identity with the right readonly + asymmetric filtering", async () => {
     const managerPg = await createLocalStore(); // user1: Aurora manager
     const memberPg = await createLocalStore(); // user2: Aurora member
-    const manager = await startClient(managerPg, proxyUrl, DEMO_USER1_ID);
-    const member = await startClient(memberPg, proxyUrl, DEMO_USER2_ID);
+    const manager = await startClient(managerPg, stack, DEMO_USER1_ID);
+    const member = await startClient(memberPg, stack, DEMO_USER2_ID);
 
     try {
       await manager.initialSyncDone;

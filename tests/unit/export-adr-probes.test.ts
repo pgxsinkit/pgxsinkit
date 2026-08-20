@@ -68,7 +68,8 @@ afterEach(async () => {
 async function makeClient(storePath: string): Promise<SyncClient<Registry>> {
   return createSyncClient<Registry>({
     registry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     ...memoryStoreForTests(storePath),

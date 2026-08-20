@@ -40,7 +40,10 @@ static_resources:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
                           # Permissive demo CORS. `expose_headers: "*"` lets the browser read Electric's
                           # `electric-*` response headers (offset/handle/schema/cursor) the sync client
-                          # needs — a too-narrow list is the classic Electric MissingHeadersError.
+                          # needs — a too-narrow list is the classic Electric MissingHeadersError. The
+                          # native read path's `stream-*` headers are the same story, but the board's edge
+                          # function exposes those itself (`STREAM_READ_EXPOSED_HEADERS`) rather than
+                          # relying on this: a mount correct only behind this gateway hot-loops elsewhere.
                           allow_origin_string_match:
                             - safe_regex: { regex: ".*" }
                           allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD"

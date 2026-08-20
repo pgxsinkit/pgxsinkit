@@ -5,14 +5,17 @@ import net from "node:net";
 import path from "node:path";
 
 import {
+  PERF_LAB_CIRCUITS_ENGINE_PORT,
+  PERF_LAB_CIRCUITS_ENGINE_URL,
   PERF_LAB_COMPOSE_PROJECT,
+  PERF_LAB_CONTROL_PLANE_URL,
   PERF_LAB_DATABASE_URL,
-  PERF_LAB_ELECTRIC_PORT,
-  PERF_LAB_ELECTRIC_URL,
+  PERF_LAB_DURABLE_STREAMS_PORT,
+  PERF_LAB_DURABLE_STREAMS_URL,
   PERF_LAB_HOST,
   PERF_LAB_LOG_DIR,
   PERF_LAB_POSTGRES_PORT,
-  PERF_LAB_SHAPE_PROXY_URL,
+  PERF_LAB_STREAM_BASE_URL,
   PERF_LAB_VITE_PORT,
   PERF_LAB_WRITE_API_PORT,
   PERF_LAB_WRITE_API_URL,
@@ -41,9 +44,11 @@ await writeFile(pidFiles.supervisor, `${process.pid}\n`, "utf8");
 const perfEnv: NodeJS.ProcessEnv = {
   ...process.env,
   DATABASE_URL: PERF_LAB_DATABASE_URL,
-  ELECTRIC_URL: PERF_LAB_ELECTRIC_URL,
-  PGXSINKIT_POSTGRES_PORT: `${PERF_LAB_POSTGRES_PORT}`,
-  PGXSINKIT_ELECTRIC_PORT: `${PERF_LAB_ELECTRIC_PORT}`,
+  CIRCUITS_ENGINE_URL: PERF_LAB_CIRCUITS_ENGINE_URL,
+  DURABLE_STREAMS_URL: PERF_LAB_DURABLE_STREAMS_URL,
+  PGXSINKIT_INTEGRATION_POSTGRES_PORT: `${PERF_LAB_POSTGRES_PORT}`,
+  PGXSINKIT_DS_PORT: `${PERF_LAB_DURABLE_STREAMS_PORT}`,
+  PGXSINKIT_CIRCUITS_ENGINE_PORT: `${PERF_LAB_CIRCUITS_ENGINE_PORT}`,
 };
 
 runCommand(
@@ -55,8 +60,12 @@ runCommand(
 runCommand("podman", ["compose", "-f", composeFile, "-p", PERF_LAB_COMPOSE_PROJECT, "up", "-d"], perfEnv);
 
 await waitForPort(PERF_LAB_HOST, PERF_LAB_POSTGRES_PORT, "PostgreSQL");
-await waitForPort(PERF_LAB_HOST, PERF_LAB_ELECTRIC_PORT, "ElectricSQL");
-await waitForHttp(`http://${PERF_LAB_HOST}:${PERF_LAB_ELECTRIC_PORT}`, "ElectricSQL");
+await waitForPort(PERF_LAB_HOST, PERF_LAB_DURABLE_STREAMS_PORT, "durable-streams");
+
+// The engine exits when its declared tables are absent and its compose `restart` is the retry, so the
+// migration has to land before it can be waited on.
+runCommand("bun", ["run", "db:migrate"], perfEnv);
+await waitForPort(PERF_LAB_HOST, PERF_LAB_CIRCUITS_ENGINE_PORT, "circuits-engine");
 
 serverProcess = startChildProcess(
   ["bun", "scripts/perf-lab-server.ts"],
@@ -77,7 +86,8 @@ viteProcess = startChildProcess(
   {
     ...perfEnv,
     VITE_WRITE_API_ORIGIN: PERF_LAB_WRITE_API_URL,
-    VITE_ELECTRIC_URL: PERF_LAB_SHAPE_PROXY_URL,
+    VITE_CONTROL_PLANE_URL: PERF_LAB_CONTROL_PLANE_URL,
+    VITE_STREAM_BASE_URL: PERF_LAB_STREAM_BASE_URL,
     VITE_PGXSINKIT_PERF_MUTATION_BATCH_SIZE: process.env["PGXSINKIT_PERF_MUTATION_BATCH_SIZE"],
   },
   logFiles.vite,

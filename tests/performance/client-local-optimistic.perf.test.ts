@@ -36,7 +36,8 @@ describe("performance: client local optimistic views", () => {
 
       const client = await createSyncClient({
         registry,
-        electricUrl: "http://127.0.0.1:1/v1/shape",
+        controlPlaneUrl: "http://127.0.0.1:1",
+        streamBaseUrl: "http://127.0.0.1:1/v1/stream",
         batchWriteUrl: "http://127.0.0.1:1/api/mutations",
         syncEnabled: false,
         ...memoryStoreForTests(`perf-client-${Date.now()}`),

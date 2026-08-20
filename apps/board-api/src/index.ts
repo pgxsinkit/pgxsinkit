@@ -10,10 +10,12 @@ export {
   type BoardIssueViewDrainHandlerOptions,
 } from "./core/events-drain";
 export {
+  createBoardStreamHandler,
   createBoardSyncHandler,
   createBoardWriteHandler,
   type BoardClaimsResolver,
   type BoardDb,
+  type BoardStreamHandlerOptions,
   type FetchHandler,
 } from "./core/handlers";
 export { stripFunctionPrefix } from "./core/routing";

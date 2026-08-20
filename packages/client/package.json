@@ -33,8 +33,7 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@electric-sql/client": "^1.5.26",
-    "@electric-sql/experimental": "^6.0.26",
+    "@durable-streams/client": "0.2.6",
     "@electric-sql/pglite-tools": "0.4.5",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/pglite-opfs-repacked": "workspace:*"

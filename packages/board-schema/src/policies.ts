@@ -23,8 +23,8 @@ import { authUid } from "drizzle-orm/supabase";
  * into team_member's RLS (`42P17 infinite recursion`); Admin is the inlined `BOARD_ADMIN_PREDICATE_SQL`.
  * All read `request.jwt.claims`, which the Mutation applier sets before applying a batch. These run
  * on the **write path** (Postgres-with-JWT). The **read path** filters the same way but over the
- * literal claim value in the proxy `customWhere` (registry.ts), because Electric runs that `where`,
- * not Postgres — both now reference the same Drizzle columns, so they cannot silently drift.
+ * literal claim value in the shape's `customPredicate` (schema.ts), because the sync engine evaluates
+ * that predicate, not Postgres — both reference the same Drizzle columns, so they cannot silently drift.
  *
  * The readonly tables (profile/team/channel) carry SELECT-only policies: their reads are governed
  * the same way, and the absence of any write policy denies writes at the DB layer — Supabase's

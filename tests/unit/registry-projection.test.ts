@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { getColumns, sql } from "drizzle-orm";
+import { getColumns } from "drizzle-orm";
 import { bigint, boolean, jsonb, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { generateLocalSchemaSql, getSyncedLocalTable } from "@pgxsinkit/client";
@@ -8,13 +8,13 @@ import {
   asEphemeral,
   asReadonly,
   assertReadContractPreserved,
-  c,
   defineReadProjection,
   defineSyncRegistry,
   defineSyncTable,
   fingerprintReadContract,
   fingerprintRegistry,
   getOmittedProjectedColumnNames,
+  p,
   type SyncTableEntry,
   withRetention,
 } from "@pgxsinkit/contracts";
@@ -46,7 +46,7 @@ const writableRestriction = () =>
     },
     shape: {
       rowFilter: (columns) => ({
-        customWhere: (claims) => (claims.sub ? sql`${c(columns.personId)} = ${claims.sub}` : null),
+        customPredicate: (claims) => (claims.sub ? p.eq(columns.personId, claims.sub) : null),
         revision: "v1",
       }),
     },
@@ -165,7 +165,7 @@ describe("asReadonly carries the column factory (ADR-0029 P1 member-boot)", () =
       subscription: "lazy",
       retention: "persistent",
       writeMode: "pessimistic",
-      shape: { rowFilter: () => ({ customWhere: () => null, revision: "v1" }) },
+      shape: { rowFilter: () => ({ customPredicate: () => null, revision: "v1" }) },
     });
 
     // The write path — and only the write path — is stripped (mode flips in value but the KEY stays).
@@ -452,7 +452,7 @@ describe("read-contract fingerprint", () => {
       },
       shape: {
         rowFilter: (columns) => ({
-          customWhere: (claims) => (claims.sub ? sql`${c(columns.personId)} = ${claims.sub}` : null),
+          customPredicate: (claims) => (claims.sub ? p.eq(columns.personId, claims.sub) : null),
           revision: "v1",
         }),
       },

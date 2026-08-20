@@ -1,17 +1,17 @@
 ---
 name: deploying
 description: >-
-  Load when deploying the @pgxsinkit/server write API and Electric shape proxy onto Bun, Deno, Supabase
-  Edge Functions, or Cloudflare Workers. Covers the runtime-portable fetch handler, the three steps a
-  non-Bun edge runtime needs (bundle for Deno with node: builtins, strip the function-name path prefix,
-  resolve claims in resolveAuthClaims), the deny-by-default apply-function ACL and --grant-execute-to
-  (ADR-0054), splitting write and sync into two functions, setting the worker
-  timeout above Electric's ~25s long-poll, and cache-control:no-store on a same-origin shape proxy. Also
-  covers the Event lane (ADR-0053): the auto-mounted /api/events route, the eventGate hook, the pgmq
-  prerequisite and pgxsinkit-generate --events queue DDL, and the consumer runner (defineEventConsumer) as a
-  long-lived Bun process never deployed serverless — plus its bounded drainOnce mode for platforms with no
-  long-lived compute (scheduled invocation + onEventsEnqueued nudge). Load before deploying the server or
-  running an event consumer.
+  Load when deploying the @pgxsinkit/server write API, the read path's control plane, and the stream
+  edge onto Bun, Deno, Supabase Edge Functions, or Cloudflare Workers. Covers the runtime-portable
+  fetch handler, the three steps a non-Bun edge runtime needs (bundle for Deno with node: builtins,
+  strip the function-name path prefix, resolve claims in resolveAuthClaims), the deny-by-default
+  apply-function ACL and --grant-execute-to (ADR-0054), and splitting write, control plane, and edge
+  into three functions — the edge on its own origin, because the cache key is the URL (ADR-0055), plus
+  the Access-Control-Expose-Headers that mount must set or the client hot-loops.
+  Also covers the Event lane (ADR-0053): the /api/events route, the eventGate hook, the pgmq
+  prerequisite and pgxsinkit-generate --events queue DDL, and defineEventConsumer as a long-lived Bun
+  process never deployed serverless — plus its bounded drainOnce mode for platforms with no
+  long-lived compute (scheduled invocation + onEventsEnqueued nudge).
 metadata:
   type: task
   library: "@pgxsinkit/server"
@@ -50,28 +50,56 @@ Deno.serve((request) => {
 });
 ```
 
-The **read** path needs no rewrite: `proxyElectricShapeRequest` keys off the query string, not the path.
+Both read functions need the same strip: the control plane routes on `/sync/v1/*` and the edge on
+`/v1/stream/*`, so each needs its own function-name prefix removed before the path is recognized.
 
 ## 3. Resolve claims from the platform JWT in `resolveAuthClaims`
 
 `verify_jwt` is a gateway concept; the portable move is to verify the token yourself and return its
-claims (or `null` to fail closed — the proxy then blocks all rows and the write route rejects). A GoTrue
-access token is already `JwtClaims`-shaped (`sub`, top-level `role`, `app_metadata`), so return it
-directly after verifying. The applier reads `role` to switch the RLS actor; the read proxy reads `sub` +
-`app_metadata.roles` for the row filter. Both paths share this one adapter, so authorization cannot
-drift.
+claims (or `null` to fail closed — the write route rejects, and the control plane answers **401**). A
+GoTrue access token is already `JwtClaims`-shaped (`sub`, top-level `role`, `app_metadata`), so return it
+directly after verifying. The applier reads `role` to switch the RLS actor; the control plane reads `sub`
 
-## Read vs write as two functions (a deployment choice)
+- `app_metadata.roles` to build the row filter and to bind the minted stream token to that subject. Both
+  paths share this one adapter, so authorization cannot drift.
 
-- **write** — `createSyncServer({ registry, db, resolveAuthClaims })` **without** `electricUrl` registers
+**Return `null`, never a claims object with no `sub`.** Unauthenticated is not a denial: a subscriber told
+"not entitled" truncates its scope and unsubscribes, so an expired JWT has to present as a retryable 401
+and not as a per-subscription refusal. The control plane enforces this — it 401s when `resolveAuthClaims`
+yields no `sub` — because a stream token with no subject would name a bearer that no revocation reaches.
+
+## Three functions: write, control plane, edge
+
+- **write** — `createSyncServer({ registry, db, resolveAuthClaims })` **without** `readPath` registers
   only the mutation route; wrap with the path rewrite above.
-- **sync** — call `proxyElectricShapeRequest(request, claims, { registry, electricUrl })` directly. No
-  rewrite. **Set the function's idle/wall-clock timeout above Electric's bounded long-poll (~25s)** so a
-  live subscription is not recycled mid-cycle. If it is a **same-origin proxy with no CDN**, force
-  `cache-control: no-store` on the response, or a rotated shape handle serves stale and the client loops
-  on 409s.
+- **control plane** (`sync`) — `createSyncServer({ registry, resolveAuthClaims, readPath: { engine, key } })`
+  serves `/sync/v1/subscribe`, `/sync/v1/refresh`, and `/sync/v1/barrier`. It answers per-subject
+  questions and mints stream tokens, so it is **never cacheable**: force `cache-control: no-store`. Its
+  upstream is the Circuits engine's control API, which must not be client-reachable.
+- **edge** (`stream`) — `createStreamGate({ key, durableStreamsUrl })` mounted at `/v1/stream`. It needs
+  **no claims resolver and no database**: the stream token IS the authorization, which is what lets this
+  half scale and cache independently.
 
-Both import the same registry and share `resolveAuthClaims`, which keeps the two ingress points honest.
+**Put the edge on its own origin.** The cache key is the URL, so the surface a CDN may share between
+subscribers has to be addressable apart from the one that answers per-subject questions. Same-origin
+mounting forecloses ever putting a CDN in front of the shared tier without also caching the private one.
+
+**Because it is a separate origin, the edge mount MUST expose the stream headers:
+`Access-Control-Expose-Headers: <STREAM_READ_EXPOSED_HEADERS>` on the actual (non-preflight) response.**
+Export that constant from `@pgxsinkit/server` and join it — do not retype the list. CORS lets script read
+only a short safelist of response headers, and every header durable-streams answers with is outside it, so
+a cross-origin browser gets a response whose stream headers are simply _not there_. The ds client steers
+its whole read loop off them (`Stream-Next-Offset`, `Stream-Cursor`, `Stream-Closed`,
+`Stream-Up-To-Date`), so stripped of them it never learns an offset, never switches to a live long poll,
+and re-requests `offset=-1` in a hot loop — hundreds of requests per second per shape, with no error
+raised on either side. `createStreamGate` cannot do this for you: it returns the upstream response
+unchanged, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision that only
+the mount makes. **Do not rely on the gateway.** A permissive `expose_headers: "*"` at istio/envoy makes
+the mount look correct behind that one deployment and hot-loop everywhere else.
+
+The control plane and the edge share the stream-token signing key, and nothing else. Both read functions
+import the same registry as the write function and share `resolveAuthClaims`, which keeps the ingress
+points honest.
 
 ## The apply function verifies itself; the `deployment` profile tunes startup (ADR-0030)
 
@@ -282,8 +310,9 @@ const { delivered, deadLettered, empty } = await consumer.drainOnce({ budgetMs: 
 per request: the mutation route reports `preTxMs` (parse/validation), `txOpenMs` (the driver's LAZY
 connection establishment + BEGIN — invisible to every other timer, and where a serverless worker's
 connect cost lands), `authMs` (resolveAuthClaims), `applyMs` (the apply call), `totalMs`, and `status`;
-the shape proxy reports `table`/`live`/`offset`, `upstreamMs` (the Electric fetch — for live long-polls,
-the hold), and `totalMs`. Pair it with the client's `__pgxsinkitDebug` rail (`operating` skill,
+the event route reports its own ingest phases. The read path emits no timing line — the control plane is
+a short per-subscribe call and the edge is a byte proxy, so their cost is visible as routing latency
+rather than as phases. Pair it with the client's `__pgxsinkitDebug` rail (`operating` skill,
 `@pgxsinkit/client`): client-observed minus server `totalMs` is routing + network, and the phase fields
 attribute the rest. Read the split BEFORE changing anything — every latency class below was found this way.
 
@@ -300,13 +329,14 @@ unaffected because the preflight responses echo requested headers). The long hop
 client→function, instead of per statement — measured: function `totalMs` 3,050 → 191.
 
 The pin is **per-function, and only right for DB-bound ones.** The mutation ingress (`board-write`) is
-DB-bound and wins from it. A **read proxy** (`board-sync`) is NOT: its upstream is Electric Cloud's
-globally-distributed CDN, so pinning it to the database's region drags every catch-up hop away from a
-distant caller — ~2 intercontinental round trips (~1.2s) versus ~300ms unpinned near the caller, while
-the function itself is lean (`totalMs − upstreamMs` ≈ 2–3ms). So keep read proxies **unpinned** (follow
-the caller) and put the region header in `writeRequestHeaders`, never the shared `requestHeaders`.
+DB-bound and wins from it. The read halves are NOT: the control plane's upstream is the engine and the
+edge's is durable-streams, neither of which is the database, and the edge in particular wants to sit near
+the CALLER so catch-up bytes take the short hop. So put the region header in `writeRequestHeaders`, never
+the shared `requestHeaders`, and leave the read functions following the caller. (The Electric-era numbers
+that used to sit here measured a CDN-fronted shape proxy and do not transfer — measure this topology
+before tuning it.)
 
-A browser also opens **one long-poll connection per synced shape**, so over HTTP/1.1 the ~6-per-origin
+A browser also opens **one live connection per synced stream**, so over HTTP/1.1 the ~6-per-origin
 cap starves writes — serve the gateway over **HTTP/2**. The JWKS/warming recipe and the connection-budget
 detail live in the `operating` skill.
 
@@ -348,7 +378,10 @@ detail live in the `operating` skill.
 - Shipping toolkit source to Deno without bundling, or leaving builtins un-prefixed (not `node:*`).
 - Forgetting to strip the function-name prefix, so `/write/api/mutations` 404s.
 - Verifying the JWT only at the gateway instead of in `resolveAuthClaims` (non-portable).
-- A sync function timeout below Electric's ~25s long-poll (constant read-path reconnects).
-- Omitting `cache-control: no-store` on a same-origin shape proxy.
+- Mounting the edge on the control plane's origin, so the cacheable and uncacheable surfaces share a
+  cache key.
+- Omitting `cache-control: no-store` on the control plane.
+- Returning a claims object with no `sub` instead of `null`, turning an expired JWT into a scope
+  truncation instead of a retryable 401.
 
 Full prose: <https://pgxsinkit.github.io/start/deploying-the-server/>.

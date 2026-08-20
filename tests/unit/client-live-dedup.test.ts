@@ -47,7 +47,8 @@ afterEach(async () => {
 async function bootClient(storePath: string, liveQueries?: { defaultKeepAliveMs?: number }) {
   const active = await createSyncClient({
     registry: todosRegistry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     ...testStoreAcknowledgment(),

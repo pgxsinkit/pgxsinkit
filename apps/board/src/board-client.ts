@@ -206,7 +206,8 @@ export async function createBoardSyncClient(
   const offline = createOfflineControl();
   const client = await createSyncClient({
     registry,
-    electricUrl: boardConfig.electricUrl,
+    controlPlaneUrl: boardConfig.controlPlaneUrl,
+    streamBaseUrl: boardConfig.streamBaseUrl,
     batchWriteUrl: boardConfig.batchWriteUrl,
     // The publishable key rides as `apikey` on every read shape + write request (toolkit ADR: generic
     // requestHeaders). The gateway validates it; a signed-in user's session token in Authorization is

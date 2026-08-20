@@ -1,23 +1,22 @@
 // Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
 // Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
-import type { ChangeMessage, Row } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { and, eq, fillPlaceholders, type SQL, sql } from "drizzle-orm";
 import { getTableConfig, type PgColumn } from "drizzle-orm/pg-core";
 
-import { quoteIdentifier, type SyncColumnType } from "@pgxsinkit/contracts";
+import { quoteIdentifier, type SyncChange, type SyncColumnType, type SyncRow } from "@pgxsinkit/contracts";
 
 import type { ApplyTarget } from "../local-tables";
 import { generateCopyData } from "./copy";
 import { drizzleOverPg } from "./drizzle-executor";
-import type { InsertChangeMessage } from "./types";
+import type { UpsertChangeMessage } from "./types";
 
 /**
  * Re-key an Electric change row (keyed by DB **column name**) to the Drizzle **property keys** the
  * query builder addresses columns by (ADR-0029 D1). A column absent from the local projected table is a
  * config error and surfaces, rather than silently binding to nothing.
  */
-function toDriverRow(target: ApplyTarget, data: Row<unknown>): Record<string, unknown> {
+function toDriverRow(target: ApplyTarget, data: SyncRow): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const name of Object.keys(data)) {
     const propertyKey = target.propertyKeyByName[name];
@@ -89,7 +88,7 @@ function castTypeFor(column: SyncColumnType, tableSchema: string | undefined): s
 export interface ApplyMessageToTableOptions {
   pg: PGliteInterface | Transaction;
   target: ApplyTarget;
-  message: ChangeMessage<Row<unknown>>;
+  message: SyncChange;
   debug: boolean;
 }
 
@@ -98,39 +97,18 @@ export async function applyMessageToTable({ pg, target, message, debug }: ApplyM
   const db = drizzleOverPg(pg);
 
   switch (message.headers.operation) {
-    case "insert": {
-      if (debug) console.log("inserting", data);
+    case "upsert": {
+      if (debug) console.log("upserting", data);
       const columns = Object.keys(data);
+      // `insertInto` adds OVERRIDING SYSTEM VALUE when the row carries a GENERATED ALWAYS identity
+      // column, so the server's authoritative id is preserved rather than silently dropped.
       const insert = insertInto(db, target, columns).values(toDriverRow(target, data) as never);
-      if (target.applyMode === "upsert") {
-        // ADR-0045 declared exception: this table legitimately receives locally-derived provisional rows
-        // (e.g. written by a local trigger), so the server's authoritative CDC insert is applied
-        // idempotently — same semantics as `applyUpsertsToTable` — rather than colliding on the pk.
-        const { conflictTarget, conflictSet, nonPkColumns } = upsertConflictSpec(target, columns);
-        if (nonPkColumns.length > 0) {
-          return await insert.onConflictDoUpdate({ target: conflictTarget, set: conflictSet as never });
-        }
-        // Target the pk explicitly so a pk-only conflict is a no-op ONLY on the primary key.
-        return await insert.onConflictDoNothing({ target: conflictTarget });
+      const { conflictTarget, conflictSet, nonPkColumns } = upsertConflictSpec(target, columns);
+      if (nonPkColumns.length > 0) {
+        return await insert.onConflictDoUpdate({ target: conflictTarget, set: conflictSet as never });
       }
-      // Default (`applyMode: "insert"`): apply exactly what Electric sent as a plain INSERT — an `insert`
-      // is a new row (post-truncate or first send). A genuine primary-key collision must surface, never
-      // be silently upserted (ADR-0014), UNLESS the table declared `applyMode: "upsert"` (handled above).
-      // `insertInto` adds OVERRIDING SYSTEM VALUE when the row carries a GENERATED ALWAYS identity column,
-      // so the server's authoritative id is preserved rather than silently dropped by the builder.
-      return await insert;
-    }
-
-    case "update": {
-      if (debug) console.log("updating", data);
-      const setColumns = Object.keys(data).filter((column) => !target.primaryKey.includes(column));
-      if (setColumns.length === 0) return;
-      const setValues: Record<string, unknown> = {};
-      for (const column of setColumns) setValues[target.propertyKeyByName[column]!] = data[column];
-      return await db
-        .update(target.table)
-        .set(setValues as never)
-        .where(and(...target.primaryKey.map((column) => eq(targetColumn(target, column), data[column]))));
+      // Target the pk explicitly so a pk-only conflict is a no-op ONLY on the primary key.
+      return await insert.onConflictDoNothing({ target: conflictTarget });
     }
 
     case "delete": {
@@ -145,7 +123,7 @@ export async function applyMessageToTable({ pg, target, message, debug }: ApplyM
 export interface BulkApplyMessagesToTableOptions {
   pg: PGliteInterface | Transaction;
   target: ApplyTarget;
-  messages: InsertChangeMessage[];
+  messages: UpsertChangeMessage[];
   debug: boolean;
 }
 
@@ -189,7 +167,7 @@ async function executeInsertBatch(
   db: ReturnType<typeof drizzleOverPg>,
   target: ApplyTarget,
   colNames: string[],
-  batch: Row<unknown>[],
+  batch: SyncRow[],
 ): Promise<void> {
   const rendered = renderInsert(db, target, colNames, batch.length);
   const values: Record<string, unknown> = {};
@@ -237,7 +215,7 @@ function getValueSize(value: unknown): number {
   }
 }
 
-function getRowSize(row: Row<unknown>, columns: readonly string[]): number {
+function getRowSize(row: SyncRow, columns: readonly string[]): number {
   return columns.reduce((size, column) => {
     const value = row[column];
     if (value === null) return size;
@@ -266,7 +244,7 @@ function getRowSize(row: Row<unknown>, columns: readonly string[]): number {
 }
 
 export async function applyInsertsToTable({ pg, target, messages, debug }: BulkApplyMessagesToTableOptions) {
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) {
     return;
@@ -274,9 +252,10 @@ export async function applyInsertsToTable({ pg, target, messages, debug }: BulkA
 
   if (debug) console.log("inserting", data);
   const columns = Object.keys(firstRow);
+  assertUniformColumnSet(target, columns, data, "applyInsertsToTable");
   const db = drizzleOverPg(pg);
 
-  let currentBatch: Row<unknown>[] = [];
+  let currentBatch: SyncRow[] = [];
   let currentBatchSize = 0;
   let currentBatchParams = 0;
 
@@ -336,6 +315,38 @@ function upsertConflictSpec(
 }
 
 /**
+ * Refuse a batch whose rows do not all carry the same columns.
+ *
+ * **Every** bulk applier here takes its column list from the FIRST row and binds the rest against it,
+ * so a batch with mixed column sets does not fail — it writes the wrong thing, differently per tier: a
+ * missing column binds `DEFAULT` on the param-bound paths (overwriting a real value with the column
+ * default on conflict) and NULL through `json_to_recordset`, while an extra column is silently dropped
+ * everywhere. So all four call sites assert, including the three backfill tiers — a corrupt initial
+ * load is the worse outcome of the two, not the lesser one.
+ *
+ * The wire makes a mixed batch impossible: `row_to_json_cols(row, out_cols)` emits every column of the
+ * shape's `out_cols` on every upsert, and `out_cols` is the local table's column set. This is a cheap
+ * check that the guarantee still holds, kept because ADR-0058 retired the primary-key collision that
+ * used to be the backstop for "the apply path silently wrote something wrong". O(rows × columns),
+ * against per-row serialization of the same order — nothing measurable next to the work it guards.
+ */
+function assertUniformColumnSet(target: ApplyTarget, columns: string[], rows: SyncRow[], applier: string): void {
+  const expected = new Set(columns);
+  for (const row of rows) {
+    const keys = Object.keys(row);
+    if (keys.length === expected.size && keys.every((key) => expected.has(key))) continue;
+    const missing = columns.filter((column) => !(column in row));
+    const extra = keys.filter((key) => !expected.has(key));
+    throw new Error(
+      `[pgxsinkit] ${applier}: batch for ${getTableConfig(target.table).name} ` +
+        `mixes column sets — every row must carry the same columns as the first ` +
+        `(${columns.join(", ")})${missing.length > 0 ? `; missing ${missing.join(", ")}` : ""}` +
+        `${extra.length > 0 ? `; unexpected ${extra.join(", ")}` : ""}`,
+    );
+  }
+}
+
+/**
  * Bulk **upsert** for tagged-subquery move-in rows (ADR-0024). A move-in is an existing row ENTERING the
  * shape — unlike a CDC `insert` (a brand-new row) it may already be present locally via an independent
  * grant, or be re-delivered on a resume from before the move-in's offset. So it is applied idempotently:
@@ -348,11 +359,12 @@ export async function applyUpsertsToTable({ pg, target, messages, debug }: BulkK
   const primaryKey = target.primaryKey;
   if (primaryKey.length === 0) throw new Error("applyUpsertsToTable requires a primary key");
 
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) return;
 
   const columns = Object.keys(firstRow);
+  assertUniformColumnSet(target, columns, data, "applyUpsertsToTable");
   const { conflictTarget, conflictSet, nonPkColumns } = upsertConflictSpec(target, columns);
 
   const perRow = columns.length;
@@ -388,7 +400,7 @@ interface JsonRecordsetColumn {
  * catalog probe: the types are always present, derived from the same Drizzle definitions the local
  * store was rendered from).
  */
-function jsonRecordsetColumns(target: ApplyTarget, firstRow: Row<unknown>): JsonRecordsetColumn[] {
+function jsonRecordsetColumns(target: ApplyTarget, firstRow: SyncRow): JsonRecordsetColumn[] {
   const present = (name: string) => Object.prototype.hasOwnProperty.call(firstRow, name);
   const { schema } = getTableConfig(target.table);
   return target.columnTypes
@@ -434,12 +446,18 @@ async function applyMessagesToTableWithJsonImpl(
 ) {
   if (debug) console.log(`applying messages with json_to_recordset${conflict ? " (upsert)" : ""}`);
 
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) {
     return;
   }
   const columns = jsonRecordsetColumns(target, firstRow);
+  assertUniformColumnSet(
+    target,
+    columns.map((column) => column.name),
+    data,
+    "applyMessagesToTableWithJson",
+  );
   const targetTable = target.table;
   // Tier ② (ADR-0028): the target table is an interpolated table object and the batch is a single bound
   // param (`sql.param` binds the raw JS array unchanged, exactly as the old `[batch]` did — critically,
@@ -508,12 +526,13 @@ function copyColumnUdts(target: ApplyTarget): Record<string, string> {
 export async function applyMessagesToTableWithCopy({ pg, target, messages, debug }: BulkApplyMessagesToTableOptions) {
   if (debug) console.log("applying messages with COPY");
 
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) {
     return;
   }
   const columns = Object.keys(firstRow);
+  assertUniformColumnSet(target, columns, data, "applyMessagesToTableWithCopy");
 
   // Serialize rows using Postgres' own COPY TEXT format — a faithful port of the backend's
   // CopyAttributeOutText / array_out routines (see ./copy) — so arrays (incl. multi-dimensional),
@@ -569,7 +588,7 @@ export interface BulkKeyedApplyOptions {
   pg: PGliteInterface | Transaction;
   target: ApplyTarget;
   /** Folded messages: for deletes the value carries the PK; for updates the PK plus merged columns. */
-  messages: ChangeMessage<Row<unknown>>[];
+  messages: SyncChange[];
   debug: boolean;
 }
 
@@ -608,61 +627,4 @@ export async function applyBulkDeletesToTable({ pg, target, messages, debug }: B
   }
 
   if (debug) console.log(`Deleted ${messages.length} rows using json_to_recordset`);
-}
-
-/**
- * Bulk UPDATE via `UPDATE … FROM json_to_recordset(…)` (ADR-0014 Phase 3), **grouped by the set of
- * non-PK columns** each row carries. Electric's default replica sends only the changed columns, so
- * two rows in one batch can set different columns; one `UPDATE … FROM` per distinct column-set keeps
- * each statement uniform. Safe from the same-PK join hazard because the fold already left one row per
- * PK, so no PK appears twice within a group.
- */
-export async function applyBulkUpdatesToTable({ pg, target, messages, debug }: BulkKeyedApplyOptions) {
-  const primaryKey = target.primaryKey;
-  if (primaryKey.length === 0) throw new Error("applyBulkUpdatesToTable requires a primary key");
-  if (messages.length === 0) return;
-
-  const pkSet = new Set(primaryKey);
-  const groups = new Map<string, { setColumns: string[]; rows: Row<unknown>[] }>();
-  for (const message of messages) {
-    const data = message.value;
-    const setColumns = Object.keys(data)
-      .filter((column) => !pkSet.has(column))
-      .sort();
-    // A PK-only update sets nothing — the per-row applyMessageToTable returns early on this too.
-    if (setColumns.length === 0) continue;
-    const groupKey = setColumns.join(" ");
-    let group = groups.get(groupKey);
-    if (!group) {
-      group = { setColumns, rows: [] };
-      groups.set(groupKey, group);
-    }
-    group.rows.push(Object.fromEntries([...primaryKey, ...setColumns].map((column) => [column, data[column]])));
-  }
-
-  const targetTable = target.table;
-  const db = drizzleOverPg(pg);
-
-  for (const { setColumns, rows } of groups.values()) {
-    const casts = recordsetColumnCasts(target, [...primaryKey, ...setColumns]);
-    const recordDef = casts.map((column) => `${quoteIdentifier(column.name)} ${column.castType}`).join(", ");
-    const setClause = setColumns
-      .map((column) => `${quoteIdentifier(column)} = x.${quoteIdentifier(column)}`)
-      .join(", ");
-    const whereJoin = primaryKey
-      .map((column) => `t.${quoteIdentifier(column)} = x.${quoteIdentifier(column)}`)
-      .join(" AND ");
-
-    for (let i = 0; i < rows.length; i += JSON_RECORDSET_BATCH) {
-      const batch = rows.slice(i, i + JSON_RECORDSET_BATCH);
-      // Tier ② (ADR-0028), as applyBulkDeletesToTable above: interpolated target table + single bound
-      // `sql.param` batch (raw array, not `JSON.stringify` — bigint-safe), no cast needed; the `SET` /
-      // `x(col type, …)` record def and the alias-qualified `t.*`/`x.*` join stay raw text (grammar).
-      await db.execute(
-        sql`UPDATE ${targetTable} AS t SET ${sql.raw(setClause)} FROM json_to_recordset(${sql.param(batch)}) AS x(${sql.raw(recordDef)}) WHERE ${sql.raw(whereJoin)}`,
-      );
-    }
-  }
-
-  if (debug) console.log(`Updated ${messages.length} rows using json_to_recordset`);
 }

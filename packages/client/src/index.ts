@@ -11,7 +11,6 @@ import type {
   RegistryRelations,
   RegistryTables,
   RegistryViews,
-  SyncConfigInput,
   SyncRuntimeStatus,
   SyncTableCreateInput,
   SyncTableEntry,
@@ -24,7 +23,6 @@ import type {
 } from "@pgxsinkit/contracts";
 import {
   fingerprintRegistry,
-  getSyncRegistrySchema,
   getSyncRegistryStorage,
   isClaimsDependentRowFilter,
   resolveStorageDeclaration,
@@ -35,6 +33,7 @@ import {
 import type { CreateOpfsRepackedPGliteOptions, OpfsRepackedPGlite } from "@pgxsinkit/pglite-opfs-repacked";
 
 import { type BootReport, type BootReportBuilder, createBootReportBuilder } from "./boot-report";
+import { startCircuitsSync, type CircuitsGroupSyncResult } from "./circuits/group-sync";
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { syncDebug, timeAsync } from "./debug";
 import { describeErrorChain } from "./error-chain";
@@ -91,7 +90,6 @@ import {
   generateEphemeralLocalSchemaSql,
   generateLocalSchemaSql,
 } from "./schema";
-import { startConfiguredSync } from "./shape-sync";
 import {
   resolveDeniedBootAuthority,
   type ResolveStoreBootOptions,
@@ -117,8 +115,8 @@ import {
   storeTargetExists,
   type StorePathInput,
 } from "./store-path";
-import { createSyncEngine, type SyncEngine } from "./sync";
-import { buildShapeHeaders } from "./sync-auth";
+import { DEFAULT_METADATA_SCHEMA } from "./sync/metadata-tables";
+import { deleteSubscriptionState, migrateSubscriptionMetadataTables } from "./sync/subscription-state";
 import { LiveRowsMaterializer } from "./worker/live-diff";
 import {
   createLiveQueryManager,
@@ -243,7 +241,7 @@ export {
   createConvergenceDriver,
   createIntervalConvergenceTrigger,
 } from "./convergence";
-export { instrumentShapeFetch, setSyncDebugSink, syncDebug, timeAsync } from "./debug";
+export { setSyncDebugSink, syncDebug, timeAsync } from "./debug";
 export {
   type AttachedSyncClient,
   attachSyncClient,
@@ -301,6 +299,34 @@ export {
 // The Outbox's object NAMES are public contract like its shape (ADR-0053 decision 2) — inspection
 // surfaces (the board's schema map, debug tooling) need them without re-deriving DDL internals.
 export { OUTBOX_SEQUENCE, OUTBOX_TABLE } from "./schema";
+
+// The Circuits-native read transport (ADR-0055 decision 10). Reads terminate on durable-streams
+// through the edge; everything above the transport stays ours.
+export { createTokenRecovery, readShapeStream, STREAM_START } from "./circuits/stream-source";
+export type { ShapeStreamSubscription, StreamBatch, StreamSourceOptions } from "./circuits/stream-source";
+export { createShapeGroup } from "./circuits/shape-group";
+export type { GroupShapeSpec, ShapeGroup, ShapeGroupBatch, ShapeGroupOptions } from "./circuits/shape-group";
+export { envelopeToChange, primaryKeyFromStreamKey } from "./circuits/envelope-to-change";
+export type { ChangeLike } from "./circuits/envelope-to-change";
+export { StreamInbox } from "./circuits/stream-inbox";
+export type { BufferedBatch } from "./circuits/stream-inbox";
+export { createBarrierReader, openSubscriptionSession } from "./circuits/subscription-client";
+export type {
+  GrantedStream,
+  RefusedStream,
+  ShapeSubscriptionRequest,
+  SubscriptionClientOptions,
+  SubscriptionSession,
+} from "./circuits/subscription-client";
+export { startCircuitsSync } from "./circuits/group-sync";
+export type { CircuitsGroupSyncOptions, CircuitsGroupSyncResult, CircuitsTableSyncResult } from "./circuits/group-sync";
+export { syncCircuitsShapes } from "./circuits/sync-engine";
+export type {
+  CircuitsShapeSpec,
+  CircuitsSyncHandle,
+  CircuitsSyncOptions,
+  ConvergenceBarrier,
+} from "./circuits/sync-engine";
 export {
   type AllMutationsView,
   getAllMutationsView,
@@ -363,7 +389,7 @@ export class ClientDisposedError extends Error {
 // sync engine's namespace, attached post-create by `createSyncClient` as the `electric` property (ADR-0032
 // S1) — no longer a create-time extension. The `electric` part is derived from `createSyncEngine`'s real
 // return so the type follows the attached object.
-export type ClientPGlite = PGliteWithLive & { electric: SyncEngine["namespace"] };
+export type ClientPGlite = PGliteWithLive;
 
 /**
  * The pre-warmed PGlite boot assets (the WASM modules + filesystem bundle), consumed by
@@ -455,7 +481,6 @@ const OPFS_STORE_EXTENT_SIZE = 65536;
  * other `degraded` cause there is no Error to describe: Electric's `onFailedAttempt` carries no argument,
  * because the failure never escaped its retry wrapper. The string says what is knowable and no more.
  */
-const READ_STREAM_UNREACHABLE = "read stream unreachable: a shape fetch failed and is retrying with backoff";
 /**
  * Default {@link CreateSyncClientOptions.readSilenceMs}. A healthy Electric read path is never silent —
  * the live long-poll cycles roughly every 20-25s with at least a bare up-to-date, and every cycle fires
@@ -464,6 +489,8 @@ const READ_STREAM_UNREACHABLE = "read stream unreachable: a shape fetch failed a
 const READ_SILENCE_MS = 45_000;
 /** `status.lastError` for the read-silence watchdog: nothing failed — that is exactly the problem. */
 const READ_STREAM_SILENT = "read stream silent: no server response inside the silence window while reporting ready";
+/** `status.lastError` while subscribe keeps failing for a reason the subject cannot act on. */
+const CONTROL_PLANE_UNREACHABLE = "control plane unreachable: subscribe is failing and retrying";
 /**
  * Non-enumerable brand stamped on an opfs-repacked instance {@link createClientPGlite} mints (ADR-0049): the
  * opfs-repacked VFS owns its store on a dedicated OPFS directory and reports NO `dataDir` (a custom VFS, the
@@ -921,7 +948,23 @@ export async function fallbackVirginCandidateToIdb(
 
 export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   registry: TRegistry;
-  electricUrl: string;
+  /**
+   * The pgxsinkit control plane: where a client subscribes, re-mints its stream token, and reads the
+   * engine convergence barrier (ADR-0055). Required, with {@link streamBaseUrl}.
+   *
+   * The client does not CONSTRUCT stream URLs, it **asks** and is told. Which shapes a subject may
+   * read — and, on the shared tier, which scopes each expands to — is not something the client can
+   * express at all, which is what removes shape selection from the wire.
+   */
+  controlPlaneUrl: string;
+  /**
+   * The edge that serves durable-streams reads. Granted stream paths are appended to it.
+   *
+   * Separate from {@link controlPlaneUrl} because they are different deployments: the control plane
+   * is a small authenticated origin, and this is the CDN-frontable read surface the shared tier
+   * exists to make cacheable.
+   */
+  streamBaseUrl: string;
   batchWriteUrl: string;
   getAuthToken?: () => Promise<string | undefined>;
   /**
@@ -1786,6 +1829,38 @@ export function replAdapter(
   };
 }
 
+/**
+ * The read transport this boot runs on: the Electric proxy, or the Circuits-native control plane.
+ *
+ * Exactly one, resolved once at boot. Both configured is a contradiction and neither is an omission,
+ * and either way the only safe answer is to refuse — a client that picked a winner would sync against
+ * an ingress its caller never named, which is precisely the class of mistake the native path's
+ * ask-don't-construct inversion exists to remove.
+ */
+interface ReadTransport {
+  controlPlaneUrl: string;
+  streamBaseUrl: string;
+}
+
+function resolveReadTransport(options: { controlPlaneUrl?: string; streamBaseUrl?: string }): ReadTransport {
+  if (options.controlPlaneUrl == null || options.controlPlaneUrl === "") {
+    throw new Error(
+      "[pgxsinkit] createSyncClient needs `controlPlaneUrl` + `streamBaseUrl` — the control plane grants " +
+        "the streams this client may read, and the edge serves them.",
+    );
+  }
+  if (options.streamBaseUrl == null || options.streamBaseUrl === "") {
+    throw new Error(
+      "[pgxsinkit] `controlPlaneUrl` needs `streamBaseUrl` beside it: the control plane grants stream " +
+        "paths and the edge serves them, and they are separate deployments.",
+    );
+  }
+  return { controlPlaneUrl: options.controlPlaneUrl, streamBaseUrl: options.streamBaseUrl };
+}
+
+/** What a started sync exposes to the client. */
+type SyncGroupsRuntime = CircuitsGroupSyncResult;
+
 export async function createSyncClient<const TRegistry extends SyncTableRegistry>(
   options: CreateSyncClientOptions<TRegistry>,
 ): Promise<SyncClient<TRegistry>> {
@@ -1854,10 +1929,15 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // ledger. The decision is taken in the restore recovery block below (it needs the quarantine count) and
   // honours an explicit `syncEnabled: false`. A normal boot resolves its final value here, up front.
   let syncEnabled = restoreBoot ? false : (options.syncEnabled ?? true);
-  // ADR-0032 S4 overlap flag. A restore starts `syncEnabled: false` here, so it never takes the overlap
-  // prefetch path (a restore also never presents a fresh spare store); the flag stays `false` for the whole
-  // boot even when the restore later comes online (which uses the sequential sync-start path, not overlap).
-  const overlapPrefetch = syncEnabled && options.freshStore === true && !options.pgliteInstance;
+  // Which read transport this boot uses. Resolved once, up front, and REFUSED when the answer is
+  // ambiguous: two transports configured is a contradiction and none is an omission, and picking a
+  // winner for either would silently sync against something the caller did not name.
+  const readTransport = resolveReadTransport(options);
+  // ADR-0032 S4 overlap prefetch is NOT available on the native read path: it works by holding commits
+  // on a `dbReady` gate while the streams prefetch, and the native engine has no such gate. Boot is
+  // strictly sequential until it grows one (backlog 0012). Kept as a named constant rather than deleted
+  // because the boot report and several branches below are written against the concept.
+  const overlapPrefetch = false;
   // How the store presents at boot (ADR-0034 `storeKind`): a restore boot seeds a brand-new store from a
   // backup; otherwise the caller's fresh-store hint (the same signal as `freshStore`) marks a fresh spare;
   // everything else is a warm (existing persisted) store. Restore wins — a restore boot is never "fresh".
@@ -2142,17 +2222,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   }
 
   // Attach the sync engine explicitly, over the already-created instance, on ALL three provenance paths
-  // (pgliteInstance, precreatedPglite, storePath) — ADR-0032 S1. The engine is no longer a create-time
-  // extension, so the raw store (a `createClientPGlite` mint, or a caller's own instance) carries no
-  // `electric` namespace until this point; the property assignment gives `ClientPGlite` its exact former
-  // structural shape (live + electric) so every `pglite.electric.…` call site is unchanged. It is attached
-  // BEFORE the schema/prepare steps below so a `prepareLocalDbAfterSchema` hook sees the same `.electric` it did when
-  // the extension provided it at create time. `engine.close` (the former extension close hook — abort every
-  // shape stream) is kept private to this client and run explicitly by `stop`/`destroy` at the same moment
-  // `pglite.close()` used to trigger it.
-  const engine: SyncEngine = await createSyncEngine(pglite);
-  (pglite as { electric: SyncEngine["namespace"] }).electric = engine.namespace;
-
   // Whether the read path's first initial sync has completed, so a recovery from `auth-needed` returns to
   // the right steady-state phase (`ready` if already caught up, else `syncing`).
   let initialSyncCompleted = false;
@@ -2191,157 +2260,111 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     }, readSilenceMs);
   };
 
-  // ─── Fresh-store prefetch overlap (ADR-0032 S4 / backlog-0003) ─────────────────────────────────────
-  // On a PROVABLY-FRESH store (the caller's `freshStore` hint — a claimed schemaless spare) the shape
-  // catch-up needs none of the local boot phases, so start it NOW and gate its commits on `dbReady`, which
-  // we resolve once schema exec + journal recovery + registry reconciliation complete. The network then
-  // overlaps those phases instead of running strictly after them. Gated to the schema-owning paths (the
-  // `pgliteInstance` path runs no schema step, so it has nothing to hide); warm stores keep the exact
-  // sequential path. See the `freshStore` option's JSDoc for who sets the hint (the board's claim path).
-  // (`overlapPrefetch` is computed once up front — see the boot-report builder above.)
-  let openDbGate: () => void = () => {};
-  const dbReady = overlapPrefetch
-    ? new Promise<void>((resolve) => {
-        openDbGate = resolve;
-      })
-    : null;
+  /**
+   * The native path's auth adapter.
+   *
+   * The SAME token lifecycle the write path and the Electric read path use (ADR-0003/ADR-0013),
+   * resolved per request rather than captured — a subscription outlives its token by design. The
+   * static `requestHeaders` ride along for the deployment gateway; a resolved `Authorization` wins
+   * over anything they carry, which is the same precedence `buildShapeHeaders` gives them.
+   */
+  const nativeAuthHeaders = async (): Promise<Record<string, string>> => {
+    const headers: Record<string, string> = { ...(options.requestHeaders ?? {}) };
+    const token = await options.getAuthToken?.();
+    if (token != null && token !== "") headers["Authorization"] = `Bearer ${token}`;
+    return headers;
+  };
 
-  // The sync-start options, built once and used by BOTH the overlap early-start and the sequential start —
-  // the only per-call difference is the promoted-lazy set (empty on a fresh store) and the overlap gate.
-  const buildStartOptions = (promotedGroups: ReadonlySet<string>): Parameters<typeof startConfiguredSync>[1] => ({
-    syncConfig: buildSyncConfigFromRegistry(options.registry, options.electricUrl),
-    registry: options.registry,
-    promotedGroups,
-    ...(dbReady ? { dbReady } : {}),
-    // Boot observability (ADR-0034): the collector opens a per-boot-group accumulator (rows/requests/fetch/
-    // apply wall) for the eager + promoted groups; lazy on-demand starts get none, so they never enter the report.
-    bootCollector: bootReportBuilder,
-    // Persist a durable lazy group's activation on first on-demand start, so the next boot promotes it.
-    onLazyActivated: (groupKey) => {
-      void writeLazyGroupActivation(pglite, options.registry, groupKey);
-    },
-    // The read path resolves the token per request (ADR-0013), not frozen at boot — so a long-lived session
-    // never wedges on JWT expiry. Read and write share one token lifecycle.
-    ...(options.getAuthToken || options.requestHeaders
-      ? {
-          shapeHeaders: buildShapeHeaders({
-            ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
-            ...(options.requestHeaders ? { requestHeaders: options.requestHeaders } : {}),
-          }),
-        }
-      : {}),
-    ...(options.onTableInitialSync ? { onTableInitialSync: options.onTableInitialSync } : {}),
-    // Per-group readiness (ADR-0032 decision 6): mirror each group's catch-up into `status.groups` and
-    // re-emit, so an app can drive progressive per-group paint off `status` (and `client.groupReady`).
-    onGroupReady: (groupKey) => {
-      status.groups = { ...(status.groups ?? {}), [groupKey]: true };
-      options.onStatusChange?.(status);
-    },
-    onInitialSync: () => {
-      initialSyncCompleted = true;
-      status.phase = "ready";
-      options.onStatusChange?.(status);
-      // Boot complete: the first initial sync landed and `ready` is about to resolve. One monotonic stamp
-      // closes the boot rail opened by `boot pglite.create` (the stamp itself is the number).
-      syncDebug("boot client ready");
-      // Boot observability (ADR-0034): finalize the report at exactly this moment — the `boot client ready`
-      // rail line — and fire the one-shot `onBootReport` push. Idempotent, so the sync-disabled path's own
-      // finalize below never double-fires it.
-      finalizeBootReport();
-      resolveReady();
-      // `ready` is now a CLAIM the watchdog holds to account: silence past the window drops it back to
-      // degraded — the "up to date offline" lie a hung long-poll otherwise sustains.
-      armReadSilenceWatchdog();
-    },
-    onSyncError: (error) => {
-      // A sync commit exhausted its retries (ADR-0009 decision 5): go degraded and surface it, rather than
-      // letting the read cache silently diverge from the server. Sticky (see below).
-      status.phase = "degraded";
-      degradedReason = "commit";
-      // The cause chain, not just the wrapper: a drizzle "Failed query" message hides the actual
-      // database error (SQLSTATE, detail) on `.cause`.
-      status.lastError = describeErrorChain(error);
-      options.onStatusChange?.(status);
-      options.onSyncError?.(error);
-    },
-    // #4: a terminal/transient NON-auth read-stream error → `degraded`, so the runtime never keeps reporting
-    // healthy while the read stream has stalled. Does not override the more-actionable `auth-needed`, nor a
-    // commit-failure degraded. Cleared on the next successful batch below.
-    onReadStreamError: (error) => {
-      // Never mask the more-actionable auth-needed, nor a sticky commit-failure degraded (its lastError is
-      // the more serious signal — a stream blip must not overwrite it).
-      if (status.phase === "auth-needed") return;
-      if (status.phase === "degraded" && degradedReason === "commit") return;
-      // Enter, or refresh, a stream-degraded status. Refreshing keeps `lastError` pointing at the most
-      // recent stream fault (and re-emits) rather than freezing on the first one, so a stream that fails one
-      // way then another reports the current cause (observability).
-      status.phase = "degraded";
-      degradedReason = "stream";
-      status.lastError = describeErrorChain(error);
-      options.onStatusChange?.(status);
-    },
-    // Board ADR-0010: a shape FETCH ATTEMPT failed and Electric is retrying it inside its own backoff
-    // wrapper. This is the only signal an outage produces — a rejected fetch is retryable, so it never
-    // escapes to `onError` and `onReadStreamError` above is never called (Electric retries forever:
-    // "clients may go offline and come back"). Without this the runtime reports `syncing` for as long as
-    // the machine is offline, and a consumer keying off the phase can never say "connection needed". The
-    // two seams partition the failures (see `read-stream-stall.ts`), so this can never pre-empt the
-    // richer classification: an auth 4xx escapes the wrapper and lands on `onAuthError`, not here.
-    //
-    // TRANSITION-only: Electric calls this on every retry tick for as long as the outage lasts, so
-    // re-entering `degraded` would re-emit to every status listener (and, in worker mode, re-broadcast to
-    // every attached tab) roughly once a second, forever. Precedence matches `onReadStreamError`: never
-    // mask `auth-needed` (more actionable) nor a commit-failure degraded (more serious).
-    onReadStreamStalled: () => {
-      if (status.phase === "auth-needed" || status.phase === "degraded") return;
-      status.phase = "degraded";
-      degradedReason = "stream";
-      status.lastError = READ_STREAM_UNREACHABLE;
-      options.onStatusChange?.(status);
-    },
-    // Clear a recoverable status (auth-needed, or a read-stream degraded) the moment a batch is delivered
-    // again. A commit-failure degraded is NOT cleared here — a fetch can succeed while applies keep failing,
-    // so only `onSyncError` clearing (a clean commit) would lift it.
-    onSyncActivity: () => {
-      if (status.phase === "auth-needed" || (status.phase === "degraded" && degradedReason === "stream")) {
-        degradedReason = null;
-        status.phase = initialSyncCompleted ? "ready" : "syncing";
+  /**
+   * Start sync on whichever read transport this boot resolved.
+   *
+   * The single place the read path is started. Everything above it — status, readiness, the boot
+   * report, the activation replay — is written against {@link SyncGroupsRuntime}.
+   */
+  const startSyncRuntime = (promotedGroups: ReadonlySet<string>): Promise<SyncGroupsRuntime> =>
+    startCircuitsSync(pglite, {
+      registry: options.registry,
+      controlPlaneUrl: readTransport.controlPlaneUrl,
+      streamBaseUrl: readTransport.streamBaseUrl,
+      metadataSchema: DEFAULT_METADATA_SCHEMA,
+      promotedGroups,
+      // ADR-0034: the per-group rows of the boot report. Only the boot starts open an accumulator.
+      bootCollector: bootReportBuilder,
+      // Teardown must be able to reach the read path BEFORE this promise resolves. A stop while the
+      // first subscribe is still in flight has no runtime handle to unsubscribe — and that is exactly
+      // the window where a stop is most likely, since an unreachable control plane is why the boot is
+      // still running. Without this, `stop()` waits on a TCP connect to a host that is not answering.
+      signal: readPathAbort.signal,
+      ...(options.getAuthToken || options.requestHeaders ? { authHeaders: nativeAuthHeaders } : {}),
+      onInitialSync: () => {
+        initialSyncCompleted = true;
+        status.phase = "ready";
         options.onStatusChange?.(status);
-      }
-      // Every delivered batch (including a bare up-to-date) is proof of life: re-arm the silence window.
-      // Harmless pre-`ready` — the watchdog's callback only ever acts on a runtime claiming `ready`.
-      armReadSilenceWatchdog();
-    },
-    // ADR-0013 Phase 3: surface a persistent read-path auth failure as a distinct `auth-needed` status (the
-    // app prompts re-login) while the stream keeps retrying for a fresh token. Only wired when a token
-    // provider exists — without one there is no auth lifecycle to track.
-    ...(options.getAuthToken
-      ? {
-          onAuthError: () => {
-            if (status.phase !== "auth-needed") {
+        syncDebug("boot client ready");
+        finalizeBootReport();
+        resolveReady();
+        armReadSilenceWatchdog();
+      },
+      onGroupReady: (groupKey: string) => {
+        status.groups = { ...(status.groups ?? {}), [groupKey]: true };
+        options.onStatusChange?.(status);
+      },
+      onSyncError: (error: Error) => {
+        status.phase = "degraded";
+        degradedReason = "commit";
+        status.lastError = describeErrorChain(error);
+        options.onStatusChange?.(status);
+        options.onSyncError?.(error);
+      },
+      // A subscribe that keeps failing on the deployment's side. Recoverable, so it takes the
+      // `stream` reason rather than `commit`: the first delivered batch clears it.
+      //
+      // Precedence, and both halves matter. It never masks `auth-needed` (more actionable — the
+      // subject can fix that one themselves), and it never masks a commit-failure degraded (more
+      // serious — its `lastError` names a store that is diverging, which a transport blip must not
+      // overwrite, and which the delivered-batch recovery must not then lift).
+      //
+      // It DOES refresh a stream-degraded status on each new fault rather than freezing on the
+      // first, so a control plane that fails one way and then another reports its current cause.
+      onSubscribeError: (error: Error) => {
+        if (status.phase === "auth-needed") return;
+        if (status.phase === "degraded" && degradedReason === "commit") return;
+        status.phase = "degraded";
+        degradedReason = "stream";
+        status.lastError = `${CONTROL_PLANE_UNREACHABLE}: ${describeErrorChain(error)}`;
+        options.onStatusChange?.(status);
+      },
+      // ADR-0013: a persistent read-path auth failure is its own status — the app prompts re-login
+      // while subscribe keeps retrying for a fresh token. Only wired when a token provider exists;
+      // without one there is no auth lifecycle to track.
+      ...(options.getAuthToken
+        ? {
+            onAuthError: () => {
+              if (status.phase === "auth-needed") return;
               status.phase = "auth-needed";
+              delete status.lastError;
               options.onStatusChange?.(status);
-            }
-          },
+            },
+          }
+        : {}),
+      onSyncActivity: () => {
+        // A delivered batch is proof of life, so the two RECOVERABLE statuses clear here: an
+        // `auth-needed` whose fresh token has started working (ADR-0013), and a `degraded` whose
+        // reason was the read stream. Never a commit failure — that one is sticky by design
+        // (ADR-0009 d5), because a fetch can keep succeeding while applies keep failing, and
+        // clearing it on traffic would report healthy while the store diverges.
+        if (status.phase === "auth-needed" || (status.phase === "degraded" && degradedReason === "stream")) {
+          status.phase = initialSyncCompleted ? "ready" : "syncing";
+          degradedReason = null;
+          delete status.lastError;
+          options.onStatusChange?.(status);
         }
-      : {}),
-  });
-
-  // Overlap: kick the shape streams off BEFORE schema exec (they buffer catch-up into the memory inbox,
-  // commits gated on `dbReady`). A fresh store has no persisted lazy activations and no subscriptions to
-  // reset, so both DB reads the sequential path makes first are skipped here.
-  let earlySync: ReturnType<typeof startConfiguredSync> | null = null;
-  let earlySyncStartedAt = 0;
-  if (overlapPrefetch) {
-    status.isRunning = true;
-    status.phase = "syncing";
-    options.onStatusChange?.(status);
-    earlySyncStartedAt = performance.now();
-    earlySync = startConfiguredSync(
-      pglite as unknown as Parameters<typeof startConfiguredSync>[0],
-      buildStartOptions(new Set()),
-    );
-  }
+        armReadSilenceWatchdog();
+      },
+      onLazyActivated: (groupKey: string) => {
+        void writeLazyGroupActivation(pglite, options.registry, groupKey);
+      },
+    });
 
   if (!options.pgliteInstance) {
     if (options.prepareLocalDbBeforeSchema) {
@@ -2514,7 +2537,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // Static index of the registry's lazy relations (ADR-0021), driving the read-path safety net.
   const lazyGuardIndex = buildLazyGuardIndex(options.registry);
 
-  let sync: Awaited<ReturnType<typeof startConfiguredSync>> | null = null;
+  let sync: SyncGroupsRuntime | null = null;
   let convergenceDriver: ConvergenceDriver | null = null;
   let eventFlushDriver: EventFlushDriver | null = null;
 
@@ -2537,6 +2560,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // True once `sync` is genuinely wired — the read seams use this (not just `sync != null`) plus `syncEnabled`
   // to tell "sync disabled" (trivially ready) apart from "sync pending" (not yet ready / hydrating).
   const isSyncPending = (): boolean => syncEnabled && sync == null && !disposed;
+
+  /** Aborts the read path's control-plane traffic on teardown — see `haltActivity`. */
+  const readPathAbort = new AbortController();
 
   // Quiesce the background write/sync tail before a teardown (ADR-0041 BLOCKER 2). `stop()`/`destroy()` can be
   // called while the tail is still in flight (React StrictMode mount/unmount). Flag disposal so the tail bails
@@ -2576,7 +2602,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // The Event lane's in-flight POST is aborted on the same synchronous edge as the write path's: a flush
     // must not still be settling verdicts into a store the teardown is about to close.
     eventLane?.abortInFlight();
-    void engine.close();
+    // Covers the read path whether or not sync has finished starting: `sync` is still null while the
+    // first subscribe is in flight, and that is the case this abort exists for.
+    readPathAbort.abort();
+    sync?.unsubscribe();
     void convergenceDriver?.stop();
     void eventFlushDriver?.stop();
   };
@@ -2605,23 +2634,21 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     if (disposed) return;
     status.isRunning = true;
 
-    // Open the overlap commit gate now the local store is ready (schema exec + journal recovery + reconcile
-    // done): the catch-up the streams prefetched during those phases now drains in one commit train. A no-op
-    // on the sequential path (`openDbGate` is the empty default there).
-    openDbGate();
+    // Provision the subscription metadata store BEFORE anything reads it. The Electric engine did this
+    // in `createSyncEngine`; the native path has no engine object, so it belongs here.
+    //
+    // Unconditional, outside the `syncEnabled` branch, for two reasons. Every sync-enabled boot reads a
+    // cursor whether or not a reset was asked for — and `desync`/`discardEphemeral` clear one on a
+    // client that may have booted with sync off, so the relations cannot be a function of a runtime
+    // flag. It is also cheap and idempotent: `IF NOT EXISTS` throughout, and the session-scoped halves
+    // (ADR-0042) have to be re-created every boot regardless, since they live in `pg_temp`.
+    await migrateSubscriptionMetadataTables({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA });
+    if (disposed) return;
 
     if (syncEnabled) {
-      if (earlySync) {
-        // Overlap path: the shape streams have been prefetching since before schema exec; adopt the handle
-        // (it resolves as soon as the streams are subscribed — catch-up drains via the gate just lifted, and
-        // `onInitialSync` still gates `ready` on a fully-consistent first paint). The construction was kicked
-        // off before schema exec, so time it here (concurrent-segment wall) into `phases.syncStartMs`.
-        sync = await earlySync;
-        bootReportBuilder.setSyncStartMs(performance.now() - earlySyncStartedAt);
-        bootReportBuilder.markSyncStartDone();
-      } else {
-        // Sequential path (warm store / no fresh hint): apply any explicit subscription resets, promote
-        // durable lazy groups, then start (catch-up strictly after the local phases).
+      {
+        // Apply any explicit subscription resets, promote durable lazy groups, then start — catch-up
+        // strictly after the local phases (ADR-0032 S4's overlap has no native form; backlog 0012).
         const resetKeys =
           versionEvent?.status === "rebuilt"
             ? [...(options.resetSubscriptionKeys ?? []), ...allGroupSubscriptionKeys(options.registry)]
@@ -2639,12 +2666,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         const promotedGroups = await readActivatedLazyGroups(pglite, options.registry);
         if (disposed) return;
 
-        sync = await bootReportBuilder.phase("syncStart", "boot sync start", () =>
-          startConfiguredSync(
-            pglite as unknown as Parameters<typeof startConfiguredSync>[0],
-            buildStartOptions(promotedGroups),
-          ),
-        );
+        sync = await bootReportBuilder.phase("syncStart", "boot sync start", () => startSyncRuntime(promotedGroups));
         bootReportBuilder.markSyncStartDone();
       }
       // If a stop landed DURING the sync-start await, unsubscribe the just-started streams here rather than
@@ -3184,7 +3206,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // Tear the engine down (abort every shape stream) immediately before closing the DB — the exact
       // point PGlite's own close used to invoke the former extension's close hook (ADR-0032 S1). Order
       // preserved: convergence stop → sync unsubscribe → status → engine close → pglite close.
-      await engine.close();
+      sync?.unsubscribe();
       // Dispose the live-query manager before closing PGlite (ADR-0040 decisions 1 & 6): it cancels any
       // keep-alive timers and awaits every in-flight live `unsubscribe()`, so none races `pglite.close()`.
       await liveManager.dispose();
@@ -3238,7 +3260,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         await pglite.exec(buildWipeLocalStoreSql(options.registry));
         // Same teardown ordering as `stop`: abort the engine's streams before closing the DB, the moment
         // the former extension close hook fired during `pglite.close()` (ADR-0032 S1).
-        await engine.close();
+        sync?.unsubscribe();
         // Dispose the live-query manager before closing PGlite — same close-vs-unsubscribe hang guard as
         // `stop()` (ADR-0040 decisions 1 & 6).
         await liveManager.dispose();
@@ -3623,8 +3645,12 @@ async function resetSubscriptionsIfRequested(pglite: ClientPGlite, keys: string[
     return;
   }
 
-  await pglite.electric.initMetadataTables();
-  await Promise.all(uniqueKeys.map((key) => pglite.electric.deleteSubscription(key)));
+  // No migrate here: boot provisions the metadata relations unconditionally, before this can run.
+  await Promise.all(
+    uniqueKeys.map((key) =>
+      deleteSubscriptionState({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA, subscriptionKey: key }),
+    ),
+  );
 }
 
 function createDrizzleDatabase<TRegistry extends SyncTableRegistry>(
@@ -3700,45 +3726,4 @@ function buildRegistryDrizzleFactory<TRegistry extends SyncTableRegistry>(
     relations: RegistryRelations<TRegistry>;
   }) => PgliteDatabase<RegistryRelations<TRegistry>>;
   return (client) => createDatabase({ client, relations });
-}
-
-function buildSyncConfigFromRegistry<TRegistry extends SyncTableRegistry>(
-  registry: TRegistry,
-  electricUrl: string,
-): SyncConfigInput {
-  return {
-    electricUrl,
-    localSchema: getSyncRegistrySchema(registry),
-    tables: Object.fromEntries(Object.entries(registry).map(([key, entry]) => [key, buildSyncTableInput(entry, key)])),
-  };
-}
-
-function buildSyncTableInput(entry: SyncTableEntry, tableKey: string) {
-  const clientProjection = getClientProjection(entry, tableKey);
-
-  return {
-    name: tableKey,
-    mode: entry.mode,
-    primaryKey: entry.primaryKey,
-    ...(entry.shape !== undefined ? { shape: entry.shape } : {}),
-    clientProjection,
-    // The read-path apply ladder (strategy + json casts) is resolved by the engine directly from the
-    // registry entry via `resolveApplyTarget` (ADR-0029 D1/D2) — `deriveSyncColumnTypes` /
-    // `classifyTableApplyStrategy` on the model, never carried through this config surface.
-    // Carry the consistency group (ADR-0009 decision 2) so the sync starter buckets grouped tables
-    // onto one MultiShapeStream; absent → singleton group.
-    ...(entry.consistencyGroup ? { consistencyGroup: entry.consistencyGroup } : {}),
-    // Carry the lifecycle axes (ADR-0021) so the sync starter can hold lazy groups out of the eager
-    // boot set and provision ephemeral clusters as TEMP; absent → eager/persistent (today's path).
-    ...(entry.subscription ? { subscription: entry.subscription } : {}),
-    ...(entry.retention ? { retention: entry.retention } : {}),
-  };
-}
-
-function getClientProjection(entry: SyncTableEntry, tableKey: string) {
-  if (!entry.clientProjection) {
-    throw new Error(`clientProjection is required for client table ${tableKey}`);
-  }
-
-  return entry.clientProjection;
 }

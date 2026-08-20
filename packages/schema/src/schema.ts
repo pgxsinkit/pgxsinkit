@@ -1,13 +1,12 @@
-import { sql, type SQL } from "drizzle-orm";
 import { bigint, pgEnum, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
 import {
+  buildOwnershipShapePredicate,
   buildSupabaseOwnerOrAdminNativePolicies,
-  c,
   clockMicrosecondsSql,
   defineSyncTable,
-  DENY_ALL,
+  type Predicate,
 } from "@pgxsinkit/contracts";
 
 export const todoStatusEnum = pgEnum("todo_status", ["todo", "in_progress", "done"]);
@@ -31,9 +30,9 @@ const authorsSyncEntry = defineSyncTable({
   conflictPolicy: "last-write-wins",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => {
+      customPredicate: (claims): Predicate | null => {
         if (claims.app_metadata?.roles?.includes("admin")) return null;
-        return claims.sub ? sql`${c(columns.ownerId)} = ${claims.sub}` : DENY_ALL;
+        return buildOwnershipShapePredicate(columns.ownerId, claims.sub);
       },
     }),
   },
@@ -71,9 +70,9 @@ const todosSyncEntry = defineSyncTable({
   conflictPolicy: "reject-if-stale",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => {
+      customPredicate: (claims): Predicate | null => {
         if (claims.app_metadata?.roles?.includes("admin")) return null;
-        return claims.sub ? sql`${c(columns.ownerId)} = ${claims.sub}` : DENY_ALL;
+        return buildOwnershipShapePredicate(columns.ownerId, claims.sub);
       },
     }),
   },

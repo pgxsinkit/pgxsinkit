@@ -4,17 +4,22 @@ import type { SQL } from "drizzle-orm";
 import { boolean, PgDialect, pgRole, pgTable, uuid, varchar, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import {
-  buildMembershipShapeWhere,
-  buildOwnerOrAdminShapeWhere,
-  buildOwnershipShapeWhere,
+  buildMembershipShapePredicate,
+  buildOwnerOrAdminShapePredicate,
+  buildOwnershipShapePredicate,
   buildSupabaseMembershipNativePolicies,
   buildSupabaseOwnerOrAdminNativePolicies,
   buildSupabaseOwnerOrAdminPredicateSqlText,
-  DENY_ALL,
+  DENY_ALL_PREDICATE,
+  isAndPredicate,
   isClaimsDependentRowFilter,
+  isInSubqueryPredicate,
+  isNotPredicate,
+  isOrPredicate,
   resolveOwnerOrAdminAccess,
   supabaseOwnerOrAdminDefaults,
   type JwtClaims,
+  type Predicate,
   type SupabaseMembershipShapeColumns,
 } from "@pgxsinkit/contracts";
 
@@ -110,6 +115,29 @@ const defaultOwnerOrAdminPredicateSql = `
     WHERE assigned_role.role_name_value = 'admin'
   )
 `;
+
+/**
+ * Every column/table name a predicate mentions, sorted and deduped — the AST counterpart of pulling
+ * quoted identifiers out of rendered SQL, so a read/write mirror test can compare the two surfaces.
+ */
+function predicateNames(node: Predicate): string[] {
+  const names = new Set<string>();
+  const walk = (n: Predicate): void => {
+    if (isAndPredicate(n)) return n.and.forEach(walk);
+    if (isOrPredicate(n)) return n.or.forEach(walk);
+    if (isNotPredicate(n)) return walk(n.not);
+    if (isInSubqueryPredicate(n)) {
+      names.add(n.col);
+      names.add(n.in.table);
+      names.add(n.in.project);
+      if (n.in.where) walk(n.in.where);
+      return;
+    }
+    names.add(n.col);
+  };
+  walk(node);
+  return [...names].sort();
+}
 
 describe("contracts supabase RLS helpers", () => {
   it("renders the default predicate byte-identically (migration-embedded DDL text)", () => {
@@ -328,7 +356,7 @@ describe("contracts owner-or-admin read-path mirror", () => {
   });
 
   it("resolveOwnerOrAdminAccess never throws on malformed claims", () => {
-    // Claims reach a customWhere unverified in shape, so every wrong shape must simply confer nothing.
+    // Claims reach a customPredicate unverified in shape, so every wrong shape must simply confer nothing.
     const malformed: unknown[] = [
       { app_metadata: "not-an-object" },
       { app_metadata: null },
@@ -353,27 +381,34 @@ describe("contracts owner-or-admin read-path mirror", () => {
     expect(resolveOwnerOrAdminAccess({ sub: 42 } as unknown as JwtClaims).subject).toBeNull();
   });
 
-  it("buildOwnerOrAdminShapeWhere: admin sees everything, owner sees their rows, nobody sees nothing", () => {
+  it("buildOwnerOrAdminShapePredicate: admin sees everything, owner sees their rows, nobody sees nothing", () => {
     // Admin → null: no filter at all, mirroring the policy's OR bypass branch.
-    expect(buildOwnerOrAdminShapeWhere(projects.ownerId, { sub: "u", app_metadata: { roles: ["admin"] } })).toBeNull();
+    expect(
+      buildOwnerOrAdminShapePredicate(projects.ownerId, { sub: "u", app_metadata: { roles: ["admin"] } }),
+    ).toBeNull();
 
-    // Owner → the ownership leaf, bare column + bound subject (Electric's grammar).
-    const owned = buildOwnerOrAdminShapeWhere(projects.ownerId, { sub: "user-1" });
-    const bound = dialect.sqlToQuery(owned as SQL);
-    expect(normalizeSqlText(bound.sql)).toBe(`"owner_id" = $1`);
-    expect(bound.params).toEqual(["user-1"]);
+    // Owner → the ownership leaf: the column's real name and the subject as a typed value.
+    expect(buildOwnerOrAdminShapePredicate(projects.ownerId, { sub: "user-1" })).toEqual({
+      col: "owner_id",
+      op: "eq",
+      value: "user-1",
+    });
     // It IS the shared ownership leaf, not a re-implementation of it.
-    expect(renderSql(owned)).toBe(renderSql(buildOwnershipShapeWhere(projects.ownerId, "user-1")));
+    expect(buildOwnerOrAdminShapePredicate(projects.ownerId, { sub: "user-1" })).toEqual(
+      buildOwnershipShapePredicate(projects.ownerId, "user-1"),
+    );
 
-    // No subject → the DENY_ALL sentinel BY REFERENCE, which is what isClaimsDependentRowFilter probes.
-    expect(buildOwnerOrAdminShapeWhere(projects.ownerId, {})).toBe(DENY_ALL);
-    expect(buildOwnerOrAdminShapeWhere(projects.ownerId, null)).toBe(DENY_ALL);
-    expect(buildOwnerOrAdminShapeWhere(projects.ownerId, { sub: "" })).toBe(DENY_ALL);
+    // No subject → the sentinel BY REFERENCE, which is what isClaimsDependentRowFilter probes.
+    expect(buildOwnerOrAdminShapePredicate(projects.ownerId, {})).toBe(DENY_ALL_PREDICATE);
+    expect(buildOwnerOrAdminShapePredicate(projects.ownerId, null)).toBe(DENY_ALL_PREDICATE);
+    expect(buildOwnerOrAdminShapePredicate(projects.ownerId, { sub: "" })).toBe(DENY_ALL_PREDICATE);
   });
 
-  it("a customWhere built on the mirror probes claims-dependent", () => {
+  it("a customPredicate built on the mirror probes claims-dependent", () => {
     expect(
-      isClaimsDependentRowFilter({ customWhere: (claims) => buildOwnerOrAdminShapeWhere(projects.ownerId, claims) }),
+      isClaimsDependentRowFilter({
+        customPredicate: (claims) => buildOwnerOrAdminShapePredicate(projects.ownerId, claims),
+      }),
     ).toBe(true);
   });
 
@@ -385,11 +420,12 @@ describe("contracts owner-or-admin read-path mirror", () => {
 
     const select = readTablePolicies(governed).find((policy) => policy.for === "select");
     const policyText = renderSql(select?.using) ?? "";
-    const mirrorText = renderSql(buildOwnerOrAdminShapeWhere(governed.ownerId, { sub: "user-1" })) ?? "";
+    const mirror = buildOwnerOrAdminShapePredicate(governed.ownerId, { sub: "user-1" });
 
-    // Same column: qualified on the write surface (Postgres RLS), bare on the read surface (Electric).
+    // Same column: qualified SQL text on the write surface (Postgres RLS), a named column on the read
+    // surface (the predicate AST) — one declaration, so a rename moves both.
     expect(policyText).toContain(`"projects"."${governed.ownerId.name}"`);
-    expect(quotedIdentifiers(mirrorText)).toEqual([`"${governed.ownerId.name}"`]);
+    expect(mirror).toMatchObject({ col: governed.ownerId.name });
 
     // Same admin role value on both surfaces — the policy inlines it, the mirror compares it.
     expect(policyText).toContain(`assigned_role.role_name_value = 'maintainer'`);
@@ -397,7 +433,7 @@ describe("contracts owner-or-admin read-path mirror", () => {
       resolveOwnerOrAdminAccess({ app_metadata: { roles: ["maintainer"] } }, { adminRoleName: "maintainer" }).admin,
     ).toBe(true);
     expect(
-      buildOwnerOrAdminShapeWhere(
+      buildOwnerOrAdminShapePredicate(
         governed.ownerId,
         { app_metadata: { roles: ["maintainer"] } },
         {
@@ -426,7 +462,7 @@ describe("contracts owner-or-admin read-path mirror", () => {
       tenant: { acl: { roles: ["admin"] } },
     };
     expect(resolveOwnerOrAdminAccess(claims, { adminRolesClaimPath }).admin).toBe(true);
-    expect(buildOwnerOrAdminShapeWhere(governed.ownerId, claims, { adminRolesClaimPath })).toBeNull();
+    expect(buildOwnerOrAdminShapePredicate(governed.ownerId, claims, { adminRolesClaimPath })).toBeNull();
     expect(resolveOwnerOrAdminAccess({ tenant: { acl: { roles: ["admin"] } } }, { adminRolesClaimPath }).admin).toBe(
       true,
     );
@@ -476,30 +512,34 @@ describe("contracts membership read-path mirror", () => {
     managerRoleColumn: workspaceMembers.role,
   } satisfies SupabaseMembershipShapeColumns;
 
-  it("renders the self-contained IN (subquery) form with the subject as a bound param", () => {
-    const where = buildMembershipShapeWhere(declaration, { sub: "member-1" });
-    const bound = dialect.sqlToQuery(where);
+  it("builds the uncorrelated IN (subquery) form with the subject as a typed value", () => {
+    // Real DB column names throughout, and the subquery's table derived from the projected column.
+    // The inner `where` reads the membership table's own columns only — uncorrelated, which is what
+    // lets the engine maintain the set once and share it across every shape referencing it.
+    expect(buildMembershipShapePredicate(declaration, { sub: "member-1" })).toEqual({
+      col: "workspace_id",
+      in: {
+        table: "workspace_members",
+        project: "workspace_id",
+        where: { col: "member_id", op: "eq", value: "member-1" },
+      },
+    });
 
-    // Bare columns (Electric rejects qualified refs), real DB column names, uncorrelated subquery.
-    expect(normalizeSqlText(bound.sql)).toBe(
-      `"workspace_id" in (select "workspace_id" from "workspace_members" where "member_id" = $1)`,
-    );
-    expect(bound.params).toEqual(["member-1"]);
-
-    // Electric renders plain IN (subquery); the RLS side renders = ANY(ARRAY(...)) — deliberate.
-    expect(normalizeSqlText(bound.sql)).not.toContain("any(array(");
-
-    // Rendered inline (a proxy composing a shape URL), drizzle owns the escaping — no injection.
-    const inline = dialect.sqlToQuery(buildMembershipShapeWhere(declaration, { sub: "a'b" }).inlineParams());
-    expect(normalizeSqlText(inline.sql)).toContain(`where "member_id" = 'a''b'`);
+    // Nothing is rendered, so there is no escaping to get wrong: a subject that would need quoting in
+    // SQL text rides as an ordinary JSON string.
+    expect(buildMembershipShapePredicate(declaration, { sub: "a'b" })).toMatchObject({
+      in: { where: { value: "a'b" } },
+    });
   });
 
-  it("denies without a subject, by DENY_ALL reference, so the filter probes claims-dependent", () => {
-    expect(buildMembershipShapeWhere(declaration, {})).toBe(DENY_ALL);
-    expect(buildMembershipShapeWhere(declaration, null)).toBe(DENY_ALL);
-    expect(buildMembershipShapeWhere(declaration, { sub: "" })).toBe(DENY_ALL);
+  it("denies without a subject, by sentinel reference, so the filter probes claims-dependent", () => {
+    expect(buildMembershipShapePredicate(declaration, {})).toBe(DENY_ALL_PREDICATE);
+    expect(buildMembershipShapePredicate(declaration, null)).toBe(DENY_ALL_PREDICATE);
+    expect(buildMembershipShapePredicate(declaration, { sub: "" })).toBe(DENY_ALL_PREDICATE);
     expect(
-      isClaimsDependentRowFilter({ customWhere: (claims) => buildMembershipShapeWhere(declaration, claims) }),
+      isClaimsDependentRowFilter({
+        customPredicate: (claims) => buildMembershipShapePredicate(declaration, claims),
+      }),
     ).toBe(true);
   });
 
@@ -509,16 +549,15 @@ describe("contracts membership read-path mirror", () => {
     ) as unknown as NativePolicy | undefined;
 
     const policyIdentifiers = quotedIdentifiers(renderSql(select?.using) ?? "");
-    const mirrorIdentifiers = quotedIdentifiers(renderSql(buildMembershipShapeWhere(declaration, { sub: "m" })) ?? "");
+    const mirrorNames = predicateNames(buildMembershipShapePredicate(declaration, { sub: "m" }));
 
     // The mirror names exactly what the policy predicate names, minus the governed table's own
-    // qualifier (Electric refs are bare) — a rename on either side would break this.
-    expect(mirrorIdentifiers).toEqual(['"member_id"', '"workspace_id"', '"workspace_members"']);
-    expect(policyIdentifiers).toEqual([...mirrorIdentifiers, '"work_items"'].sort());
+    // qualifier — a rename on either side would break this.
+    expect(mirrorNames).toEqual(["member_id", "workspace_id", "workspace_members"]);
+    expect(policyIdentifiers).toEqual([...mirrorNames.map((name) => `"${name}"`), '"work_items"'].sort());
 
     // The write-only branches are absent from the read mirror by construction.
-    const mirrorText = renderSql(buildMembershipShapeWhere(declaration, { sub: "m" })) ?? "";
-    expect(mirrorText).not.toContain("owner_id");
-    expect(mirrorText).not.toContain("role");
+    expect(mirrorNames).not.toContain("owner_id");
+    expect(mirrorNames).not.toContain("role");
   });
 });

@@ -32,7 +32,7 @@ let capturedCreateOptions: Record<string, unknown> | undefined;
 let capturedMutationOptions: Record<string, unknown> | undefined;
 let capturedSyncOptions: Record<string, unknown> | undefined;
 
-const startConfiguredSyncMock = mock(async (_pg: unknown, options: Record<string, unknown>) => {
+const startCircuitsSyncMock = mock(async (_pg: unknown, options: Record<string, unknown>) => {
   capturedSyncOptions = options;
   return {
     unsubscribe: () => undefined,
@@ -64,19 +64,16 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
     // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so its namespace now comes
     // from `createSyncEngine`'s return rather than the mocked `PGlite.create` instance.
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async () => undefined,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the reset path now calls directly (there is no engine
+    // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async () => undefined,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => null,
@@ -116,6 +113,10 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
       },
     }));
     await mock.module("../../packages/client/src/schema", () => ({
+      // The native read path's subscription metadata store (ADR-0055) reaches this module directly
+      // rather than through the mocked `./sync` barrel, so the partial mock must carry the DDL
+      // renderer, or the whole client fails to load.
+      renderCreateTableSql: () => [],
       generateLocalSchemaSql: () => "SELECT 1;",
       generateDurableLocalSchemaSql: () => "SELECT 1;",
       generateEphemeralLocalSchemaSql: () => "",
@@ -144,19 +145,20 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     capturedCreateOptions = undefined;
     capturedMutationOptions = undefined;
     capturedSyncOptions = undefined;
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
   });
 
   async function makeClient(extra: Record<string, unknown>) {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const client = await createSyncClient({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       storePath: "boot-opts",
       ...extra,
     } as Parameters<typeof createSyncClient>[0]);
-    // ADR-0041: `createSyncClient` resolves at `localReadReady`; `startConfiguredSync` (which captures the
+    // ADR-0041: `createSyncClient` resolves at `localReadReady`; `startCircuitsSync` (which captures the
     // read/shape header options this suite inspects) runs in the background tail. Await `bootSettled`.
     await client.bootSettled;
     return client;
@@ -199,12 +201,15 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
       "x-region": "eu-central-1",
     });
 
-    // Read/shape path sees the shared base only — NEVER the write-only region pin. `Authorization`
-    // rides as an async function (resolved per request), so assert the static keys explicitly.
-    const shapeHeaders = capturedSyncOptions?.["shapeHeaders"] as Record<string, unknown> | undefined;
-    expect(shapeHeaders?.["apikey"]).toBe("shared-key");
-    expect(shapeHeaders?.["x-region"]).toBeUndefined();
-    expect(typeof shapeHeaders?.["Authorization"]).toBe("function");
+    // Read path sees the shared base only — NEVER the write-only region pin. It rides ONE adapter
+    // resolved per request (not per-header thunks), so the assertion is on what that adapter returns.
+    const authHeaders = capturedSyncOptions?.["authHeaders"] as (() => Promise<Record<string, string>>) | undefined;
+    expect(typeof authHeaders).toBe("function");
+    if (typeof authHeaders !== "function") throw new Error("expected an auth-header adapter");
+    const resolved = await authHeaders();
+    expect(resolved["apikey"]).toBe("shared-key");
+    expect(resolved["x-region"]).toBeUndefined();
+    expect(resolved["Authorization"]).toBe("Bearer tok");
   });
 
   it("leaves the write path on the shared base when no writeRequestHeaders are given", async () => {
@@ -254,7 +259,8 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     // which the provision path uses to mint the spare store — must resolve it to `relaxedDurability: false`.
     const host = defineSyncWorker({
       registry: attachSyncRegistryStorage(bootRegistry(), { durability: "strict" }),
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       installGlobal: false,
     } as Parameters<typeof defineSyncWorker>[0]);
@@ -274,7 +280,8 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     // A registry with no storage declaration resolves to the relaxed default, so the provision mint is relaxed.
     const host = defineSyncWorker({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       installGlobal: false,
     } as Parameters<typeof defineSyncWorker>[0]);

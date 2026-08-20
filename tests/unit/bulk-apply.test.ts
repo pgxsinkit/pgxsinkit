@@ -8,7 +8,6 @@ import { classifyApplyStrategy } from "@pgxsinkit/contracts";
 
 import {
   applyBulkDeletesToTable,
-  applyBulkUpdatesToTable,
   applyInsertsToTable,
   applyMessagesToTableWithCopy,
   applyMessagesToTableWithJson,
@@ -16,18 +15,13 @@ import {
   applyUpsertsToTable,
   applyUpsertsToTableWithJson,
 } from "../../packages/client/src/sync/apply";
-import { foldChangeBatch } from "../../packages/client/src/sync/shape-inbox";
+import { foldChangeBatch } from "../../packages/client/src/sync/fold";
 import { createTablesFromSchema, drizzleOver, makeApplyTarget } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 
 // Tier-① fixture tables for the ad-hoc apply targets. The appliers now receive a resolved
 // {@link ApplyTarget} built from the real `pgTable` via `makeApplyTarget` (ADR-0029 D1) — no name strings.
 const delAuthors = pgTable("del_authors", { id: text("id").primaryKey(), name: text("name").notNull() });
-const updAuthors = pgTable("upd_authors", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  score: integer("score").notNull(),
-});
 const bn = pgTable("bn", {
   id: text("id").primaryKey(),
   updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
@@ -78,8 +72,8 @@ const srsCard = pgTable("srs_card", {
 
 // Derive the change-message type from an applier signature so the test does not import
 // `@electric-sql/client` directly (it does not resolve from the tests/ typecheck scope).
-type BulkMessage = Parameters<typeof applyBulkUpdatesToTable>[0]["messages"][number];
-type Operation = "insert" | "update" | "delete";
+type BulkMessage = Parameters<typeof applyBulkDeletesToTable>[0]["messages"][number];
+type Operation = "upsert" | "delete";
 function msg(key: string, operation: Operation, value: Record<string, unknown>): BulkMessage {
   return { key, value, headers: { operation } } as unknown as BulkMessage;
 }
@@ -114,18 +108,18 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     expect(result).toEqual([{ id: "a2" }]);
   });
 
-  it("applyBulkUpdatesToTable round-trips timestamptz/real/bigint (string-valued rows)", async () => {
+  it("applyUpsertsToTable round-trips timestamptz/real/bigint (string-valued rows)", async () => {
     await createTablesFromSchema(pg, { srsCard });
     const id = "c0000000-0000-0000-0000-000000000001";
     await drizzleOver(pg)
       .insert(srsCard)
       .values([{ id, gap: 0, repetition: 0, modifiedus: 0n }]);
 
-    await applyBulkUpdatesToTable({
+    await applyUpsertsToTable({
       pg,
       target: makeApplyTarget(srsCard, ["id"]),
       messages: [
-        msg(id, "update", {
+        msg(id, "upsert", {
           id,
           due_date: "2026-07-18 03:12:45.123+00",
           efactor: 2.6,
@@ -144,18 +138,18 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     expect(row?.dueDate?.toISOString()).toBe("2026-07-18T03:12:45.123Z");
   });
 
-  it("applyBulkUpdatesToTable round-trips timestamptz given parsed Date instances", async () => {
+  it("applyUpsertsToTable round-trips timestamptz given parsed Date instances", async () => {
     // srs_card was created by the string-valued round-trip test above (shared PGlite instance).
     const id = "c0000000-0000-0000-0000-000000000002";
     await drizzleOver(pg)
       .insert(srsCard)
       .values([{ id, gap: 0, repetition: 0, modifiedus: 0n }]);
 
-    await applyBulkUpdatesToTable({
+    await applyUpsertsToTable({
       pg,
       target: makeApplyTarget(srsCard, ["id"]),
       messages: [
-        msg(id, "update", {
+        msg(id, "upsert", {
           id,
           due_date: new Date("2026-07-18T03:12:45.123Z"),
           efactor: 2.6,
@@ -176,7 +170,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     expect(row?.dueDate?.toISOString()).toBe("2026-07-18T03:12:45.123Z");
   });
 
-  it("applyBulkUpdatesToTable round-trips the srs-card shape INSIDE pg.transaction (the engine's real context)", async () => {
+  it("applyUpsertsToTable round-trips the srs-card shape INSIDE pg.transaction (the engine's real context)", async () => {
     // The engine applies every Electric batch inside `pg.transaction(tx => …)` and hands the applier the
     // TRANSACTION, not the instance — a different executor/serialization path than the raw-pg tests above.
     const id = "c0000000-0000-0000-0000-000000000003";
@@ -185,11 +179,11 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       .values([{ id, gap: 0, repetition: 0, modifiedus: 0n }]);
 
     await pg.transaction(async (tx) => {
-      await applyBulkUpdatesToTable({
+      await applyUpsertsToTable({
         pg: tx,
         target: makeApplyTarget(srsCard, ["id"]),
         messages: [
-          msg(id, "update", {
+          msg(id, "upsert", {
             id,
             due_date: "2026-07-18 03:12:45.123+00",
             efactor: 2.6,
@@ -211,30 +205,47 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     expect(row?.dueDate?.toISOString()).toBe("2026-07-18T03:12:45.123Z");
   });
 
-  it("applyBulkUpdatesToTable groups by column-set so partial updates never clobber sibling columns", async () => {
-    await createTablesFromSchema(pg, { updAuthors });
-    await drizzleOver(pg)
-      .insert(updAuthors)
-      .values([
-        { id: "a1", name: "A", score: 1 },
-        { id: "a2", name: "B", score: 2 },
-      ]);
-
-    // Two rows in one batch touch *different* columns. A single uniform UPDATE..FROM would set both
-    // name and score for both rows; grouping by column-set keeps each row's untouched column intact.
-    await applyBulkUpdatesToTable({
-      pg,
-      target: makeApplyTarget(updAuthors, ["id"]),
-      messages: [msg("a1", "update", { id: "a1", name: "A2" }), msg("a2", "update", { id: "a2", score: 99 })],
-      debug: false,
+  // Every bulk applier takes its column list from the FIRST row, so a mixed batch does not fail — it
+  // writes the wrong thing. The wire cannot produce one (`row_to_json_cols` emits every `out_cols`
+  // column on every upsert), and since ADR-0058 retired the plain-INSERT collision there is no longer a
+  // downstream alarm if that guarantee ever slips. Asserted on all four tiers, not just the
+  // steady-state one: a corrupt backfill is the worse outcome.
+  it("refuses a batch whose rows carry different column sets, on every applier tier", async () => {
+    const mixed = pgTable("mixed_cols", {
+      id: text("id").primaryKey(),
+      name: text("name"),
+      score: integer("score"),
     });
+    await createTablesFromSchema(pg, { mixed });
+    const target = makeApplyTarget(mixed, ["id"]);
+    const batch = [
+      msg("a", "upsert", { id: "a", name: "A", score: 1 }),
+      msg("b", "upsert", { id: "b", name: "B" }), // no `score` — the corrupting row
+    ];
 
-    const result = await drizzleOver(pg).select().from(updAuthors).orderBy(asc(updAuthors.id));
-    expect(result).toEqual([
-      { id: "a1", name: "A2", score: 1 }, // score untouched
-      { id: "a2", name: "B", score: 99 }, // name untouched
-    ]);
+    for (const applier of [
+      applyUpsertsToTable,
+      applyInsertsToTable,
+      applyMessagesToTableWithJson,
+      applyUpsertsToTableWithJson,
+      applyMessagesToTableWithCopy,
+    ]) {
+      // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects matchers return a real promise typed as void
+      await expect(applier({ pg, target, messages: batch as never, debug: false })).rejects.toThrow(
+        /mixes column sets.*missing score/s,
+      );
+    }
+
+    // And nothing was written by the refused batch.
+    expect(await drizzleOver(pg).select().from(mixed)).toEqual([]);
   });
+
+  // The bulk-UPDATE applier's column-set grouping — one `UPDATE … FROM` per distinct set of carried
+  // columns, so a batch of heterogeneous partial updates never clobbered a sibling column — was
+  // deleted along with the `update` verb it served. Electric's default replica sent only the CHANGED
+  // columns, which is what made a batch heterogeneous; Circuits' `row_to_json_cols` emits every column
+  // of the shape's `out_cols` on every upsert, so a batch is uniform by construction and there is
+  // nothing to group. Nothing replaces this test because nothing can produce the input it covered.
 
   it("survives a bigint scalar AND a bigint[] array through json_to_recordset (number + BigInt inputs)", async () => {
     await createTablesFromSchema(pg, { bn });
@@ -245,14 +256,14 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
         { id: "b", updatedAtUs: 0n, marks: [] },
       ]);
 
-    await applyBulkUpdatesToTable({
+    await applyUpsertsToTable({
       pg,
       target: makeApplyTarget(bn, ["id"]),
       messages: [
         // JS numbers
-        msg("n", "update", { id: "n", updated_at_us: 1_700_000_000_000_000, marks: [1, 2, 3] }),
+        msg("n", "upsert", { id: "n", updated_at_us: 1_700_000_000_000_000, marks: [1, 2, 3] }),
         // JS BigInt scalar + a bigint[] array of BigInt elements, all beyond Number.MAX_SAFE_INTEGER
-        msg("b", "update", {
+        msg("b", "upsert", {
           id: "b",
           updated_at_us: 9_007_199_254_740_993n,
           marks: [9_007_199_254_740_993n, 9_007_199_254_740_994n],
@@ -275,7 +286,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     ]);
   });
 
-  it("handles a composite primary key on both update and delete", async () => {
+  it("handles a composite primary key on both upsert and delete", async () => {
     await createTablesFromSchema(pg, { parts });
     await drizzleOver(pg)
       .insert(parts)
@@ -285,10 +296,10 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
         { org: "o", sku: "z", qty: 3 },
       ]);
 
-    await applyBulkUpdatesToTable({
+    await applyUpsertsToTable({
       pg,
       target: makeApplyTarget(parts, ["org", "sku"]),
-      messages: [msg("o/x", "update", { org: "o", sku: "x", qty: 10 })],
+      messages: [msg("o/x", "upsert", { org: "o", sku: "x", qty: 10 })],
       debug: false,
     });
     await applyBulkDeletesToTable({
@@ -305,7 +316,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     ]);
   });
 
-  it("fold + three bulk statements (DELETE→INSERT→UPDATE) ≡ ordered per-row apply, against real Postgres", async () => {
+  it("fold + two bulk statements (DELETE→UPSERT) ≡ ordered per-row apply, against real Postgres", async () => {
     // Two tables seeded identically: one driven by the folded bulk path, one by the per-row applier.
     await createTablesFromSchema(pg, { foldedTable, perrowTable });
     const seedRows = [
@@ -316,33 +327,25 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     await drizzleOver(pg).insert(foldedTable).values(seedRows);
     await drizzleOver(pg).insert(perrowTable).values(seedRows);
 
-    // A faithful batch: 'repl' is deleted then re-inserted (re-create — its delete must run first),
-    // 'gone' is deleted, 'keep' gets two partial updates (merged), 'new' is inserted then updated.
+    // Every message carries the FULL projected row, as the engine's `row_to_json_cols` does — so the
+    // batch is uniform and the appliers may take their column list from any row of it. 'repl' is deleted
+    // then re-created, 'gone' is deleted, 'keep' and 'new' are each revised in place.
     const batch = [
       msg("repl", "delete", { id: "repl" }),
-      msg("keep", "update", { id: "keep", name: "k2" }),
+      msg("keep", "upsert", { id: "keep", name: "k2" }),
       msg("gone", "delete", { id: "gone" }),
-      msg("repl", "insert", { id: "repl", name: "fresh", score: 7 }),
-      msg("new", "insert", { id: "new", name: "n", score: 5 }),
-      msg("keep", "update", { id: "keep", score: 42 }),
-      msg("new", "update", { id: "new", name: "n2" }),
+      msg("repl", "upsert", { id: "repl", name: "fresh", score: 7 }),
+      msg("new", "upsert", { id: "new", name: "n", score: 5 }),
+      msg("keep", "upsert", { id: "keep", name: "k2", score: 42 }),
+      msg("new", "upsert", { id: "new", name: "n2", score: 5 }),
     ];
 
     // Per-row path (the oracle).
     for (const m of batch) {
-      if (m.headers.operation === "insert") {
-        await applyInsertsToTable({
-          pg,
-          target: makeApplyTarget(perrowTable, ["id"]),
-          messages: [m as never],
-          debug: false,
-        });
-      } else {
-        await applyMessageToTable({ pg, target: makeApplyTarget(perrowTable, ["id"]), message: m, debug: false });
-      }
+      await applyMessageToTable({ pg, target: makeApplyTarget(perrowTable, ["id"]), message: m, debug: false });
     }
 
-    // Folded bulk path: DELETE → INSERT → UPDATE.
+    // Folded bulk path: DELETE → UPSERT.
     const folded = foldChangeBatch(batch);
     await applyBulkDeletesToTable({
       pg,
@@ -350,16 +353,10 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       messages: folded.deletes,
       debug: false,
     });
-    await applyInsertsToTable({
+    await applyUpsertsToTable({
       pg,
       target: makeApplyTarget(foldedTable, ["id"]),
-      messages: folded.inserts,
-      debug: false,
-    });
-    await applyBulkUpdatesToTable({
-      pg,
-      target: makeApplyTarget(foldedTable, ["id"]),
-      messages: folded.updates,
+      messages: folded.upserts,
       debug: false,
     });
 
@@ -376,7 +373,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
 
   // ADR-0024 — the move-in apply path. A move-in is an existing row ENTERING the shape, so it must be
   // idempotent: applying it when the row is already present (another grant, or a resume re-delivery)
-  // must not raise the PK collision the plain-INSERT CDC path deliberately surfaces.
+  // must not raise the PK collision the plain-INSERT BACKFILL path still surfaces.
   describe("applyUpsertsToTable (move-in)", () => {
     it("inserts a fresh move-in row, then upserts an already-present row without colliding", async () => {
       await createTablesFromSchema(pg, { mi });
@@ -385,14 +382,14 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       await applyUpsertsToTable({
         pg,
         target: makeApplyTarget(mi, ["id"]),
-        messages: [msg("a1", "insert", { id: "a1", name: "A", score: 1 })],
+        messages: [msg("a1", "upsert", { id: "a1", name: "A", score: 1 })],
         debug: false,
       });
       // Re-delivery / second grant for the SAME pk with a refreshed value — must upsert, not throw.
       await applyUpsertsToTable({
         pg,
         target: makeApplyTarget(mi, ["id"]),
-        messages: [msg("a1", "insert", { id: "a1", name: "A-refreshed", score: 2 })],
+        messages: [msg("a1", "upsert", { id: "a1", name: "A-refreshed", score: 2 })],
         debug: false,
       });
 
@@ -403,7 +400,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     it("is a DO NOTHING no-op for a primary-key-only table", async () => {
       await createTablesFromSchema(pg, { miPk });
 
-      const moveIn = [msg("o/x", "insert", { org: "o", sku: "x" })];
+      const moveIn = [msg("o/x", "upsert", { org: "o", sku: "x" })];
       await applyUpsertsToTable({ pg, target: makeApplyTarget(miPk, ["org", "sku"]), messages: moveIn, debug: false });
       // Idempotent: a pk-only conflict has no columns to update, so DO NOTHING — applying twice is fine.
       await applyUpsertsToTable({ pg, target: makeApplyTarget(miPk, ["org", "sku"]), messages: moveIn, debug: false });
@@ -426,8 +423,8 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
         pg,
         target: makeApplyTarget(idn, ["id"]),
         messages: [
-          msg("100", "insert", { id: 100n, source_text: "alpha" }),
-          msg("200", "insert", { id: 200n, source_text: "beta" }),
+          msg("100", "upsert", { id: 100n, source_text: "alpha" }),
+          msg("200", "upsert", { id: 200n, source_text: "beta" }),
         ] as never,
         debug: false,
       });
@@ -453,13 +450,13 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       await applyMessageToTable({
         pg,
         target: makeApplyTarget(idn2, ["id"]),
-        message: msg("7", "insert", { id: 7n, source_text: "cdc" }),
+        message: msg("7", "upsert", { id: 7n, source_text: "cdc" }),
         debug: false,
       });
       await applyUpsertsToTable({
         pg,
         target: makeApplyTarget(idn2, ["id"]),
-        messages: [msg("9", "insert", { id: 9n, source_text: "movein" })],
+        messages: [msg("9", "upsert", { id: 9n, source_text: "movein" })],
         debug: false,
       });
 
@@ -486,8 +483,8 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
         pg,
         target,
         messages: [
-          msg("a", "insert", { id: "a", status: "todo" }),
-          msg("b", "insert", { id: "b", status: "done" }),
+          msg("a", "upsert", { id: "a", status: "todo" }),
+          msg("b", "upsert", { id: "b", status: "done" }),
         ] as never,
         debug: false,
       });
@@ -509,8 +506,8 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
         pg,
         target,
         messages: [
-          msg("a", "insert", { id: "a", status: "in_progress", meta: { seen: true } }),
-          msg("b", "insert", { id: "b", status: "backlog", meta: { seen: false } }),
+          msg("a", "upsert", { id: "a", status: "in_progress", meta: { seen: true } }),
+          msg("b", "upsert", { id: "b", status: "backlog", meta: { seen: false } }),
         ] as never,
         debug: false,
       });
@@ -523,11 +520,11 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     });
   });
 
-  // ADR-0045 — `applyMode: "upsert"`. A table that legitimately receives locally-derived provisional rows
-  // (e.g. written by a local trigger from another synced table) routes server CDC inserts through the
-  // idempotent upsert applier, so the authoritative server row overwrites the provisional local row
-  // instead of the plain-INSERT path failing the commit on the 23505 collision. Default `"insert"` keeps
-  // the strict collision-surfacing invariant: the same pre-existing-row scenario must reject.
+  // ADR-0045 — `applyMode: "upsert"`, now a BACKFILL policy only. Steady-state changes arrive as wire
+  // `upsert` and apply through `ON CONFLICT (pk) DO UPDATE` for every table, whatever this says. What it
+  // still selects is the INITIAL LOAD: the default assumes an empty table and takes the fast path (COPY /
+  // plain multi-row INSERT, neither of which can express ON CONFLICT), and `"upsert"` says this table can
+  // hold locally-derived provisional rows a backfill could land on, so it must be conflict-tolerant too.
   describe("applyMode: upsert (ADR-0045)", () => {
     // A synced cache table whose rows an app can also derive locally via a trigger — id is the pk, the
     // rest are the server-authoritative values a provisional local row starts out guessing.
@@ -542,12 +539,12 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       // A local trigger already inserted a provisional row for id "w1" with a guessed grade.
       await drizzleOver(pg).insert(provisional).values({ id: "w1", grade: 0, note: "provisional" });
 
-      // The server's authoritative CDC insert for the SAME pk — routed (applyMode: "upsert") through the
-      // idempotent applier the engine uses for the folded and initial-bulk insert paths.
+      // The server's authoritative row for the SAME pk, through the idempotent applier the engine uses
+      // for the folded steady-state path and for an `applyMode: "upsert"` table's backfill.
       await applyUpsertsToTable({
         pg,
         target: makeApplyTarget(provisional, ["id"], "upsert"),
-        messages: [msg("w1", "insert", { id: "w1", grade: 7, note: "server" })],
+        messages: [msg("w1", "upsert", { id: "w1", grade: 7, note: "server" })],
         debug: false,
       });
 
@@ -556,7 +553,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       expect(rows).toEqual([{ id: "w1", grade: 7, note: "server" }]);
     });
 
-    it("default insert applier (applyInsertsToTable) rejects the same pre-existing-row scenario", async () => {
+    it("default backfill applier (applyInsertsToTable) rejects the same pre-existing-row scenario", async () => {
       const strict = pgTable("provisional_strict", {
         id: text("id").primaryKey(),
         grade: integer("grade").notNull(),
@@ -565,20 +562,24 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       await createTablesFromSchema(pg, { strict });
       await drizzleOver(pg).insert(strict).values({ id: "w1", grade: 0, note: "provisional" });
 
-      // Default applyMode ("insert") is a plain INSERT with no conflict clause — a genuine PK collision
-      // must surface (ADR-0014), never be silently upserted.
+      // Default applyMode ("insert") is a plain INSERT with no conflict clause. This is the one place the
+      // collision still surfaces, and it is a real invariant rather than a leftover: the backfill fast path
+      // is only correct onto an EMPTY table, so a pre-existing row means its precondition was violated.
       // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects matchers return a real promise typed as void
       await expect(
         applyInsertsToTable({
           pg,
           target: makeApplyTarget(strict, ["id"]),
-          messages: [msg("w1", "insert", { id: "w1", grade: 7, note: "server" })] as never,
+          messages: [msg("w1", "upsert", { id: "w1", grade: 7, note: "server" })] as never,
           debug: false,
         }),
       ).rejects.toThrow();
     });
 
-    it("per-message CDC insert (applyMessageToTable) upserts under applyMode: upsert, rejects under insert", async () => {
+    // Formerly "…upserts under applyMode: upsert, rejects under insert". The rejection half is gone with
+    // the verb that produced it: a wire `upsert` asserts the row's value and claims nothing about whether
+    // it existed, so there is no message the per-row applier could treat as "this row must be new".
+    it("per-message apply upserts regardless of applyMode — the wire has no novelty-asserting verb", async () => {
       const perMsg = pgTable("provisional_permsg", {
         id: text("id").primaryKey(),
         grade: integer("grade").notNull(),
@@ -587,25 +588,22 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       await createTablesFromSchema(pg, { perMsg });
       await drizzleOver(pg).insert(perMsg).values({ id: "w1", grade: 0, note: "provisional" });
 
-      // applyMode: "upsert" — the per-message insert case applies idempotently.
       await applyMessageToTable({
         pg,
         target: makeApplyTarget(perMsg, ["id"], "upsert"),
-        message: msg("w1", "insert", { id: "w1", grade: 7, note: "server" }),
+        message: msg("w1", "upsert", { id: "w1", grade: 7, note: "server" }),
         debug: false,
       });
       expect(await drizzleOver(pg).select().from(perMsg)).toEqual([{ id: "w1", grade: 7, note: "server" }]);
 
-      // Default applyMode ("insert") — the same pre-existing pk must reject.
-      // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects matchers return a real promise typed as void
-      await expect(
-        applyMessageToTable({
-          pg,
-          target: makeApplyTarget(perMsg, ["id"]),
-          message: msg("w1", "insert", { id: "w1", grade: 9, note: "again" }),
-          debug: false,
-        }),
-      ).rejects.toThrow();
+      // The default applyMode reaches the same pre-existing row and refreshes it rather than colliding.
+      await applyMessageToTable({
+        pg,
+        target: makeApplyTarget(perMsg, ["id"]),
+        message: msg("w1", "upsert", { id: "w1", grade: 9, note: "again" }),
+        debug: false,
+      });
+      expect(await drizzleOver(pg).select().from(perMsg)).toEqual([{ id: "w1", grade: 9, note: "again" }]);
     });
 
     it("json upsert applier overwrites a colliding row and inserts new rows in the same batch", async () => {
@@ -623,9 +621,9 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
         pg,
         target: makeApplyTarget(jsonUpsert, ["id"], "upsert"),
         messages: [
-          msg("w1", "insert", { id: "w1", grade: 7, note: "server" }),
-          msg("w2", "insert", { id: "w2", grade: 3, note: "b" }),
-          msg("w3", "insert", { id: "w3", grade: 5, note: "c" }),
+          msg("w1", "upsert", { id: "w1", grade: 7, note: "server" }),
+          msg("w2", "upsert", { id: "w2", grade: 3, note: "b" }),
+          msg("w3", "upsert", { id: "w3", grade: 5, note: "c" }),
         ] as never,
         debug: false,
       });
@@ -645,7 +643,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
       ]);
       await createTablesFromSchema(pg, { jsonPk });
 
-      const batch = [msg("o/x", "insert", { org: "o", sku: "x" })] as never;
+      const batch = [msg("o/x", "upsert", { org: "o", sku: "x" })] as never;
       await applyUpsertsToTableWithJson({
         pg,
         target: makeApplyTarget(jsonPk, ["org", "sku"], "upsert"),

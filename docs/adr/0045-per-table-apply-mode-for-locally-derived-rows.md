@@ -1,6 +1,6 @@
 # Per-table `applyMode` for locally-derived rows
 
-Status: accepted (2026-07-17).
+Status: accepted (2026-07-17) — narrowed by [ADR-0058](0058-two-verb-wire-and-the-upsert-apply-path.md): `applyMode` no longer selects how steady-state changes apply (every table upserts, because the wire's only row verb is `upsert`). It survives as a BACKFILL policy — whether the initial load may assume an empty table.
 
 A synced cache table is server-authoritative, and ADR-0014 made the CDC `insert` path a plain INSERT on
 purpose: a genuine primary-key collision must SURFACE (degrade the engine loudly) rather than be silently

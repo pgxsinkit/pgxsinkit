@@ -4,10 +4,12 @@ import { getColumns } from "drizzle-orm/utils";
 
 import {
   attachSyncRegistrySchema,
+  buildOwnershipShapePredicate,
   buildSupabaseOwnerOrAdminNativePolicies,
   defineSyncTable,
   escapeSqlLiteral as escapeSqlString,
   quoteIdentifier as quoteIdent,
+  type Predicate,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
@@ -109,6 +111,20 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
       // `t` carries an index signature (makeColumns returns a Record), so ownerId is bracket-accessed;
       // buildSyntheticColumns always defines it, hence the non-null assertion.
       extras: (t) => buildSupabaseOwnerOrAdminNativePolicies({ role: authenticatedRole, ownerColumn: t["ownerId"]! }),
+      // The read-path mirror of that RLS policy, declared on the ENTRY rather than applied by a proxy.
+      // It used to be a `where` the perf-lab server spliced onto an Electric shape URL; the native path
+      // compiles the predicate from this declaration at subscribe time, so the filter travels with the
+      // registry and no server can forget to apply it.
+      shape: {
+        rowFilter: (t) => ({
+          customPredicate: (claims): Predicate | null => {
+            // Optional chaining, not `demoJwtHasRole`: the probe in `isClaimsDependentRowFilter` calls
+            // this with `{}` to classify the filter, and a required `app_metadata` would throw there.
+            if (claims.app_metadata?.roles?.includes("admin")) return null;
+            return buildOwnershipShapePredicate(t["ownerId"]!, claims.sub);
+          },
+        }),
+      },
       ...(syntheticSchema ? { schema: syntheticSchema } : {}),
       mode: "readwrite",
       conflictPolicy: "last-write-wins",

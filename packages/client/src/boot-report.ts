@@ -11,7 +11,8 @@
 import { syncDebug } from "./debug";
 
 /** Monotonic clock (ms) — `performance.now()` where available, else `Date.now()`. */
-const nowMs = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
+/** The monotonic clock every boot offset and duration in this module is measured on. */
+export const nowMs = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
 /**
  * A structured, versioned record of one client boot (ADR-0034). `reportVersion` is a contract number:

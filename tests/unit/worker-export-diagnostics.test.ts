@@ -17,8 +17,8 @@ import {
   defineSyncWorker,
   type SyncWorkerHost,
 } from "../../packages/client/src/index";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
-import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/tags";
 import { testStoreAcknowledgment } from "../../packages/client/src/testing";
 
 const todosRegistry = defineSyncRegistry({
@@ -46,7 +46,8 @@ async function makeHost(): Promise<{ host: SyncWorkerHost<TodosRegistry>; pg: PG
   const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry: todosRegistry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     // The precreated store is a prepopulated MEMORY PGlite (test only) — acknowledge it past the BYO
     // refusal the worker's `createSyncClient` boot would otherwise raise (ADR-0036).

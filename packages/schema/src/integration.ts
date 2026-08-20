@@ -1,16 +1,17 @@
-import { sql, type SQL } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { bigint, boolean, pgEnum, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
 import {
+  buildOwnershipShapePredicate,
   buildSupabaseMembershipNativePolicies,
   buildSupabaseOwnerOrAdminNativePolicies,
-  c,
   defineSyncRegistry,
   defineSyncTable,
-  DENY_ALL,
+  DENY_ALL_PREDICATE,
   clockMicrosecondsSql,
-  type SyncConfigInput,
+  p,
+  type Predicate,
   type TableSpecInput,
 } from "@pgxsinkit/contracts";
 
@@ -140,8 +141,8 @@ export const workItemStatusEnum = pgEnum("work_item_status", ["open", "resolved"
 
 // Container + membership are READONLY sync entries: a member syncs the workspaces they belong to and
 // their own membership rows (role + muted), so a client can render its membership context locally.
-// Read filtering is the proxy customWhere (Electric bypasses RLS on reads); there is no write path,
-// hence no RLS. The read filters are attached where the registry is assembled, like work_items.
+// Read filtering is the shape's `customPredicate` (the read path does not run RLS); there is no write
+// path, hence no RLS. The read filters are attached where the registry is assembled, like work_items.
 const workspacesSyncEntry = defineSyncTable({
   tableName: "workspaces",
   makeColumns: () => ({
@@ -155,10 +156,10 @@ const workspacesSyncEntry = defineSyncTable({
   mode: "readonly",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL => {
-        if (!claims.sub) return DENY_ALL;
+      customPredicate: (claims): Predicate => {
+        if (!claims.sub) return DENY_ALL_PREDICATE;
         const members = workspaceMembersSyncEntry.table;
-        return sql`${c(columns.id)} in (select ${c(members.workspaceId)} from ${members} where ${c(members.memberId)} = ${claims.sub})`;
+        return p.in(columns.id, p.subquery(members.workspaceId, p.eq(members.memberId, claims.sub)));
       },
     }),
   },
@@ -181,7 +182,7 @@ const workspaceMembersSyncEntry = defineSyncTable({
   mode: "readonly",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL => (claims.sub ? sql`${c(columns.memberId)} = ${claims.sub}` : DENY_ALL),
+      customPredicate: (claims): Predicate => buildOwnershipShapePredicate(columns.memberId, claims.sub),
     }),
   },
 });
@@ -228,13 +229,20 @@ const workItemsSyncEntry = defineSyncTable({
   conflictPolicy: "last-write-wins",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL => {
-        if (!claims.sub) return DENY_ALL;
+      customPredicate: (claims): Predicate => {
+        if (!claims.sub) return DENY_ALL_PREDICATE;
         const members = workspaceMembersSyncEntry.table;
         const sub = claims.sub;
-        const memberOf = sql`select ${c(members.workspaceId)} from ${members} where ${c(members.memberId)} = ${sub}`;
-        const managerOf = sql`select ${c(members.workspaceId)} from ${members} where ${c(members.memberId)} = ${sub} and ${c(members.role)}::text = 'manager'`;
-        return sql`${c(columns.workspaceId)} in (${memberOf}) and (${c(columns.hidden)} = false or ${c(columns.workspaceId)} in (${managerOf}))`;
+        const memberOf = p.subquery(members.workspaceId, p.eq(members.memberId, sub));
+        // The role enum compares without a `::text` cast — the native path carries a typed value.
+        const managerOf = p.subquery(
+          members.workspaceId,
+          p.and(p.eq(members.memberId, sub), p.eq(members.role, "manager")),
+        );
+        return p.and(
+          p.in(columns.workspaceId, memberOf),
+          p.or(p.eq(columns.hidden, false), p.in(columns.workspaceId, managerOf)),
+        );
       },
     }),
   },
@@ -259,25 +267,3 @@ export const membershipFanoutSyncRegistry = defineSyncRegistry({
 });
 
 // Client config: raw entry (the proxy owns filtering, like the demo split).
-export function buildMembershipFanoutSyncConfig(electricUrl: string): SyncConfigInput<{ work_items: TableSpecInput }> {
-  return {
-    electricUrl,
-    tables: {
-      work_items: workItemsSyncEntry,
-    },
-  };
-}
-
-// Client config that also syncs the readonly container + membership tables (the demo's full path).
-export function buildDemoMembershipSyncConfig(
-  electricUrl: string,
-): SyncConfigInput<{ workspaces: TableSpecInput; workspace_members: TableSpecInput; work_items: TableSpecInput }> {
-  return {
-    electricUrl,
-    tables: {
-      workspaces: workspacesSyncEntry,
-      workspace_members: workspaceMembersSyncEntry,
-      work_items: workItemsSyncEntry,
-    },
-  };
-}

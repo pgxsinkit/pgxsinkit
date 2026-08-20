@@ -7,17 +7,25 @@ import type { PGlite } from "@electric-sql/pglite";
 import { count, eq } from "drizzle-orm";
 
 import { createSyncClient } from "@pgxsinkit/client";
-import { authorsTable, buildDemoSyncConfig, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
+import { authorsTable, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
 
+import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createCircuitsTestPGlite } from "../support/circuits-pglite";
 import { drizzleOver } from "../support/drizzle";
-import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
-// Lazy on-demand activation, end-to-end against the REAL engine (postgres → Electric → PGlite).
+// Lazy on-demand activation, end-to-end against the REAL engine (postgres → Circuits → durable-streams
+// → PGlite).
 //
 // Why this exists: `client-lazy-facade.test.ts` fully MOCKS the sync engine (it only records that
 // `ensureGroupStarted` was called), and no integration test drives a lazy group actually streaming
@@ -31,53 +39,41 @@ import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
 const env = readIntegrationEnv();
 
-// Persistent local schema (today's path) and an ephemeral one where `todos`' whole cluster is TEMP.
-// generateLocalSchemaSql reads `entry.retention`/`subscription`, so a shallow override is enough.
-const persistentSchemaSql = generateLocalSchemaSql(demoSyncRegistry);
+// The lifecycle axes live on the REGISTRY, and only there (ADR-0021): `startCircuitsSync` derives its
+// groups from `entry.subscription`/`entry.retention`, so flipping `todos` is a registry override rather
+// than a per-run sync config. A shallow override is enough — `generateLocalSchemaSql` reads the same two
+// fields, so the DDL and the engine agree by construction.
+const lazyRegistry = {
+  ...demoSyncRegistry,
+  todos: { ...demoSyncRegistry.todos, subscription: "lazy" as const },
+};
+const persistentSchemaSql = generateLocalSchemaSql(lazyRegistry);
 const ephemeralRegistry = {
   ...demoSyncRegistry,
   todos: { ...demoSyncRegistry.todos, subscription: "lazy" as const, retention: "ephemeral" as const },
 };
 const ephemeralSchemaSql = generateLocalSchemaSql(ephemeralRegistry);
 
-// The demo sync config with `todos` flipped to `lazy` (Test 1) and additionally `ephemeral` (Test 2).
-// buildDemoSyncConfig returns the entry objects directly, so the engine reads these axes off them. The
-// apply ladder's types are no longer carried on the config: the engine resolves them from the registry
-// entry via `resolveApplyTarget` (ADR-0029 D1/D2), which also fixes `pg_temp` column resolution for the
-// bulk update/delete apply — so no `columnTypes` attachment is needed here.
-function lazyTodosConfig(ephemeral: boolean) {
-  const config = buildDemoSyncConfig(env.electricUrl);
-  return {
-    ...config,
-    tables: {
-      authors: { ...config.tables.authors },
-      todos: {
-        ...config.tables.todos,
-        subscription: "lazy" as const,
-        ...(ephemeral ? { retention: "ephemeral" as const } : {}),
-      },
-    },
-  };
-}
-
 async function createStore(schemaSql: string) {
-  const pg = await createSyncEngineTestPGlite();
+  const pg = await createCircuitsTestPGlite();
   await pg.exec(schemaSql);
   return pg;
 }
 
 async function startSync(
   localPg: Awaited<ReturnType<typeof createStore>>,
-  syncConfig: ReturnType<typeof lazyTodosConfig>,
+  urls: Pick<NativeSyncStack<unknown>, "controlPlaneUrl" | "streamBaseUrl">,
   registry: typeof demoSyncRegistry,
 ) {
   let markBootDone: (() => void) | null = null;
   const bootDone = new Promise<void>((resolve) => {
     markBootDone = resolve;
   });
-  const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
-    syncConfig,
+  const sync = await startCircuitsSync(localPg, {
     registry,
+    controlPlaneUrl: urls.controlPlaneUrl,
+    streamBaseUrl: urls.streamBaseUrl,
+    metadataSchema: DEFAULT_METADATA_SCHEMA,
     onInitialSync: () => {
       markBootDone?.();
       markBootDone = null;
@@ -86,8 +82,8 @@ async function startSync(
   return { sync, bootDone };
 }
 
-// Each test uses a DISTINCT author/todo id pair. The two tests share one Electric `todos` shape
-// (same table, no where), so reusing one id across tests would mean delete-then-reinsert of the same
+// Each test uses a DISTINCT author/todo id pair. The two tests share one `todos` shape
+// (same table, same predicate), so reusing one id across tests would mean delete-then-reinsert of the same
 // PK on that shape between tests — churn that races a fresh subscriber's snapshot. Distinct ids keep
 // each test hermetic.
 async function seedAuthorAndTodo(
@@ -136,11 +132,10 @@ const countTodo = async (pg: Awaited<ReturnType<typeof createStore>>, todoId: st
   (await drizzleOver(pg).select({ count: count() }).from(todosTable).where(eq(todosTable.id, todoId)))[0]?.count;
 
 describe("lazy on-demand activation streams rows (real engine)", () => {
+  // One HTTP front for the demo server, serving both the write route and the native control plane, so
+  // the full `createSyncClient` (which requires a `batchWriteUrl`) can boot against it.
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
-  // A Bun HTTP front for the demo server so the full `createSyncClient` (which requires a `batchWriteUrl`)
-  // can boot. The engine-restart repro drives reads only, so the write path is never exercised — but a
-  // real, reachable `batchWriteUrl` keeps the client construction faithful to production.
-  let writeServer!: ReturnType<typeof Bun.serve>;
   let batchWriteUrl!: string;
   const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
@@ -151,13 +146,18 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
     } finally {
       await provisioningServer.stop();
     }
-    server = createSyncServer({
-      registry: demoSyncRegistry,
-      db: serverDb.db,
-      resolveAuthClaims: () => ({ role: "authenticated", sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d" }),
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: demoSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: () => ({ role: "authenticated", sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d" }),
+          readPath,
+        }),
     });
-    writeServer = Bun.serve({ port: 0, fetch: (request) => server.fetch(request) });
-    batchWriteUrl = `http://127.0.0.1:${writeServer.port}/api/mutations`;
+    server = stack.server;
+    batchWriteUrl = `${stack.controlPlaneUrl}/api/mutations`;
   });
 
   beforeEach(async () => {
@@ -166,8 +166,7 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
   });
 
   afterAll(async () => {
-    await writeServer.stop(true);
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
@@ -176,7 +175,7 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
     const todoId = "01970000-0000-7000-8000-0000000b0001";
     await seedAuthorAndTodo(server, authorId, todoId);
     const localPg = await createStore(persistentSchemaSql);
-    const { sync, bootDone } = await startSync(localPg, lazyTodosConfig(false), demoSyncRegistry);
+    const { sync, bootDone } = await startSync(localPg, stack, lazyRegistry);
 
     try {
       await bootDone;
@@ -204,7 +203,7 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
     const todoId = "01970000-0000-7000-8000-0000000b0002";
     await seedAuthorAndTodo(server, authorId, todoId);
     const localPg = await createStore(ephemeralSchemaSql);
-    const { sync, bootDone } = await startSync(localPg, lazyTodosConfig(true), ephemeralRegistry);
+    const { sync, bootDone } = await startSync(localPg, stack, ephemeralRegistry);
 
     try {
       await bootDone;
@@ -256,7 +255,8 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
       // Boot A — fresh warm store. `todos` is lazy → dormant + empty until activated.
       const clientA = await createSyncClient({
         registry: ephemeralRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
         batchWriteUrl,
         storePath,
       });
@@ -278,7 +278,8 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
       // Boot B — cold worker (new engine), SAME warm store. The ephemeral TEMP cluster is re-created empty.
       const clientB = await createSyncClient({
         registry: ephemeralRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
         batchWriteUrl,
         storePath,
       });

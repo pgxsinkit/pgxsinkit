@@ -1,6 +1,14 @@
 import { getTableConfig, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import type { RowFilterSpec } from "./config";
+import {
+  isAndPredicate,
+  isInSubqueryPredicate,
+  isIsNullPredicate,
+  isNotPredicate,
+  isOrPredicate,
+  type Predicate,
+} from "./predicate";
 import type { SyncTableEntry, SyncTableRegistry } from "./registry";
 
 /**
@@ -9,10 +17,10 @@ import type { SyncTableEntry, SyncTableRegistry } from "./registry";
  *
  * This is the single source of "has the shape changed" — consumed as the local-DB
  * version key and as the basis of the registry-diff gate (ADR-0006). Function *bodies*
- * (`rowTransform`, `customWhere`) cannot be fingerprinted and are excluded — but their
+ * (`rowTransform`, `customPredicate`) cannot be fingerprinted and are excluded — but their
  * *presence* and the surrounding **static** filter structure (the projected columns)
  * participate. For the invisible *logic* itself, a consumer-bumped `rowFilter.revision` is
- * folded in: changing it is how a `customWhere` authorization change is forced to shift the
+ * folded in: changing it is how a `customPredicate` authorization change is forced to shift the
  * fingerprint (and so rebuild the cache + reset the subscription).
  */
 
@@ -39,8 +47,18 @@ export interface CanonicalTable {
   shape: {
     tableName: string;
     shapeKey: string;
-    electricTable: string | null;
+    physicalTable: string | null;
     rowFilter: CanonicalRowFilter | null;
+    /** Shared-tier scope columns, in declaration order — the order parameterizes the family. */
+    scope: string[] | null;
+    /**
+     * The native static predicate, canonicalized in full.
+     *
+     * Unlike `customPredicate`, this one is *visible*: an AST can be hashed, where a closure could only
+     * ever be fingerprinted by its presence. So the `revision` footgun does not apply here — editing
+     * a native `where` shifts the fingerprint by itself, and a consumer cannot forget to say so.
+     */
+    where: string | null;
   } | null;
   managedFields: Array<{ field: string; strategy: string; applyOn: string[] }>;
   /**
@@ -61,16 +79,16 @@ export interface CanonicalTable {
 
 /**
  * The static, fingerprint-able structure of a row filter. A changed projection shifts the
- * fingerprint, so the local store rebuilds and the diff gate flags it. `customWhere`'s body is
- * invisible — only its presence (`hasCustomWhere`) is recorded — so a `customWhere` *logic* change
+ * fingerprint, so the local store rebuilds and the diff gate flags it. `customPredicate`'s body is
+ * invisible — only its presence (`hasCustomPredicate`) is recorded — so a `customPredicate` *logic* change
  * is surfaced only by bumping `revision`.
  */
 export interface CanonicalRowFilter {
-  hasCustomWhere: boolean;
+  hasCustomPredicate: boolean;
   columns: string[] | null;
   /**
-   * The consumer-supplied version tag for the non-fingerprintable filter logic (the `customWhere`
-   * body). Changing it shifts the fingerprint, which is the only way a `customWhere` *logic* change
+   * The consumer-supplied version tag for the non-fingerprintable filter logic (the `customPredicate`
+   * body). Changing it shifts the fingerprint, which is the only way a `customPredicate` *logic* change
    * forces a cache + subscription reset.
    */
   revision: string | null;
@@ -108,12 +126,42 @@ function canonicalizeManagedFields(entry: SyncTableEntry): CanonicalTable["manag
     .sort((a, b) => asString(a.field, b.field));
 }
 
+/**
+ * A stable string form of a native predicate.
+ *
+ * Keys are emitted in a fixed order rather than serialized as authored, so two predicates that
+ * differ only in how their object literals were written fingerprint identically — otherwise a
+ * cosmetic edit would force every client to rebuild its local cache.
+ */
+function canonicalizePredicate(node: Predicate | undefined): string | null {
+  if (node === undefined) return null;
+  const render = (current: Predicate): unknown => {
+    if (isAndPredicate(current)) return { and: current.and.map(render) };
+    if (isOrPredicate(current)) return { or: current.or.map(render) };
+    if (isNotPredicate(current)) return { not: render(current.not) };
+    if (isInSubqueryPredicate(current)) {
+      return {
+        col: current.col,
+        in: {
+          table: current.in.table,
+          project: current.in.project,
+          where: current.in.where ? render(current.in.where) : null,
+        },
+        negated: current.negated === true,
+      };
+    }
+    if (isIsNullPredicate(current)) return { col: current.col, isNull: current.isNull };
+    return { col: current.col, op: current.op, value: current.value };
+  };
+  return JSON.stringify(render(node));
+}
+
 function canonicalizeRowFilter(filter: RowFilterSpec | undefined): CanonicalRowFilter | null {
   if (!filter) {
     return null;
   }
   return {
-    hasCustomWhere: filter.customWhere != null,
+    hasCustomPredicate: filter.customPredicate != null,
     columns: filter.columns ? [...filter.columns].sort(asString) : null,
     revision: filter.revision != null ? String(filter.revision) : null,
   };
@@ -133,8 +181,10 @@ function canonicalizeTable(key: string, entry: SyncTableEntry): CanonicalTable {
     ? {
         tableName: entry.shape.tableName,
         shapeKey: entry.shape.shapeKey,
-        electricTable: entry.shape.electricTable ?? null,
+        physicalTable: entry.shape.physicalTable ?? null,
         rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
+        scope: entry.shape.scope ? [...entry.shape.scope] : null,
+        where: canonicalizePredicate(entry.shape.where),
       }
     : null;
 
@@ -209,7 +259,7 @@ export function fingerprintRegistry(registry: SyncTableRegistry): string {
  *
  * What it pins is the data itself: two registries that present "the same" logical table to different
  * clients must agree here, or those clients are silently seeing different rows/columns. As with the
- * full registry fingerprint, the `customWhere` *body* is invisible — only its presence and the
+ * full registry fingerprint, the `customPredicate` *body* is invisible — only its presence and the
  * consumer-bumped {@link RowFilterSpec.revision} participate, so bump `revision` to force a divergence
  * a logic-only change would otherwise hide.
  */
@@ -222,8 +272,18 @@ export interface CanonicalReadContract {
   shape: {
     tableName: string;
     shapeKey: string;
-    electricTable: string | null;
+    physicalTable: string | null;
     rowFilter: CanonicalRowFilter | null;
+    /** Shared-tier scope columns, in declaration order — the order parameterizes the family. */
+    scope: string[] | null;
+    /**
+     * The native static predicate, canonicalized in full.
+     *
+     * Unlike `customPredicate`, this one is *visible*: an AST can be hashed, where a closure could only
+     * ever be fingerprinted by its presence. So the `revision` footgun does not apply here — editing
+     * a native `where` shifts the fingerprint by itself, and a consumer cannot forget to say so.
+     */
+    where: string | null;
   } | null;
 }
 
@@ -233,8 +293,10 @@ export function canonicalizeReadContract(entry: SyncTableEntry): CanonicalReadCo
     ? {
         tableName: entry.shape.tableName,
         shapeKey: entry.shape.shapeKey,
-        electricTable: entry.shape.electricTable ?? null,
+        physicalTable: entry.shape.physicalTable ?? null,
         rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
+        scope: entry.shape.scope ? [...entry.shape.scope] : null,
+        where: canonicalizePredicate(entry.shape.where),
       }
     : null;
 

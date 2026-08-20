@@ -16,7 +16,8 @@ const supabaseUrl = requireEnv(
   ["SUPABASE_URL", "SUPABASE_PUBLIC_URL"],
   "SUPABASE_URL or SUPABASE_PUBLIC_URL is required for board-api.",
 );
-const electricUrl = env["ELECTRIC_SHAPE_URL"] ?? env["ELECTRIC_URL"] ?? "http://electric:3000/v1/shape";
+const circuitsEngineUrl = env["CIRCUITS_ENGINE_URL"] ?? "http://engine:7010";
+const streamTokenSecret = env["STREAM_TOKEN_SECRET"] ?? "dev-stream-token-secret";
 const allowedOrigins = parseAllowedOrigins(env["BOARD_ALLOWED_ORIGINS"]);
 const port = Number(env["PORT"] ?? "3001");
 const idleTimeout = Number(env["FUNCS_IDLE_TIMEOUT_SEC"] ?? "120");
@@ -28,8 +29,9 @@ const fetch = createBoardBackendFetch({
     resolveAuthClaims,
     allowedOrigins,
   }),
-  boardSync: createBoardSyncHandler({
-    electricUrl,
+  boardSync: await createBoardSyncHandler({
+    circuitsEngineUrl,
+    streamTokenSecret,
     resolveAuthClaims,
     allowedOrigins,
   }),
@@ -37,7 +39,7 @@ const fetch = createBoardBackendFetch({
 
 console.log("Starting board-api...", {
   port,
-  electricUrl,
+  circuitsEngineUrl,
   allowedOrigins,
   databaseHost: redactDatabaseHost(databaseUrl),
 });

@@ -41,14 +41,14 @@ const scalars = pgTable("scalars", {
 // correctly. The json/copy tiers take their casts from the resolved target's model-derived column
 // types (ADR-0029 D2) — there is no `information_schema` round-trip to fall back to.
 
-interface InsertMsg {
-  headers: { operation: "insert" };
+interface UpsertMsg {
+  headers: { operation: "upsert" };
   key: string;
   value: Record<string, unknown>;
 }
 
-const insert = (key: string, value: Record<string, unknown>): InsertMsg => ({
-  headers: { operation: "insert" },
+const upsert = (key: string, value: Record<string, unknown>): UpsertMsg => ({
+  headers: { operation: "upsert" },
   key,
   value,
 });
@@ -71,8 +71,8 @@ describe("apply ladder", () => {
       pg,
       target: makeApplyTarget(rich, ["id"]),
       messages: [
-        insert("r1", { id: "r1", big: 100, nums: [1, 2, 3], doc: { a: 1 } }),
-        insert("r2", { id: "r2", big: 200, nums: [4, 5], doc: { b: 2 } }),
+        upsert("r1", { id: "r1", big: 100, nums: [1, 2, 3], doc: { a: 1 } }),
+        upsert("r2", { id: "r2", big: 200, nums: [4, 5], doc: { b: 2 } }),
       ],
       debug: false,
     });
@@ -99,7 +99,7 @@ describe("apply ladder", () => {
       applyMessagesToTableWithJson({
         pg,
         target: makeApplyTarget(rich, ["id"]),
-        messages: [insert("r1", { id: "r1", big: 999, nums: [9], doc: { a: 9 } })],
+        messages: [upsert("r1", { id: "r1", big: 999, nums: [9], doc: { a: 9 } })],
         debug: false,
       }),
     ).rejects.toThrow();
@@ -123,7 +123,7 @@ describe("apply ladder", () => {
     await applyMessagesToTableWithJson({
       pg,
       target: makeApplyTarget(camelRich, ["id"]),
-      messages: [insert("c1", { id: "c1", firstName: "Alice", tags: ["x", "y"] })],
+      messages: [upsert("c1", { id: "c1", firstName: "Alice", tags: ["x", "y"] })],
       debug: false,
     });
 
@@ -146,8 +146,8 @@ describe("apply ladder", () => {
       pg,
       target: makeApplyTarget(copyTarget, ["id"]),
       messages: [
-        insert("c1", { id: "c1", task: "task with, comma", done: false }),
-        insert("c2", { id: "c2", task: 'task with "quotes"', done: true }),
+        upsert("c1", { id: "c1", task: "task with, comma", done: false }),
+        upsert("c2", { id: "c2", task: 'task with "quotes"', done: true }),
       ],
       debug: false,
     });
@@ -165,7 +165,7 @@ describe("apply ladder", () => {
     await applyInsertsToTable({
       pg,
       target: makeApplyTarget(scalars, ["id"]),
-      messages: [insert("s1", { id: "s1", name: "first", count: 1 })],
+      messages: [upsert("s1", { id: "s1", name: "first", count: 1 })],
       debug: false,
     });
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
@@ -173,7 +173,7 @@ describe("apply ladder", () => {
       applyInsertsToTable({
         pg,
         target: makeApplyTarget(scalars, ["id"]),
-        messages: [insert("s1", { id: "s1", name: "second", count: 2 })],
+        messages: [upsert("s1", { id: "s1", name: "second", count: 2 })],
         debug: false,
       }),
     ).rejects.toThrow();

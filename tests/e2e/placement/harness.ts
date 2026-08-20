@@ -34,7 +34,13 @@ import {
 } from "../../../packages/client/src/worker/define-sync-worker";
 import { LEADER_LOCK_PREFIX } from "../../../packages/client/src/worker/election-coordinator";
 import { readControlEnvelope } from "../../../packages/client/src/worker/engine-control";
-import { PLACEMENT_ELECTRIC_URL, PLACEMENT_WRITE_URL, type PlacementRegistry, placementRegistry } from "./registry";
+import {
+  PLACEMENT_CONTROL_PLANE_URL,
+  PLACEMENT_STREAM_BASE_URL,
+  PLACEMENT_WRITE_URL,
+  type PlacementRegistry,
+  placementRegistry,
+} from "./registry";
 
 type Client = AttachedSyncClient<PlacementRegistry>;
 /** The worker INPUT shape `attachSyncClient` accepts (ADR-0049 D5): a FACTORY `() => SharedWorker` or a bare instance. */
@@ -801,7 +807,8 @@ const harness: PlacementHarness = {
     try {
       const client = await createSyncClient({
         registry: placementRegistry,
-        electricUrl: PLACEMENT_ELECTRIC_URL,
+        controlPlaneUrl: PLACEMENT_CONTROL_PLANE_URL,
+        streamBaseUrl: PLACEMENT_STREAM_BASE_URL,
         batchWriteUrl: PLACEMENT_WRITE_URL,
         storePath,
         syncEnabled: false,

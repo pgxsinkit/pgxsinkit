@@ -33,7 +33,8 @@ describe("BootReport — spare adoption (ADR-0034)", () => {
 
     const client = await createSyncClient({
       registry: registry as never,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...memoryStoreForTests(`boot-report-provision-${storeId}`),
       precreatedPglite: Promise.resolve(precreated as unknown as ClientPGlite),

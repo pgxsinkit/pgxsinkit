@@ -35,25 +35,28 @@ async function main() {
   const testFiles = assertTestFiles(process.argv.slice(2));
 
   const postgresPort = await allocatePort();
-  let electricPort = await allocatePort();
-
-  while (electricPort === postgresPort) {
-    electricPort = await allocatePort();
-  }
+  let dsPort = await allocatePort();
+  while (dsPort === postgresPort) dsPort = await allocatePort();
+  let enginePort = await allocatePort();
+  while (enginePort === postgresPort || enginePort === dsPort) enginePort = await allocatePort();
 
   const composeProject = buildProjectName();
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
-    PGXSINKIT_ELECTRIC_PORT: String(electricPort),
+    PGXSINKIT_DS_PORT: String(dsPort),
+    PGXSINKIT_CIRCUITS_ENGINE_PORT: String(enginePort),
   };
 
   const databaseUrl = composeCredentials.buildLocalDatabaseUrl("127.0.0.1", postgresPort);
-  const electricUrl = `http://127.0.0.1:${electricPort}/v1/shape`;
+  // Only the two CONTAINER endpoints are handed to the tests. There is no read URL to pass any more:
+  // the control plane and the edge are TypeScript, so each test file stands its own up in-process
+  // (`startNativeSyncStack`) and knows its own URLs (ADR-0055 decision 8).
   const testEnv: NodeJS.ProcessEnv = {
     ...composeEnv,
     DATABASE_URL: databaseUrl,
-    ELECTRIC_URL: electricUrl,
+    CIRCUITS_ENGINE_URL: `http://127.0.0.1:${enginePort}`,
+    DURABLE_STREAMS_URL: `http://127.0.0.1:${dsPort}`,
   };
 
   let composeStarted = false;
@@ -63,18 +66,27 @@ async function main() {
   console.log("[integration] Launching isolated containers", {
     composeProject,
     postgresPort,
-    electricPort,
+    dsPort,
+    enginePort,
   });
 
   try {
-    runCommand("podman", ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "up", "-d"], composeEnv);
+    // Marked BEFORE the up, not after: `up -d` creates containers and networks as it goes, so a
+    // failure part-way through still leaves them behind. Setting this afterwards meant every failed
+    // bring-up skipped its own teardown and leaked a whole project — which is exactly when cleanup
+    // matters most, since a failing lane is the one you re-run.
     composeStarted = true;
+    runCommand("podman", ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "up", "-d"], composeEnv);
 
     await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL", SERVICE_START_TIMEOUT_MS);
     await waitForPgReady(databaseUrl);
-    await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL", SERVICE_START_TIMEOUT_MS);
+    await waitForTcpService("127.0.0.1", dsPort, "durable-streams", SERVICE_START_TIMEOUT_MS);
 
+    // BEFORE the engine wait, deliberately: the engine exits when its declared tables are absent, and
+    // its compose `restart: unless-stopped` is the retry. Migrating first is what lets that retry succeed.
     runCommand("bun", ["run", "db:migrate"], testEnv);
+    await waitForTcpService("127.0.0.1", enginePort, "circuits-engine", SERVICE_START_TIMEOUT_MS);
+
     for (const testFile of testFiles) {
       runCommand("bun", ["test", "--bail", testFile], testEnv);
     }

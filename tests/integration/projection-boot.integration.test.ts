@@ -5,13 +5,20 @@ import { count } from "drizzle-orm";
 import { asReadonly, defineReadProjection, defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
 import { projectsSyncRegistry, projectsTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
 
+import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync";
 import { getSyncedLocalTable } from "../../packages/client/src/local-tables";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
+import { createCircuitsTestPGlite } from "../support/circuits-pglite";
 import { drizzleOver } from "../support/drizzle";
-import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
 // Class guard for the two entry-transform drops fixed in this change (asReadonly / defineReadProjection
 // dropping `makeColumns`). Since ADR-0029 P1 the client derives EVERY synced-table object from that
@@ -48,12 +55,15 @@ const PROJECT_ONE = "c1000000-0000-4000-8000-000000000001";
 const PROJECT_TWO = "c1000000-0000-4000-8000-000000000002";
 
 async function createLocalStore() {
-  const pg = await createSyncEngineTestPGlite();
+  const pg = await createCircuitsTestPGlite();
   await pg.exec(localSchemaSql);
   return pg;
 }
 
-async function startClient(pg: Awaited<ReturnType<typeof createLocalStore>>, proxyUrl: string) {
+async function startClient(
+  pg: Awaited<ReturnType<typeof createLocalStore>>,
+  urls: Pick<NativeSyncStack<unknown>, "controlPlaneUrl" | "streamBaseUrl">,
+) {
   let markDone: (() => void) | null = null;
   const initialSyncDone = new Promise<void>((resolve) => {
     markDone = resolve;
@@ -62,15 +72,11 @@ async function startClient(pg: Awaited<ReturnType<typeof createLocalStore>>, pro
   // The engine resolves an ApplyTarget for EVERY table in `memberProjectionRegistry` at subscribe time —
   // getSyncedLocalTable(registry, "projects") for the asReadonly entry and getSyncedLocalTable(registry,
   // "projects_summary") for the read projection. If either lost its column factory, this throws here.
-  const sync = await startConfiguredSync(pg as Parameters<typeof startConfiguredSync>[0], {
-    syncConfig: {
-      electricUrl: proxyUrl,
-      tables: {
-        projects: memberProjectionRegistry.projects,
-        projects_summary: memberProjectionRegistry.projects_summary,
-      },
-    },
+  const sync = await startCircuitsSync(pg, {
     registry: memberProjectionRegistry,
+    controlPlaneUrl: urls.controlPlaneUrl,
+    streamBaseUrl: urls.streamBaseUrl,
+    metadataSchema: DEFAULT_METADATA_SCHEMA,
     onInitialSync: () => {
       markDone?.();
       markDone = null;
@@ -81,25 +87,25 @@ async function startClient(pg: Awaited<ReturnType<typeof createLocalStore>>, pro
 }
 
 describe("member-style client boot over asReadonly + defineReadProjection entries (ADR-0029 P1 regression)", () => {
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof memberProjectionRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof memberProjectionRegistry>>;
-  let httpServer!: ReturnType<typeof Bun.serve>;
-  let proxyUrl!: string;
   const serverDb = createServerDb(memberProjectionRegistry, env.databaseUrl);
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // Read-only registry (both entries are readonly/projection), so no apply-function install is needed —
-    // this exercises the read/boot path only. The proxy serves the shape at shapeProxyPath; a fixed
-    // authenticated claim satisfies the auth adapter (neither entry declares a customWhere).
-    server = createSyncServer({
-      registry: memberProjectionRegistry,
-      db: serverDb.db,
-      resolveAuthClaims: (): JwtClaims => ({ role: "authenticated", sub: AUTH_SUB }),
-      electricUrl: env.electricUrl,
-      shapeProxyPath: "/v1/electric-proxy",
+    // this exercises the read/boot path only. A fixed authenticated claim satisfies the auth adapter
+    // (neither entry declares a customPredicate, so the subject only names the stream token's bearer).
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: memberProjectionRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: (): JwtClaims => ({ role: "authenticated", sub: AUTH_SUB }),
+          readPath,
+        }),
     });
-
-    httpServer = Bun.serve({ port: 0, fetch: server.fetch });
-    proxyUrl = `http://127.0.0.1:${httpServer.port}/v1/electric-proxy`;
+    server = stack.server;
   });
 
   beforeEach(async () => {
@@ -111,14 +117,13 @@ describe("member-style client boot over asReadonly + defineReadProjection entrie
   });
 
   afterAll(async () => {
-    await httpServer.stop(true);
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
   it("boots the engine and syncs rows for both the readonly and the projection entry", async () => {
     const pg = await createLocalStore();
-    const { sync, initialSyncDone } = await startClient(pg, proxyUrl);
+    const { sync, initialSyncDone } = await startClient(pg, stack);
 
     try {
       // Reaching here already proves the boot survived resolveApplyTarget → getSyncedLocalTable for both

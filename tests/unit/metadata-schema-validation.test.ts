@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { assertValidMetadataSchema, DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/tags";
+import { assertValidMetadataSchema, DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 
 // The metadata schema name is interpolated RAW into GUC identifier positions (`SET <schema>.syncing`)
 // and the `CREATE SCHEMA <schema>` DDL — positions where a double-quoted identifier is not accepted the

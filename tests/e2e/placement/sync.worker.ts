@@ -12,11 +12,17 @@
 // both. `syncEnabled: false` keeps every boot offline — the lanes prove placement, not convergence.
 
 import { defineSyncWorker } from "../../../packages/client/src/index";
-import { PLACEMENT_ELECTRIC_URL, PLACEMENT_WRITE_URL, placementRegistry } from "./registry";
+import {
+  PLACEMENT_CONTROL_PLANE_URL,
+  PLACEMENT_STREAM_BASE_URL,
+  PLACEMENT_WRITE_URL,
+  placementRegistry,
+} from "./registry";
 
 defineSyncWorker({
   registry: placementRegistry,
-  electricUrl: PLACEMENT_ELECTRIC_URL,
+  controlPlaneUrl: PLACEMENT_CONTROL_PLANE_URL,
+  streamBaseUrl: PLACEMENT_STREAM_BASE_URL,
   batchWriteUrl: PLACEMENT_WRITE_URL,
   syncEnabled: false,
   // ADR-0049 capability-driven engine placement is THE behavior — the SharedWorker runs the UNCONDITIONAL probe

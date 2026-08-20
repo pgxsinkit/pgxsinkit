@@ -41,7 +41,8 @@ type TodosRegistry = typeof todosRegistry;
 
 // Dead network URLs (`127.0.0.1:1` — nothing listens): if a restore boot ever started a shape stream it would
 // fetch here and the error would surface on `status`/degrade — the negative signal the "boots offline" assertions rely on.
-const DEAD_ELECTRIC = "http://127.0.0.1:1/v1/electric-proxy";
+const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
+const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const DEAD_WRITE = "http://127.0.0.1:1/api/mutations";
 
 const SYNCED_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -109,7 +110,8 @@ async function makeMemoryClient(
 ): Promise<SyncClient<TodosRegistry>> {
   const client = await createSyncClient<TodosRegistry>({
     registry: todosRegistry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     syncEnabled: false,
     ...memoryStoreForTests(storePath),
@@ -266,7 +268,8 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     // stream's fetch attempt observable: the INVERSE of the offline tests' "never fetches" negative signal.
     const restored = await createSyncClient<TodosRegistry>({
       registry: todosRegistry,
-      electricUrl: DEAD_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: DEAD_WRITE,
       ...memoryStoreForTests("restore-dst-clean-online"),
       restoreFrom: backup,
@@ -307,7 +310,8 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     await mkdir("tmp/agents", { recursive: true });
     const first = await createSyncClient<TodosRegistry>({
       registry: todosRegistry,
-      electricUrl: DEAD_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: DEAD_WRITE,
       syncEnabled: false,
       storePath,
@@ -322,7 +326,8 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     await expect(
       createSyncClient<TodosRegistry>({
         registry: todosRegistry,
-        electricUrl: DEAD_ELECTRIC,
+        controlPlaneUrl: DEAD_CONTROL_PLANE,
+        streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: DEAD_WRITE,
         storePath,
         restoreFrom: new Blob([new Uint8Array([1, 2, 3])]),
@@ -340,7 +345,8 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     await expect(
       createSyncClient<TodosRegistry>({
         registry: todosRegistry,
-        electricUrl: DEAD_ELECTRIC,
+        controlPlaneUrl: DEAD_CONTROL_PLANE,
+        streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: DEAD_WRITE,
         storePath,
         hasOpfsSyncAccess: true,
@@ -357,7 +363,8 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     await expect(
       createSyncClient<TodosRegistry>({
         registry: todosRegistry,
-        electricUrl: DEAD_ELECTRIC,
+        controlPlaneUrl: DEAD_CONTROL_PLANE,
+        streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: DEAD_WRITE,
         storePath,
         hasOpfsSyncAccess: true,
@@ -374,7 +381,8 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     await expect(
       createSyncClient<TodosRegistry>({
         registry: todosRegistry,
-        electricUrl: DEAD_ELECTRIC,
+        controlPlaneUrl: DEAD_CONTROL_PLANE,
+        streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: DEAD_WRITE,
         restoreFrom: backup,
         pgliteInstance: fakeInstance,
@@ -384,7 +392,8 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     await expect(
       createSyncClient<TodosRegistry>({
         registry: todosRegistry,
-        electricUrl: DEAD_ELECTRIC,
+        controlPlaneUrl: DEAD_CONTROL_PLANE,
+        streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: DEAD_WRITE,
         restoreFrom: backup,
         precreatedPglite: Promise.resolve(fakeInstance),

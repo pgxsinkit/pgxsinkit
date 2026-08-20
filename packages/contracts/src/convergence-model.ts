@@ -169,11 +169,11 @@ export const CONVERGENCE_EVENTS = [
       "journal row → acked, server_updated_at_us stamped; entity shows acked_unobserved until the echo catches up",
   },
   {
-    event: "Electric insert/update observed",
+    event: "synced upsert observed",
     effect: "synced row applied; the barrier predicate runs; resolved entities clear overlay + acked journal",
   },
   {
-    event: "Electric delete observed",
+    event: "synced delete observed",
     effect: "resolved by synced-row absence (deletes carry no Server version — ADR-0010)",
   },
   { event: "resolution", effect: "clear overlay/journal only through the shared barrier predicate (decision 4)" },

@@ -1,7 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,118 +14,49 @@ import {
   type MutationDetail,
 } from "@pgxsinkit/client";
 import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
-import { createSyncServer, proxyElectricShapeRequest } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import { createSyncServer } from "@pgxsinkit/server";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { fixedTestClaims } from "../support/claims";
 import { drizzleOver } from "../support/drizzle";
 
 const env = readIntegrationEnv();
-let writeApiPort!: number;
 
 async function createPersistentDataDir() {
   return mkdtemp(join(tmpdir(), "pgxsinkit-client-contract-"));
 }
 
-async function startFetchServer(
-  handler: (request: Request) => Promise<Response>,
-  port: number,
-): Promise<{ server: Server; port: number }> {
-  const server = createServer((incoming, outgoing) => {
-    void handleIncomingRequest(incoming, outgoing, handler, port);
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-
-  if (!address || typeof address === "string") {
-    throw new Error("Expected fetch server to bind to a TCP port");
-  }
-
-  return {
-    server,
-    port: (address as AddressInfo).port,
-  };
-}
-
-async function handleIncomingRequest(
-  incoming: IncomingMessage,
-  outgoing: ServerResponse,
-  handler: (request: Request) => Promise<Response>,
-  port: number,
-) {
-  const body = await readRequestBody(incoming);
-  const request = new Request(`http://127.0.0.1:${port}${incoming.url ?? "/"}`, {
-    method: incoming.method,
-    headers: incoming.headers as Bun.HeadersInit,
-    body: shouldSendBody(incoming.method) ? body : undefined,
-    duplex: "half",
-  } as RequestInit & { duplex: "half" });
-
-  const response = await handler(request);
-
-  outgoing.statusCode = response.status;
-  response.headers.forEach((value, key) => {
-    outgoing.setHeader(key, value);
-  });
-
-  const responseBody = Buffer.from(await response.arrayBuffer());
-  outgoing.end(responseBody);
-}
-
-async function readRequestBody(request: Parameters<Server["emit"]>[1]) {
-  const chunks: Buffer[] = [];
-
-  for await (const chunk of request) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-
-  return chunks.length > 0 ? Buffer.concat(chunks) : undefined;
-}
-
-function shouldSendBody(method: string | undefined) {
-  return method !== undefined && method !== "GET" && method !== "HEAD";
-}
-
-async function stopHttpServer(server: Server | undefined) {
-  if (!server || !server.listening) {
-    return;
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve();
-    });
-  });
-}
-
 describe("client facade contract", () => {
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>;
-  let httpServer!: Server;
+  let batchWriteUrl!: string;
   const serverDb = createServerDb(projectsSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
-    server = createSyncServer({
-      registry: projectsSyncRegistry,
-      db: serverDb.db,
+    // One origin serves both halves here: `createSyncServer` mounts /sync/v1/* beside /api/mutations,
+    // which is the default deployment shape. Only the EDGE is separate, because in production it is
+    // the CDN-frontable surface and the control plane is not.
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: projectsSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: fixedTestClaims,
+          readPath,
+        }),
     });
+    server = stack.server;
+    batchWriteUrl = `${stack.controlPlaneUrl}/api/mutations`;
 
     await installPlpgsqlBatchFunction(server.drizzle, projectsSyncRegistry);
-    const startedFetchServer = await startFetchServer(server.fetch, 0);
-    httpServer = startedFetchServer.server;
-    writeApiPort = startedFetchServer.port;
   });
 
   beforeEach(async () => {
@@ -135,8 +64,7 @@ describe("client facade contract", () => {
   });
 
   afterAll(async () => {
-    await stopHttpServer(httpServer);
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
@@ -153,8 +81,9 @@ describe("client facade contract", () => {
 
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
       });
 
@@ -193,8 +122,9 @@ describe("client facade contract", () => {
 
       const firstClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
       });
 
@@ -212,8 +142,9 @@ describe("client facade contract", () => {
 
       const secondClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
       });
 
@@ -239,8 +170,9 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
       });
 
@@ -286,8 +218,9 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
       });
 
@@ -353,8 +286,9 @@ describe("client facade contract", () => {
 
       const firstClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
       });
 
@@ -379,8 +313,9 @@ describe("client facade contract", () => {
       const events: string[] = [];
       const secondClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
         onSchemaChange: (event) => {
           events.push(event.status);
@@ -411,8 +346,9 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
         // An interval trigger drives convergence deterministically (no DOM events needed).
         autoSync: createIntervalConvergenceTrigger(200),
@@ -445,15 +381,18 @@ describe("client facade contract", () => {
 
   it("read path recovers from token expiry: surfaces auth-needed, then resumes on re-auth without a restart (ADR-0013)", async () => {
     const storePath = await createPersistentDataDir();
-    // A real Electric session gated behind an auth proxy: only a valid Bearer token is forwarded
-    // to Electric; anything else 401s — exactly the JWT-expiry case a boot-time token freeze wedged.
+    // A real session gated behind an auth proxy: only a valid Bearer token reaches the control
+    // plane; anything else 401s — exactly the JWT-expiry case a boot-time token freeze wedged.
     const VALID_TOKEN = "valid-session-token";
-    let currentToken = "expired-token"; // invalid at boot → the read path 401s
+    let currentToken = "expired-token"; // invalid at boot → subscribe 401s
 
-    // A real auth-gating proxy in front of Electric, on Bun.serve (the path proven by the
-    // membership/asymmetric integration tests) so the streaming shape response is relayed faithfully.
+    // The gate sits in front of the CONTROL PLANE, and only there, because that is the only surface
+    // the subject's own JWT ever reaches on the native path (ADR-0055): stream reads carry the
+    // minted stream token instead, and the edge checks that. So an expired session presents as a
+    // failing subscribe, not as a failing read.
     const authGate = Bun.serve({
       port: 0,
+      idleTimeout: 0,
       fetch: (request) => {
         if (request.headers.get("Authorization") !== `Bearer ${VALID_TOKEN}`) {
           return new Response(JSON.stringify({ message: "token expired" }), {
@@ -461,15 +400,10 @@ describe("client facade contract", () => {
             headers: { "content-type": "application/json" },
           });
         }
-        // Authenticated → forward the shape request to the real Electric (projects has no row filter).
-        return proxyElectricShapeRequest(
-          request,
-          { role: "authenticated", sub: "01965156-5884-7a0b-a24e-31b5c9be00a1" },
-          { registry: projectsSyncRegistry, electricUrl: env.electricUrl },
-        );
+        return server.fetch(request);
       },
     });
-    const proxyUrl = `http://127.0.0.1:${authGate.port}/v1/electric-proxy`;
+    const gatedControlPlaneUrl = `http://127.0.0.1:${authGate.port}`;
 
     try {
       await server.drizzle.insert(projectsTable).values({
@@ -480,8 +414,9 @@ describe("client facade contract", () => {
       const phases: string[] = [];
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: proxyUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: gatedControlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
         // Per-request token (ADR-0013): consulted fresh on every shape fetch and every retry.
         getAuthToken: async () => currentToken,
@@ -489,14 +424,14 @@ describe("client facade contract", () => {
       });
 
       try {
-        // While the token is dead the read stream 401s every retry; it must NOT stop — it surfaces a
+        // While the token is dead subscribe 401s every retry; it must NOT stop — it surfaces a
         // distinct auth-needed status (prompt re-login) and keeps retrying forever with backoff.
         await waitFor(async () => {
           expect(client.status.phase).toBe("auth-needed");
         });
 
         // Re-authenticate: the next per-request Authorization header resolves the valid token, the
-        // proxy forwards, and sync resumes — with NO client restart and no manual re-subscribe.
+        // gate forwards, and sync resumes — with NO client restart and no manual re-subscribe.
         currentToken = VALID_TOKEN;
 
         await waitFor(async () => {
@@ -524,8 +459,9 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
       });
 
@@ -569,8 +505,9 @@ describe("client facade contract", () => {
       // foreground server round-trip, so no Electric timing is involved and the assertions are exact.
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
         syncEnabled: false,
       });
@@ -622,8 +559,9 @@ describe("client facade contract", () => {
       const rejected: MutationDetail[] = [];
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
-        batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
+        controlPlaneUrl: stack.controlPlaneUrl,
+        streamBaseUrl: stack.streamBaseUrl,
+        batchWriteUrl,
         storePath,
         syncEnabled: false,
         onReject: (details) => {

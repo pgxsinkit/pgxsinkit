@@ -850,7 +850,7 @@ ${aclSql}
  * (ADR-0018). It is a hash of the exact generated DDL body, so it shifts on any registry-shape
  * change AND on any change to how the applier emits SQL (e.g. a @pgxsinkit/server upgrade) — the
  * two drift classes a bare signature check cannot see. It does NOT depend on TS-side row-filter /
- * customWhere logic, which never enters the apply function (that shapes the read proxy, not writes).
+ * customPredicate logic, which never enters the apply function (that shapes reads, not writes).
  */
 export function expectedApplyFingerprint(
   registry: SyncTableRegistry,
