@@ -306,6 +306,8 @@ export { OUTBOX_SEQUENCE, OUTBOX_TABLE } from "./schema";
 // through the edge; everything above the transport stays ours.
 export { createTokenRecovery, readShapeStream, STREAM_START } from "./circuits/stream-source";
 export type { ShapeStreamSubscription, StreamBatch, StreamSourceOptions } from "./circuits/stream-source";
+export { createShapeGroup } from "./circuits/shape-group";
+export type { GroupShapeSpec, ShapeGroup, ShapeGroupBatch, ShapeGroupOptions } from "./circuits/shape-group";
 export {
   type AllMutationsView,
   getAllMutationsView,
