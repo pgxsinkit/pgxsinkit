@@ -185,6 +185,10 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
       },
     }));
     await mock.module("../../packages/client/src/schema", () => ({
+      // The native read path's subscription metadata store (ADR-0055) reaches this module directly
+      // rather than through the mocked `./sync` barrel, so the partial mock must carry the DDL
+      // renderer, or the whole client fails to load.
+      renderCreateTableSql: () => [],
       generateLocalSchemaSql: () => "SELECT 1;",
       generateDurableLocalSchemaSql: () => "SELECT 1;",
       generateEphemeralLocalSchemaSql: () => "",
