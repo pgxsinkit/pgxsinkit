@@ -2,10 +2,12 @@ import { describe, expect, it } from "bun:test";
 
 import { boolean, text, uuid } from "drizzle-orm/pg-core";
 
-import { openSubscriptionSession, type RefusedStream } from "@pgxsinkit/client";
+import { createBarrierReader, openSubscriptionSession, type RefusedStream } from "@pgxsinkit/client";
 import { defineSyncRegistry, defineSyncTable, p } from "@pgxsinkit/contracts";
 import {
   authorizeStreamRead,
+  barrierPath,
+  createBarrierHandler,
   createRefreshHandler,
   createSubscribeHandler,
   importStreamTokenKey,
@@ -68,12 +70,14 @@ function routeToHandlers(entitlements: EntitlementSet): typeof fetch {
   const shared = { registry, engine: stubEngine(), entitlements, key };
   const subscribe = createSubscribeHandler({ ...shared, resolveAuthClaims: () => ({ sub: "person-a" }) });
   const refresh = createRefreshHandler({ ...shared, resolveAuthClaims: () => ({ sub: "person-a" }) });
+  const barrier = createBarrierHandler({ engine: shared.engine, resolveAuthClaims: () => ({ sub: "person-a" }) });
 
   return (async (url: string, init: RequestInit) => {
     const request = new Request(url, init);
     const path = new URL(url).pathname;
     if (path === subscribePath) return subscribe(request);
     if (path === refreshPath) return refresh(request);
+    if (path === barrierPath) return barrier(request);
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
 }
@@ -175,4 +179,15 @@ describe("subscription session", () => {
     await Promise.all([session.refresh(), session.refresh(), session.refresh(), session.refresh()]);
     expect(refreshCalls).toBe(1);
   });
+});
+
+// ADR-0056 decision 4: clients never address the engine's control plane, which is unauthenticated by
+// design and not client-reachable. The barrier reaches them proxied, on an authenticated route.
+it("reads the convergence barrier through the control plane", async () => {
+  const read = createBarrierReader({
+    controlPlaneUrl: "http://api",
+    fetch: routeToHandlers(mutableEntitlements(new Set([OFF_A]))),
+  });
+
+  expect(await read()).toEqual({ sync: true, pendingFlips: 0 });
 });

@@ -248,3 +248,42 @@ export function createRefreshHandler(
 /** The control-plane paths the native read path mounts. */
 export const subscribePath = "/sync/v1/subscribe";
 export const refreshPath = "/sync/v1/refresh";
+
+/**
+ * The convergence-barrier route (ADR-0056 decision 4).
+ *
+ * Proxied rather than exposed: the engine's control plane is unauthenticated by design and is not
+ * client-reachable, so surfacing the barrier on our own authenticated endpoint costs nothing and
+ * keeps the trust boundary intact.
+ *
+ * `maxAgeSeconds` may cache the answer briefly. Staleness is safe in exactly one direction — it
+ * moves the barrier backwards, so a stale reading can only DELAY an alignment, never satisfy one
+ * falsely.
+ */
+export function createBarrierHandler(options: {
+  engine: CircuitsEngineClient;
+  resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
+  maxAgeSeconds?: number;
+}) {
+  let cached: { at: number; body: { sync: boolean; pendingFlips: number } } | null = null;
+  const maxAge = options.maxAgeSeconds ?? 0;
+
+  return async function handleBarrier(request: Request): Promise<Response> {
+    const claims = options.resolveAuthClaims ? await options.resolveAuthClaims(request) : null;
+    // The barrier says nothing about any subject's data — only whether the engine has finished
+    // propagating — but it is still engine internals, so it needs a caller we recognise.
+    if (options.resolveAuthClaims && claims === null) {
+      return Response.json({ error: "unauthenticated" }, { status: 401 });
+    }
+
+    const now = Date.now() / 1000;
+    if (cached && now - cached.at < maxAge) return Response.json(cached.body);
+
+    const state = await options.engine.replicationState();
+    const body = { sync: state.sync, pendingFlips: state.pendingFlips };
+    cached = { at: now, body };
+    return Response.json(body);
+  };
+}
+
+export const barrierPath = "/sync/v1/barrier";

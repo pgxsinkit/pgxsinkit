@@ -493,6 +493,8 @@ export type {
 export { authorizeStreamRead, createStreamGate, readStreamToken } from "./circuits/edge";
 export type { EntitlementSet, GateDecision, StreamGateOptions } from "./circuits/edge";
 export {
+  barrierPath,
+  createBarrierHandler,
   createRefreshHandler,
   createSubscribeHandler,
   refreshPath,

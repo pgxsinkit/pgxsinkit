@@ -161,3 +161,27 @@ export async function openSubscriptionSession(
     },
   };
 }
+
+/**
+ * Read the engine's convergence barrier through the control plane — the `readBarrier` the sync
+ * engine takes.
+ *
+ * An unreachable barrier throws, and the engine treats that as a DELAY rather than a failure
+ * (ADR-0056): the group stays on the pre-alignment gate and tries again on the next delivery. So a
+ * control plane that is briefly down costs boot latency, not correctness.
+ */
+export function createBarrierReader(
+  options: Pick<SubscriptionClientOptions, "controlPlaneUrl" | "authHeaders" | "fetch">,
+): () => Promise<{ sync: boolean; pendingFlips: number }> {
+  const doFetch = options.fetch ?? fetch;
+  const controlPlane = options.controlPlaneUrl.replace(/\/+$/, "");
+
+  return async () => {
+    const headers = new Headers(await (options.authHeaders?.() ?? {}));
+    const response = await doFetch(`${controlPlane}/sync/v1/barrier`, { headers });
+    if (!response.ok) {
+      throw new Error(`[pgxsinkit] barrier → ${response.status}`);
+    }
+    return (await response.json()) as { sync: boolean; pendingFlips: number };
+  };
+}
