@@ -16,7 +16,7 @@ import {
   applyUpsertsToTable,
   applyUpsertsToTableWithJson,
 } from "../../packages/client/src/sync/apply";
-import { foldChangeBatch } from "../../packages/client/src/sync/shape-inbox";
+import { foldChangeBatch } from "../../packages/client/src/sync/fold";
 import { createTablesFromSchema, drizzleOver, makeApplyTarget } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
 

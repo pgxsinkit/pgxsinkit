@@ -14,7 +14,7 @@ import {
   applyUpsertsToTableWithJson,
 } from "../sync/apply";
 import { drizzleOverPg } from "../sync/drizzle-executor";
-import { foldChangeBatch } from "../sync/shape-inbox";
+import { foldChangeBatch } from "../sync/fold";
 import { getSubscriptionState, updateSubscriptionState } from "../sync/subscription-state";
 import type { InitialInsertMethod } from "../sync/types";
 import { envelopeToChange, type ChangeLike } from "./envelope-to-change";

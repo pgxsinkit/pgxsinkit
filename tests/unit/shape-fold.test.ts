@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { foldChangeBatch } from "../../packages/client/src/sync/shape-inbox";
+import { foldChangeBatch } from "../../packages/client/src/sync/fold";
 
 // Derive the change-message type from the fold signature so the test does not depend on
 // `@electric-sql/client` resolving from the tests/ scope (it is hoisted under packages/client).

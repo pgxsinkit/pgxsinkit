@@ -23,6 +23,7 @@ import {
   applyUpsertsToTableWithJson,
 } from "./apply";
 import { drizzleOverPg } from "./drizzle-executor";
+import { foldChangeBatch } from "./fold";
 import { assertValidMetadataSchema, DEFAULT_METADATA_SCHEMA } from "./metadata-tables";
 import {
   NUDGE_HOLD_GRACE_MS,
@@ -31,7 +32,7 @@ import {
   NUDGE_ROUND_WAIT_MS,
   withNudgeBuster,
 } from "./nudge";
-import { foldChangeBatch, ShapeInbox } from "./shape-inbox";
+import { ShapeInbox } from "./shape-inbox";
 import {
   deleteSubscriptionState,
   getSubscriptionState,
