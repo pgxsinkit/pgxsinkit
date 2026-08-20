@@ -1,6 +1,6 @@
 # A Circuits-native sync core, with a shared read tier
 
-Status: proposed (2026-08-20)
+Status: accepted (2026-08-20)
 
 ## Context
 
@@ -169,6 +169,26 @@ executes.
     reconciliation, boot staging. This is ADR-0009's precedent applied to a new substrate: keep the
     transport, internalize the semantics. `@electric-circuits/client` is **not** adopted; it carries
     `@tanstack/db` and a store model that would displace the PGlite apply path.
+
+    Two properties of that package were **verified before adopting it**, because both are
+    correctness requirements rather than conveniences:
+
+    - Its backoff retries **only** 429 and 503 (`HTTP_RETRY_STATUS_CODES`); every other 4xx is
+      thrown immediately. So a 403 on an expired stream token surfaces to us and can trigger a
+      re-mint, instead of being swallowed into a retry loop that would present first as a stall and
+      then as data loss.
+    - `HeadersRecord` accepts async thunks (`string | (() => MaybePromise<string>)`), resolved
+      afresh on every request. That is exactly the read-path token refresh ADR-0013 requires —
+      re-resolved per request, never frozen at boot.
+
+    The package deliberately mirrors `@electric-sql/client`'s API (its own comment says so for
+    dynamic params) and exports the same `BackoffDefaults` symbol pgxsinkit already imports, so this
+    is closer to substitution than rewrite. Its write half (`idempotent-producer.ts`, ~849 lines) is
+    unused — we write to Postgres — and tree-shakes away; `SequenceGapError` and `StaleEpochError`
+    are producer-side and do not apply to us.
+
+    What it does **not** provide is multi-stream coordination: there is no `MultiShapeStream`
+    equivalent, so the K-shapes-into-one-table layer of decision 4 is ours to build either way.
 
 ## What happens to every existing capability
 
