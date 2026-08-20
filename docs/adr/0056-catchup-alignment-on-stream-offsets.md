@@ -73,15 +73,34 @@ while a computed revocation was still undelivered, which is silent staleness on 
    surfaces the barrier on its own authenticated endpoint and MAY cache it briefly; a stale barrier
    can only *delay* alignment, never falsely satisfy it, because staleness moves it backwards.
 
-5. **ADR-0031's invariants are preserved verbatim, because they were never about LSNs.**
-   - The floor only ever RAISES the commit watermark and never narrows ingestion. A change below an
-     aligned floor arriving late is still ingested, buffered, and committed on the next up-to-date.
-   - Alignment is one-time and monotonic per registration/reset generation; once laid, live frontiers
-     climb past the floor and the slowest-shape min-watermark gate governs the steady state.
-   - A `must-refetch` reset re-arms alignment but RETAINS the shape's floor.
+5. **The steady-state commit gate is "every shape currently reports up-to-date". ADR-0031's commit
+   floor is deleted, not ported.**
 
-   Only the *type* of the aligned quantity changes: from a global LSN to a per-stream offset plus a
-   single group-level barrier observation.
+   *(Amended 2026-08-20. This decision originally read "the slowest-shape min-watermark gate governs
+   the steady state", carrying ADR-0031's language onto a quantity where `min` is undefined — the
+   same operation this ADR's own alternatives call ill-defined. Implementation forced the question;
+   what follows is the resolution.)*
+
+   The gate is a predicate over reports, not a comparison of positions: commit when **every** shape's
+   most recent response asserted `stream-up-to-date`. That is decision 2's happens-before argument
+   applied per commit rather than once — every stream has drained everything the server held, so no
+   cross-shape transaction can be half-applied. It needs no comparable positions, which is what makes
+   it expressible at all here.
+
+   The floor then has no job left. It existed for one reason: Electric's catch-up responses are
+   CDN-cacheable and the `up-to-date` control message rides **inside the cached body**, so a quiet
+   shape could assert a watermark captured before a busy sibling's writes, holding delivered changes
+   until that shape's first live poll. Durable-streams carries up-to-date as a **response header on a
+   live request**, and a long-poll timeout returns `204` with it set — so a quiet shape re-asserts
+   freshness every poll cycle, and the stale-watermark failure mode cannot occur. A floor here would
+   compensate for nothing.
+
+   ADR-0031's remaining invariants survive because they were never about LSNs:
+   - Ingestion is never narrowed by the gate. A batch below a shape's applied offset is dropped as
+     already-applied; nothing else drops anything.
+   - Alignment is one-time and monotonic per registration/reset generation.
+   - A `must-refetch` reset re-arms alignment. It rewinds that shape to the start of its stream,
+     which is coherent because the offset frontier and the resume token are the same value.
 
 6. **Diagnostics keep the ADR-0031 shape.** The alignment transition emits one debug-rail line
    carrying the barrier that satisfied it — including `pendingFlips` — so an alignment that fired on
@@ -100,6 +119,10 @@ while a computed revocation was still undelivered, which is silent staleness on 
   state.
 - **One extra round trip per alignment**, off the cacheable read path. It is once per
   registration/reset generation, not per poll.
+- **The commit floor, the live-tail sibling nudge, and the snapshot-acceptance flag all disappear.**
+  Each existed to compensate for something Electric-shaped — a stale cached watermark, a parked poll
+  that would not refresh one, and LSN-0 snapshot rows racing an advanced frontier. None has a native
+  counterpart, so all three are deletions rather than ports.
 - **Alignment can now fail closed on a real condition.** `pendingFlips > 0` is a genuine
   not-yet-converged signal that Electric's wire format could not express at all, so this design can
   detect a case its predecessor silently mis-committed.
