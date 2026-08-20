@@ -1,0 +1,134 @@
+# Catch-up alignment on stream offsets and the engine convergence barrier
+
+Status: accepted (2026-08-20)
+
+## Context
+
+ADR-0031 gave the `ShapeInbox` a one-time, monotonic **commit floor** so a busy shape's delivered
+changes commit at catch-up completion rather than waiting on a quiet sibling's first live poll. It
+rests on three things Electric's wire format supplied:
+
+- a **per-change global position** (`headers.lsn`) driving the dedup frontier;
+- a **per-shape reported watermark** on `up-to-date` (`global_last_seen_lsn`);
+- the fact that those watermarks are **globally comparable**, so the group's floor can be the `max`
+  over them.
+
+ADR-0055 moves the read path to Circuits' native API and durable-streams. That path supplies none of
+the three.
+
+**No usable per-change global position.** `headers.lsn` is documented absent on backfill rows, and
+is *structurally* absent on feed-retraction deletes: `delete_envelopes()` (`engine/output.rs`) takes
+a `txid` and has no `lsn` parameter to pass. Those retractions are precisely the membership move-out
+deletes ADR-0023 depends on, so the gap lands on the security-relevant message rather than an
+incidental one. `headers.txid` is present more widely, but xid assignment order is not commit order,
+so it is not a valid commit ordering.
+
+**No control message at all.** A native shape stream carries only change envelopes. `up-to-date` is
+the transport-level HTTP header `stream-up-to-date` — a boolean with no position — so
+`global_last_seen_lsn` has no native counterpart and nowhere in-band to ride.
+
+**Offsets are per-stream.** `stream-next-offset` indexes *that stream's* space. `max` across shapes
+is undefined on them, and that operation is the whole of ADR-0031's alignment step.
+
+Two further facts bound the design. Writes are atomic **within** a stream and never across streams —
+`Ds::append` posts a batch as one JSON array which the server flattens one level — so cross-shape
+tearing is real, not theoretical. And the engine already publishes its own convergence predicate at
+`GET /replication/lsn`, whose comment states it outright: *"Convergence barrier = sync caught up +
+per-table offsets at tail + pendingFlips == 0."*
+
+`pendingFlips` counts deferred subquery flip batches not yet propagated — membership move-out and
+move-in. It is the load-bearing term: a barrier expressed as an LSN alone would report convergence
+while a computed revocation was still undelivered, which is silent staleness on the revocation path
+— the failure signature that hid a real revocation-loss defect during the Circuits evaluation.
+
+## Decision
+
+1. **The dedup frontier becomes the durable-streams offset, per stream.**
+   Dedup asks only "have I already applied this, from this stream?", which needs per-stream
+   monotonicity and nothing more. `stream-next-offset` is per-stream monotonic and is *already* the
+   resume token persisted in sync metadata, so the frontier and the resume position become one value
+   instead of two that can disagree. This is strictly better than the LSN frontier it replaces, and
+   it makes the absence of `headers.lsn` on backfill and retraction rows irrelevant to dedup.
+
+2. **Commit alignment uses the engine's convergence barrier, fetched out of band, once per
+   alignment.** When every shape in the group has reported `stream-up-to-date` at least once, the
+   client reads the barrier and — if it is satisfied — commits everything it is currently holding.
+
+   The argument is a happens-before, not a position comparison: each stream reported drained, and
+   the barrier read *after* those reports asserts the engine has nothing further to propagate. What
+   the client holds at that moment is therefore complete with respect to the barrier. Nothing
+   arriving afterwards is affected, because alignment is one-time.
+
+3. **The predicate is the whole barrier, never a bare LSN.** Alignment requires `sync` caught up
+   **and** per-table offsets at tail **and** `pendingFlips == 0`. Dropping the last term reintroduces
+   exactly the undelivered-revocation window described above. The `pendingFlips` term is read
+   **engine-global** — conservative by construction: another table's pending flips can *delay* a
+   group's alignment, never falsely satisfy it. Per-shape granularity would be an upstream engine
+   change and is deferred until measured boot latency shows the delay matters. If the barrier is
+   unsatisfied the client does not align; it retries with backoff and stays on the pre-alignment
+   gate, which is correct if slower.
+
+4. **The barrier is read through the control plane, not the engine.** Clients never address the
+   engine's control-plane HTTP directly — it is unauthenticated and not exposed. The control plane
+   surfaces the barrier on its own authenticated endpoint and MAY cache it briefly; a stale barrier
+   can only *delay* alignment, never falsely satisfy it, because staleness moves it backwards.
+
+5. **ADR-0031's invariants are preserved verbatim, because they were never about LSNs.**
+   - The floor only ever RAISES the commit watermark and never narrows ingestion. A change below an
+     aligned floor arriving late is still ingested, buffered, and committed on the next up-to-date.
+   - Alignment is one-time and monotonic per registration/reset generation; once laid, live frontiers
+     climb past the floor and the slowest-shape min-watermark gate governs the steady state.
+   - A `must-refetch` reset re-arms alignment but RETAINS the shape's floor.
+
+   Only the *type* of the aligned quantity changes: from a global LSN to a per-stream offset plus a
+   single group-level barrier observation.
+
+6. **Diagnostics keep the ADR-0031 shape.** The alignment transition emits one debug-rail line
+   carrying the barrier that satisfied it — including `pendingFlips` — so an alignment that fired on
+   a half-converged engine is one grep away rather than an inference from stale data.
+
+## Consequences
+
+- **The frontier and the resume token unify.** One persisted value per shape instead of an LSN
+  frontier plus an offset, removing a class of disagreement between them.
+- **`headers.lsn` stops being load-bearing.** Its absence on backfill and retraction rows, which
+  would otherwise have forced engine-core changes to the dataflow emission path, becomes a
+  non-issue. Nothing in this design reads it.
+- **Boot acquires a control-plane dependency.** Alignment cannot complete while the barrier endpoint
+  is unreachable. Failure is a delay, not a correctness break — the client stays on the
+  pre-alignment gate — but staged boot (ADR-0041) must treat it as a degraded rather than failed
+  state.
+- **One extra round trip per alignment**, off the cacheable read path. It is once per
+  registration/reset generation, not per poll.
+- **Alignment can now fail closed on a real condition.** `pendingFlips > 0` is a genuine
+  not-yet-converged signal that Electric's wire format could not express at all, so this design can
+  detect a case its predecessor silently mis-committed.
+
+## Alternatives considered
+
+- **Stamp the LSN throughout the engine and add a heartbeat envelope carrying the replication head.**
+  The in-band answer, and the eventual right one to take upstream: it restores Electric's semantics
+  natively with no control-plane call. Rejected for now because it is engine-core work in the
+  incremental-maintenance emission path, where a mistake corrupts ordering silently rather than
+  failing loudly, and because the correct LSN for a *deferred* flip emission — propagated out of
+  commit order by design — is a genuine open question we would be answering on upstream's behalf.
+- **Group by `txid` and commit a transaction once every shape has passed it.** Rejected: backfill
+  rows carry no `txid` either; "which shapes could carry transaction T" is not answerable from the
+  stream; and xid wraparound would need handling. It also replaces a one-time alignment with
+  permanent per-transaction bookkeeping.
+- **Per-shape independent commit, abandoning cross-shape alignment.** Rejected: it discards the
+  guarantee ADR-0031 decision 3 exists to protect. Writes are atomic within a stream but never
+  across streams, so a reader could observe one half of a cross-shape transaction.
+- **Aligning on `max` over per-stream offsets.** Rejected as ill-defined, not merely imprecise:
+  offsets from different streams are incomparable values, so the comparison has no meaning even when
+  it produces a number.
+- **Reading the barrier from the engine directly.** Rejected: the engine's control plane is
+  unauthenticated by design and is not client-reachable. Proxying it through the control plane costs
+  nothing and keeps the trust boundary intact.
+
+## Open questions
+
+1. **How long may the control plane cache the barrier?** Staleness is safe in one direction only;
+   the bound should come from measured alignment latency rather than being picked.
+2. **Does `must-refetch` have a native equivalent?** ADR-0031 re-arms alignment on reset. The
+   trigger's native form — stream closed, epoch change, 409 — is not yet pinned down.
