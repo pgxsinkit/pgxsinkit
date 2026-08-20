@@ -301,6 +301,11 @@ export {
 // The Outbox's object NAMES are public contract like its shape (ADR-0053 decision 2) — inspection
 // surfaces (the board's schema map, debug tooling) need them without re-deriving DDL internals.
 export { OUTBOX_SEQUENCE, OUTBOX_TABLE } from "./schema";
+
+// The Circuits-native read transport (ADR-0055 decision 10). Reads terminate on durable-streams
+// through the edge; everything above the transport stays ours.
+export { createTokenRecovery, readShapeStream, STREAM_START } from "./circuits/stream-source";
+export type { ShapeStreamSubscription, StreamBatch, StreamSourceOptions } from "./circuits/stream-source";
 export {
   type AllMutationsView,
   getAllMutationsView,

@@ -13,6 +13,7 @@ export * from "./predicate";
 export * from "./projection";
 export * from "./runtime";
 export * from "./sql-defaults";
+export * from "./stream-envelope";
 export * from "./sql-identifier";
 export * from "./sql-role-guard";
 export * from "./supabase-rls";
