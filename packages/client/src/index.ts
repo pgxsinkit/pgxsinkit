@@ -308,6 +308,8 @@ export { createTokenRecovery, readShapeStream, STREAM_START } from "./circuits/s
 export type { ShapeStreamSubscription, StreamBatch, StreamSourceOptions } from "./circuits/stream-source";
 export { createShapeGroup } from "./circuits/shape-group";
 export type { GroupShapeSpec, ShapeGroup, ShapeGroupBatch, ShapeGroupOptions } from "./circuits/shape-group";
+export { envelopeToChange, primaryKeyFromStreamKey } from "./circuits/envelope-to-change";
+export type { ChangeLike } from "./circuits/envelope-to-change";
 export {
   type AllMutationsView,
   getAllMutationsView,
