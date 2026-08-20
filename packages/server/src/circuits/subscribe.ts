@@ -3,7 +3,7 @@ import type { JwtClaims, PredicateValue, SyncTableRegistry } from "@pgxsinkit/co
 import { compileShapeRequest } from "./compile";
 import type { EntitlementSet } from "./edge";
 import type { CircuitsEngineClient } from "./engine-client";
-import { DEFAULT_STREAM_TOKEN_TTL_SECONDS, mintStreamToken, type StreamGrant } from "./stream-token";
+import { DEFAULT_STREAM_TOKEN_TTL_SECONDS, mintStreamToken, verifyStreamToken, type StreamGrant } from "./stream-token";
 
 /** One shape a client wants to follow. */
 export interface SubscriptionRequest {
@@ -150,3 +150,101 @@ export function createSubscribeHandler(
     return Response.json(result);
   };
 }
+
+export interface RefreshResult {
+  token?: string;
+  expiresAt?: number;
+  /** Grants that survived the live entitlement re-check. */
+  granted: StreamGrant[];
+  /** Grants the subject no longer holds. The client truncates each scope and unsubscribes. */
+  revoked: DeniedSubscription[];
+}
+
+/**
+ * Re-mint a stream token from an existing one (ADR-0055 decision 6).
+ *
+ * The expiring token IS the request: its signature proves this control plane issued those grants, so
+ * nothing has to be stored server-side to know what the subject held, and the edge stays stateless on
+ * both halves. Expiry is deliberately not enforced here — a token is presented for re-mint precisely
+ * because it is at or past its TTL — but the signature is, and **entitlement is re-checked live for
+ * every grant**. That re-check is what makes the TTL a revocation bound rather than a formality: a
+ * subject who lost a scope gets a token without it, and the edge stops serving that stream as soon as
+ * the old one lapses.
+ *
+ * No engine call. The shapes already exist and the client already holds their paths; re-creating them
+ * would bump a refcount nothing ever releases.
+ */
+export async function refreshStreamToken(
+  options: Pick<SubscribeOptions, "entitlements" | "key" | "ttlSeconds">,
+  claims: JwtClaims | null,
+  expiringToken: string,
+  now: number,
+): Promise<RefreshResult> {
+  const subject = typeof claims?.sub === "string" ? claims.sub : null;
+  const verified = await verifyStreamToken(options.key, expiringToken, now, { allowExpired: true });
+  if (!verified.ok || subject === null) return { granted: [], revoked: [] };
+
+  // The token names its subject; a token presented by anyone else is not a re-mint, it is a theft.
+  if (verified.claims.sub !== subject) return { granted: [], revoked: [] };
+
+  const granted: StreamGrant[] = [];
+  const revoked: DeniedSubscription[] = [];
+
+  for (const grant of verified.claims.grants) {
+    const scoped = grant.scope !== undefined ? { scope: grant.scope } : {};
+    if (grant.scope === undefined) {
+      // Private tier: the shape's predicate already fused this subject in, so holding a signed grant
+      // for it IS the entitlement. Nothing further to check.
+      granted.push(grant);
+      continue;
+    }
+    if (!options.entitlements.ready) {
+      revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: "entitlements unavailable" });
+      continue;
+    }
+    if (!options.entitlements.permits(subject, grant.shapeKey, grant.scope)) {
+      revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: "not entitled to this scope" });
+      continue;
+    }
+    granted.push(grant);
+  }
+
+  if (granted.length === 0) return { granted, revoked };
+
+  const ttlSeconds = options.ttlSeconds ?? DEFAULT_STREAM_TOKEN_TTL_SECONDS;
+  const token = await mintStreamToken(options.key, { sub: subject, grants: granted, ttlSeconds, now });
+  return { token, expiresAt: now + ttlSeconds, granted, revoked };
+}
+
+/**
+ * The re-mint route. Takes the expiring token, answers with a fresh one and the list of scopes that
+ * did not survive the entitlement re-check.
+ *
+ * 200 even when everything was revoked, for the same reason subscribe answers 200 on a full denial:
+ * the per-grant reasons ARE the response, and a client that lost one scope of K needs to know which.
+ */
+export function createRefreshHandler(
+  options: Pick<SubscribeOptions, "entitlements" | "key" | "ttlSeconds"> & {
+    resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
+  },
+) {
+  return async function handleRefresh(request: Request): Promise<Response> {
+    let body: { token?: string };
+    try {
+      body = (await request.json()) as { token?: string };
+    } catch {
+      return Response.json({ error: "malformed body" }, { status: 400 });
+    }
+    if (typeof body.token !== "string") {
+      return Response.json({ error: "token must be a string" }, { status: 400 });
+    }
+
+    const claims = options.resolveAuthClaims ? await options.resolveAuthClaims(request) : null;
+    const result = await refreshStreamToken(options, claims, body.token, Math.floor(Date.now() / 1000));
+    return Response.json(result);
+  };
+}
+
+/** The control-plane paths the native read path mounts. */
+export const subscribePath = "/sync/v1/subscribe";
+export const refreshPath = "/sync/v1/refresh";

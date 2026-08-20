@@ -485,16 +485,25 @@ export {
 } from "./circuits/stream-token";
 export type {
   MintStreamTokenOptions,
+  VerifyStreamTokenOptions,
   StreamGrant,
   StreamTokenClaims,
   StreamTokenVerification,
 } from "./circuits/stream-token";
 export { authorizeStreamRead, createStreamGate, readStreamToken } from "./circuits/edge";
 export type { EntitlementSet, GateDecision, StreamGateOptions } from "./circuits/edge";
-export { createSubscribeHandler, subscribeToShapes } from "./circuits/subscribe";
+export {
+  createRefreshHandler,
+  createSubscribeHandler,
+  refreshPath,
+  refreshStreamToken,
+  subscribePath,
+  subscribeToShapes,
+} from "./circuits/subscribe";
 export type {
   DeniedSubscription,
   GrantedSubscription,
+  RefreshResult,
   SubscribeOptions,
   SubscribeResult,
   SubscriptionRequest,

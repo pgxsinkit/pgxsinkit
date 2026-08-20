@@ -312,6 +312,14 @@ export { envelopeToChange, primaryKeyFromStreamKey } from "./circuits/envelope-t
 export type { ChangeLike } from "./circuits/envelope-to-change";
 export { StreamInbox } from "./circuits/stream-inbox";
 export type { BufferedBatch } from "./circuits/stream-inbox";
+export { openSubscriptionSession } from "./circuits/subscription-client";
+export type {
+  GrantedStream,
+  RefusedStream,
+  ShapeSubscriptionRequest,
+  SubscriptionClientOptions,
+  SubscriptionSession,
+} from "./circuits/subscription-client";
 export { syncCircuitsShapes } from "./circuits/sync-engine";
 export type {
   CircuitsShapeSpec,

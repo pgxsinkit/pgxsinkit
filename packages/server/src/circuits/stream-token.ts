@@ -118,7 +118,24 @@ export async function mintStreamToken(key: CryptoKey, options: MintStreamTokenOp
  * Signature verification goes through `crypto.subtle.verify`, so the comparison is the platform's
  * constant-time one rather than a string equality that leaks by how early it diverges.
  */
-export async function verifyStreamToken(key: CryptoKey, token: string, now: number): Promise<StreamTokenVerification> {
+export interface VerifyStreamTokenOptions {
+  /**
+   * Accept a token past its expiry, for the **re-mint path only**.
+   *
+   * The signature is still verified, so the grants are still ones this control plane issued — that is
+   * the whole claim being relied on. Expiry bounds how long a grant keeps *working*, and the re-mint
+   * re-checks entitlement live before re-signing, so an expired token buys its bearer nothing on its
+   * own. Never set this on a read.
+   */
+  allowExpired?: boolean;
+}
+
+export async function verifyStreamToken(
+  key: CryptoKey,
+  token: string,
+  now: number,
+  options?: VerifyStreamTokenOptions,
+): Promise<StreamTokenVerification> {
   const parts = token.split(".");
   if (parts.length !== 3) return { ok: false, reason: "malformed token" };
   const [header, body, signature] = parts as [string, string, string];
@@ -146,7 +163,7 @@ export async function verifyStreamToken(key: CryptoKey, token: string, now: numb
   if (typeof claims.sub !== "string" || !Array.isArray(claims.grants) || typeof claims.exp !== "number") {
     return { ok: false, reason: "malformed payload" };
   }
-  if (claims.exp <= now) return { ok: false, reason: "expired" };
+  if (claims.exp <= now && options?.allowExpired !== true) return { ok: false, reason: "expired" };
 
   return { ok: true, claims };
 }
