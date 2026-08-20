@@ -136,10 +136,28 @@ executes.
 
 4. **Sharing moves multiplicity from the server to the client. That is the trade, stated plainly.**
    A subject in K scopes holds K subscriptions feeding one local table; the multiplicity does not
-   vanish, it relocates. The apply path gains shape→table K:1 routing, per-scope deletion, and a
-   boot gate across K shapes — the last being ADR-0031's existing *group* catch-up alignment with a
-   larger group. Local DDL, the `_synced`/`_overlay`/read-model triple, and per-query cost are
-   unchanged.
+   vanish, it relocates. Local DDL, the `_synced`/`_overlay`/read-model triple, and per-query cost
+   are unchanged.
+
+   **The apply path already admits K:1 — measured, not assumed.** Shapes are keyed by shape name with
+   a `tableKey` pointer, and every per-shape structure in the engine is keyed by shape already
+   (`shapeInsertMethod`, `useInsert`, `truncateNeeded`, `messagesToCommit`, `moveInsToCommit`). No
+   routing layer is missing. The apparent barrier — `"Already syncing shape for table"` in
+   `packages/client/src/sync/index.ts` — is not a general one-shape-per-table rule: it guards exactly
+   one thing, the default must-refetch `TRUNCATE ${target.table}`, which would wipe a co-tenant's
+   rows. Its own filter already exempts a shape that brings `onMustRefetch`, and a test pins three
+   shapes into one table under that exemption.
+
+   The shared tier satisfies it **by construction**: the scope key derives the scoped clear
+   (`DELETE … WHERE scope_col = $k`) with no bookkeeping column and no refcounting. So the client
+   cost of this decision is a clear function, not a routing layer.
+
+   Two provisos. The tag store was the remaining table-keyed structure — `clearShapeTags` keys by
+   the synced table, so a must-refetch on one shape would have dropped a co-tenant's tags —
+   which makes [ADR-0057](0057-retiring-tagged-subquery-reconciliation.md)'s retirement a
+   *precondition* for K:1, not merely an adjacent simplification. And the boot gate across K shapes
+   already exists: `isUpToDate` gates `onInitialSync` group-wide, which is ADR-0031's existing group
+   alignment over a larger group, exactly as anticipated.
 
 5. **Redaction is pre-computed in Postgres, and its specification is declarative.**
    `RedactionSpec` — a predicate over the row (and where required, claims), a null-out column set,

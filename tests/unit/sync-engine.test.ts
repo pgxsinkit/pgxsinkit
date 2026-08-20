@@ -765,6 +765,42 @@ describe("sync engine", () => {
     shape2.unsubscribe();
   });
 
+  // The per-table lock above is NOT a general "one shape per table" rule — it guards exactly one
+  // thing, the default must-refetch `TRUNCATE ${target.table}`, which would wipe a co-tenant shape's
+  // rows. A shape bringing its own SCOPED clear is already exempt (the lock's own filter), so K
+  // shapes into one table is admitted today.
+  //
+  // That is what ADR-0055's shared tier needs, and it satisfies the exemption by construction: the
+  // scope key derives the scoped clear (`DELETE … WHERE scope_col = $k`) with no bookkeeping column
+  // and no refcounting. Pinned here because it is the difference between decision 4 costing a new
+  // routing layer and costing a clear function.
+  it("admits several shapes into one table when each brings a scoped clear", async () => {
+    MockMultiShapeStream.mockImplementation(() => ({
+      subscribe: mock(),
+      unsubscribeAll: mock(),
+      isUpToDate: true,
+      shapes: { shape: { subscribe: mock(), unsubscribeAll: mock() } },
+    }));
+
+    const scopedClear = async () => {};
+    const scopeShape = (scope: string) =>
+      pg.electric.syncShapeToTable({
+        shape: { url: "http://localhost:3000/v1/shape", params: { table: `foo_${scope}` } },
+        registry,
+        tableKey: "foo",
+        shapeKey: null,
+        onMustRefetch: scopedClear,
+      });
+
+    const first = await scopeShape("off-1");
+    const second = await scopeShape("off-2");
+    const third = await scopeShape("off-3");
+
+    for (const subscription of [first, second, third]) {
+      subscription.unsubscribe();
+    }
+  });
+
   it("handles an update message with no columns to update", async () => {
     let feedMessage: (message: MultiShapeMessage) => Promise<void> = async (_) => {};
     MockMultiShapeStream.mockImplementation(() => ({
