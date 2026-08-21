@@ -1,16 +1,23 @@
-# Runbook: run the board demo on managed BaaS (Supabase Cloud + Electric Cloud)
+# Runbook: run the board demo on managed BaaS (Supabase Cloud)
+
+> **Status: retired 2026-08-21 — the read path this describes no longer exists.** Electric Cloud is
+> being shut down, and the classic Electric read path the board used against it was removed with
+> ADR-0055 (the Circuits engine + durable-streams are now the sync core). What survives here is the
+> write path, auth, migrations, seeding and the Event lane drain — all still accurate. The read half is
+> marked below with what a revival would need. A return on the native read path is possible once an
+> engine + durable-streams are hosted somewhere; nothing is committed to.
 
 ## When to use
 
-When you want the `apps/board` demo running against **real managed services** — a Supabase Cloud
-project + an Electric Cloud source — instead of the local compose stack (`bun run infra:up`). The same
-board code runs unchanged; you supply your own credentials. Design: board
+When you want the `apps/board` demo's **write** path running against a real managed Supabase Cloud
+project instead of the local compose stack (`bun run infra:up`). The same board code runs unchanged;
+you supply your own credentials. Design: board
 [ADR-0008](../../apps/board/docs/adr/0008-board-on-managed-baas.md) (and
 [ADR-0007](../../apps/board/docs/adr/0007-supabase-asymmetric-auth-only.md) for the auth model).
 
 This is **not** a one-command "push". It is: do the one-time manual setup below, fill in
-`board.cloud.env`, then `bun run board:cloud:deploy`. Two steps are manual console actions that
-cannot be scripted from this repo (project creation and the Electric source).
+`board.cloud.env`, then `bun run board:cloud:deploy`. Project creation is a manual console action that
+cannot be scripted from this repo.
 
 > The local stack proves everything the cloud path depends on (`bun run test:integration:board`, 8/8 —
 > new-API-key flow, ES256/JWKS verification, the read/write topology). What only your cloud accounts can
@@ -20,7 +27,7 @@ cannot be scripted from this repo (project creation and the Electric source).
 
 - The **Supabase CLI** installed.
 - A personal access token created while signed into the board demo's Supabase account.
-- A **Supabase Cloud** account and an **Electric Cloud** account (https://dashboard.electric-sql.cloud).
+- A **Supabase Cloud** account.
 - `bun install` done in this repo.
 
 ## One-time setup (manual)
@@ -43,29 +50,35 @@ In the Supabase dashboard, create a project. From **Project Settings**, collect:
 No auth config is needed: new projects already sign sessions ES256 and expose
 `/auth/v1/.well-known/jwks.json`, which the board functions verify against.
 
-### 2. Create the Electric Cloud source
+### 2. The read path — RETIRED, and what a revival needs
 
-In the Electric Cloud dashboard, create a **source** pointed at your project's database. Electric needs
-a **direct** (non-pooler) connection with logical replication — Supabase ships `wal_level=logical`, so
-the project's direct connection string works as-is. Electric provisions a **source id** + **secret**;
-compose them into:
+This step used to create an Electric Cloud source. It no longer applies: the classic Electric read path
+was removed, and Electric Cloud is shutting down.
 
-```
-ELECTRIC_SHAPE_URL=https://api.electric-sql.cloud/v1/shape?source_id=<id>&secret=<secret>
-```
+**No managed equivalent is provided here.** The native read path is two workloads —
 
-`board-sync` forwards to this verbatim (the proxy only rewrites `where`/`columns`), and the secret stays
-server-side as a function secret — it never reaches the browser.
+- the **Circuits engine**, which needs a **direct** (non-pooler) logical-replication connection to the
+  project's database, creates its own slot, and takes an explicit bare-name table list
+  (`ELECTRIC_CIRCUITS_PG_TABLES`); and
+- a **durable-streams** server, which the engine writes to and the edge reads from.
 
-> **Activate subqueries on your Cloud source.** The board's membership-scoped shapes use a cross-table
-> `where` subquery, which is a flagged Electric preview. On managed Electric Cloud it is **activated per
-> source by Electric staff on request** (no self-serve toggle yet; default-on is intended) — so **ask
-> Electric to enable subqueries for your source** (their Discord / support). Until then a normal member's
-> shapes return `400 {"where":["Subqueries are not supported"]}` while an **admin** (all-rows, no
-> subquery) works — that asymmetry is the symptom. Alternatively, self-host Electric with
-> `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries` pointed at the project's direct DB and set
-> `ELECTRIC_SHAPE_URL` to it. See
-> [The Electric subquery requirement](https://pgxsinkit.github.io/concepts/electric-subqueries/).
+Supabase Cloud hosts neither, and this repo deploys neither — nothing in `board:cloud:*` stands them up.
+So the cloud path deploys auth, migrations, the seed, the write function and the Event lane drain; the
+read path has no upstream unless you run those two workloads yourself somewhere reachable.
+
+Reviving it means pointing the board's two read functions at them, as three function secrets — the same
+three the local stack sets on its `functions`
+service ([`infra/compose/board-compose.yml`](../../infra/compose/board-compose.yml)):
+
+- `CIRCUITS_ENGINE_URL` — the engine's control-plane HTTP, reachable **only** from `board-sync`.
+- `DURABLE_STREAMS_URL` — the log, reachable **only** from `board-stream`. The durable-streams protocol
+  has no read authorization in any implementation, so nothing else may reach it.
+- `STREAM_TOKEN_SECRET` — one secret: `board-sync` mints stream tokens with it, `board-stream` verifies
+  them.
+
+Two gaps in this repo's cloud scripts must be closed at the same time, both recorded in
+`scripts/board-cloud-deploy.ts`: the deployed-function list omits `board-stream`, and `ELECTRIC_SHAPE_URL`
+is still a **required** input for a path that no longer exists.
 
 ### 3. Fill in `board.cloud.env`
 
@@ -95,15 +108,18 @@ That runs, in order (each is also its own `board:cloud:*` script if you need to 
 
 1. **migrate** — applies the board's migrations to the cloud DB over the **direct** connection (the
    SECURITY DEFINER membership helper + the apply function need the privileged `postgres` role).
-2. **secrets** — sets `ELECTRIC_SHAPE_URL` and `BOARD_EVENTS_DRAIN_SECRET` as function secrets. Those are
-   the _only_ secrets to set: Supabase Cloud auto-injects `SUPABASE_URL` (→ JWKS) and `SUPABASE_DB_URL`
-   (the pooler → board-write) into every function, and the `SUPABASE_` prefix is reserved (the CLI rejects
-   setting it).
+2. **secrets** — sets `BOARD_EVENTS_DRAIN_SECRET` as a function secret. There is very little to set:
+   Supabase Cloud auto-injects `SUPABASE_URL` (→ JWKS) and `SUPABASE_DB_URL` (the pooler → board-write)
+   into every function, and the `SUPABASE_` prefix is reserved (the CLI rejects setting it).
+   **Retired input:** this step still _requires_ `ELECTRIC_SHAPE_URL` and still pushes it. It feeds a path
+   that no longer exists; a revival replaces it with the three secrets named in step 2 above.
 3. **functions** — `bun run edge:build` then
    `supabase functions deploy board-write board-sync board-events-drain`. They deploy from the pre-built
    bundles (`supabase/config.toml` points each `entrypoint` at `functions-dist/<name>/index.js`,
-   `verify_jwt = false` — the functions self-verify the session token, and the drain function verifies its
-   shared secret).
+   `verify_jwt = false` — each function self-verifies its own credential: board-write and board-sync the
+   GoTrue session token, and the drain function its shared secret).
+   **Retired gap:** the list omits `board-stream`, the read path's edge — so even with an engine and a log
+   running, reads would have no gate deployed.
 4. **cron** — enables `pg_cron` + `pg_net` and schedules `board_events_drain` to POST at the drain function
    every 10 seconds. See below.
 5. **seed** — GoTrue identities (admin API via the project gateway, which translates your secret key into
@@ -147,8 +163,10 @@ pooler host, e.g. `eu-central-1`). The client sends it as the `x-region` header 
 rather than next to you. Supabase runs functions near the caller by default, which makes every write
 function→DB statement a cross-region round trip (measured from Singapore against an `eu-central-1`
 project: ~162ms per statement, ~3s per write; pinned: the long hop is paid once on the client→function
-leg). The read proxy (board-sync) is deliberately **not** pinned: its upstream is Electric Cloud's global
-CDN, so pinning it away from a distant visitor would add intercontinental hops per catch-up.
+leg). The read surfaces are deliberately **not** pinned: the edge is meant to sit behind a CDN, so
+pinning reads away from the caller would add intercontinental hops per catch-up. A revival should
+re-measure that for the control plane specifically — its upstream is the engine, which is DB-adjacent, so
+the write function's argument may apply to it and not to the edge.
 
 Sign in at `/login` with any seeded identity (e.g. `alice@board.local`, password `board-demo-password`).
 
@@ -171,23 +189,26 @@ preview at `http://localhost:5173`. Use `board:cloud:dev` on port `5660` for sou
   needs `BOARD_ALLOWED_ORIGINS` set (and re-pushed via `board:cloud:secrets`). Easiest: `*`, which
   reflects any request origin — sound for this backend because auth is a bearer token, not cookies —
   and never needs re-pushing when a dev port changes. Or enumerate exact origins (scheme+host+port).
-  Symptom of a wrong list: every shape request dies as a CORS error and the readers retry from
-  `offset=-1` forever — and in worker mode those requests are **invisible in the page's Network tab**
-  (see the next note).
+  Symptom of a wrong list: every subscribe and every stream read dies as a CORS error and the client
+  retries from the start of the stream forever — and in worker mode those requests are **invisible in
+  the page's Network tab** (see the next note). A second, quieter CORS mistake belongs to the edge only:
+  its mount must name `STREAM_READ_EXPOSED_HEADERS` on `Access-Control-Expose-Headers`, or the browser
+  hides every `stream-*` header and the reader wedges without an error.
 - **Sync traffic missing from DevTools** — in worker mode the whole engine runs in a SharedWorker, and
   browsers do not show a SharedWorker's network requests in the page's Network panel; the tab console
   only shows forwarded `[pgxsinkit·w]` rail lines. Inspect the worker itself (`chrome://inspect/#workers`
   → the board worker → inspect) — its own DevTools has the real Network and Console.
-- **Direct vs pooler** — migrations, the seed, and the Electric source use the **direct** connection
-  (DDL / privileged role / logical replication). The edge functions use the **pooler** (transaction
-  mode, port 6543; `board-write`'s `postgres.js` already sets `prepare: false`).
-- **Electric and old values** — if update/delete-driven features misbehave on a synced table, set
-  `REPLICA IDENTITY FULL` on it so Electric receives the previous row (the board's move-in/move-out read
-  filter depends on it).
+- **Direct vs pooler** — migrations and the seed use the **direct** connection (DDL / privileged role),
+  as would the Circuits engine's replication connection if one were ever pointed here. The edge
+  functions use the **pooler** (transaction mode, port 6543; `board-write`'s `postgres.js` already sets
+  `prepare: false`).
+- **Replica identity** — nothing to set by hand. The Circuits engine sets `REPLICA IDENTITY FULL` on
+  the tables in its explicit list itself, which is one more reason that list must never be `*`.
 - **`supabase` not found** — the secrets + functions steps spawn the Supabase CLI directly, so it must
   be a real binary on the PATH a non-interactive process sees (a shell alias/function, or a mise/asdf
   shim only active in your interactive shell, won't be visible). If the deploy fails with "`supabase`
   was not found on PATH", install the CLI globally or set `SUPABASE_BIN` to its absolute path:
   `SUPABASE_BIN=$(which supabase) bun run board:cloud:deploy`.
-- **What can't be scripted** — project creation and the Electric source are account-scoped console
-  actions; this repo's scripts own the repeatable migrate/deploy/seed work.
+- **What can't be scripted** — project creation is an account-scoped console action, and hosting the
+  engine + durable-streams is out of scope entirely; this repo's scripts own the repeatable
+  migrate/deploy/seed work.

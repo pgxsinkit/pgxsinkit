@@ -1,5 +1,9 @@
 # Run the board on managed BaaS: Supabase Cloud + Electric Cloud
 
+Status: retired 2026-08-21 — Electric Cloud is being shut down and the demo's read path was the
+removed classic path; a hosted demo may return on the native read path (ADR-0055) once an engine +
+durable-streams are hosted, no commitment.
+
 The board only ran on its local, trimmed, self-hosted compose stack. "Runs unchanged against real
 cloud Supabase + Electric Cloud" was **aspirational** — there was no `supabase/config.toml`, no cloud
 env, and no deploy path; only the local mechanics existed. This ADR defines the real, documented

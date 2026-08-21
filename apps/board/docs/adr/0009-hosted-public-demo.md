@@ -1,5 +1,9 @@
 # Host a public board /demo on GitHub Pages, reset nightly
 
+Status: retired 2026-08-21 — Electric Cloud is being shut down and the demo's read path was the
+removed classic path; a hosted demo may return on the native read path (ADR-0055) once an engine +
+durable-streams are hosted, no commitment.
+
 [ADR-0008](./0008-board-on-managed-baas.md) made the board runnable against managed Supabase Cloud +
 Electric Cloud, with the **frontend run locally** (`bun run dev:board` against the cloud backend) and
 "hosting the static SPA somewhere is an optional, documented follow-on." This ADR is that follow-on: a
