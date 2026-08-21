@@ -23,8 +23,8 @@ services:
       timeout: 3s
       retries: 20
 
-  # The log the client actually READS from. Official published image, pinned — only the engine is
-  # built from source, and only because it needs the repo's Dockerfile.
+  # The log the client actually READS from. Official published image, pinned — as is every image in
+  # this stack, the engine included: nothing here is built from a checkout.
   ds:
     image: docker.io/electricax/durable-streams-server-rust:0.1.5
     # FLAGS, not environment. This binary reads no env vars at all — `DS_PORT`/`DS_DATA_DIR`/`DS_MEMORY`
@@ -42,15 +42,17 @@ services:
     # the HOST, where a TCP probe can actually run.
 
   # The Circuits engine: replication ingest, shape maintenance, and the control plane the pgxsinkit
-  # server talks to (POST /shapes, GET /replication/lsn). Built from an electric-circuits checkout —
-  # a Rust release build, which is why `infra:harness:up` requires an explicit `--build`.
+  # server talks to (POST /shapes, GET /replication/lsn). The published image of the pgxsinkit FORK of
+  # electric-circuits: that repo's own `docker.yml` builds `docker/Dockerfile.engine` on every push to
+  # its `main` and publishes `main` + `sha-<short>`. Pinned by sha tag like everything else here, never
+  # `main` — a lane must not silently change engine because the fork moved. To iterate on the engine
+  # itself, build a checkout (`podman build -f docker/Dockerfile.engine -t
+  # localhost/electric-circuits-engine:dev .`) and point PGXSINKIT_CIRCUITS_ENGINE_IMAGE at the tag.
   #
   # The EDGE is deliberately absent: it is TypeScript in `packages/server` (ADR-0055 decision 8), so
   # the lane runs it in-process, which is also what lets a test revoke an entitlement between polls.
   engine:
-    build:
-      context: ${PGXSINKIT_CIRCUITS_REPO:?set PGXSINKIT_CIRCUITS_REPO to an electric-circuits checkout}
-      dockerfile: docker/Dockerfile.engine
+    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/electric-circuits/engine:sha-0d336cf}
     environment:
       ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
       ELECTRIC_CIRCUITS_PG_URL: postgres://${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}:${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}@postgres:5432/${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}

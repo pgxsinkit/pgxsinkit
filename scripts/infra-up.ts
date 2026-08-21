@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
-import { requireCircuitsEnv, waitForHttpOk, waitForPgReady, waitForTcpService } from "./lib";
+import { waitForHttpOk, waitForPgReady, waitForTcpService } from "./lib";
 
 // `infra:up` — brings up the board demo stack (infra/compose/board-compose.yml, the substantial demo
 // that replaced apps/web) and applies the board's own drizzle migrations. The minimal toolkit harness
@@ -76,8 +76,6 @@ function dumpComposeStateOnFailure(env: NodeJS.ProcessEnv): void {
 
 async function main(): Promise<void> {
   const env = { ...process.env, BOARD_DATABASE_URL };
-  // The board carries its own table list in board.env, so only the checkout is required here.
-  requireCircuitsEnv(env, { tables: false });
 
   // Issue the caddy TLS cert before bringing the stack up, so its h2/h3 front has a cert to load.
   const certReady = ensureBoardCert();
