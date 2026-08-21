@@ -12,7 +12,7 @@ import { drizzleOverPg } from "./drizzle-executor";
 import type { UpsertChangeMessage } from "./types";
 
 /**
- * Re-key an Electric change row (keyed by DB **column name**) to the Drizzle **property keys** the
+ * Re-key a streamed change row (keyed by DB **column name**) to the Drizzle **property keys** the
  * query builder addresses columns by (ADR-0029 D1). A column absent from the local projected table is a
  * config error and surfaces, rather than silently binding to nothing.
  */
@@ -347,13 +347,13 @@ function assertUniformColumnSet(target: ApplyTarget, columns: string[], rows: Sy
 }
 
 /**
- * Bulk **upsert** for tagged-subquery move-in rows (ADR-0024). A move-in is an existing row ENTERING the
- * shape — unlike a CDC `insert` (a brand-new row) it may already be present locally via an independent
- * grant, or be re-delivered on a resume from before the move-in's offset. So it is applied idempotently:
- * `INSERT … ON CONFLICT (pk) DO UPDATE` refreshes to the move-in's authoritative value (or `DO NOTHING`
- * for a pk-only table). The plain-`INSERT` invariant of the CDC path — a genuine PK collision must
- * surface ({@link applyInsertsToTable}) — is intentionally NOT used here, because for a move-in a present
- * row is expected, not a bug. Batched by parameter count (move-in volume is incremental, not a backfill).
+ * Bulk **upsert** — the applier for the wire's `upsert` verb (ADR-0058 decision 1). The engine states a
+ * row's new value rather than claiming anything about what preceded it, so an upsert routinely names a
+ * row already present locally: a subquery flip, a scope grant, a backfill replay, or a re-delivery on a
+ * resume from before its offset. So it is applied idempotently: `INSERT … ON CONFLICT (pk) DO UPDATE`
+ * refreshes to the authoritative value (or `DO NOTHING` for a pk-only table). The plain `INSERT` of the
+ * backfill path ({@link applyInsertsToTable}) is intentionally NOT used here, because a present row is
+ * expected, not a bug. Batched by parameter count (steady-state volume is incremental, not a backfill).
  */
 export async function applyUpsertsToTable({ pg, target, messages, debug }: BulkKeyedApplyOptions) {
   const primaryKey = target.primaryKey;

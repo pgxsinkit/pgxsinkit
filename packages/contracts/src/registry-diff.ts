@@ -261,7 +261,7 @@ function diffProjection(
 }
 
 /**
- * Shape changes. The Electric target (table/shapeKey/physicalTable) and the row filter both
+ * Shape changes. The shape target (table/shapeKey/physicalTable) and the row filter both
  * govern which rows stream; a change to either needs a re-sync so the local cache is not left
  * holding rows selected under the old definition (risky). The row filter's `customPredicate` body
  * is invisible to the fingerprint, so a change confined to it is not detectable here.

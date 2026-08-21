@@ -55,7 +55,7 @@ function tokensForEntry(entry: SyncTableRegistry[string]): string[] {
   if (entry.readProjection) {
     // A read PROJECTION (defineReadProjection, ADR-0025) owns no physical table: its `entry.table` is the
     // OWNER's physical table, but a consumer reads it ONLY through its DISTINCT local identity
-    // `entry.localTable` (the `as` name — where Electric syncs the projection's rows). Token that, NOT the
+    // `entry.localTable` (the `as` name — where the read path syncs the projection's rows). Token that, NOT the
     // owner's physical name: a read of the projection's own local table then resolves to it, while a read of
     // the owner's table resolves the OWNER entry (which carries the owner token) without falsely resolving
     // this projection. (A projection is always readonly and has no read-model view.)

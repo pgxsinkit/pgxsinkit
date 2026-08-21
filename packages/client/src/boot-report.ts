@@ -96,7 +96,7 @@ export interface BootReport {
     journalRecoveryMs: number;
     storeVersionReconcileMs: number;
     /**
-     * `startConfiguredSync`: stream/group construction wall. On an overlap boot (ADR-0032 S4,
+     * `startCircuitsSync`: stream/group construction wall. On an overlap boot (ADR-0032 S4,
      * {@link BootReport.overlapPrefetch}) the early-started segment runs concurrently with schema, journal
      * recovery, and registry reconciliation, so this includes that shared wall. Structurally 0 when the boot
      * is ready inside the
@@ -180,7 +180,7 @@ export interface GroupBootStamp {
   markReady: () => void;
 }
 
-/** The seam `startConfiguredSync` uses to open a boot group's accumulator (implemented by the builder). */
+/** The seam `startCircuitsSync` uses to open a boot group's accumulator (implemented by the builder). */
 export interface BootStampCollector {
   beginGroup: (groupKey: string, tables: number) => GroupBootStamp;
 }

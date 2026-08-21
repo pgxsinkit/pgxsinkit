@@ -32,7 +32,7 @@ export function isConflictPolicy(value: unknown): value is ConflictPolicy {
 }
 
 /**
- * Subscription timing for a synced table (ADR-0021): **when** its Electric shape subscribes.
+ * Subscription timing for a synced table (ADR-0021): **when** its read-path shape subscribes.
  *
  * - `eager` (default) — subscribed in the boot set, as today.
  * - `lazy` — excluded from boot; subscribed on first query-reference. With `persistent` retention,
@@ -40,7 +40,8 @@ export function isConflictPolicy(value: unknown): value is ConflictPolicy {
  *   sessions; with `ephemeral` retention it is session-scoped.
  *
  * A property of the **consistency group**: every table sharing a `consistencyGroup` must agree, since
- * a group commits atomically on one `MultiShapeStream` and cannot be partly lazy (ADR-0021 §4).
+ * a group's streams commit atomically together — all up-to-date, then one transaction (ADR-0056) — so
+ * it cannot be partly lazy (ADR-0021 §4).
  */
 export type SubscriptionTiming = "eager" | "lazy";
 
@@ -264,9 +265,10 @@ export interface ShapeSpec {
   /**
    * INTERNAL / resolved — the physical Postgres table this shape reads, when it differs from the
    * shape's own `tableName`. A read PROJECTION (`defineReadProjection`) sets it to the OWNING table's
-   * name so several shapes can read one physical table under distinct `shapeKey`s; the engine resolves
-   * an incoming request by `shapeKey` and consults this only on egress, to build the upstream Electric
-   * `table` param. `attachSyncRegistrySchema` also fills/qualifies it for schema-bound registries.
+   * name so several shapes can read one physical table under distinct `shapeKey`s; the control plane
+   * resolves an incoming subscription by `shapeKey` and consults this only when it creates the shape, as
+   * the source `table` it hands the engine. `attachSyncRegistrySchema` also fills/qualifies it for
+   * schema-bound registries.
    *
    * Not a consumer input — there is no valid reason to hand-set it (it can only be redundant with, or
    * wrong about, the table you are reading), so it is omitted from {@link ShapeSpecInput}. The
@@ -377,15 +379,16 @@ export interface RowTransformContext {
 }
 
 /**
- * Per-row rewrite applied in the proxy response path (after the row filter, before
- * column omission). Receives a shape-log row's column map (keys are wire/column names)
+ * Per-row rewrite applied on the server's read egress path (after the row filter, before
+ * column omission). Receives a streamed row's column map (keys are wire/column names)
  * and returns a possibly-rewritten one — letting the server strip a *sub-document* of a
  * jsonb column, or otherwise rewrite a value, *conditionally on row data*. This expresses
  * what a static, whole-column `omitColumns` cannot.
  *
- * It runs only in the proxy's per-response path: it never alters the local PGlite schema,
- * never changes the Electric shape URL, and so never pollutes Electric's shared shape
- * cache. Return the same `row` reference to signal "no change".
+ * Server authority only: it never alters the local PGlite schema and never alters the shape
+ * definition — the engine ref-counts shapes by definition (ADR-0055), so a transform can
+ * neither change which stream a subject reads nor split one that would otherwise be shared.
+ * Return the same `row` reference to signal "no change".
  */
 export type RowTransform = (row: Record<string, unknown>, context: RowTransformContext) => Record<string, unknown>;
 
@@ -398,13 +401,13 @@ export interface ClientProjectionSpec {
 }
 
 /**
- * Server-side projection applied in the proxy response path. This is server
+ * Server-side projection applied on the read egress path. This is server
  * authority, not client shape — it never alters the local PGlite schema or the
- * Electric shape URL — so it lives apart from {@link ClientProjectionSpec} (ADR-0004).
+ * shape definition — so it lives apart from {@link ClientProjectionSpec} (ADR-0004).
  */
 export interface ServerProjectionSpec {
   /**
-   * Optional per-row rewrite applied in the proxy response path. Runs before column
+   * Optional per-row rewrite applied on the read egress path. Runs before column
    * omission, so it may read a column (e.g. a control flag) that
    * `clientProjection.omitColumns` then removes from the client-visible row. See
    * {@link RowTransform}.
@@ -465,8 +468,9 @@ export interface TableSpecInput {
   clientProjection?: ClientProjectionSpec;
   governance?: TableGovernanceSpec;
   /**
-   * Consistency group (ADR-0009 decision 2): tables sharing a group sync on one `MultiShapeStream`
-   * and commit atomically at a shared LSN frontier. Absent → the table is its own singleton group.
+   * Consistency group (ADR-0009 decision 2): tables sharing a group sync on one set of streams and
+   * commit atomically — every stream up-to-date, then one transaction (ADR-0056). Absent → the table is
+   * its own singleton group.
    */
   consistencyGroup?: string;
   /**
@@ -573,9 +577,9 @@ export function isClaimsDependentRowFilter(filter: RowFilterSpec | undefined): b
 }
 
 /**
- * The ownership **predicate** — the native-path counterpart to {@link buildOwnershipShapeWhere}: rows
- * whose owner column equals the caller's subject, {@link DENY_ALL_PREDICATE} for an unauthenticated
- * caller (by reference, so a `customPredicate` built on it probes claims-dependent).
+ * The ownership **predicate** the read path filters on: rows whose owner column equals the caller's
+ * subject, {@link DENY_ALL_PREDICATE} for an unauthenticated caller (by reference, so a
+ * `customPredicate` built on it probes claims-dependent).
  *
  * Takes the real Drizzle owner column, so the reference is rename-safe, and the subject rides as a
  * typed JSON scalar rather than text that has to be escaped and re-parsed.

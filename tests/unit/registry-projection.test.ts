@@ -253,7 +253,7 @@ describe("defineReadProjection serverProjection + serverOnlyColumns (egress reda
     expect(projection.serverProjection?.rowTransform).toBe(stripKeys);
   });
 
-  it("adds the serverOnly physical name to the Electric fetch allow-list (kept names + serverOnly + PK)", () => {
+  it("adds the serverOnly physical name to the shape's columns allow-list (kept names + serverOnly + PK)", () => {
     const projection = defineReadProjection(securedItem(), {
       as: "secured_item_window",
       columns: ["payload", "metadata"],
@@ -285,7 +285,7 @@ describe("defineReadProjection serverProjection + serverOnlyColumns (egress reda
       serverProjection: { rowTransform: stripKeys },
     });
     expect(projection.serverProjection?.rowTransform).toBe(stripKeys);
-    // No columns omitted → no Electric `columns` allow-list (the whole row is fetched, then redacted).
+    // No columns omitted → no `columns` allow-list (the whole row is fetched, then redacted).
     expect(projection.shape?.rowFilter?.columns).toBeUndefined();
   });
 

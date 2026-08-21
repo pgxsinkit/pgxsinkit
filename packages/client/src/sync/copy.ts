@@ -5,14 +5,14 @@
  * Serialization of JavaScript values into a PostgreSQL `COPY ... WITH (FORMAT
  * text)` stream.
  *
- * The Electric client parses the wire values it receives into native JS values
- * before they reach this module: `int2`/`int4`/`float4`/`float8` become
- * `number`, `int8` becomes `bigint`, `bool` becomes `boolean`, `json`/`jsonb`
- * become parsed objects/arrays, array columns become (possibly nested) JS
- * arrays, and every other type is left as its raw Postgres text representation
- * (a `string`). To feed those values back into `COPY` we have to reverse that:
- * turn each value into the exact text Postgres' input functions expect, then
- * apply the COPY framing.
+ * Values reach this module already decoded — the read path hands the applier
+ * JSON cell values, never Postgres wire text — so the runtime types it accepts
+ * are the decoded ones: `int2`/`int4`/`float4`/`float8` as `number`, `bool` as
+ * `boolean`, `json`/`jsonb` as parsed objects/arrays, array columns as
+ * (possibly nested) JS arrays, `int8` as `bigint`, and every other type as its
+ * raw Postgres text representation (a `string`). To feed those values back into
+ * `COPY` we have to reverse that: turn each value into the exact text Postgres'
+ * input functions expect, then apply the COPY framing.
  *
  * Rather than invent an escaping scheme (the previous CSV-based approach broke
  * on arrays, JSON, embedded delimiters, etc.) this is a faithful port of the
@@ -53,8 +53,8 @@ function escapeCopyText(value: string): string {
 
 /**
  * Convert a Uint8Array to Postgres `bytea` hex-format text (`\xDEADBEEF`).
- * Electric normally delivers `bytea` already as such a string, so this only
- * matters for callers using a custom parser that yields binary.
+ * The read path normally delivers `bytea` already as such a string, so this only
+ * matters for a caller whose decoder yields binary.
  */
 function byteaToText(bytes: Uint8Array): string {
   let hex = "";
@@ -107,8 +107,8 @@ function arrayToText(arr: ReadonlyArray<unknown>): string {
 
 /**
  * Convert a non-null JS value to its bare Postgres text representation (before
- * COPY field escaping is applied). Dispatch is on the runtime type produced by
- * the Electric parser. `json`/`jsonb` columns are handled ahead of this by
+ * COPY field escaping is applied). Dispatch is on the value's decoded runtime
+ * type. `json`/`jsonb` columns are handled ahead of this by
  * `serializeCopyValue` when a column type is known; reaching the object branch
  * here is the type-less fallback.
  */
@@ -135,7 +135,7 @@ function valueToText(value: unknown): string {
       return JSON.stringify(value);
     }
     default:
-      // Should be unreachable for Electric-parsed values; be defensive.
+      // Should be unreachable for decoded wire values; be defensive.
       return String(value);
   }
 }
@@ -152,8 +152,8 @@ function jsonArrayToText(arr: ReadonlyArray<unknown>): string {
 }
 
 /**
- * Re-serialize a parsed `json`/`jsonb` value to its JSON text form. Electric
- * delivers these columns already run through `JSON.parse`, so the value is the
+ * Re-serialize a parsed `json`/`jsonb` value to its JSON text form. These columns
+ * arrive already run through `JSON.parse`, so the value is the
  * decoded JS value (object, array, string, number, boolean or null) and always
  * needs `JSON.stringify` to become valid JSON input again — including scalars
  * (the string `hi` must be written as `"hi"`).

@@ -26,10 +26,10 @@ import {
  *
  * `syncCircuitsShapes` syncs ONE consistency group: K streams committed atomically. This is the
  * layer above it — deriving groups from the registry, subscribing each to the control plane, and
- * carrying ADR-0021's eager/lazy lifecycle. It is the native counterpart of `startConfiguredSync`,
- * and deliberately a separate module rather than a branch inside it: the Electric one builds shape
- * URLs from a base and this one is TOLD its URLs, which is the whole inversion ADR-0055 decision 10
- * describes, and nothing useful is shared between the two paths above the apply layer.
+ * carrying ADR-0021's eager/lazy lifecycle. It succeeded the removed `startConfiguredSync` as its own
+ * module rather than a branch inside it: that one BUILT shape URLs from a base, and this one is TOLD
+ * its URLs by the control plane, which is the whole inversion ADR-0055 decision 10 describes — nothing
+ * useful was shared between the two paths above the apply layer.
  */
 
 /** One synced table, resolved from the registry — the native spec, with no URL in it. */

@@ -334,8 +334,8 @@ function buildEntryClusterStatements(entry: SyncTableEntry, tableKey: string, lo
   );
 
   // Trigger: automatically clear overlay + journal entries when the sync
-  // echo arrives. Fires on INSERT/UPDATE (new data from Electric) and DELETE
-  // (row removed on server, synced back via Electric).
+  // echo arrives. Fires on INSERT/UPDATE (new data down the read path) and
+  // DELETE (row removed on the server, streamed back down the read path).
   const pkMatchSql = (alias: string) =>
     primaryKeyColumns
       .map((col) => `"${alias}"."${col.name}" = COALESCE(NEW."${col.name}", OLD."${col.name}")`)

@@ -1,8 +1,8 @@
 // A tiny web-standard `fetch` router for the pgxsinkit server (ADR-0017). The server needs only
 // exact-path GET/POST routing, a small CORS layer, and an error boundary, so a focused router keeps
 // `@pgxsinkit/server` dependency-light and runnable on any `fetch` runtime — no web framework required.
-// `proxyElectricShapeRequest` and the mutation handler are plain `(Request) => Response` functions, so
-// they can equally be mounted in someone else's framework.
+// The mutation handler, the control-plane routes, and the stream edge are all plain
+// `(Request) => Response` functions, so they can equally be mounted in someone else's framework.
 
 import { resolveCorsOrigin } from "./cors-origin";
 
