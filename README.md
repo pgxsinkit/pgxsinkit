@@ -69,14 +69,14 @@ paths end-to-end against a partial Supabase + Electric stack:
 2. `bun install`
 3. `cp .env.example .env`
 4. `mkcert -install` — one-time: trust the local CA so the browser accepts the gateway's HTTP/2 cert
-5. `bun run infra:up` — brings up the board stack (partial Supabase + Electric), builds the edge functions, and applies the board's migration history
+5. `bun run infra:up` — brings up the board stack (partial Supabase + the native read path), builds the edge functions, and applies the board's migration history
 6. `bun run seed:board` — GoTrue identities + fixtures
 7. `bun run dev:board`
 
-The board stack is self-contained on its own ports (gateway `54331`, db `54322`, electric `54330`,
-HTTP/2 gateway `54343`), so it coexists with the harness. Studio is at `http://localhost:54333`. For
+The board stack is self-contained on its own ports (gateway `54331`, db `54322`, durable-streams
+`54341`, Circuits engine `54342`, HTTP/2 gateway `54343`), so it coexists with the harness. Studio is at `http://localhost:54333`. For
 the minimal reference server (`apps/write-api`) instead, use `bun run infra:harness:up` (PostgreSQL +
-Electric) → `bun run dev:api`.
+durable-streams + the Circuits engine) → `bun run dev:api`.
 
 ## The write path
 

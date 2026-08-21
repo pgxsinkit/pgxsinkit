@@ -3,6 +3,10 @@ import net from "node:net";
 
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sql";
+import { getTableConfig } from "drizzle-orm/pg-core";
+
+import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+import { governanceSyncRegistry } from "@pgxsinkit/schema";
 
 // ─── Port helpers ─────────────────────────────────────────────────────────────
 
@@ -226,4 +230,81 @@ function assertComposeResourcesRemoved(composeProject: string): void {
       `Compose cleanup left resources behind for project ${composeProject}: containers=${containerIds.length}, networks=${networkNames.length}`,
     );
   }
+}
+
+// ─── Circuits engine table list ───────────────────────────────────────────────
+
+/** The optional lane override for the derived list (see {@link resolveCircuitsPgTables}). */
+const CIRCUITS_PG_TABLES_VAR = "PGXSINKIT_CIRCUITS_PG_TABLES";
+
+/**
+ * The Circuits engine's EXPLICIT table list, DERIVED from the registries the container lanes
+ * exercise rather than read out of a developer's `.env`.
+ *
+ * The engine needs the list up front: it introspects every named table, sets `REPLICA IDENTITY FULL`
+ * on it, builds one circuit input per table, and its pgoutput decoder DROPS changes for any relation
+ * that is not on the list. `*` is never the answer — it takes every primary-keyed base table in
+ * `public` (the engine's `list_tables`), which here also means `operations_log`, and gives each of
+ * them `REPLICA IDENTITY FULL` too. (It does NOT sweep in pgmq: that extension is non-relocatable in
+ * schema `pgmq`, which the engine never looks at — see packages/server/src/events/ddl.ts.)
+ *
+ * `governanceSyncRegistry` is that union — the demo entries plus every integration registry — and is
+ * already the registry the harness database's governance DDL is generated from, so the engine's table
+ * set and the migrated schema move together by construction.
+ *
+ * `PGXSINKIT_CIRCUITS_PG_TABLES` still WINS when set: the deliberate override for pointing a lane at
+ * a different table set. Either way the invariant holds — a non-empty list of bare `public` names,
+ * never `*`.
+ */
+export function resolveCircuitsPgTables(env: NodeJS.ProcessEnv): string[] {
+  const override = env[CIRCUITS_PG_TABLES_VAR]?.trim();
+  const names = [...new Set(override ? parseTableList(override) : registryTableNames())].sort();
+
+  // Both checks sit AFTER the union, because an override is the only way either can be violated —
+  // and either violation would silently turn the lane into introspect-all (or into nothing at all).
+  if (names.includes("*")) {
+    throw new Error(
+      `${CIRCUITS_PG_TABLES_VAR} must name tables explicitly — \`*\` makes the engine replicate every ` +
+        "primary-keyed table in `public` (the operations log included) and give each one REPLICA IDENTITY FULL",
+    );
+  }
+
+  if (names.length === 0) {
+    throw new Error(
+      override
+        ? `${CIRCUITS_PG_TABLES_VAR} is set but names no tables; unset it to use the registry-derived list`
+        : "The lane registries declare no tables, so the engine has nothing to replicate",
+    );
+  }
+
+  return names;
+}
+
+/** The compose/env fragment every lane runner spreads into the environment it hands to podman. */
+export function circuitsPgTablesEnv(env: NodeJS.ProcessEnv): { PGXSINKIT_CIRCUITS_PG_TABLES: string } {
+  return { [CIRCUITS_PG_TABLES_VAR]: resolveCircuitsPgTables(env).join(",") };
+}
+
+function parseTableList(value: string): string[] {
+  return value
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+}
+
+function registryTableNames(): string[] {
+  return Object.values(governanceSyncRegistry as SyncTableRegistry).map((entry) => {
+    const config = getTableConfig(entry.table);
+
+    // Bare names only: the engine introspects `public` by bare name, so a schema-qualified entry is
+    // not something this variable can express — fail loudly rather than emit a name the engine would
+    // fail to find at startup.
+    if (config.schema !== undefined && config.schema !== "public") {
+      throw new Error(
+        `${CIRCUITS_PG_TABLES_VAR} cannot express "${config.schema}.${config.name}": the engine introspects \`public\` by bare name`,
+      );
+    }
+
+    return config.name;
+  });
 }

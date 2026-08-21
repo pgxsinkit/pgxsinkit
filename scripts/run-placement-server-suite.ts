@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 
 import { composeCredentials } from "../infra/compose-credentials";
-import { allocatePort, runComposeDown, waitForPgReady, waitForTcpService } from "./lib";
+import { allocatePort, circuitsPgTablesEnv, runComposeDown, waitForPgReady, waitForTcpService } from "./lib";
 import { startPlacementFixtureServer } from "./placement-fixture-server";
 
 // `test:browser:placement:server` (all configured browsers) / `test:integration:placement` (Chromium) — the
@@ -53,6 +53,7 @@ async function main(): Promise<void> {
   const composeProject = `pgxsinkit-placement-${Date.now().toString(36)}-${process.pid}`;
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
+    ...circuitsPgTablesEnv(process.env),
     PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
     PGXSINKIT_DS_PORT: String(dsPort),
     PGXSINKIT_CIRCUITS_ENGINE_PORT: String(enginePort),

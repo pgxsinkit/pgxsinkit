@@ -12,6 +12,25 @@ import { spawnSync } from "node:child_process";
 // failure); the seed + assertions still run.
 
 const SMOKE_TEST = "tests/integration/board-smoke.integration.test.ts";
+
+// Pinned to the LANE's own stack, exactly as run-worker-lane.ts pins them, and for the same reason: a
+// developer's .env legitimately points the board at a DEPLOYMENT, and every child here is a `bun`
+// that auto-loads it. Inheriting bare `process.env` sent `seed:board` at the deployed gateway
+// (ConnectionRefused against a cloud host) while the local stack it had just brought up sat idle.
+// Pinned rather than deleted: `?? default` readers treat a missing key as "use the default", but a
+// deleted key is simply re-filled from .env by the child's auto-load, so only an explicit value wins.
+const BOARD_GATEWAY_URL = "http://localhost:54331";
+const BOARD_DATABASE_URL =
+  "postgresql://postgres:your-super-secret-and-long-postgres-password@localhost:54322/postgres?sslmode=disable";
+const laneEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  BOARD_GATEWAY_URL,
+  BOARD_DATABASE_URL,
+  DATABASE_URL: BOARD_DATABASE_URL,
+  BOARD_SECRET_KEY: "sb_secret_boarddemoLOCALxxxxxxxxxxxxxxx_demo0000",
+  BOARD_PUBLISHABLE_KEY: "sb_publishable_boarddemoLOCALxxxxxxxxx_demo0000",
+  BOARD_SEED_PASSWORD: "board-demo-password",
+};
 const keep = process.argv.includes("--keep");
 
 // The first request after a fresh boot pays the edge-runtime cold start (~6s to import a function
@@ -19,7 +38,7 @@ const keep = process.argv.includes("--keep");
 const TEST_TIMEOUT_MS = 45_000;
 
 function run(command: string, args: string[]): void {
-  const result = spawnSync(command, args, { stdio: "inherit", env: process.env });
+  const result = spawnSync(command, args, { stdio: "inherit", env: laneEnv });
   if (result.status !== 0) {
     throw new Error(`Command failed: ${command} ${args.join(" ")}`);
   }

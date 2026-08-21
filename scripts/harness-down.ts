@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
 
+import { circuitsPgTablesEnv } from "./lib";
+
 // `infra:harness:down` — tears down the minimal toolkit reference stack (`infra:harness:up`). The
 // board demo stack is torn down separately via `infra:down`.
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
@@ -36,8 +38,10 @@ function sanitizeStderr(stderr: string): { filtered: string; suppressedKnownNois
 }
 
 function main() {
+  // The compose file's `${PGXSINKIT_CIRCUITS_PG_TABLES:?…}` is substituted on `down` too, so the
+  // teardown needs the same derived value as the bring-up or it fails before removing anything.
   const result = spawnSync("podman", ["compose", "-f", COMPOSE_FILE, "down", "--volumes", "--remove-orphans"], {
-    env: process.env,
+    env: { ...process.env, ...circuitsPgTablesEnv(process.env) },
     encoding: "utf8",
   });
 

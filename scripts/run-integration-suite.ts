@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 import { composeCredentials } from "../infra/compose-credentials";
-import { allocatePort, runComposeDown, waitForPgReady, waitForTcpService } from "./lib";
+import { allocatePort, circuitsPgTablesEnv, runComposeDown, waitForPgReady, waitForTcpService } from "./lib";
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
 const SERVICE_START_TIMEOUT_MS = 120_000;
@@ -43,6 +43,9 @@ async function main() {
   const composeProject = buildProjectName();
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
+    // The engine's table list is derived from the registries this lane exercises, so a fresh clone
+    // with no `.env` starts the same stack as a developer machine.
+    ...circuitsPgTablesEnv(process.env),
     PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
     PGXSINKIT_DS_PORT: String(dsPort),
     PGXSINKIT_CIRCUITS_ENGINE_PORT: String(enginePort),

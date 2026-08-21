@@ -1,10 +1,12 @@
 // Board demo smoke — the ONE lane that drives the demo's real deployment topology end-to-end:
-// GoTrue (password login) → Envoy → the two Deno edge functions (board-write, board-sync) → Electric,
+// GoTrue (password login) → Envoy → the three Deno edge functions (board-write, plus the native read
+// path's board-sync control plane and board-stream edge) → the Circuits engine and durable-streams,
 // with RLS + the registry read filter governing every row. The toolkit integration suites
 // (tests/integration/*.integration.test.ts) exercise the client/server primitives in-process against
-// the minimal postgres+electric harness with synthetic claims; none of them exercises GoTrue, the
-// gateway, or the bundled edge functions. This does, so a wiring break in the demo's deployment path
-// (auth, routing, the control plane's claim-driven `customPredicate`, the apply's RLS actor switch) fails here.
+// the minimal postgres + engine + durable-streams harness with synthetic claims; none of them exercises
+// GoTrue, the gateway, or the bundled edge functions. This does, so a wiring break in the demo's deployment
+// path (auth, routing, the control plane's claim-driven `customPredicate`, the apply's RLS actor switch)
+// fails here.
 //
 // Run via `bun run test:integration:board` (scripts/run-board-smoke.ts brings the board stack up,
 // seeds it, runs this, and tears it down). The deterministic seed (scripts/seed-board.ts) is the
@@ -15,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { asc, eq } from "drizzle-orm";
 
 import { boardSyncRegistry, issueTable, teamTable } from "@pgxsinkit/board-schema";
+import { readShapeStream, STREAM_START } from "@pgxsinkit/client";
 import { createServerDb } from "@pgxsinkit/test-utils";
 
 const GATEWAY_URL = process.env["BOARD_GATEWAY_URL"] ?? "http://localhost:54331";
@@ -67,50 +70,166 @@ async function login(email: string): Promise<string> {
   return token;
 }
 
-interface ShapeMessage {
-  value?: Record<string, unknown>;
-  key?: string;
-  headers: { operation?: "insert" | "update" | "delete"; control?: string };
+// The two read-path surfaces behind the gateway, composed exactly as the real client composes them
+// (apps/board/src/config.ts): board-sync is the CONTROL PLANE and board-stream is the EDGE. They are
+// separate origins by design (ADR-0055) — the edge's responses are the ones a CDN may share between
+// subscribers, and the control plane's per-subject answers must not share a cache key with them.
+const CONTROL_PLANE_URL = `${GATEWAY_URL}/functions/v1/board-sync`;
+const STREAM_BASE_URL = `${GATEWAY_URL}/functions/v1/board-stream/v1/stream`;
+
+/** The shapes this smoke reads. Their shapeKeys come from the registry — see {@link shapeKeyFor}. */
+type BoardShapeName = "issue" | "team" | "message";
+
+/**
+ * The shapeKey a subscription names, read off the registry rather than restated here.
+ *
+ * `defineSyncTable` derives it from `tableName` when a shape does not declare one, and the control
+ * plane resolves a request by matching that exact string (`resolveEntryByShapeKey`). Reading it back
+ * off the same registry the server compiles from is what keeps the two spellings one spelling.
+ */
+function shapeKeyFor(table: BoardShapeName): string {
+  const shapeKey = boardSyncRegistry[table].shape?.shapeKey;
+  if (shapeKey == null) throw new Error(`board registry entry "${table}" declares no shape to subscribe to`);
+  return shapeKey;
 }
 
-// Read a whole shape through the board-sync proxy as a given identity: walk offsets until Electric
-// reports up-to-date, folding insert/update/delete into the final row set (keyed by Electric's row
-// key). Returns exactly the rows the control plane's claim-driven `customPredicate` let through for this token.
-async function fetchShapeRows(table: string, token: string): Promise<Record<string, unknown>[]> {
+/** One stream the control plane granted: what to read, and where to read it from. */
+interface GrantedSubscription {
+  shapeKey: string;
+  shapeId: string;
+  /** The durable-streams path, appended to the edge's stream mount. */
+  streamPath: string;
+}
+
+interface SubscribeResult {
+  /** The STREAM token covering every grant — a capability the edge verifies, NOT a session JWT. */
+  token?: string;
+  expiresAt?: number;
+  granted: GrantedSubscription[];
+  denied: { shapeKey: string; reason: string }[];
+}
+
+// The gateway's `apikey` rides on every request, exactly as the real client sets it
+// (`requestHeaders: { apikey }`, apps/board/src/board/board-sync.worker.ts). `readShapeStream` owns the
+// Authorization header — it re-resolves the stream token per request — so a wrapped `fetch` is the seam
+// for a static gateway header on the byte path.
+const fetchWithApiKey = ((input: string | URL | Request, init?: RequestInit) => {
+  const headers = new Headers(init?.headers);
+  headers.set("apikey", PUBLISHABLE_KEY);
+  return fetch(input, { ...init, headers });
+}) as typeof fetch;
+
+/**
+ * Ask the control plane for one shape, as a given identity.
+ *
+ * Spelled out here rather than routed through the client's `openSubscriptionSession`, for the same
+ * reason `applyMutation` below POSTs raw JSON instead of driving the client's write path: this lane
+ * exists to assert the DEPLOYED wire, so the request it sends is written where a wire change breaks it.
+ */
+async function subscribeToShape(shapeKey: string, token: string): Promise<SubscribeResult> {
+  const url = `${CONTROL_PLANE_URL}/sync/v1/subscribe`;
+  // `apikey` is for the gateway; the GoTrue session JWT is the identity. The control plane's claims come
+  // from the latter, and every predicate and entitlement decision is made against them. Nothing
+  // shape-shaped is on the wire — a shapeKey, and the server answers what this subject may read.
+  const init: RequestInit = {
+    method: "POST",
+    headers: { apikey: PUBLISHABLE_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ subscriptions: [{ shapeKey }] }),
+  };
+
+  let response = await fetch(url, init);
+  // Cold-start tolerance: the edge worker can return a transient 502/503/504 from the gateway while
+  // board-sync's bundle is (re)importing (~6s; see the header note). That is a local-compose artifact
+  // — a managed BaaS keeps functions warm — so retry the transient before failing the correctness smoke.
+  // The byte path needs no equivalent: `@durable-streams/client` retries 5xx with its own backoff, which
+  // covers board-stream's separate cold start.
+  for (let attempt = 0; attempt < 20 && [502, 503, 504].includes(response.status); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    response = await fetch(url, init);
+  }
+  if (!response.ok) {
+    throw new Error(`board-sync subscribe ${shapeKey} failed (${response.status}): ${await response.text()}`);
+  }
+
+  return (await response.json()) as SubscribeResult;
+}
+
+/**
+ * Read one granted stream to the tail through the edge, folding its envelopes into the row set.
+ *
+ * `readShapeStream` is the REAL reader — the same transport the board client runs — so the offsets,
+ * cursors and up-to-date signalling of the durable-streams protocol are not re-implemented here.
+ */
+async function foldStreamToTail(
+  grant: GrantedSubscription,
+  streamToken: string,
+  rows: Map<string, Record<string, unknown>>,
+): Promise<void> {
+  const upToDate = Promise.withResolvers<void>();
+  const subscription = await readShapeStream(
+    {
+      // `streamBaseUrl` + `streamPath`, composed exactly as `openSubscriptionSession` composes it.
+      url: `${STREAM_BASE_URL}/${grant.streamPath.replace(/^\/+/, "")}`,
+      offset: STREAM_START,
+      // The STREAM token minted by subscribe, NOT the GoTrue JWT: the edge verifies a capability that
+      // names these paths, and a session token means nothing to it.
+      token: () => streamToken,
+      // Read to the tail and stop — a smoke asserts what the subject holds now, not what arrives later.
+      live: false,
+      fetch: fetchWithApiKey,
+    },
+    (batch) => {
+      // Two verbs on the wire (ADR-0058): `upsert` states the row's new value, `delete` is key-only.
+      for (const envelope of batch.envelopes) {
+        if (envelope.headers.operation === "delete") rows.delete(envelope.key);
+        else if (envelope.value) rows.set(envelope.key, envelope.value);
+      }
+      if (batch.upToDate) upToDate.resolve();
+    },
+  );
+
+  try {
+    await upToDate.promise;
+  } finally {
+    subscription.close();
+  }
+}
+
+/**
+ * Read a whole shape as a given identity, over the NATIVE read path (ADR-0055).
+ *
+ * Two hops, two functions, two credentials. `board-sync` is the CONTROL PLANE: it answers questions
+ * ABOUT streams — compiling the shape from the registry against this identity's claims, registering it
+ * with the engine, and minting a stream token naming the paths granted — and never serves a byte.
+ * `board-stream` is the EDGE: it verifies that token and proxies the durable-streams bytes, which is
+ * what puts the control plane out of the read path once a subscription exists.
+ *
+ * Returns exactly the rows the control plane's claim-driven `customPredicate` let through for this token.
+ */
+async function fetchShapeRows(table: BoardShapeName, token: string): Promise<Record<string, unknown>[]> {
+  const shapeKey = shapeKeyFor(table);
+  const result = await subscribeToShape(shapeKey, token);
+
+  // A denial is an AUTHORIZATION answer, and it is never one this lane expects: every shape it reads is
+  // private-tier and every identity it uses is seeded. Fail with the reason rather than assert over the
+  // empty row set a swallowed denial would leave behind — which would pass most of these expectations.
+  if (result.denied.length > 0) {
+    const reasons = result.denied.map((entry) => `${entry.shapeKey}: ${entry.reason}`).join("; ");
+    throw new Error(`board-sync denied ${shapeKey}: ${reasons}`);
+  }
+  if (result.granted.length === 0) {
+    throw new Error(`board-sync granted no stream for ${shapeKey}`);
+  }
+  const streamToken = result.token;
+  if (!streamToken) {
+    throw new Error(`board-sync granted ${result.granted.length} stream(s) for ${shapeKey} but no stream token`);
+  }
+
+  // ONE row set across every grant: a shape fans out to one stream per scope the subject holds, and the
+  // rows they hold are the union of those streams, keyed by the engine's own row key.
   const rows = new Map<string, Record<string, unknown>>();
-  let handle: string | null = null;
-  let offset = "-1";
-
-  for (let guard = 0; guard < 30; guard++) {
-    const url = new URL(`${GATEWAY_URL}/functions/v1/board-sync`);
-    url.searchParams.set("table", table);
-    url.searchParams.set("offset", offset);
-    if (handle) url.searchParams.set("handle", handle);
-
-    const headers = { apikey: PUBLISHABLE_KEY, Authorization: `Bearer ${token}` };
-    let response = await fetch(url, { headers });
-    // Cold-start tolerance: the edge worker can return a transient 502/503/504 from the gateway while
-    // board-sync's bundle is (re)importing (~6s; see the header note). That is a local-compose artifact
-    // — a managed BaaS keeps functions warm — so retry the transient before failing the correctness smoke.
-    for (let attempt = 0; attempt < 20 && [502, 503, 504].includes(response.status); attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      response = await fetch(url, { headers });
-    }
-    if (!response.ok) {
-      throw new Error(`board-sync ${table} failed (${response.status}): ${await response.text()}`);
-    }
-
-    const messages = (await response.json()) as ShapeMessage[];
-    for (const message of messages) {
-      if (message.headers.control) continue;
-      const key = message.key ?? "";
-      if (message.headers.operation === "delete") rows.delete(key);
-      else if (message.value) rows.set(key, message.value);
-    }
-
-    handle = response.headers.get("electric-handle") ?? handle;
-    offset = response.headers.get("electric-offset") ?? offset;
-    if (response.headers.get("electric-up-to-date") === "true") break;
+  for (const grant of result.granted) {
+    await foldStreamToTail(grant, streamToken, rows);
   }
   return [...rows.values()];
 }
@@ -171,7 +290,7 @@ function boardWriteStatus(token: string, issue: IssueRow, next: string): Promise
 
 const otherStatus = (status: string): "todo" | "done" => (status === "done" ? "todo" : "done");
 
-describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions → Electric)", () => {
+describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions → engine + durable-streams)", () => {
   let aliceToken: string;
   let adminToken: string;
 
@@ -298,8 +417,9 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
   // while the Admin syncs every channel and the full history. The seed spreads chat across ~30 days, so
   // older messages always fall outside the 21-day window and are visibly admin-only. (`message` is `lazy`
   // for both roles and the retention is per-client — `persistent` for the Admin, projected `ephemeral`
-  // for the Member — but those are client-side subscription/retention hints; the proxy serves the shape on
-  // request all the same, which is what this reads.)
+  // for the Member — but those are client-side subscription/retention hints, invisible to the control
+  // plane: a subscribe is a subscribe, so it grants the shape on request all the same, which is what
+  // this reads.)
   describe("member chat read window (ADR-0025 read filter)", () => {
     it("windows a Member to their channels and the recent history, giving the Admin everything", async () => {
       const aliceMsgs = await fetchShapeRows("message", aliceToken);

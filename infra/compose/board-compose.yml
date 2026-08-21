@@ -188,7 +188,7 @@ services:
       EDGE_WORKER_TIMEOUT_MS: "600000"
 
   # The log the board's clients actually READ from, through board-stream. Official published image,
-  # pinned — only the engine is built from source, and only because it needs the repo's Dockerfile.
+  # pinned — as is every image in this stack, the engine included: nothing here is built from a checkout.
   ds:
     image: docker.io/electricax/durable-streams-server-rust:0.1.5
     container_name: board-ds
@@ -207,17 +207,20 @@ services:
     # the HOST, where a TCP probe can actually run.
 
   # The Circuits engine: replication ingest, shape maintenance, and the control API board-sync calls.
-  # Built from an electric-circuits checkout — a Rust release build, so bring it up with `--build`.
+  # The published image of the pgxsinkit FORK of electric-circuits: that repo's own `docker.yml` builds
+  # `docker/Dockerfile.engine` on every push to its `main` and publishes `main` + `sha-<short>`. Pinned
+  # by sha tag like everything else here, never `main` — the demo must not silently change engine
+  # because the fork moved. To iterate on the engine itself, build a checkout (`podman build -f
+  # docker/Dockerfile.engine -t localhost/electric-circuits-engine:dev .`) and point
+  # PGXSINKIT_CIRCUITS_ENGINE_IMAGE at the tag.
   engine:
     container_name: board-engine
-    build:
-      context: ${PGXSINKIT_CIRCUITS_REPO:?set PGXSINKIT_CIRCUITS_REPO to an electric-circuits checkout}
-      dockerfile: docker/Dockerfile.engine
+    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/electric-circuits/engine:sha-0d336cf}
     environment:
       ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
       ELECTRIC_CIRCUITS_PG_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       # Explicit table list, never `*`: `*` introspects every public table with a primary key, which
-      # sweeps in the operations log and pgmq's own relations (docs/research/0001).
+      # sweeps in the operations log (pgmq is untouched: it lives in schema `pgmq`, not `public`).
       ELECTRIC_CIRCUITS_PG_TABLES: ${BOARD_CIRCUITS_PG_TABLES:?set the explicit board table list}
       ELECTRIC_CIRCUITS_BIND: 0.0.0.0:7010
     depends_on:

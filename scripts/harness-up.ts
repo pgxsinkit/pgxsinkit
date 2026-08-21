@@ -1,16 +1,14 @@
 import { spawnSync } from "node:child_process";
 
 import { composeCredentials } from "../infra/compose-credentials";
-import { waitForPgReady, waitForTcpService } from "./lib";
+import { circuitsPgTablesEnv, waitForPgReady, waitForTcpService } from "./lib";
 
 // `infra:harness:up` — the toolkit reference stack: postgres + durable-streams + the Circuits engine,
 // the demo membership registry, and apps/write-api. This is NOT the substantial demo: that is the
 // board stack (`infra:up`).
 //
-// The ENGINE is built from an electric-circuits checkout, and that is a Rust release build costing
-// minutes of full-core CPU. So `--build` is required explicitly rather than implied: without it this
-// starts whatever image is already tagged, which is what you want on every run but the first and
-// after every engine change.
+// Every service here runs a pinned published image — the engine included (the pgxsinkit fork's own
+// build; see the compose file) — so a bring-up is a pull, never a build.
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
 
 const DEFAULT_DATABASE_URL = composeCredentials.DEFAULT_DATABASE_URL;
@@ -22,32 +20,16 @@ function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): vo
   }
 }
 
-function requireEnv(env: NodeJS.ProcessEnv, name: string, hint: string): void {
-  // Fail here, with the reason, rather than letting compose fail with a variable-substitution error
-  // that says nothing about what the caller was supposed to provide.
-  if (!env[name]) throw new Error(`${name} is not set — ${hint}`);
-}
-
 async function main() {
-  const env = process.env;
-  requireEnv(
-    env,
-    "PGXSINKIT_CIRCUITS_REPO",
-    "point it at an electric-circuits checkout; the engine image is built from its Dockerfile",
-  );
-  requireEnv(
-    env,
-    "PGXSINKIT_CIRCUITS_PG_TABLES",
-    "the engine needs an EXPLICIT table list. `*` sweeps in the operations log and pgmq's relations " +
-      "(docs/research/0001), which are not sync tables and must not become shapes",
-  );
+  // The engine's table list is derived from the registries this stack serves, not required from the
+  // environment, so `infra:harness:up` works on a fresh clone with no `.env`.
+  const env: NodeJS.ProcessEnv = { ...process.env, ...circuitsPgTablesEnv(process.env) };
 
-  const build = process.argv.includes("--build");
   const databaseUrl = new URL(env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL);
   const dsPort = Number(env["PGXSINKIT_DS_PORT"] ?? 8791);
   const enginePort = Number(env["PGXSINKIT_CIRCUITS_ENGINE_PORT"] ?? 7010);
 
-  runCommand("podman", ["compose", "-f", COMPOSE_FILE, "up", "-d", ...(build ? ["--build"] : [])], env);
+  runCommand("podman", ["compose", "-f", COMPOSE_FILE, "up", "-d"], env);
 
   await waitForTcpService(databaseUrl.hostname, Number(databaseUrl.port || 5432), "PostgreSQL");
   await waitForPgReady(env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL);
