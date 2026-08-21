@@ -60,22 +60,42 @@ while a computed revocation was still undelivered, which is silent staleness on 
    arriving afterwards is affected, because alignment is one-time.
 
 3. **The predicate is the whole barrier, never a bare LSN.** Alignment requires `sync` caught up
-   **and** per-table offsets at tail **and** `pendingFlips == 0`. Dropping the last term reintroduces
-   exactly the undelivered-revocation window described above. The `pendingFlips` term is read
-   **engine-global** — conservative by construction: another table's pending flips can *delay* a
-   group's alignment, never falsely satisfy it. Per-shape granularity would be an upstream engine
-   change and is deferred until measured boot latency shows the delay matters. If the barrier is
-   unsatisfied the client does not align; it retries with backoff and stays on the pre-alignment
-   gate, which is correct if slower.
+   **and** per-table offsets at tail **and** `pendingFlips == 0` **and** `flipFailures == 0`.
+   Dropping the third term reintroduces exactly the undelivered-revocation window described above.
+   The `pendingFlips` term is read **engine-global** — conservative by construction: another table's
+   pending flips can *delay* a group's alignment, never falsely satisfy it. Per-shape granularity
+   would be an upstream engine change and is deferred until measured boot latency shows the delay
+   matters. If the barrier is unsatisfied the client does not align; it retries with backoff and
+   stays on the pre-alignment gate, which is correct if slower.
 
-   All three terms describe work that is still *coming*, which is why waiting is the right response
-   to each. Work that has been **lost** is a different condition and this barrier cannot express it —
-   see [backlog 0011](../backlog/0011-lost-flip-batches-drain-the-barrier.md).
+   The first three terms describe work that is still *coming*, which is why waiting is the right
+   response to each. Work that has been **lost** is a different condition, and the fourth term is the
+   barrier expressing it — a term the engine did not report when this ADR was written, which
+   [backlog 0011](../backlog/0011-lost-flip-batches-drain-the-barrier.md) records.
+
+   *(Amended 2026-08-21, `flipFailures`.)* `flipFailures` is the one term the client must not wait
+   on. The engine abandons a flip batch only after exhausting its propagation retries, and an
+   abandoned batch **keeps its `pendingFlips` count held** — deliberately, so the waiting terms can
+   never read converged over work that was lost. Waiting on that held count is therefore waiting
+   forever, and from the client's side it is indistinguishable from waiting on a slow engine. The
+   engine states the difference instead: it counts the abandoned batch in `flipFailures` and latches
+   itself degraded, answering `503` on `/v1/health` and on every membership-bearing route while a
+   reaper deletes the subquery shape streams. A group reading a non-zero `flipFailures` therefore
+   **refuses terminally** rather than holding, and reports the refusal. Recovery is an operator
+   restart, after which clients re-subscribe and re-snapshot — a deliberate act, not something a
+   client can wait out.
 
 4. **The barrier is read through the control plane, not the engine.** Clients never address the
    engine's control-plane HTTP directly — it is unauthenticated and not exposed. The control plane
-   surfaces the barrier on its own authenticated endpoint and MAY cache it briefly; a stale barrier
-   can only *delay* alignment, never falsely satisfy it, because staleness moves it backwards.
+   surfaces the barrier on its own authenticated endpoint and MAY cache it briefly.
+
+   *(Amended 2026-08-21.)* This decision originally justified the cache with "a stale barrier can
+   only *delay* alignment, never falsely satisfy it, because staleness moves it backwards". That
+   holds for `sync` and `pendingFlips`, and **inverts** for `flipFailures`: a cached pre-degradation
+   zero licenses precisely the alignment the term exists to refuse. So a degraded reading is never
+   cached and never served from cache, and the cache window is restated for what it actually is —
+   the bound on how long a client may align against a freshly-degraded engine. That is why the
+   default is zero.
 
 5. **The steady-state commit gate is "every shape currently reports up-to-date". ADR-0031's commit
    floor is deleted, not ported.**
@@ -159,6 +179,10 @@ while a computed revocation was still undelivered, which is silent staleness on 
 - **Alignment can now fail closed on a real condition.** `pendingFlips > 0` is a genuine
   not-yet-converged signal that Electric's wire format could not express at all, so this design can
   detect a case its predecessor silently mis-committed.
+- **Alignment can also fail *terminally*, which is new.** `flipFailures > 0` has no Electric
+  counterpart in either direction: the engine could not previously report lost membership effects,
+  and the client had no state in which it stopped rather than retried. Runtimes must surface it —
+  a group in this state never becomes up-to-date and never will without an engine restart.
 - **`must-refetch` stops being a wire concern.** No reset opcode, no control message, no handling for
   one arriving against a superseded generation. The cost is that a reset is only ever *noticed* at
   subscribe: a shape whose stream is deleted mid-session detects it on the read failure and must
@@ -188,9 +212,11 @@ while a computed revocation was still undelivered, which is silent staleness on 
 
 ## Open questions
 
-1. **How long may the control plane cache the barrier?** Staleness is safe in one direction only;
-   the bound should come from measured alignment latency rather than being picked. The default stays
-   zero until it is measured.
+1. **How long may the control plane cache the barrier?** Still open, but the question changed shape
+   under decision 4's amendment. It is no longer only "how stale may an alignment signal be" — a
+   healthy cached reading also masks a subsequent degradation for the length of the window, so the
+   bound is the smaller of measured alignment latency and the tolerable delay in noticing an engine
+   that has lost membership effects. The default stays zero until both are measured.
 2. ~~**Does `must-refetch` have a native equivalent?**~~ **Resolved** by decision 7: it is the
    handle comparison at subscribe, and every other candidate trigger (eviction, `404`, `410`,
    `Stream-Closed`) reaches the client through it.

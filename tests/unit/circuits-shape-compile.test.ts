@@ -188,6 +188,23 @@ it("posts the compiled body to the engine and returns its handle", async () => {
   expect(handle.streamPath).toBe("shape/s1");
 });
 
+// The barrier is readable only WHOLE (ADR-0056 decision 3). An engine that omits `flipFailures`
+// cannot say whether membership effects were lost, and defaulting the missing term to zero would
+// turn "cannot report a loss" into "reports none" — a gate term with nothing behind it. So the
+// answer is rejected outright, naming the field and the fact that this is the wrong engine.
+it("refuses a replication state missing a barrier term", async () => {
+  const client = createCircuitsEngineClient({
+    baseUrl: "http://engine:4000",
+    fetch: (async () =>
+      new Response(JSON.stringify({ lsn: "0/0", sync: true, pendingFlips: 0 }), {
+        status: 200,
+      })) as unknown as typeof fetch,
+  });
+
+  // oxlint-disable-next-line typescript/await-thenable -- .rejects returns a real promise typed as void
+  await expect(client.replicationState()).rejects.toThrow(/flipFailures/);
+});
+
 // ── localPrimaryKey narrowing (the ADR-0014 replacement check) ────────────────────────────────
 // A `clientProjection.localPrimaryKey` narrower than the server key collapses every server row that
 // differs only in a dropped column onto one local row. That is the ONE primary-key collision that is

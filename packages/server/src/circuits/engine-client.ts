@@ -73,16 +73,50 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
 
     /**
      * The engine's convergence barrier (ADR-0056): where replication is, whether the tailer has
-     * caught up, and how many computed-but-undelivered subquery flips remain.
+     * caught up, how many computed-but-undelivered subquery flips remain, and how many flip batches
+     * the engine gave up on.
      *
      * `pendingFlips > 0` means a revocation has been computed and not yet written to any stream,
      * which no wire-format watermark can see. That is the term the Electric wire could not express
      * at all, and the reason the barrier is read out of band rather than inferred from a position.
+     *
+     * `flipFailures > 0` means a batch was **abandoned** after exhausting its propagation retries:
+     * those membership effects are gone rather than late. The engine keeps the abandoned batch's
+     * `pendingFlips` count held — so the waiting terms never falsely read converged — and latches
+     * itself degraded: `/v1/health` answers 503, so do its membership-bearing routes, and a reaper
+     * deletes every subquery shape stream. Recovery is an operator restart.
+     *
+     * The answer is VALIDATED, not cast. An engine that does not report both counters cannot answer
+     * the question this barrier asks, and defaulting a missing term to zero would manufacture a
+     * converged reading out of an engine that never claimed one.
      */
     async replicationState(): Promise<CircuitsReplicationState> {
-      return (await call("/replication/lsn", { method: "GET" })) as CircuitsReplicationState;
+      const body = (await call("/replication/lsn", { method: "GET" })) as Partial<CircuitsReplicationState>;
+      if (body === null || typeof body !== "object") throw unusableBarrier("the body", body);
+      if (body.lsn !== null && typeof body.lsn !== "string") throw unusableBarrier("lsn", body.lsn);
+      if (typeof body.pendingFlips !== "number") throw unusableBarrier("pendingFlips", body.pendingFlips);
+      if (typeof body.flipFailures !== "number") throw unusableBarrier("flipFailures", body.flipFailures);
+      return {
+        lsn: body.lsn,
+        sync: body.sync === true,
+        pendingFlips: body.pendingFlips,
+        flipFailures: body.flipFailures,
+      };
     },
   };
+}
+
+/**
+ * An engine whose barrier this client cannot read is not a degraded engine — it is the wrong engine,
+ * and saying so is the point. Silently tolerating the omission would leave a gate claiming to check a
+ * term nothing reports.
+ */
+function unusableBarrier(field: string, value: unknown): Error {
+  return new Error(
+    `[pgxsinkit] the engine's GET /replication/lsn answered with an unusable \`${field}\` (${JSON.stringify(value)}). ` +
+      `This client requires an engine reporting the whole convergence barrier — \`lsn\`, \`sync\`, \`pendingFlips\` and ` +
+      `\`flipFailures\` (ADR-0056 decision 3); the engine at this URL is not the one this client targets.`,
+  );
 }
 
 export type CircuitsEngineClient = ReturnType<typeof createCircuitsEngineClient>;
@@ -93,4 +127,10 @@ export interface CircuitsReplicationState {
   lsn: string | null;
   sync: boolean;
   pendingFlips: number;
+  /**
+   * Flip batches the engine abandoned after exhausting their retries. Non-zero means membership
+   * effects were **lost**, not delayed: the batch's pending count stays held, the engine is latched
+   * degraded, and only a restart clears it.
+   */
+  flipFailures: number;
 }

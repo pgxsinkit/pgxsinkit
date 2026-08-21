@@ -103,7 +103,7 @@ describe("circuits sync engine", () => {
 
   // The shared tier's whole point: one local table fed by several scope-keyed streams.
   it("applies two scope shapes into one local table", async () => {
-    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0 };
+    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0, flipFailures: 0 };
     const handle = await syncCircuitsShapes({
       pg,
       registry,
@@ -151,7 +151,7 @@ describe("circuits sync engine", () => {
       registry,
       key: null,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 2 }),
+      readBarrier: async () => ({ sync: true, pendingFlips: 2, flipFailures: 0 }),
       token: () => "t",
       fetch: parkAfter([dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true)]),
       shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
@@ -174,7 +174,7 @@ describe("circuits sync engine", () => {
       key: null,
       metadataSchema: METADATA_SCHEMA,
       // Unsatisfied on the first read, converged on every one after it.
-      readBarrier: async () => ({ sync: true, pendingFlips: ++reads === 1 ? 2 : 0 }),
+      readBarrier: async () => ({ sync: true, pendingFlips: ++reads === 1 ? 2 : 0, flipFailures: 0 }),
       token: () => "t",
       fetch: parkAfter([
         dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true),
@@ -194,6 +194,48 @@ describe("circuits sync engine", () => {
     await drizzleOver(pg).delete(content);
   });
 
+  // A degraded engine is the one barrier reading that is NOT a delay. An abandoned flip batch keeps
+  // its `pendingFlips` count held forever, so waiting on it is indistinguishable from waiting on a
+  // slow engine — the effects it carried are gone and no restart-free future makes them land. The
+  // group must therefore refuse terminally: no commit now, no commit on any later delivery, and one
+  // error telling the operator the engine has to be restarted.
+  //
+  // The barrier below is exactly what this engine reports after a loss — the abandoned batch pins
+  // `pendingFlips` above zero permanently. Deleting the flipFailures term makes this fail: the group
+  // would hold on that pending count silently and forever, raising nothing, which is precisely the
+  // indistinguishable-from-a-slow-engine state the term exists to break.
+  it("refuses terminally when the barrier reports lost flips", async () => {
+    const errors: Error[] = [];
+    const handle = await syncCircuitsShapes({
+      pg,
+      registry,
+      key: null,
+      metadataSchema: METADATA_SCHEMA,
+      readBarrier: async () => ({ sync: true, pendingFlips: 3, flipFailures: 1 }),
+      token: () => "t",
+      onSyncError: (error) => errors.push(error),
+      fetch: parkAfter([
+        dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true),
+        dsResponse([envelope(ROW_2, OFF_A)], "0000000000000002", true),
+      ]),
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
+    });
+
+    await settle();
+
+    // Neither the batch that was held when the loss surfaced nor the delivery after it.
+    expect(await drizzleOver(pg).select({ id: content.id }).from(content)).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toMatch(/abandoned 1 membership flip batch/);
+    expect(errors[0]!.message).toMatch(/degraded/);
+    expect(errors[0]!.message).toMatch(/must be restarted/);
+    // And it stays refused — a degraded group must never report a consistent store.
+    expect(handle.isUpToDate).toBe(false);
+
+    handle.unsubscribe();
+    await drizzleOver(pg).delete(content);
+  });
+
   // The native must-refetch (ADR-0056 d6). The client is handed a different stream for the same
   // shape — an eviction, a deletion, a close, all end here — and the offset it persisted addresses
   // the OLD stream, where it means nothing. So it re-snapshots, and the previous stream's rows are
@@ -202,7 +244,7 @@ describe("circuits sync engine", () => {
   // Delete the handle comparison and this fails twice over: the stale row survives, and the offset
   // from a foreign stream is replayed against the new one.
   it("re-snapshots when the granted handle differs from the persisted one", async () => {
-    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0 };
+    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0, flipFailures: 0 };
     const common = {
       pg,
       registry,
@@ -252,7 +294,7 @@ describe("circuits sync engine", () => {
       key: null,
       live: false,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 0 }),
+      readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 0 }),
       token: () => "t",
       fetch: stubEdge({}),
       shapes: {
@@ -277,7 +319,7 @@ describe("circuits sync engine", () => {
       registry,
       live: false as const,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 0 }),
+      readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 0 }),
       token: () => "t",
       maxCommitRetries: 1,
     });

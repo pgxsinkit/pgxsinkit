@@ -93,7 +93,7 @@ function stubEngine(generation: string): CircuitsEngineClient {
       return { shapeId: path, table: request.table, streamPath: path, streamUrl: `http://ds/${path}` };
     },
     releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0 }),
+    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
   } as CircuitsEngineClient;
 }
 

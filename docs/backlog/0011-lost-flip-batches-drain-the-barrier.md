@@ -1,6 +1,22 @@
 # A lost flip batch drains the convergence barrier as if it had landed
 
-Status: parked (upstream engine defect; not reachable by anything we do today)
+Status: promoted → adr/0056 (decision 3 amended 2026-08-21)
+
+## Resolution
+
+The engine pgxsinkit deploys is the pgxsinkit fork of `electric-circuits` (`0d336cf`), and it closes
+both halves of this. Failed flip propagation is **retried** rather than dropped; a batch abandoned
+after its retries **keeps its `pendingFlips` count held**, so the barrier can never read zero over
+lost work; the abandoned batch is counted in a new `flipFailures` term on `GET /replication/lsn`; and
+the engine latches itself **degraded** — `503` on `/v1/health` and on every membership-bearing route,
+subquery shape streams reaped, recovery only by operator restart.
+
+That is the reopen trigger below, fired. pgxsinkit now reads `flipFailures` through the control-plane
+barrier and **refuses terminally** on it rather than holding — the fourth term of
+[ADR-0056](../adr/0056-catchup-alignment-on-stream-offsets.md) decision 3. The original entry follows,
+unchanged.
+
+---
 
 Found 2026-08-21 while re-baselining the native read path onto upstream `electric-circuits` main.
 [ADR-0056](../adr/0056-catchup-alignment-on-stream-offsets.md) decision 3 gates a client's first

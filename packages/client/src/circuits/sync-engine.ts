@@ -29,15 +29,27 @@ import type { StreamSourceOptions } from "./stream-source";
  * move-out and move-in — so a barrier without it reports convergence while a revocation is still in
  * the engine. That is silent staleness on exactly the security-relevant path.
  *
+ * `flipFailures` is the term the others cannot express. A flip batch abandoned after its retries
+ * carried membership effects that are **gone**, not late: the engine keeps that batch's
+ * `pendingFlips` count held forever and latches itself degraded — 503 on `/v1/health` and on every
+ * membership-bearing route, subquery streams reaped, recovery only by operator restart. The waiting
+ * terms are therefore honest but permanently unsatisfied, which is indistinguishable from a slow
+ * engine; this term is how a client tells the two apart.
+ *
  * These are exactly the fields `GET /replication/lsn` answers with. Nothing here is derived, and
  * nothing here is optional — a term the engine does not report is a term this client must not claim
- * to check (see backlog 0011 for the one the engine cannot report yet).
+ * to check.
  */
 export interface ConvergenceBarrier {
   /** Whether the engine's replication tailer has caught up. */
   sync: boolean;
   /** Deferred subquery flip batches not yet propagated. Read engine-global — conservative. */
   pendingFlips: number;
+  /**
+   * Flip batches the engine abandoned. Non-zero means membership effects were **lost**, not delayed
+   * — unrecoverable in-process, and terminal for any group that reads it.
+   */
+  flipFailures: number;
 }
 
 export interface CircuitsShapeSpec {
@@ -386,6 +398,8 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
    * Every shape drained, plus — for the first commit of each alignment generation — the engine
    * barrier. An unsatisfied barrier does not fail: the group simply does not align yet and retries
    * on the next delivery, which is correct if slower.
+   *
+   * A **degraded** engine is the one reading that is not a delay, and is handled the opposite way.
    */
   const gateOpen = async (): Promise<boolean> => {
     if (!inbox.isGroupUpToDate()) return false;
@@ -394,6 +408,22 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
 
     try {
       const barrier = await options.readBarrier();
+      // Lost membership effects are terminal, and waiting them out is the one wrong response: the
+      // engine holds the abandoned batch's `pendingFlips` count forever, so a group that merely held
+      // would be indistinguishable from a slow engine while quietly never aligning. The engine has
+      // latched itself degraded and refuses its membership-bearing routes until it is restarted; the
+      // client says so and stops.
+      if (barrier.flipFailures > 0) {
+        degraded = true;
+        options.onSyncError?.(
+          new Error(
+            `[pgxsinkit] the sync engine abandoned ${barrier.flipFailures} membership flip batch(es) after exhausting ` +
+              `its retries and is degraded: those effects are lost, so this store cannot be proven consistent. The ` +
+              `engine must be restarted and the client re-subscribed.`,
+          ),
+        );
+        return false;
+      }
       // ONLY `pendingFlips`. `sync` is reported beside it (it mirrors the engine's wire shape) but is
       // not a condition here, and reading it as one was a bug in two ways.
       //

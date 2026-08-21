@@ -28,4 +28,4 @@ Rules:
 - [0008 — Lazy ephemeral schema at activation (split the all-mutations view first)](0008-lazy-ephemeral-schema-at-activation.md) — candidate
 - [0009 — Circuits keys tables by bare name (schema-bound registries)](0009-circuits-schema-qualified-tables.md) — candidate
 - [0010 — Mid-session shape reset (stream gone under a live read)](0010-mid-session-shape-reset.md) — candidate
-- [0011 — A lost flip batch drains the convergence barrier](0011-lost-flip-batches-drain-the-barrier.md) — parked
+- [0011 — A lost flip batch drains the convergence barrier](0011-lost-flip-batches-drain-the-barrier.md) — promoted → adr/0056

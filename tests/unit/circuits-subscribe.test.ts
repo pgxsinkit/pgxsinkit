@@ -76,7 +76,7 @@ function stubEngine(): CircuitsEngineClient & { created: unknown[] } {
       };
     },
     releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0 }),
+    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
   } as CircuitsEngineClient & { created: unknown[] };
 }
 
@@ -205,7 +205,7 @@ describe("subscribe under engine failure", () => {
         throw new CircuitsEngineError(status, "degraded", "engine degraded");
       },
       releaseShape: async () => {},
-      replicationState: async () => ({ lsn: null, sync: false, pendingFlips: 0 }),
+      replicationState: async () => ({ lsn: null, sync: false, pendingFlips: 0, flipFailures: 1 }),
     } as unknown as CircuitsEngineClient;
   }
 
@@ -231,10 +231,12 @@ describe("subscribe under engine failure", () => {
   });
 });
 
-// The barrier's cache is sound because staleness only ever moves the barrier BACKWARDS: a stale
-// reading can delay an alignment, never satisfy one falsely.
+// The barrier's cache is sound for `sync`/`pendingFlips` because staleness only ever moves those
+// terms BACKWARDS: a stale reading can delay an alignment, never satisfy one falsely. `flipFailures`
+// inverts that — a cached pre-degradation zero would license exactly the alignment the term exists
+// to refuse — so a degraded reading is never cached.
 describe("barrier cache", () => {
-  function engineReporting(states: { sync: boolean; pendingFlips: number }[]) {
+  function engineReporting(states: { sync: boolean; pendingFlips: number; flipFailures: number }[]) {
     let index = 0;
     const reads = { count: 0 };
     const engine = {
@@ -250,10 +252,10 @@ describe("barrier cache", () => {
   const get = () => new Request("http://cp/sync/v1/barrier");
 
   it("caches a healthy reading", async () => {
-    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0 }]);
+    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0, flipFailures: 0 }]);
     const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
 
-    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0 });
+    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 0 });
     await handle(get());
     expect(reads.count).toBe(1);
   });
@@ -261,10 +263,24 @@ describe("barrier cache", () => {
   // Uncached by default, so an unconverged engine is re-read every time rather than being believed
   // for a window — the cache is an opt-in for deployments that have measured the trade.
   it("re-reads every time with no cache window", async () => {
-    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 2 }]);
+    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 2, flipFailures: 0 }]);
     const handle = createBarrierHandler({ engine });
 
-    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 2 });
+    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 2, flipFailures: 0 });
+    await handle(get());
+    await handle(get());
+    expect(reads.count).toBe(3);
+  });
+
+  // A degraded reading is never CACHED — with the same generous window that just cached a healthy
+  // answer, every degraded read still goes to the engine. That keeps a restart visible immediately
+  // instead of being masked for a window, and is what stops a stale zero from ever being served in
+  // its place. Deleting the guard makes this fail: the reading is served once and never re-read.
+  it("never caches a degraded reading", async () => {
+    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 4, flipFailures: 1 }]);
+    const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
+
+    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 4, flipFailures: 1 });
     await handle(get());
     await handle(get());
     expect(reads.count).toBe(3);

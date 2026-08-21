@@ -40,7 +40,7 @@ const engine: CircuitsEngineClient = {
     streamUrl: "http://ds/shape/s1",
   }),
   releaseShape: async () => {},
-  replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0 }),
+  replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
 } as CircuitsEngineClient;
 
 const resolveAuthClaims = () => ({ sub: "boot-report-subject" });

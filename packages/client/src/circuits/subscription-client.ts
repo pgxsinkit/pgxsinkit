@@ -214,6 +214,11 @@ export async function openSubscriptionSession(
  * An unreachable barrier throws, and the engine treats that as a DELAY rather than a failure
  * (ADR-0056): the group stays on the pre-alignment gate and tries again on the next delivery. So a
  * control plane that is briefly down costs boot latency, not correctness.
+ *
+ * A body missing a term throws for the same reason and to the same effect. Defaulting the absent
+ * field to zero would let a control plane that CANNOT report lost membership effects be read as one
+ * reporting none — a guard that cannot trip, which is protection nobody has. Throwing leaves the
+ * group on the pre-alignment gate instead: it never aligns against a barrier it cannot read whole.
  */
 export function createBarrierReader(
   options: Pick<SubscriptionClientOptions, "controlPlaneUrl" | "authHeaders" | "signal" | "fetch">,
@@ -231,6 +236,13 @@ export function createBarrierReader(
       throw new ControlPlaneError(response.status, "/sync/v1/barrier", await response.text());
     }
     const body = (await response.json()) as Partial<ConvergenceBarrier>;
-    return { sync: body.sync === true, pendingFlips: body.pendingFlips ?? 0 };
+    if (typeof body.pendingFlips !== "number" || typeof body.flipFailures !== "number") {
+      throw new Error(
+        `[pgxsinkit] the barrier at /sync/v1/barrier answered without \`pendingFlips\`/\`flipFailures\` ` +
+          `(${JSON.stringify(body)}). This client aligns only on the whole barrier (ADR-0056 decision 3); a control ` +
+          `plane that cannot report lost membership effects is not one this client can align against.`,
+      );
+    }
+    return { sync: body.sync === true, pendingFlips: body.pendingFlips, flipFailures: body.flipFailures };
   };
 }
