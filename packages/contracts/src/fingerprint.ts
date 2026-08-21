@@ -17,10 +17,10 @@ import type { SyncTableEntry, SyncTableRegistry } from "./registry";
  *
  * This is the single source of "has the shape changed" — consumed as the local-DB
  * version key and as the basis of the registry-diff gate (ADR-0006). Function *bodies*
- * (`rowTransform`, `customWhere`) cannot be fingerprinted and are excluded — but their
+ * (`rowTransform`, `customPredicate`) cannot be fingerprinted and are excluded — but their
  * *presence* and the surrounding **static** filter structure (the projected columns)
  * participate. For the invisible *logic* itself, a consumer-bumped `rowFilter.revision` is
- * folded in: changing it is how a `customWhere` authorization change is forced to shift the
+ * folded in: changing it is how a `customPredicate` authorization change is forced to shift the
  * fingerprint (and so rebuild the cache + reset the subscription).
  */
 
@@ -54,7 +54,7 @@ export interface CanonicalTable {
     /**
      * The native static predicate, canonicalized in full.
      *
-     * Unlike `customWhere`, this one is *visible*: an AST can be hashed, where a closure could only
+     * Unlike `customPredicate`, this one is *visible*: an AST can be hashed, where a closure could only
      * ever be fingerprinted by its presence. So the `revision` footgun does not apply here — editing
      * a native `where` shifts the fingerprint by itself, and a consumer cannot forget to say so.
      */
@@ -79,16 +79,16 @@ export interface CanonicalTable {
 
 /**
  * The static, fingerprint-able structure of a row filter. A changed projection shifts the
- * fingerprint, so the local store rebuilds and the diff gate flags it. `customWhere`'s body is
- * invisible — only its presence (`hasCustomWhere`) is recorded — so a `customWhere` *logic* change
+ * fingerprint, so the local store rebuilds and the diff gate flags it. `customPredicate`'s body is
+ * invisible — only its presence (`hasCustomPredicate`) is recorded — so a `customPredicate` *logic* change
  * is surfaced only by bumping `revision`.
  */
 export interface CanonicalRowFilter {
-  hasCustomWhere: boolean;
+  hasCustomPredicate: boolean;
   columns: string[] | null;
   /**
-   * The consumer-supplied version tag for the non-fingerprintable filter logic (the `customWhere`
-   * body). Changing it shifts the fingerprint, which is the only way a `customWhere` *logic* change
+   * The consumer-supplied version tag for the non-fingerprintable filter logic (the `customPredicate`
+   * body). Changing it shifts the fingerprint, which is the only way a `customPredicate` *logic* change
    * forces a cache + subscription reset.
    */
   revision: string | null;
@@ -161,7 +161,7 @@ function canonicalizeRowFilter(filter: RowFilterSpec | undefined): CanonicalRowF
     return null;
   }
   return {
-    hasCustomWhere: filter.customWhere != null,
+    hasCustomPredicate: filter.customPredicate != null,
     columns: filter.columns ? [...filter.columns].sort(asString) : null,
     revision: filter.revision != null ? String(filter.revision) : null,
   };
@@ -259,7 +259,7 @@ export function fingerprintRegistry(registry: SyncTableRegistry): string {
  *
  * What it pins is the data itself: two registries that present "the same" logical table to different
  * clients must agree here, or those clients are silently seeing different rows/columns. As with the
- * full registry fingerprint, the `customWhere` *body* is invisible — only its presence and the
+ * full registry fingerprint, the `customPredicate` *body* is invisible — only its presence and the
  * consumer-bumped {@link RowFilterSpec.revision} participate, so bump `revision` to force a divergence
  * a logic-only change would otherwise hide.
  */
@@ -279,7 +279,7 @@ export interface CanonicalReadContract {
     /**
      * The native static predicate, canonicalized in full.
      *
-     * Unlike `customWhere`, this one is *visible*: an AST can be hashed, where a closure could only
+     * Unlike `customPredicate`, this one is *visible*: an AST can be hashed, where a closure could only
      * ever be fingerprinted by its presence. So the `revision` footgun does not apply here — editing
      * a native `where` shifts the fingerprint by itself, and a consumer cannot forget to say so.
      */

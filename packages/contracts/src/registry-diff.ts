@@ -109,7 +109,7 @@ function stableStringify(value: unknown): string {
  * **The blind spot is real and named.** JSON Schema cannot express a zod refinement or transform, so
  * `z.string().refine(v => v.length >= 3)` and the incompatible `>= 10` version canonicalize identically —
  * the hash sees no change and the review gate never fires. {@link EventStreamEntry.revision} is the fix and
- * it is the AUTHOR's obligation, exactly as `RowFilterSpec.revision` is for a `customWhere` closure: bump it
+ * it is the AUTHOR's obligation, exactly as `RowFilterSpec.revision` is for a `customPredicate` closure: bump it
  * on any acceptance-logic change the JSON Schema cannot carry, and the stream's hash shifts.
  *
  * The hash exists to DETECT change, not to VALIDATE compatibility. ADR-0053 decision 1 binds a stream's
@@ -263,7 +263,7 @@ function diffProjection(
 /**
  * Shape changes. The Electric target (table/shapeKey/physicalTable) and the row filter both
  * govern which rows stream; a change to either needs a re-sync so the local cache is not left
- * holding rows selected under the old definition (risky). The row filter's `customWhere` body
+ * holding rows selected under the old definition (risky). The row filter's `customPredicate` body
  * is invisible to the fingerprint, so a change confined to it is not detectable here.
  */
 function diffShape(
@@ -287,7 +287,7 @@ function diffShape(
   if (JSON.stringify(previous?.scope ?? null) !== JSON.stringify(next?.scope ?? null)) {
     changes.push({ severity: "risky", table, detail: "shape scope changed (re-sync required)" });
   }
-  // Unlike `customWhere`, this one IS visible — so a change confined to the static predicate is
+  // Unlike `customPredicate`, this one IS visible — so a change confined to the static predicate is
   // caught here rather than needing a consumer to remember to bump a revision.
   if ((previous?.where ?? null) !== (next?.where ?? null)) {
     changes.push({ severity: "risky", table, detail: "shape predicate changed (re-sync required)" });

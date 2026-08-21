@@ -1,23 +1,23 @@
 import { describe, expect, it } from "bun:test";
 
-import { sql, type SQL } from "drizzle-orm";
 import { uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 
 import {
   assertRegistryInvariant,
-  buildOwnerOrAdminShapeWhere,
-  buildRowFilterShape,
+  buildOwnerOrAdminShapePredicate,
   buildSupabaseOwnerOrAdminNativePolicies,
-  c,
   defineSyncRegistry,
   defineSyncTable,
-  DENY_ALL,
+  deniesAllRows,
+  p,
   type JwtClaims,
+  type Predicate,
 } from "@pgxsinkit/contracts";
 
-// assertRegistryInvariant (ADR-0052): audit the RENDERED read filter + write policies of every entry a
-// classification binds, against named claims personas. Aggregates every failing cell into one error.
+// assertRegistryInvariant (ADR-0052): audit the RESOLVED read predicate + rendered write policies of
+// every entry a classification binds, against named claims personas. Aggregates every failing cell into
+// one error.
 
 // A private, owner-scoped table: RLS owner-or-admin policies, and the matching read-path mirror.
 const papersSyncEntry = defineSyncTable({
@@ -31,7 +31,7 @@ const papersSyncEntry = defineSyncTable({
   rowClass: "private",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => buildOwnerOrAdminShapeWhere(columns.ownerId, claims),
+      customPredicate: (claims): Predicate | null => buildOwnerOrAdminShapePredicate(columns.ownerId, claims),
     }),
   },
 });
@@ -48,7 +48,7 @@ const draftsSyncEntry = defineSyncTable({
   rowClass: "private",
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims): SQL | null => (claims.sub ? sql`${c(columns.ownerId)} = ${claims.sub}` : null),
+      customPredicate: (claims): Predicate | null => (claims.sub ? p.eq(columns.ownerId, claims.sub) : null),
     }),
   },
 });
@@ -75,8 +75,8 @@ const owner: JwtClaims = { sub: "11111111-1111-1111-1111-111111111111" };
 const admin: JwtClaims = { sub: "22222222-2222-2222-2222-222222222222", app_metadata: { roles: ["admin"] } };
 
 /** The invariant under test throughout: an anonymous caller sees no `private` row. */
-const deniesAnonymousReads = (cell: { fixtureName: string; renderedWhere: { where: string } | null }) =>
-  cell.fixtureName !== "anonymous" || cell.renderedWhere?.where === "false" || "anonymous read is not denied";
+const deniesAnonymousReads = (cell: { fixtureName: string; readPredicate: Predicate | null }) =>
+  cell.fixtureName !== "anonymous" || deniesAllRows(cell.readPredicate) || "anonymous read is not denied";
 
 describe("assertRegistryInvariant (ADR-0052)", () => {
   it("passes when every bound entry × fixture holds", () => {
@@ -99,7 +99,7 @@ describe("assertRegistryInvariant (ADR-0052)", () => {
         claimsFixtures: { anonymous, owner, admin },
         // Fails for `papers` under admin (the mirror's bypass branch returns no filter) AND for `drafts`
         // under anonymous (its filter denies nobody) — two entries, two different fixtures, one error.
-        holds: ({ renderedWhere }) => renderedWhere != null || "no row filter — every row streams",
+        holds: ({ readPredicate }) => readPredicate != null || "no row filter — every row streams",
       });
     } catch (error) {
       message = (error as Error).message;
@@ -163,27 +163,30 @@ describe("assertRegistryInvariant (ADR-0052)", () => {
     ).toThrow(/binds no entries \(row class\(es\) privat\)/);
   });
 
-  it("renders the read filter through the real pipeline, per fixture", () => {
-    const rendered = new Map<string, { where: string; params: string[] } | null>();
+  it("resolves the read predicate through the real pipeline, per fixture", () => {
+    const resolved = new Map<string, Predicate | null>();
     assertRegistryInvariant(registry, {
-      name: "capture rendered where",
+      name: "capture resolved predicate",
       appliesTo: ["private"],
       claimsFixtures: { anonymous, owner, admin },
-      holds: ({ fixtureName, renderedWhere }) => {
-        rendered.set(fixtureName, renderedWhere);
+      holds: ({ fixtureName, readPredicate }) => {
+        resolved.set(fixtureName, readPredicate);
         return true;
       },
     });
 
     const rowFilter = papersSyncEntry.shape!.rowFilter!;
-    expect(rendered.get("owner")).toEqual(buildRowFilterShape(rowFilter, owner));
-    expect(rendered.get("owner")).toEqual({ where: '"owner_id" = $1', params: [owner.sub!] });
+    // Exactly what the filter itself returns — the cell is the pipeline's output, not a re-derivation.
+    expect(resolved.get("owner")).toEqual(rowFilter.customPredicate!(owner));
+    expect(resolved.get("owner")).toEqual({ col: "owner_id", op: "eq", value: owner.sub! });
     // The mirror's deny sentinel and its admin bypass, as the client would receive them.
-    expect(rendered.get("anonymous")).toEqual(buildRowFilterShape(rowFilter, anonymous));
-    expect(rendered.get("anonymous")?.where).toBe("false");
-    expect(rendered.get("admin")).toBeNull();
-    // An entry with no rowFilter at all also renders null (unfiltered).
-    expect(buildRowFilterShape({ customWhere: () => DENY_ALL }, anonymous)?.where).toBe("false");
+    expect(resolved.get("anonymous")).toEqual(rowFilter.customPredicate!(anonymous));
+    expect(deniesAllRows(resolved.get("anonymous") ?? null)).toBe(true);
+    expect(resolved.get("admin")).toBeNull();
+    // `deniesAllRows` recognises the sentinel by reference AND a structurally empty OR, since both are
+    // always-FALSE on the wire and the invariant is asking about the outcome.
+    expect(deniesAllRows({ or: [] })).toBe(true);
+    expect(deniesAllRows(null)).toBe(false);
   });
 
   it("exposes the table's RLS policies, rendered to inline SQL", () => {
@@ -222,7 +225,7 @@ describe("assertRegistryInvariant (ADR-0052)", () => {
       name: "unpoliced reference data",
       appliesTo: ["reference"],
       claimsFixtures: { anonymous },
-      holds: ({ renderedPolicies, renderedWhere }) => renderedPolicies.length === 0 && renderedWhere === null,
+      holds: ({ renderedPolicies, readPredicate }) => renderedPolicies.length === 0 && readPredicate === null,
     });
   });
 });

@@ -4,7 +4,7 @@ import { getColumns } from "drizzle-orm";
 
 import { boardAdminRegistry, boardMemberRegistry, boardSyncRegistry } from "@pgxsinkit/board-schema";
 import { getSyncedLocalTable } from "@pgxsinkit/client";
-import { buildRowFilterShape, fingerprintReadContract } from "@pgxsinkit/contracts";
+import { fingerprintReadContract, isAndPredicate, isInSubqueryPredicate } from "@pgxsinkit/contracts";
 
 // Importing the registry runs `defineSyncRegistry` → `validateSyncTableEntry` for every table (and
 // `assertReadContractPreserved` for the member projection), so a missing Server version or conflictPolicy
@@ -63,7 +63,7 @@ describe("board sync registry", () => {
   it("attaches a read-path row filter to every entry", () => {
     for (const key of Object.keys(boardSyncRegistry)) {
       const entry = boardSyncRegistry[key as keyof typeof boardSyncRegistry];
-      expect(entry.shape?.rowFilter?.customWhere).toBeTypeOf("function");
+      expect(entry.shape?.rowFilter?.customPredicate).toBeTypeOf("function");
     }
   });
 
@@ -126,19 +126,24 @@ describe("board sync registry", () => {
     const messageFilter = boardSyncRegistry.message.shape!.rowFilter!;
 
     it("syncs the full chat history to an Admin (no read filter)", () => {
-      expect(buildRowFilterShape(messageFilter, { sub: "u1", app_metadata: { roles: ["admin"] } })).toBeNull();
+      expect(messageFilter.customPredicate!({ sub: "u1", app_metadata: { roles: ["admin"] } })).toBeNull();
     });
 
     it("windows a Member to the recent cutoff (channel scope AND a created_at_us lower bound)", () => {
-      const shape = buildRowFilterShape(messageFilter, { sub: "u1" });
-      expect(shape).not.toBeNull();
-      expect(shape!.where).toContain("channel_id");
-      expect(shape!.where).toContain("created_at_us");
-      expect(shape!.where).toContain(">=");
-      // The channel subquery binds the subject ($1); the window binds the day-quantized cutoff ($2) —
-      // a bound param, never an inlined literal.
-      expect(shape!.params.length).toBe(2);
-      expect(Number(shape!.params[1])).toBeGreaterThan(0);
+      const predicate = messageFilter.customPredicate!({ sub: "u1" });
+      expect(predicate).not.toBeNull();
+      expect(isAndPredicate(predicate!)).toBe(true);
+
+      const [channelScope, window] = (predicate as { and: [unknown, unknown] }).and;
+      // Visible channels: an IN over the channel subquery, keyed on the message's channel.
+      expect(isInSubqueryPredicate(channelScope as never)).toBe(true);
+      expect(channelScope).toMatchObject({ col: "channel_id", in: { table: "channel", project: "id" } });
+
+      // The window: a lower bound on the day-quantized cutoff, carried as a typed number rather than
+      // text — so there is no rendering step in which it could become an inlined literal.
+      expect(window).toMatchObject({ col: "created_at_us", op: "gte" });
+      expect(typeof (window as { value: unknown }).value).toBe("number");
+      expect((window as { value: number }).value).toBeGreaterThan(0);
     });
   });
 });

@@ -94,7 +94,7 @@ describe("member-style client boot over asReadonly + defineReadProjection entrie
   beforeAll(async () => {
     // Read-only registry (both entries are readonly/projection), so no apply-function install is needed —
     // this exercises the read/boot path only. A fixed authenticated claim satisfies the auth adapter
-    // (neither entry declares a customWhere, so the subject only names the stream token's bearer).
+    // (neither entry declares a customPredicate, so the subject only names the stream token's bearer).
     stack = await startNativeSyncStack({
       env,
       createServer: (readPath) =>

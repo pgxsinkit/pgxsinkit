@@ -1,9 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { sql } from "drizzle-orm";
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
-import { DENY_ALL, type JwtClaims, type SyncTableRegistry } from "@pgxsinkit/contracts";
+import { buildOwnershipShapePredicate, type JwtClaims, type SyncTableRegistry } from "@pgxsinkit/contracts";
 
 import { memoryStoreForTests } from "../../packages/client/src/testing";
 
@@ -16,7 +15,7 @@ const secretTable = pgTable("secret", { id: uuid("id").primaryKey(), owner: text
 const publicTable = pgTable("public_notes", { id: uuid("id").primaryKey(), body: text("body") });
 const boardTable = pgTable("board", { id: uuid("id").primaryKey(), title: text("title") });
 
-// `secret` denies anonymous callers via the DENY_ALL sentinel (claims-dependent); `public_notes` has no
+// `secret` denies anonymous callers via the DENY_ALL_PREDICATE sentinel (claims-dependent); `public_notes` has no
 // filter (not claims-dependent). Both are lazy so activation is deferred to first reference. `board` is
 // eager (default) — a registry key that is NOT a lazy activation target, so a write to it activates nothing.
 function diagnosticRegistry(): SyncTableRegistry {
@@ -29,7 +28,9 @@ function diagnosticRegistry(): SyncTableRegistry {
       shape: {
         tableName: "secret",
         shapeKey: "schema.secret",
-        rowFilter: { customWhere: (claims: JwtClaims) => (claims.sub ? sql`"owner" = ${claims.sub}` : DENY_ALL) },
+        rowFilter: {
+          customPredicate: (claims: JwtClaims) => buildOwnershipShapePredicate(secretTable.owner, claims.sub),
+        },
       },
       clientProjection: { syncedTable: "secret" },
     },

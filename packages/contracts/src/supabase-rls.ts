@@ -1,7 +1,8 @@
 import { and, eq, getTableName, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { PgDialect, pgPolicy, type AnyPgTable, type PgRole } from "drizzle-orm/pg-core";
 
-import { buildOwnershipShapeWhere, c, DENY_ALL, type JwtClaims } from "./config";
+import { buildOwnershipShapePredicate, DENY_ALL_PREDICATE, type JwtClaims } from "./config";
+import { p, type Predicate } from "./predicate";
 
 // Render a typed fragment to inline-literal SQL text (CREATE POLICY DDL cannot carry `$n` binds).
 // The tier-② discipline for the text builders below: values enter as typed `${value}` interpolations
@@ -63,7 +64,7 @@ export type SupabaseOwnerOrAdminNativePoliciesOptions = {
   subjectCastType?: string;
   /**
    * Path to the roles array in the claims. Defaults to {@link adminRolesClaimPath}; pass the SAME value to
-   * {@link resolveOwnerOrAdminAccess} / {@link buildOwnerOrAdminShapeWhere} so both surfaces read one claim.
+   * {@link resolveOwnerOrAdminAccess} / {@link buildOwnerOrAdminShapePredicate} so both surfaces read one claim.
    */
   adminRolesClaimPath?: readonly string[];
 };
@@ -326,20 +327,17 @@ export function resolveOwnerOrAdminAccess(
 }
 
 /**
- * The Electric shape `where` for an owner-or-admin table — the read counterpart of
- * {@link buildSupabaseOwnerOrAdminNativePolicies}, built from the same owner column. An admin gets
- * `null` (no filter, every row — the policy's bypass branch); anyone else gets
- * {@link buildOwnershipShapeWhere}, i.e. their own rows, or the {@link DENY_ALL} sentinel when there is
- * no subject. Returning the sentinel *by reference* is what lets a `customWhere` built on this probe as
- * claims-dependent (`isClaimsDependentRowFilter`).
+ * The owner-or-admin **predicate** — the native-path counterpart to
+ * the owner-or-admin `select` policy, from the same declaration. An admin gets `null` (no filter,
+ * every row — the policy's bypass branch); anyone else gets {@link buildOwnershipShapePredicate}.
  */
-export function buildOwnerOrAdminShapeWhere(
+export function buildOwnerOrAdminShapePredicate(
   ownerColumn: AnyColumn,
   claims: JwtClaims | null,
   options: OwnerOrAdminAccessOptions = {},
-): SQL | null {
+): Predicate | null {
   const access = resolveOwnerOrAdminAccess(claims, options);
-  return access.admin ? null : buildOwnershipShapeWhere(ownerColumn, access.subject);
+  return access.admin ? null : buildOwnershipShapePredicate(ownerColumn, access.subject);
 }
 
 // ---------------------------------------------------------------------------
@@ -362,9 +360,9 @@ export function buildOwnerOrAdminShapeWhere(
 // the Supabase per-statement-eval RLS perf idiom). Columns serialize qualified
 // (`"work_items"."workspace_id"`) — fine for Postgres RLS (the write path, unlike Electric's bare rule).
 //
-// The `select` half of this family is mirrored on the Electric read path by
-// {@link buildMembershipShapeWhere}, built from the same column declarations — Electric cannot read
-// RLS, so the two surfaces are generated from one declaration and must agree.
+// The `select` half of this family is mirrored on the read path by
+// {@link buildMembershipShapePredicate}, built from the same column declarations — the sync engine cannot
+// read RLS, so the two surfaces are generated from one declaration and must agree.
 // ---------------------------------------------------------------------------
 
 type MembershipPolicyKind = "select" | "insert" | "update" | "delete";
@@ -538,7 +536,7 @@ export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershi
 // ---------------------------------------------------------------------------
 
 /**
- * The columns {@link buildMembershipShapeWhere} needs: the SELECT-relevant subset of
+ * The columns {@link buildMembershipShapePredicate} needs: the SELECT-relevant subset of
  * {@link SupabaseMembershipPredicateColumns}. The write-only fields (owner, manager role, subject cast,
  * write gate, policy role) are accepted but ignored, so the **same declaration object** you hand to
  * {@link buildSupabaseMembershipNativePolicies} can be handed to the read mirror verbatim.
@@ -550,24 +548,28 @@ export type SupabaseMembershipShapeColumns = Pick<
   Partial<SupabaseMembershipNativePoliciesOptions>;
 
 /**
- * The Electric shape `where` for a membership-scoped table — the read counterpart of the `select`
- * policy in {@link buildSupabaseMembershipNativePolicies}: the row's container must be one the caller
- * is a member of. Columns are referenced **bare** via {@link c} (Electric's grammar requires plain
- * column refs) yet still through the real Drizzle column objects, so the reference is rename-safe; the
- * subject rides as a typed interpolation and becomes a bound param once `buildRowFilterShape`
- * serializes it (never a hand-escaped literal). The subquery is **self-contained** (uncorrelated) — it
- * gets its own `FROM`, so the membership table's bare column names resolve to it.
+ * The membership **predicate** — the read-path mirror of the membership `select` policy, from the
+ * same column declarations.
  *
- * No subject → {@link DENY_ALL} (by reference, so a `customWhere` built on it probes claims-dependent),
- * mirroring the policy, whose membership subquery matches nothing without a JWT sub.
+ * The containment becomes a first-class {@link InSubqueryPredicate} rather than SQL text, which buys
+ * something the text form could not: the engine maintains the inner set incrementally and **shares it
+ * across every shape referencing the same subquery**, so an entitlement-shaped membership costs one
+ * index rather than one per shape. The subquery is uncorrelated, as the engine requires — the inner
+ * `where` reads the membership table's own columns only.
  */
-export function buildMembershipShapeWhere(columns: SupabaseMembershipShapeColumns, claims: JwtClaims | null): SQL {
+export function buildMembershipShapePredicate(
+  columns: SupabaseMembershipShapeColumns,
+  claims: JwtClaims | null,
+): Predicate {
   const subject = readSubjectClaim(claims);
   if (subject === null) {
-    return DENY_ALL;
+    return DENY_ALL_PREDICATE;
   }
 
-  return sql`${c(columns.containerColumn)} in (select ${c(columns.membershipContainerColumn)} from ${columns.membershipTable} where ${c(columns.membershipSubjectColumn)} = ${subject})`;
+  return p.in(
+    columns.containerColumn,
+    p.subquery(columns.membershipContainerColumn, p.eq(columns.membershipSubjectColumn, subject)),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -589,10 +591,10 @@ export function buildMembershipShapeWhere(columns: SupabaseMembershipShapeColumn
 //     regression-guard the InitPlan discipline (see the `rls-read-load` perf track);
 //     never ship it.
 //
-// The same grant set is mirrored on the Electric read path by {@link resolveGrantScopeAccess}
-// (or {@link resolveGrantScopeIds} for the id set alone) + {@link buildGrantScopeShapeWhere}: the proxy
-// resolves the ids from the claims in JS and injects a literal `scope_col IN ('a','b')` — Electric
-// cannot read RLS, so the two surfaces are generated from one declaration and must agree.
+// The same grant set is mirrored on the read path by {@link resolveGrantScopeAccess} (or
+// {@link resolveGrantScopeIds} for the id set alone) + {@link buildGrantScopeShapePredicate}: the control
+// plane resolves the ids from the claims in JS and compiles them into the shape's predicate — the sync
+// engine cannot read RLS, so the two surfaces are generated from one declaration and must agree.
 // ---------------------------------------------------------------------------
 
 type GrantScopePolicyKind = "select" | "insert" | "update" | "delete";
@@ -607,7 +609,7 @@ const defaultBypassScopeKind = "platform";
  * An unconditional bypass declaration: any grant whose `role` ∈ `roleValues` and whose `scope.kind` =
  * `scopeKind` (default `"platform"`) confers access to every row — e.g. a platform-scoped
  * `platform_admin`. Hand the SAME object to the policy builder and to
- * {@link resolveGrantScopeAccess} / {@link buildGrantScopeAccessShapeWhere}.
+ * {@link resolveGrantScopeAccess} / {@link buildGrantScopeAccessShapePredicate}.
  */
 export type GrantScopeBypassOptions = {
   roleValues: string[];
@@ -635,7 +637,7 @@ export type SupabaseGrantScopePredicateColumns = GrantScopeClaimOptions & {
    * `bypass.roleValues` and whose `scope.kind` = `bypass.scopeKind` (default "platform") grants all
    * rows — e.g. a platform-scoped `platform_admin`. The bypass is an **uncorrelated** EXISTS, so it
    * stays InitPlan-hoisted in both the correct and naive forms. Its read-path twin is
-   * {@link buildGrantScopeAccessShapeWhere} (bypass → `null`, i.e. no shape filter at all).
+   * {@link buildGrantScopeAccessShapePredicate} (bypass → `null`, i.e. no shape filter at all).
    */
   bypass?: GrantScopeBypassOptions;
 };
@@ -759,7 +761,7 @@ export function buildSupabaseGrantScopeNativePolicies(options: SupabaseGrantScop
 // two enforcement surfaces, derived from the same grant data so they cannot drift.
 //
 // The policy's OR bypass branch has a mirror too: {@link resolveGrantScopeAccess} reports it and
-// {@link buildGrantScopeAccessShapeWhere} turns it into `null` — no shape filter at all, every row
+// {@link buildGrantScopeAccessShapePredicate} turns it into `null` — no shape filter at all, every row
 // streams — exactly as the `exists (…)` OR-branch makes the scope test irrelevant on the write side.
 // Without it a bypass grant would be enforced on writes yet invisible on reads.
 // ---------------------------------------------------------------------------
@@ -804,20 +806,20 @@ export function resolveGrantScopeIds(claims: JwtClaims | null, options: GrantSco
 }
 
 /**
- * The Electric shape `where` for a grant-scope table: an `IN (…)` over the resolved ids (what the
- * proxy injects). Takes the real Drizzle scope column — referenced bare via `c()` (Electric's grammar
- * requires bare columns), so the reference is rename-safe — and returns a typed fragment whose ids
- * are **bound params** once `buildRowFilterShape` serializes it (never hand-escaped literals). An
- * empty id set denies all rows ({@link DENY_ALL}), mirroring the policy returning no rows.
+ * The grant-scope **predicate** — the read-path mirror of the grant-scope `select` policy.
+ * An empty id set denies all rows ({@link DENY_ALL_PREDICATE}), mirroring the policy returning no rows.
+ *
+ * An `OR` of equalities, not an `IN`: the engine's `In` leaf takes a *subquery*, and a grant set lives
+ * in the JWT rather than in a table, so there is nothing to select from. This is not a workaround —
+ * `OR(=v…)` is exactly what the engine's own SQL parser desugars `IN (list)` to, so the two forms
+ * compile to the same nodes.
  */
-export function buildGrantScopeShapeWhere(scopeColumn: AnyColumn, ids: string[]): SQL {
+export function buildGrantScopeShapePredicate(scopeColumn: AnyColumn, ids: string[]): Predicate {
   if (ids.length === 0) {
-    return DENY_ALL;
+    return DENY_ALL_PREDICATE;
   }
-  return sql`${c(scopeColumn)} in (${sql.join(
-    ids.map((id) => sql`${id}`),
-    sql`, `,
-  )})`;
+  const equalities = ids.map((id) => p.eq(scopeColumn, id));
+  return equalities.length === 1 ? equalities[0]! : p.or(...equalities);
 }
 
 /** The full grant-scope declaration the read mirror needs: the claim options plus the optional bypass. */
@@ -879,7 +881,7 @@ function hasGrantScopeBypass(claims: JwtClaims | null, options: GrantScopeAccess
  * options object you gave {@link buildSupabaseGrantScopeNativePolicies} and a bypass grant cannot be
  * enforced on writes yet invisible on reads.
  *
- * Never throws on malformed claims (they reach a `customWhere` unverified in shape) — a wrong shape
+ * Never throws on malformed claims (they reach a `customPredicate` unverified in shape) — a wrong shape
  * simply confers nothing. A malformed `grantsClaimPath`/`scopeIdField` **option** is still a loud error.
  */
 export function resolveGrantScopeAccess(claims: JwtClaims | null, options: GrantScopeAccessOptions): GrantScopeAccess {
@@ -890,18 +892,16 @@ export function resolveGrantScopeAccess(claims: JwtClaims | null, options: Grant
 }
 
 /**
- * The Electric shape `where` for a grant-scope table, bypass included — the read counterpart of the
- * `select` policy in {@link buildSupabaseGrantScopeNativePolicies}, from the same declaration. A caller
- * holding a bypass grant gets `null` (no filter, every row — the policy's OR branch); anyone else gets
- * {@link buildGrantScopeShapeWhere} over their resolved ids, i.e. the {@link DENY_ALL} sentinel *by
- * reference* when the set is empty (which is what lets a `customWhere` built on this probe as
- * claims-dependent). Use {@link buildGrantScopeShapeWhere} directly only when there is no bypass to mirror.
+ * The grant-scope **predicate**, bypass included — the native-path counterpart to
+ * the grant-scope `select` policy, from the same declaration. A caller holding a bypass grant
+ * gets `null` (no filter, every row); anyone else gets {@link buildGrantScopeShapePredicate} over
+ * their resolved ids.
  */
-export function buildGrantScopeAccessShapeWhere(
+export function buildGrantScopeAccessShapePredicate(
   scopeColumn: AnyColumn,
   claims: JwtClaims | null,
   options: GrantScopeAccessOptions,
-): SQL | null {
+): Predicate | null {
   const access = resolveGrantScopeAccess(claims, options);
-  return access.bypass ? null : buildGrantScopeShapeWhere(scopeColumn, access.ids);
+  return access.bypass ? null : buildGrantScopeShapePredicate(scopeColumn, access.ids);
 }

@@ -1,10 +1,7 @@
-import { sql, type AnyColumn, type SQL } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
+import type { AnyColumn } from "drizzle-orm";
 import { z } from "zod";
 
-import type { Predicate } from "./predicate";
-
-const pgDialect = new PgDialect();
+import { p, type Predicate } from "./predicate";
 
 export type TableMode = "readonly" | "writeonly" | "readwrite";
 
@@ -332,6 +329,37 @@ export function readShapeTier(shape: ShapeSpec): ShapeTier {
   return shape.scope != null ? "shared" : "private";
 }
 
+/**
+ * Refuse a shape whose `rowFilter` cannot actually filter.
+ *
+ * The control plane compiles a private-tier shape from `customPredicate` alone, so a filter that does
+ * not supply one is created with no subject test and streams **every** row to whoever subscribed. That
+ * is the precise shape of a silent authorization bypass: the registry says "filtered", the wire says
+ * "all rows", and nothing anywhere reports a discrepancy.
+ *
+ * The way to land there is a `rowFilter` that filters nothing at all — no predicate and no column
+ * allow-list — so it asserts a restriction it does not carry. (A filter holding *only* `columns` is
+ * legitimate: that is how `defineReadProjection` narrows a projection's wire columns without
+ * restricting its rows.)
+ *
+ * Refused at DEFINITION time, not at the first subscribe: declaring a `rowFilter` asserts that these
+ * rows are not for everyone, and there is no input for which a filter that cannot run could later turn
+ * out to be fine. A shape that genuinely serves every row omits `rowFilter` entirely — the difference
+ * between "no filter" and "a filter that does nothing" is exactly what this keeps expressible.
+ */
+export function assertShapeFilterIsEnforceable(shape: ShapeSpec): void {
+  const filter = shape.rowFilter;
+  if (filter == null || filter.customPredicate != null) return;
+
+  if (filter.columns == null) {
+    throw new Error(
+      `[pgxsinkit] shape "${shape.shapeKey}" declares a rowFilter that restricts nothing — no ` +
+        `customPredicate and no column allow-list. Declare customPredicate, or drop the rowFilter if ` +
+        `the rows really are for everyone (an absent rowFilter is how a shape says so).`,
+    );
+  }
+}
+
 /** Input variant of {@link ShapeSpec} where `tableName` and `shapeKey` are optional.
  * When omitted, both default to the top-level `tableName` of the `defineSyncTable` call.
  * `physicalTable` is deliberately absent — it is a resolved/internal field, never a consumer input
@@ -475,75 +503,35 @@ export function getLocalSyncPrimaryKeyColumns(source: {
 
 export interface RowFilterSpec {
   /**
-   * The row filter: returns the Electric shape `where` for this request, or `null` to bypass
-   * filtering (e.g. admin access). **Prefer returning a Drizzle `SQL` fragment** built from the
-   * table's columns: reference each column through {@link c} (a bare, rename-safe identifier) and
-   * embed request-derived values directly — they become **bound `$n` params**, never hand-escaped
-   * literals. Enum columns must be cast to text (`${c(col)}::text = 'x'`) for Electric's grammar,
-   * and subqueries must be self-contained (not correlated), since Electric needs plain column refs.
+   * The PRIVATE-TIER row filter (ADR-0055): the predicate fused with the caller's claims, compiled
+   * into the shape at subscribe. `null` bypasses filtering (all rows); {@link DENY_ALL_PREDICATE}
+   * denies.
    *
-   * Returning a raw **string** is the escape hatch for a predicate Drizzle can't express. SECURITY:
-   * a string is interpolated verbatim into the `where` — it is NOT escaped, so any request-derived
-   * value you embed must be escaped/validated (`escapeSqlLiteral`) inside this function, or it is a
-   * SQL-injection vector. Reach for the string form only when the Drizzle fragment cannot express it.
+   * Authored with the `p.*` builders over real Drizzle column objects, so a comparison is checked
+   * against the column's own TypeScript type — a mistyped enum label, a `null` against a NOT NULL
+   * column, or a `jsonb`/`Date` column with no scalar wire form are all compile errors rather than
+   * silently-wrong filters.
    *
-   * **Must be pure.** The proxy already calls this fresh on every shape request; the client also
-   * *probes* it with empty claims (`{}`) to detect claims-dependence (ADR-0039 —
-   * {@link isClaimsDependentRowFilter}). Do not memoize, mutate external state, or assume it runs once.
-   */
-  customWhere?: (claims: JwtClaims, params?: Record<string, unknown>) => string | SQL | null;
-  /**
-   * The PRIVATE-TIER filter on the Circuits-native path (ADR-0055): the same job as `customWhere`,
-   * returning a {@link Predicate} instead of SQL text. `null` bypasses filtering (all rows);
-   * {@link DENY_ALL_PREDICATE} denies.
-   *
-   * It exists as a sibling rather than a replacement only because both read paths are present while
-   * the native one is being built. `customWhere` goes when the Electric path does — the native path
-   * cannot use it, since a compiled `SQL` fragment is text and the native API takes an AST, and
-   * re-lexing that text in the control plane would reintroduce in TypeScript exactly the parser
-   * ADR-0055 declines to depend on.
-   *
-   * **Must be pure**, for the same reasons `customWhere` must: it is called fresh per shape
-   * creation, and probed with empty claims to detect claims-dependence.
+   * **Must be pure**: it is called fresh per shape creation, and probed with empty claims to detect
+   * claims-dependence (ADR-0039 — {@link isClaimsDependentRowFilter}).
    */
   customPredicate?: (claims: JwtClaims, params?: Record<string, unknown>) => Predicate | null;
   /** Column projection for the shape URL (e.g. ["id", "source_text"]). */
   columns?: string[];
   /**
-   * An opaque version tag for the part of this filter the fingerprint cannot see — the `customWhere`
-   * body (you cannot hash a closure; only its *presence* is fingerprinted). Bump this (any new
-   * string/number) whenever you change that logic so the fingerprint shifts and the local read cache
-   * rebuilds + the shape subscription resets. Leaving it unchanged after a `customWhere`
-   * authorization change would silently serve the stale shape.
+   * An opaque version tag for the part of this filter the fingerprint cannot see — the
+   * `customPredicate` body (you cannot hash a closure; only its *presence* is fingerprinted). Bump
+   * this (any new string/number) whenever you change that logic so the fingerprint shifts and the
+   * local read cache rebuilds + the shape subscription resets. Leaving it unchanged after a
+   * `customPredicate` authorization change would silently serve the stale shape.
    */
   revision?: string | number;
 }
 
 /**
- * A **bare** (table-unqualified) quoted identifier for a Drizzle column — `"workspace_id"`, never
- * `"work_items"."workspace_id"`. Electric's shape `where` grammar requires *plain* column references
- * (it rejects a qualified one with "Expected a plain column reference"), and Drizzle qualifies columns
- * by default — so reference columns through `c()` when authoring a `customWhere` Drizzle fragment. The
- * column object keeps the reference rename-safe and existence-checked at compile time; only the bare
- * name reaches the wire. Subqueries must stay self-contained (not correlated), since bare names then
- * resolve unambiguously to each FROM — a correlated subquery would need qualification Electric rejects.
- */
-export function c(column: AnyColumn): SQL {
-  return sql`${sql.identifier(column.name)}`;
-}
-
-/**
- * The deny-all row filter: a `customWhere` returns this to make **no** rows visible (e.g. an
+ * The deny-all predicate: a `customPredicate` returns this to make **no** rows visible (e.g. an
  * unauthenticated request), the counterpart to returning `null` (which bypasses filtering — all rows
- * visible). It is a Drizzle `SQL` fragment (`false`), so it stays on the typed/parameterized path
- * with the rest of the filter rather than being a hand-written `"1 = 0"` string. `WHERE false`
- * matches nothing; Electric accepts it (verified) exactly as it accepts `1 = 0`.
- */
-export const DENY_ALL: SQL = sql`false`;
-
-/**
- * The deny-all **predicate** — the native-path counterpart to {@link DENY_ALL}, returned by a
- * `customPredicate` that makes no rows visible.
+ * visible).
  *
  * An empty `OR` rather than a synthetic always-false comparison: the engine evaluates it as FALSE by
  * construction (`Or` starts at FALSE and only TRUE dominates), it needs no column to name, and it
@@ -563,65 +551,35 @@ export const DENY_ALL_PREDICATE: Predicate = Object.freeze({ or: [] as Predicate
  * claims-dependent, activated with no auth token, opens an empty subscription by construction, so
  * the client warns.
  *
- * A filter is claims-dependent when its `customWhere`, evaluated with **empty claims** (`{}` —
- * exactly what the proxy passes for an unauthenticated request) and no params, either **throws** or
- * returns the {@link DENY_ALL} sentinel by **reference identity** (which every contracts helper —
- * {@link buildOwnershipShapeWhere} and friends — returns for a missing subject, and which is already
- * the documented deny-anonymous pattern). Any other result — `null` (no filtering), a string, or a
- * different `SQL` fragment — is not claims-dependent as far as this probe can tell.
+ * A filter is claims-dependent when its `customPredicate`, evaluated with **empty claims** (`{}` —
+ * exactly what the control plane passes for an unauthenticated request) and no params, either
+ * **throws** or returns the {@link DENY_ALL_PREDICATE} sentinel by **reference identity** (which every
+ * contracts helper — {@link buildOwnershipShapePredicate} and friends — returns for a missing subject,
+ * and which is already the documented deny-anonymous pattern). Any other result — `null` (no
+ * filtering) or a different predicate — is not claims-dependent as far as this probe can tell.
  *
- * Requires `customWhere` to be pure (its contract; see {@link RowFilterSpec.customWhere}).
+ * Requires `customPredicate` to be pure (its contract; see {@link RowFilterSpec.customPredicate}).
  */
 export function isClaimsDependentRowFilter(filter: RowFilterSpec | undefined): boolean {
-  if (!filter?.customWhere) {
+  if (!filter?.customPredicate) {
     return false;
   }
 
   try {
-    return filter.customWhere({}, undefined) === DENY_ALL;
+    return filter.customPredicate({}, undefined) === DENY_ALL_PREDICATE;
   } catch {
     return true;
   }
 }
 
 /**
- * The ownership shape `where` — the read-path mirror of an owner-column RLS policy: rows whose owner
- * column equals the caller's subject, {@link DENY_ALL} for an unauthenticated caller. Takes the real
- * Drizzle owner column (bare via {@link c}, rename-safe); the subject rides as a typed interpolation —
- * a bound param through `buildRowFilterShape`, or a drizzle-escaped literal when a proxy renders it
- * inline for a shape URL.
+ * The ownership **predicate** — the native-path counterpart to {@link buildOwnershipShapeWhere}: rows
+ * whose owner column equals the caller's subject, {@link DENY_ALL_PREDICATE} for an unauthenticated
+ * caller (by reference, so a `customPredicate` built on it probes claims-dependent).
+ *
+ * Takes the real Drizzle owner column, so the reference is rename-safe, and the subject rides as a
+ * typed JSON scalar rather than text that has to be escaped and re-parsed.
  */
-export function buildOwnershipShapeWhere(ownerColumn: AnyColumn, subject: string | null | undefined): SQL {
-  return subject == null || subject === "" ? DENY_ALL : sql`${c(ownerColumn)} = ${subject}`;
-}
-
-/** The parameterized shape filter the proxy sends to Electric: a `where` and its positional params. */
-export interface RowFilterShape {
-  where: string;
-  params: string[];
-}
-
-/**
- * The shape filter the proxy sends to Electric: the `where` plus its positional `params` (`$1`, `$2`,
- * …). A `customWhere` returning a Drizzle `SQL` fragment is serialized here, so request-derived values
- * become **bound params** — never hand-escaped literals; a string `customWhere` is the raw escape
- * hatch (no params). Returns `null` when there is no filter (all rows visible).
- */
-export function buildRowFilterShape(
-  filter: RowFilterSpec,
-  claims: JwtClaims | null,
-  params?: Record<string, unknown>,
-): RowFilterShape | null {
-  const custom = filter.customWhere?.(claims ?? {}, params);
-
-  if (custom == null) {
-    return null;
-  }
-
-  if (typeof custom === "string") {
-    return custom ? { where: custom, params: [] } : null;
-  }
-
-  const compiled = pgDialect.sqlToQuery(custom);
-  return { where: compiled.sql, params: compiled.params.map((value) => String(value)) };
+export function buildOwnershipShapePredicate(ownerColumn: AnyColumn, subject: string | null | undefined): Predicate {
+  return subject == null || subject === "" ? DENY_ALL_PREDICATE : p.eq(ownerColumn, subject);
 }

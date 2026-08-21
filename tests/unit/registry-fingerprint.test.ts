@@ -155,7 +155,7 @@ describe("registry fingerprint (ADR-0004)", () => {
     expect(fingerprintRegistry(withTransform)).toBe(fingerprintRegistry(withoutTransform));
   });
 
-  it("changes when a static row filter is swapped, but not when only customWhere differs", () => {
+  it("changes when a static row filter is swapped, but not when only customPredicate differs", () => {
     const withColumns = (projection: string[]) => {
       const entry = defineSyncTable({
         tableName: "items",
@@ -176,22 +176,22 @@ describe("registry fingerprint (ADR-0004)", () => {
       fingerprintRegistry(withColumns(["id", "team_id"])),
     );
 
-    // A change confined to the customWhere function body is not (only its presence is recorded).
-    const withCustom = (fn: () => string) => {
+    // A change confined to the customPredicate function body is not (only its presence is recorded).
+    const withCustom = (fn: () => null) => {
       const entry = defineSyncTable({
         tableName: "items",
         makeColumns: () => ({ id: uuid("id").primaryKey() }),
         clientProjection: { omitColumns: [] },
       });
-      return defineSyncRegistry({ items: { ...entry, shape: { ...entry.shape!, rowFilter: { customWhere: fn } } } });
+      return defineSyncRegistry({
+        items: { ...entry, shape: { ...entry.shape!, rowFilter: { customPredicate: fn } } },
+      });
     };
-    expect(fingerprintRegistry(withCustom(() => "owner_id = '1'"))).toBe(
-      fingerprintRegistry(withCustom(() => "team_id = '2'")),
-    );
+    expect(fingerprintRegistry(withCustom(() => null))).toBe(fingerprintRegistry(withCustom(() => null)));
   });
 
-  it("changes when rowFilter.revision is bumped (the escape hatch for invisible customWhere logic)", () => {
-    // The customWhere body is invisible to the fingerprint, so a consumer that changes its
+  it("changes when rowFilter.revision is bumped (the escape hatch for invisible customPredicate logic)", () => {
+    // The customPredicate body is invisible to the fingerprint, so a consumer that changes its
     // *authorization logic* bumps `revision` to force a cache + subscription reset.
     const withRevision = (revision?: string | number) => {
       const entry = defineSyncTable({
@@ -200,7 +200,7 @@ describe("registry fingerprint (ADR-0004)", () => {
         clientProjection: { omitColumns: [] },
       });
       const rowFilter = {
-        customWhere: () => "owner_id = '1'",
+        customPredicate: () => null,
         ...(revision !== undefined ? { revision } : {}),
       };
       return defineSyncRegistry({ items: { ...entry, shape: { ...entry.shape!, rowFilter } } });

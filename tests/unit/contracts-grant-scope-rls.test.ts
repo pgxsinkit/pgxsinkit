@@ -4,10 +4,10 @@ import type { SQL } from "drizzle-orm";
 import { PgDialect, pgRole, pgTable, uuid, type AnyPgTable } from "drizzle-orm/pg-core";
 
 import {
-  buildGrantScopeAccessShapeWhere,
-  buildGrantScopeShapeWhere,
+  buildGrantScopeAccessShapePredicate,
+  buildGrantScopeShapePredicate,
   buildSupabaseGrantScopeNativePolicies,
-  DENY_ALL,
+  DENY_ALL_PREDICATE,
   isClaimsDependentRowFilter,
   resolveGrantScopeAccess,
   resolveGrantScopeIds,
@@ -170,20 +170,27 @@ describe("contracts grant-scope RLS helpers", () => {
     expect(resolveGrantScopeIds({ sub: "x" }, { scopeKind: "offering", roleValues: teacherRoles })).toEqual([]);
   });
 
-  it("buildGrantScopeShapeWhere emits a bare-column IN over bound ids (deny on empty)", () => {
+  it("buildGrantScopeShapePredicate emits an OR of equalities over the ids (deny on empty)", () => {
     const enrolments = pgTable("enrolments", { offeringId: uuid("offering_id").notNull() });
 
-    // The fragment parameterizes ids ($n bound params via buildRowFilterShape) and references the
-    // column bare (Electric's grammar), rename-safe through the real column object.
-    const bound = dialect.sqlToQuery(buildGrantScopeShapeWhere(enrolments.offeringId, ["off-a", "off-b"]));
-    expect(normalizeSqlText(bound.sql)).toBe(`"offering_id" in ($1, $2)`);
-    expect(bound.params).toEqual(["off-a", "off-b"]);
+    // An OR-chain, not an IN: the engine's `In` leaf takes a SUBQUERY, and a grant set lives in the
+    // JWT rather than a table. This is the same shape the engine's own SQL parser desugars
+    // `IN (list)` to, so nothing is lost — and the ids ride as typed values, never escaped text.
+    expect(buildGrantScopeShapePredicate(enrolments.offeringId, ["off-a", "off-b"])).toEqual({
+      or: [
+        { col: "offering_id", op: "eq", value: "off-a" },
+        { col: "offering_id", op: "eq", value: "off-b" },
+      ],
+    });
 
-    // Rendered inline (a proxy composing a shape URL), drizzle owns the escaping — no injection.
-    const inline = dialect.sqlToQuery(buildGrantScopeShapeWhere(enrolments.offeringId, ["a'b"]).inlineParams());
-    expect(normalizeSqlText(inline.sql)).toBe(`"offering_id" in ('a''b')`);
+    // A single grant collapses to the bare leaf rather than a one-armed OR.
+    expect(buildGrantScopeShapePredicate(enrolments.offeringId, ["off-a"])).toEqual({
+      col: "offering_id",
+      op: "eq",
+      value: "off-a",
+    });
 
-    expect(dialect.sqlToQuery(buildGrantScopeShapeWhere(enrolments.offeringId, [])).sql).toBe("false");
+    expect(buildGrantScopeShapePredicate(enrolments.offeringId, [])).toBe(DENY_ALL_PREDICATE);
   });
 });
 
@@ -268,24 +275,26 @@ describe("contracts grant-scope bypass read-path mirror", () => {
     }
   });
 
-  it("buildGrantScopeAccessShapeWhere: bypass → null, otherwise the ids path, DENY_ALL on empty", () => {
+  it("buildGrantScopeAccessShapePredicate: bypass → null, otherwise the ids path, deny on empty", () => {
     // Bypass → no filter at all, mirroring the policy's OR branch (every row streams).
-    expect(buildGrantScopeAccessShapeWhere(enrolments.offeringId, grantClaims([bypassGrant]), declaration)).toBeNull();
+    expect(
+      buildGrantScopeAccessShapePredicate(enrolments.offeringId, grantClaims([bypassGrant]), declaration),
+    ).toBeNull();
 
-    // No bypass → the unchanged ids fragment, bare column + bound ids.
-    const scoped = buildGrantScopeAccessShapeWhere(enrolments.offeringId, grantClaims([teacherGrant]), declaration);
-    const bound = dialect.sqlToQuery(scoped as SQL);
-    expect(normalizeSqlText(bound.sql)).toBe(`"offering_id" in ($1)`);
-    expect(bound.params).toEqual(["off-a"]);
-    expect(renderSql(scoped)).toBe(renderSql(buildGrantScopeShapeWhere(enrolments.offeringId, ["off-a"])));
+    // No bypass → the unchanged ids predicate.
+    const scoped = buildGrantScopeAccessShapePredicate(enrolments.offeringId, grantClaims([teacherGrant]), declaration);
+    expect(scoped).toEqual({ col: "offering_id", op: "eq", value: "off-a" });
+    expect(scoped).toEqual(buildGrantScopeShapePredicate(enrolments.offeringId, ["off-a"]));
 
-    // Neither bypass nor grants → the DENY_ALL sentinel BY REFERENCE, so a customWhere built on this
+    // Neither bypass nor grants → the sentinel BY REFERENCE, so a customPredicate built on this
     // probes claims-dependent.
-    expect(buildGrantScopeAccessShapeWhere(enrolments.offeringId, grantClaims([]), declaration)).toBe(DENY_ALL);
-    expect(buildGrantScopeAccessShapeWhere(enrolments.offeringId, null, declaration)).toBe(DENY_ALL);
+    expect(buildGrantScopeAccessShapePredicate(enrolments.offeringId, grantClaims([]), declaration)).toBe(
+      DENY_ALL_PREDICATE,
+    );
+    expect(buildGrantScopeAccessShapePredicate(enrolments.offeringId, null, declaration)).toBe(DENY_ALL_PREDICATE);
     expect(
       isClaimsDependentRowFilter({
-        customWhere: (claims) => buildGrantScopeAccessShapeWhere(enrolments.offeringId, claims, declaration),
+        customPredicate: (claims) => buildGrantScopeAccessShapePredicate(enrolments.offeringId, claims, declaration),
       }),
     ).toBe(true);
   });
@@ -304,6 +313,8 @@ describe("contracts grant-scope bypass read-path mirror", () => {
 
     // The very grant the policy's EXISTS would match is the one the mirror bypasses on.
     expect(resolveGrantScopeAccess(grantClaims([bypassGrant]), declaration).bypass).toBe(true);
-    expect(buildGrantScopeAccessShapeWhere(governed.offeringId, grantClaims([bypassGrant]), declaration)).toBeNull();
+    expect(
+      buildGrantScopeAccessShapePredicate(governed.offeringId, grantClaims([bypassGrant]), declaration),
+    ).toBeNull();
   });
 });

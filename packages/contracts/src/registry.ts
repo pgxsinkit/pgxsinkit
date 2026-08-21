@@ -33,6 +33,7 @@ import {
   isStorageDurability,
   isSubscriptionTiming,
   isWriteMode,
+  assertShapeFilterIsEnforceable,
   readShapeTier,
   RETENTIONS,
   STORAGE_BACKENDS,
@@ -310,7 +311,7 @@ export type SyncTableInputProjection<
 /**
  * A row filter for {@link defineSyncTable}'s `shape`, authored from the table's built, typed columns.
  * Reference columns through `c(columns.x)` exactly as `extras` does with its `self` argument, so
- * `customWhere` builds parameterized Electric `where`s from real, rename-safe column objects instead
+ * `customPredicate` builds the shape's predicate from real, rename-safe column objects instead
  * of hand-written column-name strings.
  */
 export type RowFilterInput<TColumns extends Record<string, ColumnBuilderBase>> = (
@@ -764,7 +765,10 @@ export function defineSyncTable<
   // Read the tier for its side effect: a shape declaring both `scope` and `rowFilter` is refused
   // HERE, at definition time, rather than at the first shape creation — the two are contradictory
   // by construction, so there is no input for which it could later turn out to be fine.
-  if (resolvedShape != null) readShapeTier(resolvedShape);
+  if (resolvedShape != null) {
+    readShapeTier(resolvedShape);
+    assertShapeFilterIsEnforceable(resolvedShape);
+  }
 
   const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
   const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);
@@ -836,10 +840,10 @@ export function defineSyncTable<
  * - **Readonly.** A projection has no write path; the engine resolves an incoming shape request by its
  *   unique `shapeKey` (= `as`) and consults the derived physical target only on egress.
  *
- * The `rowFilter` callback receives the OWNER's full columns — `customWhere` runs in Electric against
+ * The `rowFilter` callback receives the OWNER's full columns — the predicate is evaluated against
  * the physical table, so it may reference a column the local subset omits. RLS for the projection's
  * reads lives on the OWNER's table (a projection adds no DDL to a table it does not own); its
- * `customWhere` must be a subset of what that RLS allows.
+ * `customPredicate` must be a subset of what that RLS allows.
  *
  * The `owner` may be a `defineSyncTable` entry OR an `asReadonly` of one — an `asReadonly` projection
  * preserves the full read contract (physical table, columns, primary key) and only drops the write path,
@@ -1056,7 +1060,7 @@ export function defineReadProjection<
     ...(opts.retention != null ? { retention: opts.retention } : {}),
   });
 
-  // Resolve the row filter against the OWNER's full columns (the customWhere runs in Electric on the
+  // Resolve the row filter against the OWNER's full columns (the predicate is evaluated on the
   // physical table, so it may reference a column the subset omits).
   const resolvedRowFilter = opts.rowFilter?.(getColumns(owner.table) as unknown as TableColumnsShape<TOwnerTable>);
 
@@ -1086,6 +1090,10 @@ export function defineReadProjection<
     physicalTable: physicalTable,
     ...(rowFilter != null ? { rowFilter } : {}),
   };
+
+  // Same definition-time refusal the owning `defineSyncTable` performs: a projection's filter is a
+  // filter, and one that cannot run here is the same unfiltered stream it would be there.
+  assertShapeFilterIsEnforceable(shape);
 
   // Point `table` at the owner's physical table and flag `readProjection` — that flag (not the absence of
   // a column factory) is what generators/appliers key on to skip owning-table work (see plpgsql-apply's

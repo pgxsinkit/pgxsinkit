@@ -56,9 +56,9 @@ const boardEventStreams = {
 };
 
 /**
- * The board sync registry — the single contract the client, the `board-sync` proxy, and the
- * `board-write` API all consume. Each entry carries its read-path `customWhere` (applied by the
- * proxy); the write-path RLS lives on the tables (schema.ts / policies.ts). The two are deliberate
+ * The board sync registry — the single contract the client, the `board-sync` control plane, and the
+ * `board-write` API all consume. Each entry carries its read-path `customPredicate` (compiled into the
+ * shape at subscribe); the write-path RLS lives on the tables (schema.ts / policies.ts). The two are deliberate
  * mirrors: read filters and write policies derive from the same member-of-team / channel-visibility /
  * admin predicates so a row can never be visible-but-unwritable or vice versa by accident.
  *

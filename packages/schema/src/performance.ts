@@ -1,15 +1,15 @@
-import type { SQL } from "drizzle-orm";
 import { bigint, getTableConfig, pgSchema, type AnyPgTable, uuid, varchar } from "drizzle-orm/pg-core";
 import { authenticatedRole } from "drizzle-orm/supabase";
 import { getColumns } from "drizzle-orm/utils";
 
 import {
   attachSyncRegistrySchema,
-  buildOwnershipShapeWhere,
+  buildOwnershipShapePredicate,
   buildSupabaseOwnerOrAdminNativePolicies,
   defineSyncTable,
   escapeSqlLiteral as escapeSqlString,
   quoteIdentifier as quoteIdent,
+  type Predicate,
   type SyncTableEntry,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
@@ -117,11 +117,11 @@ export function buildSyntheticRegistry(options: SyntheticRegistryOptions): Synth
       // registry and no server can forget to apply it.
       shape: {
         rowFilter: (t) => ({
-          customWhere: (claims): SQL | null => {
+          customPredicate: (claims): Predicate | null => {
             // Optional chaining, not `demoJwtHasRole`: the probe in `isClaimsDependentRowFilter` calls
             // this with `{}` to classify the filter, and a required `app_metadata` would throw there.
             if (claims.app_metadata?.roles?.includes("admin")) return null;
-            return buildOwnershipShapeWhere(t["ownerId"]!, claims.sub);
+            return buildOwnershipShapePredicate(t["ownerId"]!, claims.sub);
           },
         }),
       },

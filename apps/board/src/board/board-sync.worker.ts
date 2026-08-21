@@ -11,10 +11,10 @@ import { boardConfig } from "../config";
 // pin them. The worker NAME carries the store path only, never configuration.
 
 // Dev-only: turn the toolkit's opt-in instrumentation on INSIDE the worker scope too (main.tsx does the
-// same on the tab). `timeAsync`/`instrumentShapeFetch` gate their rail lines on this WORKER-scope flag, so
-// without it the boot phase + shape-request stamps never reach the sink `defineSyncWorker` installs — only
-// the unconditional `syncDebug` calls would cross. With it, the FULL boot rail (schema/journal/reconcile,
-// the shape-request start, and the S4 `boot shape prefetch start` / `boot commits opened` overlap stamps)
+// same on the tab). `timeAsync` gates its rail lines on this WORKER-scope flag, so without it the boot
+// phase stamps never reach the sink `defineSyncWorker` installs — only the unconditional `syncDebug`
+// calls would cross. With it, the FULL boot rail (schema/journal/reconcile, and the S4
+// `boot shape prefetch start` / `boot commits opened` overlap stamps)
 // is forwarded to every tab and printed there as `[pgxsinkit·w …ms]`. Never on in a production build —
 // except the e2e lane's (`VITE_E2E=1`), whose scenarios assert these rail lines on the built artifact.
 if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {

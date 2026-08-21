@@ -165,7 +165,7 @@ function privatePredicate(
   if (filter == null) return { predicate: undefined };
 
   const resolved = filter(claims ?? {}, params);
-  // Reference identity, matching how `DENY_ALL` is recognised: a denied subject gets no shape at
+  // Reference identity: a denied subject gets no shape at
   // all rather than an empty one, so nothing is created and nothing has to be torn down later.
   if (resolved === DENY_ALL_PREDICATE) {
     return { refusal: `shape "${shape.shapeKey}" denies this caller` };

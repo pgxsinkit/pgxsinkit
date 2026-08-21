@@ -241,7 +241,7 @@ export {
   createConvergenceDriver,
   createIntervalConvergenceTrigger,
 } from "./convergence";
-export { instrumentShapeFetch, setSyncDebugSink, syncDebug, timeAsync } from "./debug";
+export { setSyncDebugSink, syncDebug, timeAsync } from "./debug";
 export {
   type AttachedSyncClient,
   attachSyncClient,

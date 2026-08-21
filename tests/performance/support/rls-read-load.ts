@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 
-import { and, desc, eq, exists, inArray, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, inArray, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import type { drizzle as bunSqlDrizzle } from "drizzle-orm/bun-sql";
 import {
   bigint,
@@ -17,7 +17,6 @@ import {
 } from "drizzle-orm/pg-core";
 
 import {
-  buildGrantScopeShapeWhere,
   buildSupabaseGrantScopeNativePolicies,
   buildSupabaseMembershipNativePolicies,
   resolveGrantScopeIds,
@@ -340,11 +339,26 @@ function grantScopeScenario(config: RlsReadConfig): ScenarioSpec {
       { mode: "rls-fnrows", policies: buildFnRowsGrantScopePolicies() },
     ],
     claims: grantScopeClaims(config),
-    // The Electric shape `where` is a measured artifact and must be the literal text Electric would
-    // run — author it from the typed column via the contracts builder, render once inline.
-    shapeWhere: new PgDialect().sqlToQuery(buildGrantScopeShapeWhere(enrolmentsTable.offeringId, ids).inlineParams())
-      .sql,
+    // The shape filter as a measured artifact: this track compares the COST of the same visibility
+    // rule expressed three ways in Postgres (shape-query vs RLS-correct vs RLS-naive), so this half
+    // has to be literal SQL text a query planner sees. That is why it is rendered here rather than
+    // taken from the contracts builders — those now emit the native predicate AST, which is what the
+    // sync engine consumes and is deliberately never SQL.
+    shapeWhere: new PgDialect().sqlToQuery(renderScopeInList(enrolmentsTable.offeringId, ids).inlineParams()).sql,
   };
+}
+
+/**
+ * `"offering_id" in ('a','b',…)` — the shape filter's Postgres spelling, for the benchmark only.
+ * Bare column (unqualified) so the text matches what the shape-query mode runs, and ids ride as typed
+ * interpolations so drizzle owns the escaping.
+ */
+function renderScopeInList(scopeColumn: AnyColumn, ids: string[]): SQL {
+  if (ids.length === 0) return sql`false`;
+  return sql`${sql.identifier(scopeColumn.name)} in (${sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  )})`;
 }
 
 export interface RlsReadModeMetric {

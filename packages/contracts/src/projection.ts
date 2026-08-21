@@ -126,7 +126,7 @@ export function asEphemeral<TEntry extends SyncTableEntry>(entry: TEntry): TEntr
  *
  * Throws, naming the divergent tables, on any mismatch. Call it where the client registries are assembled
  * (module-eval or a test) so a drifted projection fails closed instead of silently serving different rows
- * to different clients. The `customWhere` body is invisible to the fingerprint — bump
+ * to different clients. The `customPredicate` body is invisible to the fingerprint — bump
  * {@link RowFilterSpec.revision} so a logic-only divergence is caught.
  */
 export function assertReadContractPreserved(

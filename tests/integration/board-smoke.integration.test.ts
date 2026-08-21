@@ -4,7 +4,7 @@
 // (tests/integration/*.integration.test.ts) exercise the client/server primitives in-process against
 // the minimal postgres+electric harness with synthetic claims; none of them exercises GoTrue, the
 // gateway, or the bundled edge functions. This does, so a wiring break in the demo's deployment path
-// (auth, routing, the proxy's claim-driven `customWhere`, the apply's RLS actor switch) fails here.
+// (auth, routing, the control plane's claim-driven `customPredicate`, the apply's RLS actor switch) fails here.
 //
 // Run via `bun run test:integration:board` (scripts/run-board-smoke.ts brings the board stack up,
 // seeds it, runs this, and tears it down). The deterministic seed (scripts/seed-board.ts) is the
@@ -75,7 +75,7 @@ interface ShapeMessage {
 
 // Read a whole shape through the board-sync proxy as a given identity: walk offsets until Electric
 // reports up-to-date, folding insert/update/delete into the final row set (keyed by Electric's row
-// key). Returns exactly the rows the proxy's claim-driven `customWhere` let through for this token.
+// key). Returns exactly the rows the control plane's claim-driven `customPredicate` let through for this token.
 async function fetchShapeRows(table: string, token: string): Promise<Record<string, unknown>[]> {
   const rows = new Map<string, Record<string, unknown>>();
   let handle: string | null = null;
@@ -189,7 +189,7 @@ describe("board demo smoke (real edge stack: GoTrue → Envoy → edge functions
     expect(adminToken.length).toBeGreaterThan(0);
   });
 
-  it("scopes a member's read to their own teams (board-sync customWhere: Alice = Platform + Growth, not Design)", async () => {
+  it("scopes a member's read to their own teams (board-sync customPredicate: Alice = Platform + Growth, not Design)", async () => {
     const teams = new Set((await fetchShapeRows("issue", aliceToken)).map((row) => row["team_id"]));
     expect(teams.has(PLATFORM)).toBe(true);
     expect(teams.has(GROWTH)).toBe(true);

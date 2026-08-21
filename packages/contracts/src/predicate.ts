@@ -17,8 +17,13 @@ import { getColumnTable, getTableName, type AnyColumn } from "drizzle-orm";
  */
 export type PredicateValue = string | number | boolean | null;
 
-/** Comparison operators for a leaf predicate. */
-export type PredicateLeafOp = "eq" | "neq" | "lt" | "lte" | "gt" | "gte";
+/**
+ * Comparison operators for a leaf predicate.
+ *
+ * `like` is SQL `LIKE`: case-sensitive, `%` = any sequence, `_` = any single char. There is no
+ * `notLike` op — the engine models it as `Not(Like)`, which is what {@link p.notLike} builds.
+ */
+export type PredicateLeafOp = "eq" | "neq" | "lt" | "lte" | "gt" | "gte" | "like";
 
 /** `col <op> value`. Three-valued: never TRUE on a NULL cell — use {@link IsNullPredicate} for that. */
 export interface LeafPredicate {
@@ -55,10 +60,16 @@ export interface NotPredicate {
  * `(a, b) IN (…)`. Subqueries must stay **uncorrelated**: the inner `where` references the inner
  * table's columns only, never the outer row's.
  */
-export interface SubqueryRef {
+export interface SubqueryRef<TValue extends PredicateValue = PredicateValue> {
   table: string;
   project: string;
   where?: Predicate;
+  /**
+   * Phantom: the projected column's value type, carried so {@link p.in} can require the OUTER column
+   * to be comparable with what the subquery actually projects. Never serialized — it is a type-level
+   * marker only, which is why it is optional and never read.
+   */
+  readonly __value?: TValue;
 }
 
 /**
@@ -122,9 +133,69 @@ function assertPredicateValue(column: AnyColumn, value: unknown): asserts value 
   );
 }
 
-function leaf(column: AnyColumn, op: PredicateLeafOp, value: PredicateValue): LeafPredicate {
-  assertPredicateValue(column, value);
-  return { col: column.name, op, value };
+/**
+ * What a builder accepts, versus {@link PredicateValue} (what goes on the wire).
+ *
+ * `bigint` is admitted because the toolkit's own timestamp convention is a **microsecond BIGINT**, so
+ * comparing against one is ordinary rather than exotic. It is narrowed to a number by `toWireValue`
+ * rather than widening the wire type: Postgres `bigint` is `ColumnType::Int` to the engine, which reads
+ * the JSON scalar as an `i64` — a decimal *string* would be rejected against an int column.
+ */
+export type PredicateValueInput = PredicateValue | bigint;
+
+/** A column's TypeScript value type, as Drizzle carries it on the column object. */
+type ColumnData<TCol extends AnyColumn> = TCol["_"]["data"];
+
+type IsAny<T> = 0 extends 1 & T ? true : false;
+/**
+ * Whether a column's value type is statically unknowable — `any`, or the `unknown` that Drizzle's
+ * erased column paths (`getColumns`, `PgBuildExtraConfigColumns`) yield. Those must stay PERMISSIVE:
+ * narrowing an unknowable type through `Extract` collapses it to `never`, which would refuse every
+ * comparison on a column the author cannot re-type.
+ */
+type IsUnknownData<T> = IsAny<T> extends true ? true : unknown extends T ? true : false;
+
+/**
+ * What may be compared against `TCol` — the column's OWN value type, narrowed to what this wire can
+ * carry, plus `null` when the column is nullable.
+ *
+ * `Extract` is what refuses a column whose values have no scalar form at all: a `jsonb` column typed
+ * as an object, or a `timestamp` column typed as `Date`, resolves to `never` here, so the comparison
+ * is a compile error rather than the runtime throw it used to be. And because a `pgEnum` column's
+ * data type is the literal union of its labels, a mistyped label is caught too — something the SQL
+ * text form could never see.
+ */
+export type ColumnValue<TCol extends AnyColumn> =
+  IsUnknownData<ColumnData<TCol>> extends true
+    ? PredicateValueInput
+    : Extract<ColumnData<TCol>, PredicateValueInput> | (TCol["_"]["notNull"] extends true ? never : null);
+
+/**
+ * Narrow a builder input to its wire form, refusing the one conversion that would be silently wrong.
+ *
+ * A `bigint` past `Number.MAX_SAFE_INTEGER` cannot survive the trip: JSON's only integer carrier here
+ * is a JS `number` (an IEEE double), so serializing it would round to a nearby value and the predicate
+ * would compare unequal to the row it was written for. Microsecond timestamps sit comfortably inside
+ * the safe range, so this throws only for a value that genuinely cannot be expressed.
+ */
+function toWireValue(column: AnyColumn, value: PredicateValueInput): PredicateValue {
+  if (typeof value !== "bigint") {
+    assertPredicateValue(column, value);
+    return value;
+  }
+
+  if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) {
+    throw new Error(
+      `[pgxsinkit] predicate on "${column.name}": ${value}n is outside the exactly-representable ` +
+        `integer range, so serializing it would silently round to a different value. Compare against ` +
+        `a value inside the safe-integer range, or split the test.`,
+    );
+  }
+  return Number(value);
+}
+
+function leaf<TCol extends AnyColumn>(column: TCol, op: PredicateLeafOp, value: ColumnValue<TCol>): LeafPredicate {
+  return { col: column.name, op, value: toWireValue(column, value as PredicateValueInput) };
 }
 
 /**
@@ -140,12 +211,20 @@ function leaf(column: AnyColumn, op: PredicateLeafOp, value: PredicateValue): Le
  * ```
  */
 export const p = {
-  eq: (column: AnyColumn, value: PredicateValue): LeafPredicate => leaf(column, "eq", value),
-  ne: (column: AnyColumn, value: PredicateValue): LeafPredicate => leaf(column, "neq", value),
-  lt: (column: AnyColumn, value: PredicateValue): LeafPredicate => leaf(column, "lt", value),
-  lte: (column: AnyColumn, value: PredicateValue): LeafPredicate => leaf(column, "lte", value),
-  gt: (column: AnyColumn, value: PredicateValue): LeafPredicate => leaf(column, "gt", value),
-  gte: (column: AnyColumn, value: PredicateValue): LeafPredicate => leaf(column, "gte", value),
+  eq: <TCol extends AnyColumn>(column: TCol, value: ColumnValue<TCol>): LeafPredicate => leaf(column, "eq", value),
+  ne: <TCol extends AnyColumn>(column: TCol, value: ColumnValue<TCol>): LeafPredicate => leaf(column, "neq", value),
+  lt: <TCol extends AnyColumn>(column: TCol, value: ColumnValue<TCol>): LeafPredicate => leaf(column, "lt", value),
+  lte: <TCol extends AnyColumn>(column: TCol, value: ColumnValue<TCol>): LeafPredicate => leaf(column, "lte", value),
+  gt: <TCol extends AnyColumn>(column: TCol, value: ColumnValue<TCol>): LeafPredicate => leaf(column, "gt", value),
+  gte: <TCol extends AnyColumn>(column: TCol, value: ColumnValue<TCol>): LeafPredicate => leaf(column, "gte", value),
+
+  /** SQL `LIKE` (case-sensitive; `%` = any sequence, `_` = any single char). Text columns only. */
+  like: <TCol extends AnyColumn<{ data: string }>>(column: TCol, pattern: string): LeafPredicate =>
+    leaf(column, "like", pattern as ColumnValue<TCol>),
+  /** SQL `NOT LIKE`. The engine has no negated-like op; it models it as `Not(Like)`, so this does too. */
+  notLike: <TCol extends AnyColumn<{ data: string }>>(column: TCol, pattern: string): NotPredicate => ({
+    not: leaf(column, "like", pattern as ColumnValue<TCol>),
+  }),
 
   isNull: (column: AnyColumn): IsNullPredicate => ({ col: column.name, isNull: true }),
   isNotNull: (column: AnyColumn): IsNullPredicate => ({ col: column.name, isNull: false }),
@@ -159,14 +238,23 @@ export const p = {
    * column, so there is no table name to get wrong and no way to project a column the named table
    * does not have.
    */
-  subquery: (projected: AnyColumn, where?: Predicate): SubqueryRef => ({
+  subquery: <TCol extends AnyColumn>(
+    projected: TCol,
+    where?: Predicate,
+  ): SubqueryRef<Extract<ColumnValue<TCol>, PredicateValue>> => ({
     table: getTableName(getColumnTable(projected)),
     project: projected.name,
     ...(where !== undefined ? { where } : {}),
   }),
 
-  in: (column: AnyColumn, ref: SubqueryRef): InSubqueryPredicate => ({ col: column.name, in: ref }),
-  notIn: (column: AnyColumn, ref: SubqueryRef): InSubqueryPredicate => ({
+  in: <TCol extends AnyColumn>(
+    column: TCol,
+    ref: SubqueryRef<Extract<ColumnValue<TCol>, PredicateValue>>,
+  ): InSubqueryPredicate => ({ col: column.name, in: ref }),
+  notIn: <TCol extends AnyColumn>(
+    column: TCol,
+    ref: SubqueryRef<Extract<ColumnValue<TCol>, PredicateValue>>,
+  ): InSubqueryPredicate => ({
     col: column.name,
     in: ref,
     negated: true,
