@@ -49,10 +49,15 @@ const notes = defineSyncTable({
 
 const registry = defineSyncRegistry({ tables: { content, notes } });
 
+// person-a holds TWO offerings, so a single requested shape must fan out to two streams.
+const HELD = ["off-1", "off-2"];
+
 const entitlements: EntitlementSet = {
   ready: true,
   permits: (subject, shapeKey, scope) =>
-    subject === "person-a" && shapeKey === "offering_content" && scope[0] === "off-1",
+    subject === "person-a" && shapeKey === "offering_content" && HELD.includes(String(scope[0])),
+  scopesFor: (subject, shapeKey) =>
+    subject === "person-a" && shapeKey === "offering_content" ? HELD.map((held) => [held]) : [],
 };
 
 function stubEngine(): CircuitsEngineClient & { created: unknown[] } {
@@ -76,54 +81,97 @@ function stubEngine(): CircuitsEngineClient & { created: unknown[] } {
 }
 
 describe("subscribe", () => {
-  it("grants a batch under one token the edge then accepts", async () => {
+  // The client asks for two SHAPES and gets three STREAMS: the shared one fans out across the two
+  // offerings person-a holds, the private one does not fan out at all. Nothing on the request named
+  // a scope — that expansion is the control plane's, off the entitlement set.
+  it("expands a shared shape to one stream per entitled scope, under one token", async () => {
     const engine = stubEngine();
     const result = await subscribeToShapes(
       { registry, engine, entitlements, key },
       { sub: "person-a" },
-      [{ shapeKey: "offering_content", scope: ["off-1"] }, { shapeKey: "notes" }],
+      [{ shapeKey: "offering_content" }, { shapeKey: "notes" }],
       NOW,
     );
 
     expect(result.denied).toEqual([]);
-    expect(result.granted.map((g) => g.streamPath)).toEqual(["shape/s1", "shape/s2"]);
+    expect(result.granted.map((g) => [g.shapeKey, g.scope?.[0] ?? null])).toEqual([
+      ["offering_content", "off-1"],
+      ["offering_content", "off-2"],
+      ["notes", null],
+    ]);
     expect(result.expiresAt).toBe(NOW + 300);
 
+    // Each scope got its OWN shape — the predicates differ, so they must not collapse onto one.
+    expect(engine.created).toHaveLength(3);
+
+    // One token covers all three, and the edge accepts each.
     const gate = { key, entitlements, durableStreamsUrl: "http://ds:8080" };
-    expect((await authorizeStreamRead(gate, result.token!, "shape/s1", NOW)).allow).toBe(true);
-    expect((await authorizeStreamRead(gate, result.token!, "shape/s2", NOW)).allow).toBe(true);
+    for (const grant of result.granted) {
+      expect((await authorizeStreamRead(gate, result.token!, grant.streamPath, NOW)).allow).toBe(true);
+    }
   });
 
-  // A subject who lost one of K scopes must still get the K-1 they hold; failing the batch would
-  // deny them everything at boot.
+  // One bad shape in a batch must not cost the subject the rest of it.
   it("degrades per subscription, not per batch", async () => {
     const engine = stubEngine();
     const result = await subscribeToShapes(
       { registry, engine, entitlements, key },
       { sub: "person-a" },
-      [
-        { shapeKey: "offering_content", scope: ["off-1"] },
-        { shapeKey: "offering_content", scope: ["off-nope"] },
-        { shapeKey: "unknown_shape" },
-      ],
+      [{ shapeKey: "offering_content" }, { shapeKey: "unknown_shape" }],
       NOW,
     );
 
-    expect(result.granted).toHaveLength(1);
-    expect(result.denied.map((d) => d.reason)).toEqual([
-      "not entitled to this scope",
-      'no shape declares shapeKey "unknown_shape"',
+    expect(result.granted).toHaveLength(2);
+    expect(result.denied.map((d) => d.reason)).toEqual(['no shape declares shapeKey "unknown_shape"']);
+  });
+
+  // A subject holding nothing is refused, not granted an empty set: zero grants returned silently
+  // would leave the client waiting on streams that were never created.
+  it("refuses a shared shape the subject holds no scope of", async () => {
+    const engine = stubEngine();
+    const result = await subscribeToShapes(
+      { registry, engine, entitlements, key },
+      { sub: "person-b" },
+      [{ shapeKey: "offering_content" }],
+      NOW,
+    );
+
+    expect(result.granted).toEqual([]);
+    expect(result.denied[0]?.reason).toBe("no entitled scopes");
+    expect(engine.created).toEqual([]);
+  });
+
+  // Enumeration and permits are required to agree. When they do not, subscribe is the side that has
+  // to catch it — the edge checks `permits` on every read, so a scope only `scopesFor` believes in
+  // would mint a capability for a stream that then 403s forever.
+  it("refuses a scope that scopesFor yields but permits denies", async () => {
+    const engine = stubEngine();
+    const disagreeing: EntitlementSet = {
+      ready: true,
+      permits: (_subject, _shapeKey, scope) => scope[0] === "off-1",
+      scopesFor: () => [["off-1"], ["off-ghost"]],
+    };
+    const result = await subscribeToShapes(
+      { registry, engine, entitlements: disagreeing, key },
+      { sub: "person-a" },
+      [{ shapeKey: "offering_content" }],
+      NOW,
+    );
+
+    expect(result.granted.map((g) => g.scope?.[0])).toEqual(["off-1"]);
+    expect(result.denied).toEqual([
+      { shapeKey: "offering_content", scope: ["off-ghost"], reason: "not entitled to this scope" },
     ]);
-    // The unentitled scope never reached the engine — no shape created, no capability minted.
+    // The ghost scope never reached the engine — no shape created, no capability minted.
     expect(engine.created).toHaveLength(1);
   });
 
   it("creates nothing while the entitlement set is unavailable", async () => {
     const engine = stubEngine();
     const result = await subscribeToShapes(
-      { registry, engine, entitlements: { ready: false, permits: () => true }, key },
+      { registry, engine, entitlements: { ready: false, permits: () => true, scopesFor: () => [["off-1"]] }, key },
       { sub: "person-a" },
-      [{ shapeKey: "offering_content", scope: ["off-1"] }],
+      [{ shapeKey: "offering_content" }],
       NOW,
     );
 
@@ -137,7 +185,7 @@ describe("subscribe", () => {
     const result = await subscribeToShapes(
       { registry, engine, entitlements, key },
       null,
-      [{ shapeKey: "notes" }, { shapeKey: "offering_content", scope: ["off-1"] }],
+      [{ shapeKey: "notes" }, { shapeKey: "offering_content" }],
       NOW,
     );
 

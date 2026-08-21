@@ -45,6 +45,8 @@ function mutableEntitlements(allowed: Set<string>): EntitlementSet {
     ready: true,
     permits: (subject, shapeKey, scope) =>
       subject === "person-a" && shapeKey === "offering_content" && allowed.has(String(scope[0])),
+    scopesFor: (subject, shapeKey) =>
+      subject === "person-a" && shapeKey === "offering_content" ? [...allowed].map((held) => [held]) : [],
   };
 }
 
@@ -86,6 +88,8 @@ const OFF_A = "11111111-1111-4111-8111-111111111111";
 const OFF_B = "22222222-2222-4222-8222-222222222222";
 
 describe("subscription session", () => {
+  // ONE request, TWO streams. The client never named a scope — it asked for the shape and the
+  // control plane expanded it across the offerings this subject holds.
   it("is told its stream URLs rather than constructing them", async () => {
     const session = await openSubscriptionSession(
       {
@@ -93,37 +97,51 @@ describe("subscription session", () => {
         streamBaseUrl: "http://edge/stream",
         fetch: routeToHandlers(mutableEntitlements(new Set([OFF_A, OFF_B]))),
       },
-      [
-        { shapeKey: "offering_content", scope: [OFF_A] },
-        { shapeKey: "offering_content", scope: [OFF_B] },
-      ],
+      [{ shapeKey: "offering_content" }],
     );
 
     expect(session.granted.map((g) => g.streamUrl)).toEqual([
       "http://edge/stream/shape/s1",
       "http://edge/stream/shape/s2",
     ]);
+    expect(session.granted.map((g) => g.scope?.[0])).toEqual([OFF_A, OFF_B]);
     // And the token it was handed actually opens them at the gate.
     const gate = { key, entitlements: mutableEntitlements(new Set([OFF_A, OFF_B])), durableStreamsUrl: "http://ds" };
     const token = await session.token();
     expect((await authorizeStreamRead(gate, token, "shape/s1", Math.floor(Date.now() / 1000))).allow).toBe(true);
   });
 
-  it("reports a refused scope per subscription and grants the rest", async () => {
+  // Losing an offering is now invisible at subscribe rather than reported: expansion only ever
+  // yields scopes the subject holds, so there is no unentitled request left to refuse. What used to
+  // be a per-subscription denial is simply a smaller fan-out.
+  it("expands to only what the subject still holds", async () => {
     const session = await openSubscriptionSession(
       {
         controlPlaneUrl: "http://api",
         streamBaseUrl: "http://edge/stream",
         fetch: routeToHandlers(mutableEntitlements(new Set([OFF_A]))),
       },
-      [
-        { shapeKey: "offering_content", scope: [OFF_A] },
-        { shapeKey: "offering_content", scope: [OFF_B] },
-      ],
+      [{ shapeKey: "offering_content" }],
     );
 
-    expect(session.granted).toHaveLength(1);
-    expect(session.refused.map((r) => r.reason)).toEqual(["not entitled to this scope"]);
+    expect(session.granted.map((g) => g.scope?.[0])).toEqual([OFF_A]);
+    expect(session.refused).toEqual([]);
+  });
+
+  // Holding nothing is a refusal, not an empty success — otherwise the client waits forever on
+  // streams that were never created.
+  it("refuses a shape the subject holds no scope of", async () => {
+    const session = await openSubscriptionSession(
+      {
+        controlPlaneUrl: "http://api",
+        streamBaseUrl: "http://edge/stream",
+        fetch: routeToHandlers(mutableEntitlements(new Set())),
+      },
+      [{ shapeKey: "offering_content" }],
+    );
+
+    expect(session.granted).toEqual([]);
+    expect(session.refused.map((r) => r.reason)).toEqual(["no entitled scopes"]);
   });
 
   // The re-check on re-mint is what makes the TTL a revocation bound rather than a formality.
@@ -138,10 +156,7 @@ describe("subscription session", () => {
         fetch: routeToHandlers(mutableEntitlements(allowed)),
         onRevoked: (entries) => revoked.push(...entries),
       },
-      [
-        { shapeKey: "offering_content", scope: [OFF_A] },
-        { shapeKey: "offering_content", scope: [OFF_B] },
-      ],
+      [{ shapeKey: "offering_content" }],
     );
 
     allowed.delete(OFF_B);
@@ -173,7 +188,7 @@ describe("subscription session", () => {
           return inner(url, init);
         }) as unknown as typeof fetch,
       },
-      [{ shapeKey: "offering_content", scope: [OFF_A] }],
+      [{ shapeKey: "offering_content" }],
     );
 
     await Promise.all([session.refresh(), session.refresh(), session.refresh(), session.refresh()]);

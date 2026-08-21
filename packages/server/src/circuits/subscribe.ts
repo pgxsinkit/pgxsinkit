@@ -1,15 +1,27 @@
-import type { JwtClaims, PredicateValue, SyncTableRegistry } from "@pgxsinkit/contracts";
+import {
+  readShapeTier,
+  type JwtClaims,
+  type PredicateValue,
+  type SyncTableEntry,
+  type SyncTableRegistry,
+} from "@pgxsinkit/contracts";
 
-import { compileShapeRequest } from "./compile";
+import { compileShapeRequest, resolveEntryByShapeKey } from "./compile";
 import type { EntitlementSet } from "./edge";
 import { CircuitsEngineError, type CircuitsEngineClient } from "./engine-client";
 import { DEFAULT_STREAM_TOKEN_TTL_SECONDS, mintStreamToken, verifyStreamToken, type StreamGrant } from "./stream-token";
 
-/** One shape a client wants to follow. */
+/**
+ * One shape a client wants to follow.
+ *
+ * A shape KEY and nothing else — deliberately (ADR-0055 decision 6). A shared-tier shape fans out to
+ * one stream per scope the subject holds, and the control plane does that expansion because it is
+ * the only side that knows the answer: it holds the entitlement set. A client naming its own scopes
+ * could only ever restate that set redundantly or contradict it, and every contradiction is a
+ * denial it then has to reconcile at boot.
+ */
 export interface SubscriptionRequest {
   shapeKey: string;
-  /** Shared tier only, positionally matching the shape's declared scope columns. */
-  scope?: readonly PredicateValue[];
 }
 
 /** A subscription the control plane granted: what to read, and where. */
@@ -50,10 +62,41 @@ export interface SubscribeOptions {
 }
 
 /**
+ * What one requested shape expands to: the scopes to compile it at.
+ *
+ * `[undefined]` — a single scope-less compile — is the private tier, whose subject arrives in the
+ * claims instead. A shared-tier shape expands to one entry per entitled scope, and none is a
+ * refusal rather than an empty success: a subject with no scopes has nothing to read, and returning
+ * zero grants silently would leave the client waiting on streams that were never created.
+ *
+ * An unknown shapeKey deliberately expands to `[undefined]` and is refused downstream by
+ * `compileShapeRequest`, so the message for "no such shape" has exactly one author.
+ */
+function expandToScopes(
+  options: Pick<SubscribeOptions, "registry" | "entitlements">,
+  subject: string,
+  shapeKey: string,
+): { scopes: readonly (readonly PredicateValue[] | undefined)[] } | { refusal: string } {
+  const entry: SyncTableEntry | undefined = resolveEntryByShapeKey(options.registry, shapeKey);
+  const shape = entry?.shape;
+  if (shape == null) return { scopes: [undefined] };
+  if (readShapeTier(shape) === "private") return { scopes: [undefined] };
+
+  if (!options.entitlements.ready) return { refusal: "entitlements unavailable" };
+  const held = options.entitlements.scopesFor(subject, shapeKey);
+  if (held.length === 0) return { refusal: "no entitled scopes" };
+  return { scopes: held };
+}
+
+/**
  * Subscribe to a batch of shapes: compile each against the registry, check entitlement, register it
  * with the engine, and mint ONE token covering all of them.
  *
- * A partial result rather than an all-or-nothing one. A subject asking for K scopes at boot may
+ * A shared-tier shape FANS OUT: one stream per scope the subject holds, so K requested shapes yield
+ * however many grants their entitlements come to. Expansion happens here rather than on the client
+ * because this is the side holding the entitlement set — see {@link SubscriptionRequest}.
+ *
+ * A partial result rather than an all-or-nothing one. A subject holding K scopes at boot may
  * legitimately have lost one of them, and failing the whole batch on that would deny them the K-1
  * they still hold — so a denial is reported per subscription and the rest proceed.
  *
@@ -78,19 +121,8 @@ export async function subscribeToShapes(
   const grants: StreamGrant[] = [];
 
   for (const request of requests) {
-    const scoped = request.scope !== undefined ? { scope: request.scope } : {};
-    const deny = (reason: string) => denied.push({ shapeKey: request.shapeKey, ...scoped, reason });
-
-    const compiled = compileShapeRequest(options.registry, {
-      shapeKey: request.shapeKey,
-      claims,
-      ...scoped,
-      ...(options.params ? { params: options.params } : {}),
-    });
-    if (compiled.outcome === "deny") {
-      deny(compiled.reason);
-      continue;
-    }
+    const deny = (reason: string, scope?: readonly PredicateValue[]) =>
+      denied.push({ shapeKey: request.shapeKey, ...(scope !== undefined ? { scope } : {}), reason });
 
     // Every read is bound to a subject, both tiers. The private tier fuses the subject into the
     // predicate and the shared tier checks it against the entitlement set, but neither has an
@@ -100,21 +132,39 @@ export async function subscribeToShapes(
       continue;
     }
 
-    if (compiled.tier === "shared") {
-      if (!options.entitlements.ready) {
-        deny("entitlements unavailable");
-        continue;
-      }
-      if (!options.entitlements.permits(subject, request.shapeKey, request.scope ?? [])) {
-        deny("not entitled to this scope");
-        continue;
-      }
+    const expanded = expandToScopes(options, subject, request.shapeKey);
+    if ("refusal" in expanded) {
+      deny(expanded.refusal);
+      continue;
     }
 
-    // Deliberately unguarded: see the note above on why an engine fault is not a denial.
-    const handle = await options.engine.createShape(compiled.request);
-    granted.push({ shapeKey: request.shapeKey, ...scoped, shapeId: handle.shapeId, streamPath: handle.streamPath });
-    grants.push({ path: handle.streamPath, shapeKey: request.shapeKey, ...scoped });
+    for (const scope of expanded.scopes) {
+      const scoped = scope !== undefined ? { scope } : {};
+      const compiled = compileShapeRequest(options.registry, {
+        shapeKey: request.shapeKey,
+        claims,
+        ...scoped,
+        ...(options.params ? { params: options.params } : {}),
+      });
+      if (compiled.outcome === "deny") {
+        deny(compiled.reason, scope);
+        continue;
+      }
+
+      // Enumeration said yes; ask the predicate too. The two are required to agree, and when they do
+      // not it is this side that must catch it: the edge checks `permits` on EVERY read, so a scope
+      // only `scopesFor` believes in would mint a capability for a stream the client can never
+      // actually read. Better a denial it can see now than a stream that 403s forever.
+      if (compiled.tier === "shared" && !options.entitlements.permits(subject, request.shapeKey, scope ?? [])) {
+        deny("not entitled to this scope", scope);
+        continue;
+      }
+
+      // Deliberately unguarded: see the note above on why an engine fault is not a denial.
+      const handle = await options.engine.createShape(compiled.request);
+      granted.push({ shapeKey: request.shapeKey, ...scoped, shapeId: handle.shapeId, streamPath: handle.streamPath });
+      grants.push({ path: handle.streamPath, shapeKey: request.shapeKey, ...scoped });
+    }
   }
 
   if (subject === null || grants.length === 0) return { granted, denied };

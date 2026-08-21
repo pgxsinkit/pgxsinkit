@@ -2,10 +2,16 @@ import type { PredicateValue } from "@pgxsinkit/contracts";
 
 import type { ConvergenceBarrier } from "./sync-engine";
 
-/** One shape the client wants to follow, by declared identity and (shared tier) scope values. */
+/**
+ * One shape the client wants to follow — by declared identity, and nothing else.
+ *
+ * No scope, deliberately (ADR-0055 decision 6). A shared-tier shape comes back as one grant per
+ * scope the subject holds, expanded by the control plane, which is the only side that knows the
+ * answer. So K requests can return more than K streams, and a client that tracks them by shapeKey
+ * alone will lose all but one.
+ */
 export interface ShapeSubscriptionRequest {
   shapeKey: string;
-  scope?: readonly PredicateValue[];
 }
 
 /** A subscription the control plane granted. */

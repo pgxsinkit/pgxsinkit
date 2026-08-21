@@ -189,6 +189,24 @@ executes.
    - Losing entitlement means losing the *subscription*, not losing rows. The client receives 403 on
      its next poll and must **truncate that scope and unsubscribe**. This is a different eviction
      path from predicate-driven move-out (ADR-0023), and the client implements both.
+   - **The client names a shape; the control plane expands it to the subject's scopes.** *(Amended
+     2026-08-21. Subscribe originally took `(shapeKey, scope)` per subscription, leaving the client
+     to supply scope values it had no sanctioned way to learn.)* A subscription request carries a
+     shape key and nothing else, and a shared-tier shape fans out to one grant — one stream, one
+     entry in the token — per scope the subject holds. The expansion belongs on this side because
+     this side holds the entitlement set: a client naming its own scopes can only restate that set
+     redundantly or contradict it, and every contradiction is a denial it then has to reconcile at
+     boot. It also removes the last thing a client could have got wrong about what it may read.
+
+     Two consequences worth stating. **K requests can return more than K streams**, so a client
+     keying its subscriptions by shape key alone loses all but one of a fan-out. And **a subject
+     holding no scope of a shape is refused, not granted an empty set** — returning zero grants
+     silently would leave the client waiting on streams that were never created.
+
+     `EntitlementSet` therefore enumerates as well as decides (`scopesFor` beside `permits`), and
+     the two are required to agree. Where they disagree, subscribe refuses the scope: the edge
+     checks `permits` on every read, so a scope only enumeration believes in would mint a capability
+     for a stream that then 403s forever.
 
 7. **The edge holds entitlements in memory, kept live as a Circuits shape, and fails closed.**
    The entitlement relation syncs into the edge through the same engine that serves everything else.
@@ -446,6 +464,10 @@ These are deliberately not decided here.
    no subqueries to reconcile, and the private tier's evictions arrive as explicit deletes, verified
    across the offline gap on a native stack.
 4. **The shape of the entitlement relation** the edge subscribes to: one canonical `(subject, scope)`
-   projection, or per-shape-family relations.
+   projection, or per-shape-family relations. Decision 6's amendment sharpens rather than settles
+   this: the set must now **enumerate** a subject's scopes, not only answer yes/no about one, and a
+   canonical `(subject, shapeKey, scope)` projection supports that directly while a per-family rule
+   computed on demand has to be invertible to. The invalidation question underneath it is untouched
+   — a rule reading a relation *transitively* has no subject to key a memo by.
 5. **Migration sequencing** for existing consumers. Clients resync from scratch at cutover, which
    removes most of the difficulty, but the order of server, edge, and client rollout is unspecified.

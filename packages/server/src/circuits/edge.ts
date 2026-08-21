@@ -21,6 +21,19 @@ export interface EntitlementSet {
   readonly ready: boolean;
   /** Whether `subject` may read `shapeKey` at `scope`. */
   permits(subject: string, shapeKey: string, scope: readonly PredicateValue[]): boolean;
+  /**
+   * Every scope of `shapeKey` that `subject` holds, each an ordered tuple matching the shape's
+   * declared scope columns.
+   *
+   * This is what lets a client subscribe by shape alone (ADR-0055 decision 6): it names
+   * `offering_content`, and the control plane answers with one stream per offering the subject can
+   * actually read. The alternative — the client naming scopes — makes it restate something only this
+   * set knows, so its every answer is either redundant or wrong.
+   *
+   * Enumeration and `permits` must agree: a scope returned here that `permits` would refuse is a
+   * grant the edge then rejects on every read.
+   */
+  scopesFor(subject: string, shapeKey: string): readonly (readonly PredicateValue[])[];
 }
 
 export interface StreamGateOptions {

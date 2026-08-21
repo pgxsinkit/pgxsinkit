@@ -21,6 +21,7 @@ const entitled: EntitlementSet = {
   ready: true,
   permits: (subject, shapeKey, scope) =>
     subject === "person-a" && shapeKey === "offering_content" && scope[0] === "off-1",
+  scopesFor: (subject, shapeKey) => (subject === "person-a" && shapeKey === "offering_content" ? [["off-1"]] : []),
 };
 
 async function tokenFor(grants: Parameters<typeof mintStreamToken>[1]["grants"], sub = "person-a") {
@@ -83,7 +84,7 @@ describe("gate", () => {
   // The whole point of decision 7's fail-closed clause: a set that cannot be trusted is never a permit.
   it("denies while the entitlement set is unavailable", async () => {
     const token = await tokenFor([sharedGrant]);
-    const degraded = { ...options, entitlements: { ready: false, permits: () => true } };
+    const degraded = { ...options, entitlements: { ready: false, permits: () => true, scopesFor: () => [] } };
     expect(await authorizeStreamRead(degraded, token, "shape/s1", NOW)).toEqual({
       allow: false,
       reason: "entitlements unavailable",
