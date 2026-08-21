@@ -227,3 +227,35 @@ function assertComposeResourcesRemoved(composeProject: string): void {
     );
   }
 }
+
+/**
+ * Refuse to start a container lane whose native read-path env is missing.
+ *
+ * Compose's own `:?` substitution already fails with a usable message, but only AFTER the runner has
+ * allocated ports and announced the project — and then the teardown path fails the same way, burying
+ * the real cause under two more errors. `harness-up.ts` has always checked up front for exactly that
+ * reason; this is that check, shared, so every lane behaves the same way.
+ */
+export function requireCircuitsEnv(env: NodeJS.ProcessEnv, options: { tables?: boolean } = {}): void {
+  // `tables: false` for the BOARD stack, which carries its own list as `BOARD_CIRCUITS_PG_TABLES` in
+  // the committed `infra/compose/board.env` — it needs the checkout, but not this variable.
+  const required: [name: string, hint: string][] = [
+    [
+      "PGXSINKIT_CIRCUITS_REPO",
+      "point it at an electric-circuits checkout; the engine image is built from its Dockerfile",
+    ],
+  ];
+  if (options.tables !== false) {
+    required.push([
+      "PGXSINKIT_CIRCUITS_PG_TABLES",
+      "the engine needs an EXPLICIT table list. `*` sweeps in the operations log and pgmq's relations " +
+        "(docs/research/0001), which are not sync tables and must not become shapes",
+    ]);
+  }
+  const missing = required.filter(([name]) => !env[name]);
+  if (missing.length === 0) return;
+  throw new Error(
+    `${missing.map(([name]) => name).join(" and ")} not set — see .env.example:\n` +
+      missing.map(([name, hint]) => `  ${name}: ${hint}`).join("\n"),
+  );
+}

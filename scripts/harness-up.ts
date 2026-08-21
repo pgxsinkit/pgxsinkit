@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 import { composeCredentials } from "../infra/compose-credentials";
-import { waitForPgReady, waitForTcpService } from "./lib";
+import { requireCircuitsEnv, waitForPgReady, waitForTcpService } from "./lib";
 
 // `infra:harness:up` — the toolkit reference stack: postgres + durable-streams + the Circuits engine,
 // the demo membership registry, and apps/write-api. This is NOT the substantial demo: that is the
@@ -22,25 +22,9 @@ function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): vo
   }
 }
 
-function requireEnv(env: NodeJS.ProcessEnv, name: string, hint: string): void {
-  // Fail here, with the reason, rather than letting compose fail with a variable-substitution error
-  // that says nothing about what the caller was supposed to provide.
-  if (!env[name]) throw new Error(`${name} is not set — ${hint}`);
-}
-
 async function main() {
   const env = process.env;
-  requireEnv(
-    env,
-    "PGXSINKIT_CIRCUITS_REPO",
-    "point it at an electric-circuits checkout; the engine image is built from its Dockerfile",
-  );
-  requireEnv(
-    env,
-    "PGXSINKIT_CIRCUITS_PG_TABLES",
-    "the engine needs an EXPLICIT table list. `*` sweeps in the operations log and pgmq's relations " +
-      "(docs/research/0001), which are not sync tables and must not become shapes",
-  );
+  requireCircuitsEnv(env);
 
   const build = process.argv.includes("--build");
   const databaseUrl = new URL(env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL);

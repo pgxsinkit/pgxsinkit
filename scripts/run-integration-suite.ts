@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 import { composeCredentials } from "../infra/compose-credentials";
-import { allocatePort, runComposeDown, waitForPgReady, waitForTcpService } from "./lib";
+import { allocatePort, requireCircuitsEnv, runComposeDown, waitForPgReady, waitForTcpService } from "./lib";
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
 const SERVICE_START_TIMEOUT_MS = 120_000;
@@ -33,6 +33,7 @@ function buildProjectName(): string {
 
 async function main() {
   const testFiles = assertTestFiles(process.argv.slice(2));
+  requireCircuitsEnv(process.env);
 
   const postgresPort = await allocatePort();
   let dsPort = await allocatePort();

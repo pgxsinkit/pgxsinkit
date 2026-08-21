@@ -2,12 +2,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
-import { waitForHttpOk, waitForPgReady, waitForTcpService } from "./lib";
+import { requireCircuitsEnv, waitForHttpOk, waitForPgReady, waitForTcpService } from "./lib";
 
 // `infra:up` — brings up the board demo stack (infra/compose/board-compose.yml, the substantial demo
 // that replaced apps/web) and applies the board's own drizzle migrations. The minimal toolkit harness
-// (postgres + electric for the apps/write-api reference) is a separate stack under `infra:harness:up`;
-// the board runs on its own ports (db 54322, gateway 54331, electric 54330) so the two never collide.
+// (postgres + the native read path for the apps/write-api reference) is a separate stack under
+// `infra:harness:up`; the board runs on its own ports (db 54322, gateway 54331, durable-streams 54341,
+// circuits engine 54342) so the two never collide.
 
 const COMPOSE_FILE = "infra/compose/board-compose.yml";
 const ENV_FILE = "infra/compose/board.env";
@@ -75,6 +76,8 @@ function dumpComposeStateOnFailure(env: NodeJS.ProcessEnv): void {
 
 async function main(): Promise<void> {
   const env = { ...process.env, BOARD_DATABASE_URL };
+  // The board carries its own table list in board.env, so only the checkout is required here.
+  requireCircuitsEnv(env, { tables: false });
 
   // Issue the caddy TLS cert before bringing the stack up, so its h2/h3 front has a cert to load.
   const certReady = ensureBoardCert();
@@ -88,7 +91,12 @@ async function main(): Promise<void> {
   const readiness = [
     waitForTcpService("127.0.0.1", 54322, "board Postgres"),
     waitForTcpService("127.0.0.1", 54331, "board Envoy gateway"),
-    waitForTcpService("127.0.0.1", 54330, "board Electric"),
+    // The native read path, in place of the classic Electric service this used to wait for on 54330.
+    // Nothing has published that port since the Electric service was removed, so the gate could never
+    // be satisfied and every lane that funnels through `infra:up` — the board smoke lane and the
+    // worker lane — failed to start rather than failing a test.
+    waitForTcpService("127.0.0.1", 54341, "board durable-streams"),
+    waitForTcpService("127.0.0.1", 54342, "board Circuits engine"),
   ];
   // Only gate on the caddy front when its cert exists; otherwise it never comes up (and the container
   // lanes do not need it), so waiting on 54343 would hang.
