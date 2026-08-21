@@ -51,7 +51,7 @@ const authors = authorsEntry.localTable;
 const todos = todosEntry.localTable;
 const readState = readStateEntry.localTable;
 
-interface TestInsertMessage {
+interface TestUpsertMessage {
   headers: { operation: "upsert" };
   key: string;
   value: Record<string, unknown>;
@@ -144,7 +144,7 @@ describe("sync apply", () => {
             headers: { operation: "upsert" },
             key: "author-1",
             value: { id: "author-1", name: "First name", updated_at_us: 1 },
-          } as TestInsertMessage,
+          } as TestUpsertMessage,
         ],
         debug: false,
       }),
@@ -163,7 +163,7 @@ describe("sync apply", () => {
             headers: { operation: "upsert" },
             key: "author-1",
             value: { id: "author-1", name: "Updated name", updated_at_us: 2 },
-          } as TestInsertMessage,
+          } as TestUpsertMessage,
         ],
         debug: false,
       }),
@@ -190,7 +190,7 @@ describe("sync apply", () => {
           headers: { operation: "upsert" },
           key: "todo-1",
           value: { id: "todo-1", title: "First title", completed: false },
-        } as TestInsertMessage,
+        } as TestUpsertMessage,
         debug: false,
       }),
     );
@@ -202,7 +202,7 @@ describe("sync apply", () => {
         headers: { operation: "upsert" },
         key: "todo-1",
         value: { id: "todo-1", title: "Updated title", completed: true },
-      } as TestInsertMessage,
+      } as TestUpsertMessage,
       debug: false,
     });
 

@@ -205,6 +205,41 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
     expect(row?.dueDate?.toISOString()).toBe("2026-07-18T03:12:45.123Z");
   });
 
+  // Every bulk applier takes its column list from the FIRST row, so a mixed batch does not fail — it
+  // writes the wrong thing. The wire cannot produce one (`row_to_json_cols` emits every `out_cols`
+  // column on every upsert), and since ADR-0058 retired the plain-INSERT collision there is no longer a
+  // downstream alarm if that guarantee ever slips. Asserted on all four tiers, not just the
+  // steady-state one: a corrupt backfill is the worse outcome.
+  it("refuses a batch whose rows carry different column sets, on every applier tier", async () => {
+    const mixed = pgTable("mixed_cols", {
+      id: text("id").primaryKey(),
+      name: text("name"),
+      score: integer("score"),
+    });
+    await createTablesFromSchema(pg, { mixed });
+    const target = makeApplyTarget(mixed, ["id"]);
+    const batch = [
+      msg("a", "upsert", { id: "a", name: "A", score: 1 }),
+      msg("b", "upsert", { id: "b", name: "B" }), // no `score` — the corrupting row
+    ];
+
+    for (const applier of [
+      applyUpsertsToTable,
+      applyInsertsToTable,
+      applyMessagesToTableWithJson,
+      applyUpsertsToTableWithJson,
+      applyMessagesToTableWithCopy,
+    ]) {
+      // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects matchers return a real promise typed as void
+      await expect(applier({ pg, target, messages: batch as never, debug: false })).rejects.toThrow(
+        /mixes column sets.*missing score/s,
+      );
+    }
+
+    // And nothing was written by the refused batch.
+    expect(await drizzleOver(pg).select().from(mixed)).toEqual([]);
+  });
+
   // The bulk-UPDATE applier's column-set grouping — one `UPDATE … FROM` per distinct set of carried
   // columns, so a batch of heterogeneous partial updates never clobbered a sibling column — was
   // deleted along with the `update` verb it served. Electric's default replica sent only the CHANGED

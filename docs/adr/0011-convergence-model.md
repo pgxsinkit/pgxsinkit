@@ -1,6 +1,6 @@
 # The Convergence model: one owner of local convergence, derived not stored
 
-Status: accepted (2026-06-23)
+Status: accepted (2026-06-23) — two event names amended by [ADR-0058](0058-two-verb-wire-and-the-upsert-apply-path.md): the read-path events are `synced upsert observed` / `synced delete observed`. Their effects are unchanged; the old names referred to an engine pgxsinkit no longer reads from and to a wire verb (`insert`/`update`) that no longer exists.
 
 Now that the read path is internalized ([ADR-0009](0009-internalize-read-path-sync.md)) and the
 write path is ours, the toolkit owns both edges of the local store. But they are still two largely

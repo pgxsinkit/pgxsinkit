@@ -252,6 +252,7 @@ export async function applyInsertsToTable({ pg, target, messages, debug }: BulkA
 
   if (debug) console.log("inserting", data);
   const columns = Object.keys(firstRow);
+  assertUniformColumnSet(target, columns, data, "applyInsertsToTable");
   const db = drizzleOverPg(pg);
 
   let currentBatch: SyncRow[] = [];
@@ -314,27 +315,20 @@ function upsertConflictSpec(
 }
 
 /**
- * Bulk **upsert** for tagged-subquery move-in rows (ADR-0024). A move-in is an existing row ENTERING the
- * shape — unlike a CDC `insert` (a brand-new row) it may already be present locally via an independent
- * grant, or be re-delivered on a resume from before the move-in's offset. So it is applied idempotently:
- * `INSERT … ON CONFLICT (pk) DO UPDATE` refreshes to the move-in's authoritative value (or `DO NOTHING`
- * for a pk-only table). The plain-`INSERT` invariant of the CDC path — a genuine PK collision must
- * surface ({@link applyInsertsToTable}) — is intentionally NOT used here, because for a move-in a present
- * row is expected, not a bug. Batched by parameter count (move-in volume is incremental, not a backfill).
- */
-/**
  * Refuse a batch whose rows do not all carry the same columns.
  *
- * Every bulk applier here takes its column list from the FIRST row and binds the rest against it, so a
- * batch with mixed column sets does not fail — it writes the wrong thing. A row missing one of
- * `columns` binds `DEFAULT` (overwriting a real value with the column default on conflict), and a row
- * carrying an extra column has it silently dropped.
+ * **Every** bulk applier here takes its column list from the FIRST row and binds the rest against it,
+ * so a batch with mixed column sets does not fail — it writes the wrong thing, differently per tier: a
+ * missing column binds `DEFAULT` on the param-bound paths (overwriting a real value with the column
+ * default on conflict) and NULL through `json_to_recordset`, while an extra column is silently dropped
+ * everywhere. So all four call sites assert, including the three backfill tiers — a corrupt initial
+ * load is the worse outcome of the two, not the lesser one.
  *
- * The wire makes that impossible: `row_to_json_cols(row, out_cols)` emits every column of the shape's
- * `out_cols` on every upsert, and `out_cols` is the local table's column set. This is a cheap check
- * that the guarantee still holds, kept because ADR-0058 retired the primary-key collision that used to
- * be the backstop for "the apply path silently wrote something wrong". O(rows × columns), against a
- * per-row `toDriverRow` of the same order — so it costs nothing measurable next to the work it guards.
+ * The wire makes a mixed batch impossible: `row_to_json_cols(row, out_cols)` emits every column of the
+ * shape's `out_cols` on every upsert, and `out_cols` is the local table's column set. This is a cheap
+ * check that the guarantee still holds, kept because ADR-0058 retired the primary-key collision that
+ * used to be the backstop for "the apply path silently wrote something wrong". O(rows × columns),
+ * against per-row serialization of the same order — nothing measurable next to the work it guards.
  */
 function assertUniformColumnSet(target: ApplyTarget, columns: string[], rows: SyncRow[], applier: string): void {
   const expected = new Set(columns);
@@ -352,6 +346,15 @@ function assertUniformColumnSet(target: ApplyTarget, columns: string[], rows: Sy
   }
 }
 
+/**
+ * Bulk **upsert** for tagged-subquery move-in rows (ADR-0024). A move-in is an existing row ENTERING the
+ * shape — unlike a CDC `insert` (a brand-new row) it may already be present locally via an independent
+ * grant, or be re-delivered on a resume from before the move-in's offset. So it is applied idempotently:
+ * `INSERT … ON CONFLICT (pk) DO UPDATE` refreshes to the move-in's authoritative value (or `DO NOTHING`
+ * for a pk-only table). The plain-`INSERT` invariant of the CDC path — a genuine PK collision must
+ * surface ({@link applyInsertsToTable}) — is intentionally NOT used here, because for a move-in a present
+ * row is expected, not a bug. Batched by parameter count (move-in volume is incremental, not a backfill).
+ */
 export async function applyUpsertsToTable({ pg, target, messages, debug }: BulkKeyedApplyOptions) {
   const primaryKey = target.primaryKey;
   if (primaryKey.length === 0) throw new Error("applyUpsertsToTable requires a primary key");
@@ -449,6 +452,12 @@ async function applyMessagesToTableWithJsonImpl(
     return;
   }
   const columns = jsonRecordsetColumns(target, firstRow);
+  assertUniformColumnSet(
+    target,
+    columns.map((column) => column.name),
+    data,
+    "applyMessagesToTableWithJson",
+  );
   const targetTable = target.table;
   // Tier ② (ADR-0028): the target table is an interpolated table object and the batch is a single bound
   // param (`sql.param` binds the raw JS array unchanged, exactly as the old `[batch]` did — critically,
@@ -523,6 +532,7 @@ export async function applyMessagesToTableWithCopy({ pg, target, messages, debug
     return;
   }
   const columns = Object.keys(firstRow);
+  assertUniformColumnSet(target, columns, data, "applyMessagesToTableWithCopy");
 
   // Serialize rows using Postgres' own COPY TEXT format — a faithful port of the backend's
   // CopyAttributeOutText / array_out routines (see ./copy) — so arrays (incl. multi-dimensional),
