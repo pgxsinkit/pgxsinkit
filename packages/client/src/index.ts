@@ -320,6 +320,8 @@ export type {
   SubscriptionClientOptions,
   SubscriptionSession,
 } from "./circuits/subscription-client";
+export { startCircuitsSync } from "./circuits/group-sync";
+export type { CircuitsGroupSyncOptions, CircuitsGroupSyncResult, CircuitsTableSyncResult } from "./circuits/group-sync";
 export { syncCircuitsShapes } from "./circuits/sync-engine";
 export type {
   CircuitsShapeSpec,
