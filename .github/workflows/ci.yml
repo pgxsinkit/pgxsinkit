@@ -12,9 +12,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
+      # No `bun-version`: setup-bun defaults to the version in package.json's `packageManager`, which
+      # is the repo's single Bun pin (mise.toml pins the same version for local work).
       - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
       - run: bun install
       - run: bun run validate:full
       # ADR-0018: fail the build if a committed sync-function migration no longer matches the
@@ -32,8 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
       - run: bun install
       - name: Build the documentation site (TypeDoc API reference + Starlight)
         run: bun run docs:build
@@ -55,8 +53,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
       - run: bun install
       # Install mkcert + register its CA so both caddy's cert issuance and Playwright's Chromium accept
       # the local https front. This runs on the THROWAWAY runner only. Chromium on Linux trusts the USER
