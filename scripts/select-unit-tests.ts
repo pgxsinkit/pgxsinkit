@@ -34,6 +34,12 @@ const GLOBALS = [
 const FS_INPUTS: Record<string, string[]> = {
   "public-package-set": ["packages/*/package.json"],
   "public-package-artifacts": ["packages/**", "scripts/build-public-packages.ts"],
+  // The mount guard scans every source tree for `createStreamGate` callers; the drift guard reads the
+  // INSTALLED ds client, which only moves with the lockfile.
+  "stream-edge-cors": ["scripts/*.ts", "apps/*/src/**", "packages/*/src/**", "bun.lock"],
+  // Flagged as a reader only through scripts/lib.ts's podman `spawnSync` helpers, which these tests
+  // never reach; the derivation itself is pure registry walking, all on-graph.
+  "circuits-pg-tables": [],
 };
 
 // `bun test` narrowing flags — forwarding any would certify a partial run, so they are refused.

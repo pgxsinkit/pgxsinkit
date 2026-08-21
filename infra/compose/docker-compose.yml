@@ -56,8 +56,9 @@ services:
     environment:
       ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
       ELECTRIC_CIRCUITS_PG_URL: postgres://${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}:${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}@postgres:5432/${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
-      # Explicit table list, never `*`: `*` introspects every public table with a primary key, which
-      # sweeps in the operations log and pgmq's own relations (docs/research/0001).
+      # Explicit table list, never `*`: `*` introspects every `public` table with a primary key, which
+      # sweeps in the operations log. The lane runners derive and set it (scripts/lib.ts
+      # `resolveCircuitsPgTables`); `PGXSINKIT_CIRCUITS_PG_TABLES` in the environment overrides that.
       ELECTRIC_CIRCUITS_PG_TABLES: ${PGXSINKIT_CIRCUITS_PG_TABLES:?set the explicit table list}
       ELECTRIC_CIRCUITS_BIND: 0.0.0.0:7010
     ports:

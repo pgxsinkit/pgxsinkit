@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 
+import { circuitsPgTablesEnv } from "./lib";
 import {
   PERF_LAB_CIRCUITS_ENGINE_PORT,
   PERF_LAB_CIRCUITS_ENGINE_URL,
@@ -43,6 +44,7 @@ await writeFile(pidFiles.supervisor, `${process.pid}\n`, "utf8");
 
 const perfEnv: NodeJS.ProcessEnv = {
   ...process.env,
+  ...circuitsPgTablesEnv(process.env),
   DATABASE_URL: PERF_LAB_DATABASE_URL,
   CIRCUITS_ENGINE_URL: PERF_LAB_CIRCUITS_ENGINE_URL,
   DURABLE_STREAMS_URL: PERF_LAB_DURABLE_STREAMS_URL,

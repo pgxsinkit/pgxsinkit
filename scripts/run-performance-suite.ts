@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { composeCredentials } from "../infra/compose-credentials";
-import { allocatePort, requireCircuitsEnv, waitForPgReady, waitForTcpService } from "./lib";
+import { allocatePort, circuitsPgTablesEnv, waitForPgReady, waitForTcpService } from "./lib";
 
 const COMPOSE_FILE = "infra/compose/docker-compose.yml";
 const SERVICE_START_TIMEOUT_MS = 180_000;
@@ -80,7 +80,6 @@ function buildProjectName(): string {
 }
 
 async function main() {
-  requireCircuitsEnv(process.env);
   const testFiles = assertTestFiles(process.argv.slice(2));
   await acquireRunnerLease();
   registerSignalHandlers();
@@ -94,6 +93,7 @@ async function main() {
   const composeProject = buildProjectName();
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
+    ...circuitsPgTablesEnv(process.env),
     PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
     PGXSINKIT_DS_PORT: String(dsPort),
     PGXSINKIT_CIRCUITS_ENGINE_PORT: String(enginePort),

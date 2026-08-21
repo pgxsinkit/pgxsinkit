@@ -220,7 +220,7 @@ services:
       ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
       ELECTRIC_CIRCUITS_PG_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       # Explicit table list, never `*`: `*` introspects every public table with a primary key, which
-      # sweeps in the operations log and pgmq's own relations (docs/research/0001).
+      # sweeps in the operations log (pgmq is untouched: it lives in schema `pgmq`, not `public`).
       ELECTRIC_CIRCUITS_PG_TABLES: ${BOARD_CIRCUITS_PG_TABLES:?set the explicit board table list}
       ELECTRIC_CIRCUITS_BIND: 0.0.0.0:7010
     depends_on:

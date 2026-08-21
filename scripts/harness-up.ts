@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 import { composeCredentials } from "../infra/compose-credentials";
-import { requireCircuitsEnv, waitForPgReady, waitForTcpService } from "./lib";
+import { circuitsPgTablesEnv, waitForPgReady, waitForTcpService } from "./lib";
 
 // `infra:harness:up` — the toolkit reference stack: postgres + durable-streams + the Circuits engine,
 // the demo membership registry, and apps/write-api. This is NOT the substantial demo: that is the
@@ -21,8 +21,9 @@ function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): vo
 }
 
 async function main() {
-  const env = process.env;
-  requireCircuitsEnv(env);
+  // The engine's table list is derived from the registries this stack serves, not required from the
+  // environment, so `infra:harness:up` works on a fresh clone with no `.env`.
+  const env: NodeJS.ProcessEnv = { ...process.env, ...circuitsPgTablesEnv(process.env) };
 
   const databaseUrl = new URL(env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL);
   const dsPort = Number(env["PGXSINKIT_DS_PORT"] ?? 8791);
