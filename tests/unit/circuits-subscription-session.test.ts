@@ -63,7 +63,7 @@ function stubEngine(): CircuitsEngineClient {
       };
     },
     releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sequencedLsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
+    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0 }),
   } as CircuitsEngineClient;
 }
 
@@ -204,5 +204,5 @@ it("reads the convergence barrier through the control plane", async () => {
     fetch: routeToHandlers(mutableEntitlements(new Set([OFF_A]))),
   });
 
-  expect(await read()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 0 });
+  expect(await read()).toEqual({ sync: true, pendingFlips: 0 });
 });

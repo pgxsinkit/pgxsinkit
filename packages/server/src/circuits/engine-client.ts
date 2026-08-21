@@ -73,13 +73,11 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
 
     /**
      * The engine's convergence barrier (ADR-0056): where replication is, whether the tailer has
-     * caught up, how many computed-but-undelivered subquery flips remain, and how many were lost.
+     * caught up, and how many computed-but-undelivered subquery flips remain.
      *
      * `pendingFlips > 0` means a revocation has been computed and not yet written to any stream,
-     * which no wire-format watermark can see. `flipFailures > 0` means one was **abandoned** — the
-     * engine has poisoned its own frontier and `sequencedLsn` is frozen at whatever it last proved.
-     * That distinction matters because an abandoned batch releases its barrier permit, so the other
-     * counters recover and only this one still says anything happened.
+     * which no wire-format watermark can see. That is the term the Electric wire could not express
+     * at all, and the reason the barrier is read out of band rather than inferred from a position.
      */
     async replicationState(): Promise<CircuitsReplicationState> {
       return (await call("/replication/lsn", { method: "GET" })) as CircuitsReplicationState;
@@ -89,13 +87,10 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
 
 export type CircuitsEngineClient = ReturnType<typeof createCircuitsEngineClient>;
 
-/** What `GET /replication/lsn` answers. */
+/** What `GET /replication/lsn` answers — these fields exactly, no more. */
 export interface CircuitsReplicationState {
   /** The ingest head — where the replication tailer has read to. */
   lsn: string | null;
-  /** The fan-out frontier: the highest commit whose every effect has reached the shape streams. */
-  sequencedLsn: string | null;
   sync: boolean;
   pendingFlips: number;
-  flipFailures: number;
 }

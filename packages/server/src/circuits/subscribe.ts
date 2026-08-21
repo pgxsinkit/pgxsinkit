@@ -203,8 +203,10 @@ export function createSubscribeHandler(
     try {
       result = await subscribeToShapes(options, claims, body.subscriptions, Math.floor(Date.now() / 1000));
     } catch (error) {
-      // A degraded engine refuses shape creation outright (503). Answering with the engine's own
-      // status keeps the client retrying rather than treating an outage as lost entitlement.
+      // An engine that could not answer is an OUTAGE, and 503 is what keeps the client retrying.
+      // Relaying it as a per-subscription denial would tell the client it lost entitlement, and a
+      // client told that truncates the scope and unsubscribes — turning a transient fault into data
+      // loss.
       if (error instanceof CircuitsEngineError) {
         return Response.json({ error: "sync engine unavailable" }, { status: 503 });
       }
@@ -323,13 +325,9 @@ export const refreshPath = "/sync/v1/refresh";
  * client-reachable, so surfacing the barrier on our own authenticated endpoint costs nothing and
  * keeps the trust boundary intact.
  *
- * `maxAgeSeconds` may cache the answer briefly, but only a HEALTHY one. For the `sync` and
- * `pendingFlips` terms staleness is safe in one direction — it moves the barrier backwards, so a
- * stale reading can only delay an alignment, never satisfy one falsely. `flipFailures` inverts that:
- * a cached pre-poisoning zero would let a group align against an engine that has already lost
- * membership effects, which is precisely the alignment the term exists to refuse. So a poisoned
- * reading is never cached and never served from cache, and the cache window is exactly the bound on
- * how long a client may align against a freshly-poisoned engine — which is why the default is 0.
+ * `maxAgeSeconds` may cache the answer briefly. Staleness is safe in exactly one direction — it
+ * moves the barrier backwards, so a stale reading can only DELAY an alignment, never satisfy one
+ * falsely.
  */
 export function createBarrierHandler(options: {
   engine: CircuitsEngineClient;
@@ -351,17 +349,16 @@ export function createBarrierHandler(options: {
     if (cached && now - cached.at < maxAge) return Response.json(cached.body);
 
     const state = await options.engine.replicationState();
-    const body = { sync: state.sync, pendingFlips: state.pendingFlips, flipFailures: state.flipFailures };
-    cached = body.flipFailures > 0 ? null : { at: now, body };
+    const body = { sync: state.sync, pendingFlips: state.pendingFlips };
+    cached = { at: now, body };
     return Response.json(body);
   };
 }
 
 export const barrierPath = "/sync/v1/barrier";
 
-/** The barrier as the client reads it — the engine's LSNs are operator detail and stay server-side. */
+/** The barrier as the client reads it — the engine's LSN is operator detail and stays server-side. */
 interface BarrierBody {
   sync: boolean;
   pendingFlips: number;
-  flipFailures: number;
 }

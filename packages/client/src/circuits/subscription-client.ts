@@ -177,10 +177,6 @@ export async function openSubscriptionSession(
  * An unreachable barrier throws, and the engine treats that as a DELAY rather than a failure
  * (ADR-0056): the group stays on the pre-alignment gate and tries again on the next delivery. So a
  * control plane that is briefly down costs boot latency, not correctness.
- *
- * `flipFailures` is read defensively rather than trusted to be present: a control plane older than
- * the poison gate omits it, and defaulting it to zero there is right — that deployment cannot report
- * a poisoning, so inventing one would degrade every group on it.
  */
 export function createBarrierReader(
   options: Pick<SubscriptionClientOptions, "controlPlaneUrl" | "authHeaders" | "fetch">,
@@ -195,6 +191,6 @@ export function createBarrierReader(
       throw new Error(`[pgxsinkit] barrier → ${response.status}`);
     }
     const body = (await response.json()) as Partial<ConvergenceBarrier>;
-    return { sync: body.sync === true, pendingFlips: body.pendingFlips ?? 0, flipFailures: body.flipFailures ?? 0 };
+    return { sync: body.sync === true, pendingFlips: body.pendingFlips ?? 0 };
   };
 }

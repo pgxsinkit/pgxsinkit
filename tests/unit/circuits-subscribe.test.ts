@@ -76,7 +76,7 @@ function stubEngine(): CircuitsEngineClient & { created: unknown[] } {
       };
     },
     releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sequencedLsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
+    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0 }),
   } as CircuitsEngineClient & { created: unknown[] };
 }
 
@@ -205,7 +205,7 @@ describe("subscribe under engine failure", () => {
         throw new CircuitsEngineError(status, "degraded", "engine degraded");
       },
       releaseShape: async () => {},
-      replicationState: async () => ({ lsn: null, sequencedLsn: null, sync: false, pendingFlips: 0, flipFailures: 1 }),
+      replicationState: async () => ({ lsn: null, sync: false, pendingFlips: 0 }),
     } as unknown as CircuitsEngineClient;
   }
 
@@ -231,18 +231,17 @@ describe("subscribe under engine failure", () => {
   });
 });
 
-// The barrier's cache is sound for `sync`/`pendingFlips` because staleness only moves the barrier
-// backwards. `flipFailures` inverts that — a cached pre-poisoning zero would license exactly the
-// alignment the term exists to refuse — so a poisoned reading is never cached.
+// The barrier's cache is sound because staleness only ever moves the barrier BACKWARDS: a stale
+// reading can delay an alignment, never satisfy one falsely.
 describe("barrier cache", () => {
-  function engineReporting(states: { sync: boolean; pendingFlips: number; flipFailures: number }[]) {
+  function engineReporting(states: { sync: boolean; pendingFlips: number }[]) {
     let index = 0;
     const reads = { count: 0 };
     const engine = {
       replicationState: async () => {
         reads.count += 1;
         const state = states[Math.min(index++, states.length - 1)]!;
-        return { lsn: "0/0", sequencedLsn: "0/0", ...state };
+        return { lsn: "0/0", ...state };
       },
     } as unknown as CircuitsEngineClient;
     return { engine, reads };
@@ -251,23 +250,21 @@ describe("barrier cache", () => {
   const get = () => new Request("http://cp/sync/v1/barrier");
 
   it("caches a healthy reading", async () => {
-    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0, flipFailures: 0 }]);
+    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0 }]);
     const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
 
-    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 0 });
+    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0 });
     await handle(get());
     expect(reads.count).toBe(1);
   });
 
-  // A poisoned reading is never CACHED — with the same generous window that just cached a healthy
-  // answer, every poisoned read still goes to the engine. That keeps a restart visible immediately
-  // instead of being masked for a window, and is what stops a stale zero from ever being served in
-  // its place.
-  it("never caches a poisoned reading", async () => {
-    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0, flipFailures: 1 }]);
-    const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
+  // Uncached by default, so an unconverged engine is re-read every time rather than being believed
+  // for a window — the cache is an opt-in for deployments that have measured the trade.
+  it("re-reads every time with no cache window", async () => {
+    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 2 }]);
+    const handle = createBarrierHandler({ engine });
 
-    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 1 });
+    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 2 });
     await handle(get());
     await handle(get());
     expect(reads.count).toBe(3);

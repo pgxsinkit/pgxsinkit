@@ -29,22 +29,15 @@ import type { StreamSourceOptions } from "./stream-source";
  * move-out and move-in — so a barrier without it reports convergence while a revocation is still in
  * the engine. That is silent staleness on exactly the security-relevant path.
  *
- * `flipFailures` is the term the other three cannot express. A flip batch abandoned after its
- * retries releases its barrier permit on the way out, so `pendingFlips` returns to zero and `sync`
- * stays true — the engine looks converged from every counter — while the membership effect it
- * carried is **gone**. The engine marks itself poisoned and stops advancing its own frontier; this
- * is the client reading the same fact.
+ * These are exactly the fields `GET /replication/lsn` answers with. Nothing here is derived, and
+ * nothing here is optional — a term the engine does not report is a term this client must not claim
+ * to check (see backlog 0011 for the one the engine cannot report yet).
  */
 export interface ConvergenceBarrier {
   /** Whether the engine's replication tailer has caught up. */
   sync: boolean;
   /** Deferred subquery flip batches not yet propagated. Read engine-global — conservative. */
   pendingFlips: number;
-  /**
-   * Flip batches the engine abandoned. Non-zero means membership effects were **lost**, not delayed
-   * — unrecoverable in-process, and terminal for any group that reads it.
-   */
-  flipFailures: number;
 }
 
 export interface CircuitsShapeSpec {
@@ -383,8 +376,6 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
    * Every shape drained, plus — for the first commit of each alignment generation — the engine
    * barrier. An unsatisfied barrier does not fail: the group simply does not align yet and retries
    * on the next delivery, which is correct if slower.
-   *
-   * A **poisoned** engine is the one reading that is not a delay, and is handled the opposite way.
    */
   const gateOpen = async (): Promise<boolean> => {
     if (!inbox.isGroupUpToDate()) return false;
@@ -393,20 +384,6 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
 
     try {
       const barrier = await options.readBarrier();
-      // Lost membership effects are terminal, and waiting them out is the one wrong response: the
-      // other three terms report converged forever, so a group that merely held would be
-      // indistinguishable from a slow engine while quietly never aligning. The engine has declared
-      // itself unrecoverable in-process and needs a restart; the client says so and stops.
-      if (barrier.flipFailures > 0) {
-        degraded = true;
-        options.onSyncError?.(
-          new Error(
-            `[pgxsinkit] the sync engine lost ${barrier.flipFailures} membership flip batch(es) and is degraded: ` +
-              `its frontier will not advance again and this store cannot be proven consistent. The engine must be restarted.`,
-          ),
-        );
-        return false;
-      }
       if (!barrier.sync || barrier.pendingFlips > 0) {
         if (debug) console.log("alignment barrier unsatisfied", barrier);
         return false;
