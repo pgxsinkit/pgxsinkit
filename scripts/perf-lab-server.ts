@@ -39,6 +39,7 @@ import {
   createSubscribeHandler,
   importStreamTokenKey,
   refreshPath,
+  STREAM_READ_EXPOSED_HEADERS,
   subscribePath,
 } from "../packages/server/src/circuits/index";
 import {
@@ -115,6 +116,11 @@ app.use(
     origin: allowedOrigins,
     allowMethods: ["GET", "POST", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
+    // The edge is mounted on this app (`PERF_LAB_STREAM_MOUNT_PATH`) and the lab UI reads it from a
+    // browser on another origin. None of the ds protocol's response headers is CORS-safelisted, so
+    // without this the ds client sees no offset, never goes live, and hot-loops at `offset=-1` — which
+    // would present as a perf result rather than as the misconfiguration it is.
+    exposeHeaders: [...STREAM_READ_EXPOSED_HEADERS],
   }),
 );
 

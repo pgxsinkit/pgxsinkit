@@ -7,6 +7,7 @@ import {
   createStreamGate,
   createSyncServer,
   importStreamTokenKey,
+  STREAM_READ_EXPOSED_HEADERS,
   type EventsEnqueuedHook,
 } from "@pgxsinkit/server";
 
@@ -117,6 +118,11 @@ export async function createBoardStreamHandler(options: BoardStreamHandlerOption
       "Access-Control-Allow-Origin": corsOriginFor(request, options.allowedOrigins),
       "Access-Control-Allow-Methods": "GET,OPTIONS",
       "Access-Control-Allow-Headers": "authorization,apikey,content-type",
+      // The edge is on its own origin by design, so every board read is cross-origin and none of the ds
+      // protocol's response headers is CORS-safelisted. Set here rather than left to the gateway: the
+      // compose stack's envoy sends `expose_headers: "*"`, which would leave this function correct only
+      // behind that one deployment and silently hot-looping (`offset=-1`) anywhere else.
+      "Access-Control-Expose-Headers": STREAM_READ_EXPOSED_HEADERS.join(", "),
       Vary: "Origin",
     };
 

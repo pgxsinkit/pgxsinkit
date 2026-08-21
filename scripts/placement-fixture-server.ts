@@ -17,6 +17,7 @@ import {
   createStreamGate,
   createSyncServer,
   importStreamTokenKey,
+  STREAM_READ_EXPOSED_HEADERS,
 } from "@pgxsinkit/server";
 import { createServerDb } from "@pgxsinkit/test-utils";
 
@@ -37,7 +38,28 @@ export interface PlacementFixtureServer {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const STREAM_MOUNT_PATH = "/v1/stream";
+
 const FIXTURE_SUBJECT = "0198a000-0000-7000-8000-0000000f0001";
+
+/**
+ * The CORS headers every fixture response carries, edge reads included.
+ *
+ * Module-level and exported so the exposure rule can be pinned by a unit test — the fixture itself only
+ * starts against containers, and the header set is exactly the part that must not silently regress.
+ */
+export function placementCorsHeaders(origin: string | null, allowedOrigins: string[]): Record<string, string> {
+  const allow = origin && allowedOrigins.includes(origin) ? origin : allowedOrigins[0]!;
+  return {
+    "Access-Control-Allow-Origin": allow,
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "authorization,apikey,content-type",
+    // The edge rides this same origin and the placement suite reads it from a BROWSER, cross-origin from
+    // the preview server. Without this the ds client sees none of the stream headers, never advances past
+    // `offset=-1`, and hot-loops — see `STREAM_READ_EXPOSED_HEADERS` for why that is silent.
+    "Access-Control-Expose-Headers": STREAM_READ_EXPOSED_HEADERS.join(", "),
+    Vary: "Origin",
+  };
+}
 
 export async function startPlacementFixtureServer(opts: {
   databaseUrl: string;
@@ -85,15 +107,8 @@ export async function startPlacementFixtureServer(opts: {
   let refuseWrites = false;
   let writesStarted = 0;
 
-  const corsHeaders = (origin: string | null): Record<string, string> => {
-    const allow = origin && opts.allowedOrigins.includes(origin) ? origin : opts.allowedOrigins[0]!;
-    return {
-      "Access-Control-Allow-Origin": allow,
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "authorization,apikey,content-type",
-      Vary: "Origin",
-    };
-  };
+  const corsHeaders = (origin: string | null): Record<string, string> =>
+    placementCorsHeaders(origin, opts.allowedOrigins);
 
   const fetch = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);

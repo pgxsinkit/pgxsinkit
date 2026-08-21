@@ -535,7 +535,7 @@ export type {
   StreamTokenClaims,
   StreamTokenVerification,
 } from "./circuits/stream-token";
-export { authorizeStreamRead, createStreamGate, readStreamToken } from "./circuits/edge";
+export { authorizeStreamRead, createStreamGate, readStreamToken, STREAM_READ_EXPOSED_HEADERS } from "./circuits/edge";
 export type { EntitlementSet, GateDecision, StreamGateOptions } from "./circuits/edge";
 export {
   barrierPath,
