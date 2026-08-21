@@ -1,6 +1,6 @@
 # Bulk apply on both paths, without the set-based ordering hazard
 
-Status: accepted (2026-06-23)
+Status: accepted (2026-06-23) — decision 1 amended by [ADR-0058](0058-two-verb-wire-and-the-upsert-apply-path.md): the engine emits `upsert | delete` only, so the fold's buckets are `deletes`/`upserts`, the plain-INSERT collision surfacing is retired (it is replaced by two targeted assertions), and the `[delete, update]` rejection checks a state the wire can no longer express. The clearing DELETE on a re-created key survives, and is load-bearing.
 
 Both the read-path Sync applier and the write-path Mutation applier currently degrade to one SQL
 statement per row for the common case: the read apply bulk-loads only *leading* inserts and then

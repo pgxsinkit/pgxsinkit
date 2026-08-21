@@ -1,4 +1,4 @@
-import type { PGliteInterface } from "@electric-sql/pglite";
+import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 
 import { classifyTableApplyStrategy, type ApplyStrategy, type SyncTableRegistry } from "@pgxsinkit/contracts";
@@ -7,7 +7,6 @@ import { nowMs, type GroupBootStamp } from "../boot-report";
 import { resolveApplyTarget, type ApplyTarget } from "../local-tables";
 import {
   applyBulkDeletesToTable,
-  applyBulkUpdatesToTable,
   applyInsertsToTable,
   applyMessagesToTableWithCopy,
   applyMessagesToTableWithJson,
@@ -142,7 +141,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
   } = options;
 
   const shapeNames = Object.keys(shapes);
-  assertScopedClearsForSharedTables(shapes);
+  const { soleOccupants } = resolveTableSharing(shapes);
 
   const targets = new Map<string, ApplyTarget>(
     shapeNames.map((shapeName) => [shapeName, resolveApplyTarget(registry, shapes[shapeName]!.tableKey)]),
@@ -237,6 +236,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
           if (shapesToTruncate.has(shapeName)) {
             if (spec.onMustRefetch) {
               await spec.onMustRefetch(drizzleOverPg(tx));
+              await assertClearLeftNoResidue({ pg: tx, target, shapeName, soleOccupant: soleOccupants.has(shapeName) });
             } else {
               // A must-refetch wipe is engine cache maintenance, not server truth (ADR-0029 D4), so it
               // TRUNCATEs rather than reacting per row. Tier ②: TRUNCATE has no Drizzle builder, so the
@@ -253,7 +253,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
             const remainder: ChangeLike[] = [];
             let sawNonInsert = false;
             for (const change of changes) {
-              if (!sawNonInsert && change.headers.operation === "insert") leadingInserts.push(change);
+              if (!sawNonInsert && change.headers.operation === "upsert") leadingInserts.push(change);
               else {
                 sawNonInsert = true;
                 remainder.push(change);
@@ -282,21 +282,20 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
 
           if (changes.length === 0) continue;
 
-          // ADR-0014: fold to one net op per primary key, then DELETE → INSERT → UPDATE. A re-created
-          // key's delete must precede its insert; every other key lands in exactly one statement.
+          // ADR-0014: fold to one net op per primary key, then DELETE → UPSERT. A re-created key's
+          // delete must precede its upsert; every other key lands in exactly one statement.
+          //
+          // Always the upsert applier, never a plain INSERT: the engine emits `upsert`, which asserts
+          // the row's value and says nothing about whether it existed. ADR-0014's plain-INSERT rule
+          // rested on `insert` meaning "this row is new", and that verb is gone from the wire — see
+          // {@link StreamOperation}. `applyMode` no longer selects between insert and upsert here; it
+          // survives only to keep the BULK BACKFILL path conflict-tolerant (below).
           const folded = foldChangeBatch(changes as never);
           if (folded.deletes.length > 0) {
             await applyBulkDeletesToTable({ pg: tx, target, messages: folded.deletes, debug });
           }
-          if (folded.inserts.length > 0) {
-            if (target.applyMode === "upsert") {
-              await applyUpsertsToTable({ pg: tx, target, messages: folded.inserts, debug });
-            } else {
-              await applyInsertsToTable({ pg: tx, target, messages: folded.inserts, debug });
-            }
-          }
-          if (folded.updates.length > 0) {
-            await applyBulkUpdatesToTable({ pg: tx, target, messages: folded.updates, debug });
+          if (folded.upserts.length > 0) {
+            await applyUpsertsToTable({ pg: tx, target, messages: folded.upserts, debug });
           }
         }
 
@@ -395,7 +394,22 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
 
     try {
       const barrier = await options.readBarrier();
-      if (!barrier.sync || barrier.pendingFlips > 0) {
+      // ONLY `pendingFlips`. `sync` is reported beside it (it mirrors the engine's wire shape) but is
+      // not a condition here, and reading it as one was a bug in two ways.
+      //
+      // It is an i64 watermark — "highest `__el_sync` sentinel counter the ingestor has decoded" —
+      // so `!barrier.sync` shut this gate permanently on any database where no sentinel had ever been
+      // written, which is every pgxsinkit database: the counter is legitimately 0 and `!0` is true.
+      //
+      // The deeper error is that it answers a question this gate does not ask. The sentinel is a
+      // GLOBAL quiescence fence (bump the counter, wait for the engine to report having decoded at
+      // least that value, and every earlier commit is therefore on the stream) — the engine's own
+      // conformance harness uses it to know a test database has gone quiet. pgxsinkit never needs it,
+      // because write convergence here is PER ENTITY: the mutation ack carries `serverUpdatedAtUs` and
+      // the overlay clears when a synced row arrives bearing that version (ADR-0010/0011). What boot
+      // alignment actually needs is the thing ADR-0056 d3 names — that no computed revocation is still
+      // undelivered — and that is exactly `pendingFlips`.
+      if (barrier.pendingFlips > 0) {
         if (debug) console.log("alignment barrier unsatisfied", barrier);
         return false;
       }
@@ -467,8 +481,12 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
  * The default must-refetch is a TRUNCATE of the whole table, which would wipe a co-tenant scope's
  * rows — so this is the same condition the Electric engine's per-table lock enforced, stated as the
  * requirement it always was rather than as a prohibition on sharing.
+ *
+ * Returns the shapes that are the **sole occupant** of their table, which is the set
+ * {@link assertClearLeftNoResidue} can check: for those, and only those, "this shape's rows are
+ * gone" and "the table is empty" are the same statement.
  */
-function assertScopedClearsForSharedTables(shapes: Record<string, CircuitsShapeSpec>): void {
+function resolveTableSharing(shapes: Record<string, CircuitsShapeSpec>): { soleOccupants: Set<string> } {
   const byTable = new Map<string, string[]>();
   for (const [shapeName, spec] of Object.entries(shapes)) {
     const sharing = byTable.get(spec.tableKey) ?? [];
@@ -476,8 +494,12 @@ function assertScopedClearsForSharedTables(shapes: Record<string, CircuitsShapeS
     byTable.set(spec.tableKey, sharing);
   }
 
+  const soleOccupants = new Set<string>();
   for (const [tableKey, sharing] of byTable) {
-    if (sharing.length < 2) continue;
+    if (sharing.length < 2) {
+      soleOccupants.add(sharing[0]!);
+      continue;
+    }
     const bare = sharing.filter((shapeName) => !shapes[shapeName]!.onMustRefetch);
     if (bare.length > 0) {
       throw new Error(
@@ -487,4 +509,53 @@ function assertScopedClearsForSharedTables(shapes: Record<string, CircuitsShapeS
       );
     }
   }
+  return { soleOccupants };
+}
+
+/**
+ * After a custom {@link CircuitsShapeSpec.onMustRefetch}, assert the clear actually cleared.
+ *
+ * This is one of the two checks that replace ADR-0014's primary-key collision tripwire. That
+ * tripwire was never an application-data guard — Postgres enforces PK uniqueness upstream, so the
+ * server cannot send two distinct rows sharing a key. It was an invariant alarm on the replication
+ * machinery, and the state it could actually catch was *stale rows the client should no longer
+ * hold*. It fired only indirectly, when the server later re-sent one of those keys as an `insert`.
+ * With `upsert` on the wire the alarm is unreachable, so the invariant is asserted where it lives
+ * instead: at the clear, on the shape whose own callback is responsible for it.
+ *
+ * **Only sound for a sole occupant.** When K shapes share a table, each brings a scoped clear that
+ * deliberately leaves its co-tenants' rows in place, and the client holds no scope predicate to
+ * subtract them with (`CircuitsShapeSpec` carries an opaque callback, not a scope key). Demanding
+ * emptiness there would fail every correct shared-table clear. What carries the shared case is the
+ * contract in {@link resolveTableSharing}, not a check here — stated plainly rather than papered
+ * over with a check that only looks like one.
+ *
+ * The default TRUNCATE path is not routed here: it cannot leave residue, so the query would be pure
+ * cost. Must-refetch is rare, so the surviving cost is a single existence probe per reset.
+ */
+async function assertClearLeftNoResidue({
+  pg,
+  target,
+  shapeName,
+  soleOccupant,
+}: {
+  pg: PGliteInterface | Transaction;
+  target: ApplyTarget;
+  shapeName: string;
+  soleOccupant: boolean;
+}): Promise<void> {
+  if (!soleOccupant) return;
+
+  const residue = await drizzleOverPg(pg)
+    .select({ one: sql<number>`1` })
+    .from(target.table)
+    .limit(1);
+  if (residue.length === 0) return;
+
+  throw new Error(
+    `[pgxsinkit] shape "${shapeName}" ran its onMustRefetch but rows remain in its table, and it is ` +
+      `the only shape on that table — so the clear was incomplete. The re-snapshot that follows would ` +
+      `merge onto rows the shape no longer holds, leaving them visible forever. Fix the onMustRefetch ` +
+      `to clear everything this shape syncs, or drop it and take the default TRUNCATE.`,
+  );
 }

@@ -71,8 +71,12 @@ async function main() {
   });
 
   try {
-    runCommand("podman", ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "up", "-d"], composeEnv);
+    // Marked BEFORE the up, not after: `up -d` creates containers and networks as it goes, so a
+    // failure part-way through still leaves them behind. Setting this afterwards meant every failed
+    // bring-up skipped its own teardown and leaked a whole project — which is exactly when cleanup
+    // matters most, since a failing lane is the one you re-run.
     composeStarted = true;
+    runCommand("podman", ["compose", "-f", COMPOSE_FILE, "-p", composeProject, "up", "-d"], composeEnv);
 
     await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL", SERVICE_START_TIMEOUT_MS);
     await waitForPgReady(databaseUrl);

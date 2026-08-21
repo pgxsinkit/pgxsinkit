@@ -8,7 +8,7 @@ import type { ChangeLike } from "@pgxsinkit/client";
 // transaction being applied, and the offset is what a crash resumes from.
 
 function change(key: string): ChangeLike {
-  return { key, value: { id: key }, headers: { operation: "insert" } };
+  return { key, value: { id: key }, headers: { operation: "upsert" } };
 }
 
 /** Offsets are opaque but lexicographically sortable WITHIN a stream — the protocol says so (S10.2). */

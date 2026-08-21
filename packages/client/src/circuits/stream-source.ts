@@ -117,7 +117,15 @@ export async function readShapeStream(
       // already individual envelopes rather than the arrays a producer appended.
       envelopes: batch.items,
       offset: String(batch.offset),
-      upToDate: response.upToDate,
+      // `batch.upToDate`, NOT `response.upToDate`. They answer the same question at different times:
+      // the batch's flag describes THIS batch ("ends at the current end of the stream"), while the
+      // response's is documented as updated *after* each chunk is delivered to the consumer — i.e.
+      // after this callback returns. Reading the response's here yields the PREVIOUS batch's answer,
+      // which on the first catch-up batch is always `false`. Nothing downstream can recover from
+      // that: the commit gate waits for every shape to report up-to-date, so a group whose first
+      // batch is misreported never commits and `ready` never resolves, with the rows sitting in the
+      // inbox and no error anywhere.
+      upToDate: batch.upToDate,
     });
   });
 

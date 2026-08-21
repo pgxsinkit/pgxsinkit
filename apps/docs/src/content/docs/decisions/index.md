@@ -70,5 +70,6 @@ complete as ADRs are added.
 - [ADR-0055 — A Circuits-native sync core, with a shared read tier](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0055-circuits-native-sync-core.md)
 - [ADR-0056 — Catch-up alignment on stream offsets and the engine convergence barrier](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0056-catchup-alignment-on-stream-offsets.md)
 - [ADR-0057 — Retiring tagged-subquery reconciliation](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0057-retiring-tagged-subquery-reconciliation.md)
+- [ADR-0058 — A two-verb wire, and what replaces primary-key collision surfacing](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0058-two-verb-wire-and-the-upsert-apply-path.md)
 
 <!-- adr:list:end -->

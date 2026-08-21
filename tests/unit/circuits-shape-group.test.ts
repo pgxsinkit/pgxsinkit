@@ -9,7 +9,7 @@ import type { StreamEnvelope } from "@pgxsinkit/contracts";
 // answer concurrently), and group up-to-date is the ADR-0031 alignment — every shape, not any.
 
 function envelope(key: string): StreamEnvelope {
-  return { type: "offering_content", key, value: { id: key }, headers: { operation: "insert" } };
+  return { type: "offering_content", key, value: { id: key }, headers: { operation: "upsert" } };
 }
 
 /** A durable-streams catch-up response: the envelopes, plus the headers the client reads off it. */

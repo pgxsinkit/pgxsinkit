@@ -136,12 +136,19 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
   mode: TableMode;
   primaryKey: PrimaryKeySpec;
   /**
-   * CDC insert-apply policy (ADR-0045). Default `"insert"`: a server CDC `insert` is applied as a plain
-   * INSERT, so a genuine primary-key collision surfaces (the ADR-0014 collision-surfacing invariant).
-   * `"upsert"`: this table legitimately receives locally-derived provisional rows (e.g. written by a
-   * local trigger from another synced table), so server CDC inserts are applied idempotently as
-   * `INSERT … ON CONFLICT (pk) DO UPDATE` — the authoritative server row overwrites the provisional
-   * local row instead of failing the commit. Resolved to `"insert"` when omitted.
+   * **Backfill** conflict policy (ADR-0045). Resolved to `"insert"` when omitted.
+   *
+   * This no longer selects how steady-state changes apply. The engine emits `upsert`, which states a
+   * row's value without claiming it is new, so every streamed change now applies as `INSERT … ON
+   * CONFLICT (pk) DO UPDATE` regardless of this setting. ADR-0014's plain-INSERT collision surfacing
+   * went with the `insert` verb it depended on.
+   *
+   * What survives is the **initial load**, which is a different question: a fresh subscription or a
+   * post-must-refetch re-snapshot lands on a table assumed empty, which is what lets it use COPY or a
+   * plain multi-row INSERT — neither of which can express `ON CONFLICT`. Set `"upsert"` when that
+   * assumption does not hold for this table, i.e. it legitimately receives locally-DERIVED provisional
+   * rows (e.g. a local trigger on another synced table inserts one here) that a backfill could meet.
+   * The backfill then takes the conflict-tolerant applier instead, at the cost of the faster path.
    */
   applyMode: "insert" | "upsert";
   /**
@@ -389,14 +396,13 @@ export type SyncTableInput<
    */
   primaryKey?: string[] | { name: string; columns: string[] };
   /**
-   * CDC insert-apply policy (ADR-0045). **Default `"insert"`** — a CDC insert is a plain INSERT, so a
-   * genuine PK collision must surface (the ADR-0014 collision-surfacing invariant; a synced cache table
-   * is server-authoritative and a duplicate insert is a real bug). Set `"upsert"` **only** when this
-   * table legitimately receives locally-DERIVED provisional rows — e.g. a local trigger on another
-   * synced table inserts a provisional row here, and the server independently creates the same row so
-   * its CDC insert would collide (23505). With `"upsert"`, server CDC inserts are applied idempotently
-   * as `INSERT … ON CONFLICT (pk) DO UPDATE`; the authoritative server row overwrites the provisional
-   * local row. Declare the exception here, where it lives — do not weaken the invariant repo-wide.
+   * **Backfill** conflict policy (ADR-0045). **Default `"insert"`** — the initial load assumes an empty
+   * table (fresh subscription or post-must-refetch re-snapshot) and takes the fast path, COPY or a plain
+   * multi-row INSERT, neither of which can express `ON CONFLICT`. Set `"upsert"` **only** when this table
+   * legitimately receives locally-DERIVED provisional rows a backfill could land on top of — e.g. a local
+   * trigger on another synced table inserts a provisional row here, and the server independently creates
+   * the same row (23505). Steady-state changes are unaffected: the engine emits `upsert`, so they apply
+   * as `INSERT … ON CONFLICT (pk) DO UPDATE` for every table. See {@link SyncTableEntry.applyMode}.
    */
   applyMode?: "insert" | "upsert";
   /**
@@ -682,12 +688,13 @@ export function defineSyncTable<
   const columnLevelPkKeys = Object.entries(probeColumns)
     .filter(([, col]) => col.primary === true)
     .map(([key]) => key);
-  const specPropertyKeys = primaryKeyColumns.map((key) => {
+  const toPropertyKey = (key: string, label: string) => {
     if (probeColumns[key]) return key;
     const byColumnName = Object.entries(probeColumns).find(([, col]) => col.name === key);
     if (byColumnName) return byColumnName[0];
-    throw new Error(`[pgxsinkit] ${tableName}: primaryKey column "${key}" not found among the table's columns`);
-  });
+    throw new Error(`[pgxsinkit] ${tableName}: ${label} column "${key}" not found among the table's columns`);
+  };
+  const specPropertyKeys = primaryKeyColumns.map((key) => toPropertyKey(key, "primaryKey"));
 
   if (columnLevelPkKeys.length > 1) {
     throw new Error(
@@ -772,8 +779,31 @@ export function defineSyncTable<
 
   const omittedColumns = (clientProjection?.omitColumns ?? []) as TOmittedColumns;
   const projectedCols = viewColumnsForProjection(makeColumns(), omittedColumns);
+
+  // The local synced table carries its OWN primary key, mirroring exactly what the local-schema
+  // generator emits for it (`getLocalSyncPrimaryKeyColumns` → `buildTableColumnSql`) — including a
+  // `clientProjection.localPrimaryKey` narrowing, where the server's key columns may not even be
+  // projected. Stating it here keeps the drizzle object and the physical table in agreement; a
+  // localTable that claimed no key while its table had one stayed invisible only while the apply path
+  // was a plain INSERT plus `UPDATE … WHERE pk`, and became a 42P10 the moment anything said
+  // `ON CONFLICT (pk)` (ADR-0058 decision 3). Skipped when a single column already carries the flag
+  // itself, since drizzle would then render two primary keys.
+  const localPkPropertyKeys = (clientProjection?.localPrimaryKey?.columns ?? primaryKeyColumns).map((key) =>
+    toPropertyKey(key, "localPrimaryKey"),
+  );
+  const localPkIsColumnLevel =
+    localPkPropertyKeys.length === 1 && probeColumns[localPkPropertyKeys[0]!]?.primary === true;
+  const localExtrasFn = localPkIsColumnLevel
+    ? undefined
+    : (self: PgBuildExtraConfigColumns<Record<string, ColumnBuilderBase>>) => {
+        const selfCols = self as unknown as Record<string, AnyPgColumn>;
+        const pkColumns = localPkPropertyKeys.map((k) => selfCols[k]!) as [AnyPgColumn, ...AnyPgColumn[]];
+        return [pgPrimaryKey({ name: primaryKeyConstraintName, columns: pkColumns })];
+      };
   const localTable = (
-    schema ? schema.table(tableName, projectedCols) : pgTable(tableName, projectedCols)
+    schema
+      ? schema.table(tableName, projectedCols, localExtrasFn as never)
+      : pgTable(tableName, projectedCols, localExtrasFn as never)
   ) as ProjectedLocalTable<TName, TColumns, TOmittedColumns>;
 
   const viewColumns = viewColumnsForProjection(makeColumns(), omittedColumns);

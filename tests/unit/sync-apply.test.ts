@@ -52,7 +52,7 @@ const todos = todosEntry.localTable;
 const readState = readStateEntry.localTable;
 
 interface TestInsertMessage {
-  headers: { operation: "insert" };
+  headers: { operation: "upsert" };
   key: string;
   value: Record<string, unknown>;
 }
@@ -93,7 +93,7 @@ describe("sync apply", () => {
   // applier `personId` while `columnByName` is keyed `person_id`, and every update and delete threw
   // "column not found". Found while building the Circuits envelope translation (ADR-0055), which has
   // to reconstruct exactly these columns from a body-less delete key.
-  it("updates and deletes a table whose pk property key differs from its column name", async () => {
+  it("upserts and deletes a table whose pk property key differs from its column name", async () => {
     const target = resolveApplyTarget(registry, "readState");
     expect(target.primaryKey).toEqual(["person_id", "item_id"]);
 
@@ -101,7 +101,7 @@ describe("sync apply", () => {
       pg,
       target,
       message: {
-        headers: { operation: "insert" },
+        headers: { operation: "upsert" },
         key: "person-1",
         value: { person_id: "person-1", item_id: "item-1", seen: false },
       } as never,
@@ -112,7 +112,7 @@ describe("sync apply", () => {
       pg,
       target,
       message: {
-        headers: { operation: "update" },
+        headers: { operation: "upsert" },
         key: "person-1",
         value: { person_id: "person-1", item_id: "item-1", seen: true },
       } as never,
@@ -141,7 +141,7 @@ describe("sync apply", () => {
         target,
         messages: [
           {
-            headers: { operation: "insert" },
+            headers: { operation: "upsert" },
             key: "author-1",
             value: { id: "author-1", name: "First name", updated_at_us: 1 },
           } as TestInsertMessage,
@@ -150,8 +150,9 @@ describe("sync apply", () => {
       }),
     );
 
-    // An Electric `insert` is a new row (post-truncate or first send). Replaying an existing key is a
-    // protocol/truncate violation that must surface, not be silently swallowed by an upsert.
+    // The BACKFILL fast path is only correct onto an empty table (fresh subscription or post-truncate
+    // re-snapshot), so a pre-existing key means that precondition was violated and must surface. This
+    // is the one place ADR-0014's plain-INSERT collision survives — see ADR-0058 decision 4.
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
       applyInsertsToTable({
@@ -159,7 +160,7 @@ describe("sync apply", () => {
         target,
         messages: [
           {
-            headers: { operation: "insert" },
+            headers: { operation: "upsert" },
             key: "author-1",
             value: { id: "author-1", name: "Updated name", updated_at_us: 2 },
           } as TestInsertMessage,
@@ -176,14 +177,17 @@ describe("sync apply", () => {
     expect(rows).toEqual([{ id: "author-1", name: "First name", updated_at_us: 1 }]);
   });
 
-  it("applies single insert messages operation-faithfully; a replayed primary key fails", async () => {
+  // Formerly "…a replayed primary key fails". The per-row applier now refreshes the row instead: a wire
+  // `upsert` states the row's value and claims nothing about whether it existed, so a second delivery of
+  // a key is an ordinary revision, not a protocol violation (ADR-0058).
+  it("applies single upsert messages operation-faithfully; a re-delivered primary key refreshes", async () => {
     const target = resolveApplyTarget(registry, "todos");
     await measureTiming("single:applyMessage:first", () =>
       applyMessageToTable({
         pg,
         target,
         message: {
-          headers: { operation: "insert" },
+          headers: { operation: "upsert" },
           key: "todo-1",
           value: { id: "todo-1", title: "First title", completed: false },
         } as TestInsertMessage,
@@ -191,24 +195,21 @@ describe("sync apply", () => {
       }),
     );
 
-    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
-    await expect(
-      applyMessageToTable({
-        pg,
-        target,
-        message: {
-          headers: { operation: "insert" },
-          key: "todo-1",
-          value: { id: "todo-1", title: "Updated title", completed: true },
-        } as TestInsertMessage,
-        debug: false,
-      }),
-    ).rejects.toThrow();
+    await applyMessageToTable({
+      pg,
+      target,
+      message: {
+        headers: { operation: "upsert" },
+        key: "todo-1",
+        value: { id: "todo-1", title: "Updated title", completed: true },
+      } as TestInsertMessage,
+      debug: false,
+    });
 
     const rows = await drizzleOver(pg)
       .select({ id: todos.id, title: todos.title, completed: todos.completed })
       .from(todos);
 
-    expect(rows).toEqual([{ id: "todo-1", title: "First title", completed: false }]);
+    expect(rows).toEqual([{ id: "todo-1", title: "Updated title", completed: true }]);
   });
 });

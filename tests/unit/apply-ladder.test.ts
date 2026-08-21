@@ -42,13 +42,13 @@ const scalars = pgTable("scalars", {
 // types (ADR-0029 D2) — there is no `information_schema` round-trip to fall back to.
 
 interface InsertMsg {
-  headers: { operation: "insert" };
+  headers: { operation: "upsert" };
   key: string;
   value: Record<string, unknown>;
 }
 
 const insert = (key: string, value: Record<string, unknown>): InsertMsg => ({
-  headers: { operation: "insert" },
+  headers: { operation: "upsert" },
   key,
   value,
 });

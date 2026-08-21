@@ -2,10 +2,10 @@ import { describe, expect, it } from "bun:test";
 
 import { foldChangeBatch } from "../../packages/client/src/sync/fold";
 
-// Derive the change-message type from the fold signature so the test does not depend on
-// `@electric-sql/client` resolving from the tests/ scope (it is hoisted under packages/client).
+// Derive the change-message type from the fold signature so the test does not depend on the client
+// package's own module resolution from the tests/ scope.
 type FoldInput = Parameters<typeof foldChangeBatch>[0][number];
-type Operation = "insert" | "update" | "delete";
+type Operation = "upsert" | "delete";
 type Row = Record<string, unknown>;
 
 let lsnCounter = 0n;
@@ -18,89 +18,69 @@ function message(key: string, operation: Operation, value: Row): FoldInput {
 }
 
 describe("foldChangeBatch (ADR-0014 / decision 1) — targeted cases", () => {
-  it("[insert, update] ⇒ one INSERT with merged values", () => {
+  it("[upsert, upsert] ⇒ one UPSERT with merged values", () => {
     const folded = foldChangeBatch([
-      message("k", "insert", { id: "k", a: 1, b: 2 }),
-      message("k", "update", { id: "k", a: 9 }),
+      message("k", "upsert", { id: "k", a: 1, b: 2 }),
+      message("k", "upsert", { id: "k", a: 9 }),
     ]);
     expect(folded.deletes).toHaveLength(0);
-    expect(folded.updates).toHaveLength(0);
-    expect(folded.inserts).toHaveLength(1);
-    expect(folded.inserts[0]!.value).toEqual({ id: "k", a: 9, b: 2 });
-    expect(folded.inserts[0]!.headers.operation).toBe("insert");
+    expect(folded.upserts).toHaveLength(1);
+    expect(folded.upserts[0]!.value).toEqual({ id: "k", a: 9, b: 2 });
+    expect(folded.upserts[0]!.headers.operation).toBe("upsert");
   });
 
-  it("[update, update] ⇒ one UPDATE with merged values (carries the PK)", () => {
-    const folded = foldChangeBatch([
-      message("k", "update", { id: "k", a: 1 }),
-      message("k", "update", { id: "k", b: 5 }),
-    ]);
-    expect(folded.inserts).toHaveLength(0);
-    expect(folded.deletes).toHaveLength(0);
-    expect(folded.updates).toHaveLength(1);
-    expect(folded.updates[0]!.value).toEqual({ id: "k", a: 1, b: 5 });
-    expect(folded.updates[0]!.headers.operation).toBe("update");
-  });
-
-  it("[update, delete] ⇒ one DELETE", () => {
-    const folded = foldChangeBatch([message("k", "update", { id: "k", a: 1 }), message("k", "delete", { id: "k" })]);
-    expect(folded.inserts).toHaveLength(0);
-    expect(folded.updates).toHaveLength(0);
+  it("[upsert, delete] ⇒ one DELETE", () => {
+    const folded = foldChangeBatch([message("k", "upsert", { id: "k", a: 1 }), message("k", "delete", { id: "k" })]);
+    expect(folded.upserts).toHaveLength(0);
     expect(folded.deletes).toHaveLength(1);
     expect(folded.deletes[0]!.value).toEqual({ id: "k" });
   });
 
-  it("[insert, update, delete] (trailing delete) ⇒ one DELETE, no insert", () => {
+  it("[upsert, upsert, delete] (trailing delete) ⇒ one DELETE, no upsert", () => {
     const folded = foldChangeBatch([
-      message("k", "insert", { id: "k", a: 1, b: 2 }),
-      message("k", "update", { id: "k", a: 3 }),
+      message("k", "upsert", { id: "k", a: 1, b: 2 }),
+      message("k", "upsert", { id: "k", a: 3 }),
       message("k", "delete", { id: "k" }),
     ]);
-    expect(folded.inserts).toHaveLength(0);
-    expect(folded.updates).toHaveLength(0);
+    expect(folded.upserts).toHaveLength(0);
     expect(folded.deletes).toHaveLength(1);
   });
 
-  it("[delete, insert] (re-created) ⇒ DELETE *and* INSERT, so the pre-existing row is cleared first", () => {
+  // The clearing DELETE is load-bearing, not belt-and-braces: `ON CONFLICT DO UPDATE` refreshes only
+  // the columns the row carries, so folding `[delete, upsert]` down to a bare UPSERT would let a row
+  // that genuinely left and re-entered keep column values from its previous life.
+  it("[delete, upsert] (re-created) ⇒ DELETE *and* UPSERT, so the pre-existing row is cleared first", () => {
     const folded = foldChangeBatch([
       message("k", "delete", { id: "k" }),
-      message("k", "insert", { id: "k", a: 7, b: 8 }),
+      message("k", "upsert", { id: "k", a: 7, b: 8 }),
     ]);
-    expect(folded.updates).toHaveLength(0);
     expect(folded.deletes).toHaveLength(1);
     expect(folded.deletes[0]!.value).toEqual({ id: "k" });
-    expect(folded.inserts).toHaveLength(1);
-    expect(folded.inserts[0]!.value).toEqual({ id: "k", a: 7, b: 8 });
+    expect(folded.upserts).toHaveLength(1);
+    expect(folded.upserts[0]!.value).toEqual({ id: "k", a: 7, b: 8 });
   });
 
-  it("[delete, insert, update] ⇒ DELETE + INSERT with merged values", () => {
+  it("[delete, upsert, upsert] ⇒ DELETE + UPSERT with merged values", () => {
     const folded = foldChangeBatch([
       message("k", "delete", { id: "k" }),
-      message("k", "insert", { id: "k", a: 7, b: 8 }),
-      message("k", "update", { id: "k", b: 99 }),
+      message("k", "upsert", { id: "k", a: 7, b: 8 }),
+      message("k", "upsert", { id: "k", b: 99 }),
     ]);
     expect(folded.deletes).toHaveLength(1);
-    expect(folded.inserts).toHaveLength(1);
-    expect(folded.inserts[0]!.value).toEqual({ id: "k", a: 7, b: 99 });
-  });
-
-  it("[delete, update] (update after delete) ⇒ throws — malformed for a faithful stream", () => {
-    expect(() =>
-      foldChangeBatch([message("k", "delete", { id: "k" }), message("k", "update", { id: "k", a: 1 })]),
-    ).toThrow(/malformed/);
+    expect(folded.upserts).toHaveLength(1);
+    expect(folded.upserts[0]!.value).toEqual({ id: "k", a: 7, b: 99 });
   });
 
   it("folds independently per key in a mixed multi-key batch", () => {
     const folded = foldChangeBatch([
-      message("ins", "insert", { id: "ins", a: 1, b: 1 }),
-      message("upd", "update", { id: "upd", a: 2 }),
+      message("ins", "upsert", { id: "ins", a: 1, b: 1 }),
+      message("upd", "upsert", { id: "upd", a: 2 }),
       message("del", "delete", { id: "del" }),
-      message("upd", "update", { id: "upd", b: 3 }),
+      message("upd", "upsert", { id: "upd", b: 3 }),
     ]);
-    expect(folded.inserts.map((m) => m.key)).toEqual(["ins"]);
-    expect(folded.updates.map((m) => m.key)).toEqual(["upd"]);
+    expect(folded.upserts.map((m) => m.key).sort()).toEqual(["ins", "upd"]);
     expect(folded.deletes.map((m) => m.key)).toEqual(["del"]);
-    expect(folded.updates[0]!.value).toEqual({ id: "upd", a: 2, b: 3 });
+    expect(folded.upserts.find((m) => m.key === "upd")!.value).toEqual({ id: "upd", a: 2, b: 3 });
   });
 });
 
@@ -118,39 +98,30 @@ function mulberry32(seed: number): () => number {
 
 type State = Map<string, Row>;
 
+/**
+ * One upsert, as `INSERT … ON CONFLICT (pk) DO UPDATE SET <carried cols> = excluded.<col>` behaves:
+ * absent row ⇒ inserted as-is; present row ⇒ the carried columns are overwritten and any column the
+ * row does not carry is left alone. Modelling it as a wholesale replace would hide exactly the case
+ * the clearing delete exists for.
+ */
+function upsertInto(state: State, key: string, value: Row): void {
+  const current = state.get(key);
+  state.set(key, current ? { ...current, ...value } : { ...value });
+}
+
 /** The oracle: apply raw ops one at a time, exactly as the per-row Sync applier does today. */
 function applyPerRow(state: State, ops: FoldInput[]): State {
   for (const op of ops) {
-    const key = op.key;
-    switch (op.headers.operation) {
-      case "insert":
-        if (state.has(key)) throw new Error(`collision on insert ${key}`);
-        state.set(key, { ...(op.value as Row) });
-        break;
-      case "update": {
-        const current = state.get(key);
-        if (current) state.set(key, { ...current, ...(op.value as Row) }); // missing row ⇒ no-op, as in SQL
-        break;
-      }
-      case "delete":
-        state.delete(key);
-        break;
-    }
+    if (op.headers.operation === "delete") state.delete(op.key);
+    else upsertInto(state, op.key, op.value as Row);
   }
   return state;
 }
 
-/** Apply a folded batch as the three bulk statements will (Phase 3): deletes → inserts → updates. */
+/** Apply a folded batch as the two bulk statements will: deletes → upserts. */
 function applyFolded(state: State, folded: ReturnType<typeof foldChangeBatch>): State {
   for (const d of folded.deletes) state.delete(d.key);
-  for (const i of folded.inserts) {
-    if (state.has(i.key)) throw new Error(`collision on insert ${i.key}`);
-    state.set(i.key, { ...(i.value as Row) });
-  }
-  for (const u of folded.updates) {
-    const current = state.get(u.key);
-    if (current) state.set(u.key, { ...current, ...(u.value as Row) });
-  }
+  for (const u of folded.upserts) upsertInto(state, u.key, u.value as Row);
   return state;
 }
 
@@ -159,7 +130,7 @@ function stable(state: State): string {
 }
 
 describe("foldChangeBatch — property: fold-then-bulk ≡ ordered per-row apply", () => {
-  it("holds over random faithful same-PK sequences and random initial DB state", () => {
+  it("holds over random upsert/delete sequences and random initial DB state", () => {
     const rand = mulberry32(0x5e1f0d);
     const randInt = (n: number) => Math.floor(rand() * n);
 
@@ -170,31 +141,27 @@ describe("foldChangeBatch — property: fold-then-bulk ≡ ordered per-row apply
 
       for (let k = 0; k < keyCount; k++) {
         const key = `k${k}`;
-        // A faithful stream only `insert`s a row that does not currently exist, and only
-        // `update`s/`delete`s one that does — so the row's initial existence is fixed by its first op.
-        let exists = rand() < 0.5;
-        if (exists) initial.set(key, { id: key, a: randInt(5), b: randInt(5) });
+        // No faithfulness precondition to respect any more: an upsert is legal whether or not the
+        // row exists, and a delete of an absent row is a no-op. So the generator is free to emit any
+        // sequence, which covers strictly more than the old insert/update/delete state machine did.
+        if (rand() < 0.5) initial.set(key, { id: key, a: randInt(5), b: randInt(5), local: iteration });
 
         const ops: FoldInput[] = [];
         const steps = 1 + randInt(6);
         for (let s = 0; s < steps; s++) {
-          if (!exists) {
-            ops.push(message(key, "insert", { id: key, a: randInt(5), b: randInt(5) }));
-            exists = true;
-          } else if (rand() < 0.5) {
+          if (rand() < 0.65) {
             const value: Row = { id: key };
             if (rand() < 0.7) value["a"] = randInt(5);
             if (rand() < 0.7 || value["a"] === undefined) value["b"] = randInt(5);
-            ops.push(message(key, "update", value));
+            ops.push(message(key, "upsert", value));
           } else {
             ops.push(message(key, "delete", { id: key }));
-            exists = false;
           }
         }
         perKeyOps.push(ops);
       }
 
-      // Interleave the per-key op lists into one LSN-ordered batch, preserving each key's order.
+      // Interleave the per-key op lists into one stream-ordered batch, preserving each key's order.
       const cursors = perKeyOps.map(() => 0);
       const batch: FoldInput[] = [];
       let remaining = perKeyOps.reduce((sum, ops) => sum + ops.length, 0);

@@ -187,3 +187,74 @@ it("posts the compiled body to the engine and returns its handle", async () => {
   expect(seen?.body).toEqual({ table: "offering_content" });
   expect(handle.streamPath).toBe("shape/s1");
 });
+
+// ── localPrimaryKey narrowing (the ADR-0014 replacement check) ────────────────────────────────
+// A `clientProjection.localPrimaryKey` narrower than the server key collapses every server row that
+// differs only in a dropped column onto one local row. That is the ONE primary-key collision that is
+// not machinery — it is a registry design error — and it used to surface only indirectly, as a plain
+// INSERT failing. The wire has no plain INSERT any more, so the narrowing is checked where it can
+// actually be decided: against the predicate this caller's subscription compiles to.
+const cards = defineSyncTable({
+  tableName: "card",
+  makeColumns: () => ({
+    ownerId: uuid("owner_id").notNull(),
+    cardId: uuid("card_id").notNull(),
+    grade: text("grade").notNull(),
+  }),
+  primaryKey: ["owner_id", "card_id"],
+  mode: "readonly",
+  clientProjection: { localPrimaryKey: { columns: ["card_id"] } },
+  shape: {
+    rowFilter: (c) => ({
+      customPredicate: (claims) => (typeof claims.sub === "string" ? p.eq(c.ownerId, claims.sub) : DENY_ALL_PREDICATE),
+    }),
+  },
+});
+
+const looseCards = defineSyncTable({
+  tableName: "loose_card",
+  makeColumns: () => ({
+    ownerId: uuid("owner_id").notNull(),
+    cardId: uuid("card_id").notNull(),
+    grade: text("grade").notNull(),
+  }),
+  primaryKey: ["owner_id", "card_id"],
+  mode: "readonly",
+  clientProjection: { localPrimaryKey: { columns: ["card_id"] } },
+  shape: {
+    // A membership subquery, not an equality: this caller may own rows under MANY owner_ids, so two
+    // server rows sharing a card_id can both be in the shape.
+    rowFilter: (c) => ({
+      customPredicate: (claims) =>
+        typeof claims.sub === "string"
+          ? p.in(c.ownerId, p.subquery(cards.table.ownerId, p.eq(cards.table.cardId, claims.sub)))
+          : DENY_ALL_PREDICATE,
+    }),
+  },
+});
+
+const narrowingRegistry = defineSyncRegistry({ tables: { cards, looseCards } });
+
+describe("localPrimaryKey narrowing", () => {
+  it("compiles when the predicate pins every dropped primary-key column to one value", () => {
+    const compiled = compileShapeRequest(narrowingRegistry, {
+      shapeKey: "card",
+      claims: { sub: "11111111-1111-1111-1111-111111111111" },
+    });
+
+    expect(compiled.outcome).toBe("create");
+  });
+
+  it("denies when a dropped column is only constrained by a subquery, which admits many values", () => {
+    const compiled = compileShapeRequest(narrowingRegistry, {
+      shapeKey: "loose_card",
+      claims: { sub: "11111111-1111-1111-1111-111111111111" },
+    });
+
+    expect(compiled).toEqual({
+      outcome: "deny",
+      reason: expect.stringContaining("does not pin"),
+    });
+    expect(compiled.outcome === "deny" && compiled.reason).toContain("owner_id");
+  });
+});

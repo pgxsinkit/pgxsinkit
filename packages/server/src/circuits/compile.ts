@@ -3,6 +3,9 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import {
   conjoinPredicates,
   DENY_ALL_PREDICATE,
+  isAndPredicate,
+  isIsNullPredicate,
+  isLeafPredicate,
   readShapeTier,
   type JwtClaims,
   type Predicate,
@@ -109,6 +112,10 @@ export function compileShapeRequest(registry: SyncTableRegistry, request: ShapeR
   if ("refusal" in subject) return { outcome: "deny", reason: subject.refusal };
 
   const where = conjoinPredicates(subject.predicate, shape.where);
+
+  const narrowing = assertLocalPrimaryKeyIsPinned(entry, where);
+  if (narrowing != null) return { outcome: "deny", reason: narrowing };
+
   const columns = emittedColumns(entry);
 
   return {
@@ -153,6 +160,69 @@ function scopePredicate(
   });
 
   return { predicate: conjoinPredicates(...equalities) };
+}
+
+/**
+ * Every column pinned to exactly one value by a predicate's **top-level conjunction**.
+ *
+ * Conservative on purpose: only `col = value` and `col IS NULL` conjuncts pin, and only where they
+ * sit in the outermost `AND` chain. A branch under `OR` or `NOT` admits more than one value for its
+ * column by construction, and an `IN (subquery)` admits as many as the subquery returns — none of
+ * those pin, so none are collected.
+ */
+function pinnedColumns(node: Predicate | undefined, into: Set<string> = new Set()): Set<string> {
+  if (node == null) return into;
+  if (isAndPredicate(node)) {
+    for (const child of node.and) pinnedColumns(child, into);
+    return into;
+  }
+  if (isIsNullPredicate(node)) {
+    into.add(node.col);
+    return into;
+  }
+  if (isLeafPredicate(node) && node.op === "eq") {
+    into.add(node.col);
+  }
+  return into;
+}
+
+/**
+ * Refuse a `clientProjection.localPrimaryKey` that narrows the server key without the predicate
+ * pinning what it drops.
+ *
+ * The second of the two checks replacing ADR-0014's primary-key collision tripwire, and the one case
+ * where a collision was never machinery at all. Narrowing is the point of `localPrimaryKey` — server
+ * key `(owner_id, card_id)` becomes local key `(card_id)` because the caller only ever syncs their
+ * own rows — and it is sound *exactly when* the shape's predicate admits one value for every dropped
+ * column. Pinned, two server rows can never collapse onto one local key. Unpinned, they can, and the
+ * client would silently keep whichever arrived last: under a plain INSERT that surfaced as a PK
+ * collision, and under `upsert` it does not surface at all.
+ *
+ * Checked here rather than at `defineSyncTable` because the predicate is claims-dependent: what pins
+ * `owner_id` is the subject fused into it, which does not exist until a real caller subscribes. The
+ * refusal is therefore per-subscription, and lands at the same place and in the same form as every
+ * other compile denial.
+ */
+function assertLocalPrimaryKeyIsPinned(entry: SyncTableEntry, where: Predicate | undefined): string | null {
+  const localKey = entry.clientProjection?.localPrimaryKey?.columns;
+  if (localKey == null || localKey.length === 0) return null;
+
+  const localKeySet = new Set<string>(localKey);
+  const dropped = entry.primaryKey.columns.filter((column) => !localKeySet.has(column));
+  if (dropped.length === 0) return null;
+
+  const pinned = pinnedColumns(where);
+  const unpinned = dropped.filter((column) => !pinned.has(column));
+  if (unpinned.length === 0) return null;
+
+  return (
+    `shape "${entry.shape!.shapeKey}" declares clientProjection.localPrimaryKey ` +
+    `(${localKey.join(", ")}), dropping ${unpinned.join(", ")} from the server primary key ` +
+    `(${entry.primaryKey.columns.join(", ")}) — but this caller's predicate does not pin ` +
+    `${unpinned.length === 1 ? "that column" : "those columns"} to a single value, so two server rows ` +
+    `could collapse onto one local key. Pin it with a top-level equality in the shape's rowFilter (or ` +
+    `its scope), or widen localPrimaryKey to include it.`
+  );
 }
 
 /** The private tier's predicate: the registry's own claims-fused filter, or a denial. */

@@ -1,4 +1,4 @@
-import type { StreamEnvelope, StreamValue } from "@pgxsinkit/contracts";
+import type { StreamEnvelope, StreamValue, SyncOperation } from "@pgxsinkit/contracts";
 
 import type { ApplyTarget } from "../local-tables";
 
@@ -10,11 +10,11 @@ import type { ApplyTarget } from "../local-tables";
  */
 const PK_SEPARATOR = "\u001f";
 
-/** The applier's message shape — Electric's `ChangeMessage` as far as `applyMessageToTable` reads it. */
+/** The applier's message shape, once an envelope has been resolved against its table. */
 export interface ChangeLike {
   key: string;
   value: Record<string, unknown>;
-  headers: { operation: "insert" | "update" | "delete" };
+  headers: { operation: SyncOperation };
 }
 
 /**
@@ -69,19 +69,16 @@ export function primaryKeyFromStreamKey(target: ApplyTarget, key: string): Recor
 /**
  * Translate a Circuits envelope into the message the applier consumes.
  *
- * Two differences from Electric's wire format carry real weight:
+ * There is no operation mapping to do — {@link SyncOperation} is the wire's own vocabulary. What
+ * this function carries is the one structural difference: **a delete has no row body**, only its
+ * key, so the pk columns are reconstructed here. That is a privacy improvement (an eviction
+ * discloses the key and nothing else) and an implementation hazard in the same change, which is why
+ * the reconstruction is a named, tested function rather than an inline split.
  *
- * **A delete has no row body** — only its key. Circuits' `delete_envelopes` carries no value at all,
- * so the pk columns are reconstructed here. That is a privacy improvement (an eviction discloses the
- * key and nothing else) and an implementation hazard in the same change, which is why the
- * reconstruction is a named, tested function rather than an inline split.
- *
- * **`upsert` is a real operation**, emitted on backfill rows where the engine is not claiming the
- * row is new. It maps to `insert` because backfill only ever lands on an empty table — a fresh
- * subscription, or a post-must-refetch re-snapshot — which is the same invariant the existing bulk
- * backfill path already relies on. Mapping it to `update` instead would silently no-op every
- * backfill row, and mapping it away from `insert` would lose ADR-0014's primary-key collision
- * surfacing on the tables that declare they want it.
+ * An `upsert` carries the **complete projected row** every time — the engine's `row_to_json_cols`
+ * emits every column of the shape's `out_cols`, never a changed-column subset — which is what lets
+ * the apply path refresh every non-pk column from `excluded` without knowing whether the row already
+ * existed locally.
  */
 export function envelopeToChange(target: ApplyTarget, envelope: StreamEnvelope): ChangeLike {
   const operation = envelope.headers.operation;
@@ -101,9 +98,5 @@ export function envelopeToChange(target: ApplyTarget, envelope: StreamEnvelope):
     );
   }
 
-  return {
-    key: envelope.key,
-    value: envelope.value,
-    headers: { operation: operation === "update" ? "update" : "insert" },
-  };
+  return { key: envelope.key, value: envelope.value, headers: { operation: "upsert" } };
 }

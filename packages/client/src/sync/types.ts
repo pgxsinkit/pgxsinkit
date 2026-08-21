@@ -13,11 +13,13 @@ export type SubscriptionKey = string;
 export type InitialInsertMethod = "insert" | "copy" | "json";
 
 /**
- * A change the fold has established is a plain INSERT of a complete row.
+ * A change the fold has established is the net UPSERT of a complete row.
  *
- * The narrowing is what the bulk-insert path relies on: `value` carries every column, so the rows can
- * go out as one multi-row INSERT (or a COPY) with no per-row branch on which columns are present.
+ * The narrowing is what the bulk paths rely on: `value` carries every projected column, so the rows
+ * can go out as one multi-row statement (or a COPY) with no per-row branch on which columns are
+ * present. Guaranteed by the engine, not merely hoped for — `row_to_json_cols` emits every column of
+ * the shape's `out_cols` on every upsert.
  */
-export type InsertChangeMessage = SyncChange & {
-  headers: { operation: "insert" };
+export type UpsertChangeMessage = SyncChange & {
+  headers: { operation: "upsert" };
 };

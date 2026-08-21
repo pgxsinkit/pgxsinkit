@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 import type { PGlite } from "@electric-sql/pglite";
+import { asc, eq } from "drizzle-orm";
 import { boolean, text, uuid } from "drizzle-orm/pg-core";
 
 import { syncCircuitsShapes, type ConvergenceBarrier } from "@pgxsinkit/client";
@@ -262,5 +263,122 @@ describe("circuits sync engine", () => {
 
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
     await expect(attempt).rejects.toThrow(/share table "content" without an onMustRefetch/);
+  });
+  // ── The post-clear residue assertion (the ADR-0014 replacement check) ────────────────────────
+  // ADR-0014's primary-key collision was a tripwire on the replication machinery, and the state it
+  // could actually catch was stale rows the client should no longer hold — which it noticed only
+  // indirectly, when the server later re-sent one of those keys as a plain `insert`. The wire has no
+  // `insert` any more, so the invariant is asserted at the clear that is responsible for it.
+  describe("post-clear residue", () => {
+    // A function, not a const: `pg` is assigned in beforeAll, which runs AFTER this describe body, so
+    // capturing it here would bind `undefined`.
+    const common = () => ({
+      pg,
+      registry,
+      live: false as const,
+      metadataSchema: METADATA_SCHEMA,
+      readBarrier: async () => ({ sync: true, pendingFlips: 0 }),
+      token: () => "t",
+      maxCommitRetries: 1,
+    });
+
+    /** Subscribe once so a handle is persisted, then re-subscribe on a NEW stream — a must-refetch. */
+    async function reSnapshotWith(
+      key: string,
+      onMustRefetch: NonNullable<Parameters<typeof syncCircuitsShapes>[0]["shapes"][string]["onMustRefetch"]>,
+    ): Promise<Error | undefined> {
+      const first = await syncCircuitsShapes({
+        ...common(),
+        key,
+        fetch: stubEdge({ "/shape/s1": [envelope(ROW_1, OFF_A)] }),
+        shapes: { solo: { streamUrl: "http://edge/shape/s1", tableKey: "content", onMustRefetch } },
+      });
+      await settle();
+      first.unsubscribe();
+
+      let failure: Error | undefined;
+      const second = await syncCircuitsShapes({
+        ...common(),
+        key,
+        onSyncError: (error) => {
+          failure = error;
+        },
+        fetch: stubEdge({ "/shape/s2": [envelope(ROW_2, OFF_B)] }),
+        shapes: { solo: { streamUrl: "http://edge/shape/s2", tableKey: "content", onMustRefetch } },
+      });
+      await settle();
+      second.unsubscribe();
+      return failure;
+    }
+
+    it("surfaces an onMustRefetch that leaves rows behind on a sole-occupant table", async () => {
+      await drizzleOver(pg).delete(content);
+      const failure = await reSnapshotWith("sub-residue-bad", async () => {
+        // Clears nothing — the under-clearing bug this check exists to catch.
+      });
+
+      expect(failure?.message).toMatch(/the clear was incomplete/);
+      expect(failure?.message).toContain('shape "solo"');
+      await drizzleOver(pg).delete(content);
+    });
+
+    it("passes an onMustRefetch that actually clears, and lands the new snapshot", async () => {
+      await drizzleOver(pg).delete(content);
+      const failure = await reSnapshotWith("sub-residue-good", async (db) => {
+        await db.delete(content);
+      });
+
+      expect(failure).toBeUndefined();
+      expect((await drizzleOver(pg).select({ id: content.id }).from(content)).map((r) => r.id)).toEqual([ROW_2]);
+      await drizzleOver(pg).delete(content);
+    });
+
+    // The check is deliberately NOT applied when a table is shared: a scoped clear leaves its
+    // co-tenants' rows in place by design, and the client holds no scope predicate to subtract them
+    // with. What carries the shared case is the scoped-clear requirement, not a check here.
+    it("does not fire for a shared table, where a scoped clear leaves co-tenant rows standing", async () => {
+      await drizzleOver(pg).delete(content);
+      const key = "sub-residue-shared";
+      // Only scopeA re-snapshots (scopeB keeps its handle), and its clear removes only its own row.
+      const clearA = async (db: ReturnType<typeof drizzleOver>) => {
+        await db.delete(content).where(eq(content.offeringId, OFF_A));
+      };
+      const clearB = async () => {};
+
+      const first = await syncCircuitsShapes({
+        ...common(),
+        key,
+        fetch: stubEdge({ "/shape/a1": [envelope(ROW_1, OFF_A)], "/shape/b1": [envelope(ROW_2, OFF_B)] }),
+        shapes: {
+          scopeA: { streamUrl: "http://edge/shape/a1", tableKey: "content", onMustRefetch: clearA },
+          scopeB: { streamUrl: "http://edge/shape/b1", tableKey: "content", onMustRefetch: clearB },
+        },
+      });
+      await settle();
+      first.unsubscribe();
+
+      let failure: Error | undefined;
+      const second = await syncCircuitsShapes({
+        ...common(),
+        key,
+        onSyncError: (error) => {
+          failure = error;
+        },
+        fetch: stubEdge({ "/shape/a2": [envelope(ROW_1, OFF_A)], "/shape/b1": [] }),
+        shapes: {
+          scopeA: { streamUrl: "http://edge/shape/a2", tableKey: "content", onMustRefetch: clearA },
+          scopeB: { streamUrl: "http://edge/shape/b1", tableKey: "content", onMustRefetch: clearB },
+        },
+      });
+      await settle();
+      second.unsubscribe();
+
+      expect(failure).toBeUndefined();
+      // Both rows stand: scopeA re-delivered its own, scopeB's was never touched.
+      expect(
+        (await drizzleOver(pg).select({ id: content.id }).from(content).orderBy(asc(content.id))).map((r) => r.id),
+      ).toEqual([ROW_1, ROW_2]);
+      await drizzleOver(pg).delete(content);
+    });
   });
 });

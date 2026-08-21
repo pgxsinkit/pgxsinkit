@@ -78,19 +78,19 @@ describe("envelope translation", () => {
     });
   });
 
-  // Backfill rows arrive as `upsert`. Mapping them to `update` would silently no-op every one.
-  it("maps a backfill upsert to insert and an update to update", () => {
+  // Every row change arrives as `upsert` — backfill and live alike — and is carried through as one.
+  // The translator used to map it to `insert`, on a comment claiming `upsert` meant "backfill row";
+  // a live UPDATE in its own transaction arrives as `upsert` too, so every change after a key's
+  // first became a colliding INSERT.
+  it("carries an upsert through as an upsert", () => {
     const value = { id: "n1", body: "hello" };
     expect(
       envelopeToChange(noteTarget, envelope({ key: "n1", value, headers: { operation: "upsert" } })).headers,
-    ).toEqual({ operation: "insert" });
-    expect(
-      envelopeToChange(noteTarget, envelope({ key: "n1", value, headers: { operation: "update" } })).headers,
-    ).toEqual({ operation: "update" });
+    ).toEqual({ operation: "upsert" });
   });
 
   it("refuses a non-delete envelope with no row body", () => {
-    expect(() => envelopeToChange(noteTarget, envelope({ key: "n1", headers: { operation: "insert" } }))).toThrow(
+    expect(() => envelopeToChange(noteTarget, envelope({ key: "n1", headers: { operation: "upsert" } }))).toThrow(
       /carries no row body/,
     );
   });

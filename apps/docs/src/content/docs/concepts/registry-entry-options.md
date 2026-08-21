@@ -118,26 +118,26 @@ column-level `.primaryKey()`. A table-level `primaryKey(...)` passed via `extras
 
 ### `applyMode`
 
-**What it achieves.** Chooses how a server **CDC insert** for this table is applied on the client
-(ADR-0045). A synced cache table is server-authoritative, so the default deliberately keeps a genuine
-primary-key collision visible.
+**What it achieves.** Chooses how this table's **initial load** is applied on the client (ADR-0045).
 
 ```ts
-applyMode: "insert",   // default — a CDC insert is a plain INSERT; a real PK collision surfaces (ADR-0014)
-applyMode: "upsert",   // idempotent — server CDC inserts become INSERT … ON CONFLICT (pk) DO UPDATE
+applyMode: "insert",   // default — backfill takes the fast path (COPY / plain multi-row INSERT)
+applyMode: "upsert",   // backfill tolerates rows that are already there
 ```
 
-**Default.** `"insert"`. A CDC insert is a plain INSERT with no conflict clause, so a duplicate insert
-(a real bug in a server-authoritative table) surfaces instead of being silently swallowed — the ADR-0014
-collision-surfacing invariant.
+**This no longer affects steady-state changes.** The engine emits `upsert`, which states a row's value
+and claims nothing about whether it existed, so every streamed change applies as `INSERT … ON CONFLICT
+(pk) DO UPDATE` (or a pk-targeted `DO NOTHING` for a pk-only table) whatever `applyMode` says.
+ADR-0014's plain-INSERT collision surfacing went with the `insert` verb it depended on.
 
-**When to use `"upsert"`.** Only when this table legitimately receives locally-**derived** provisional
-rows — e.g. a local trigger on another synced table inserts a provisional row here, and the server
-independently creates the same row, so its CDC insert would otherwise collide (23505) and degrade the
-engine. With `"upsert"`, server CDC inserts (the initial bulk-snapshot path, the steady-state fold, and
-the per-message path) are applied idempotently as `INSERT … ON CONFLICT (pk) DO UPDATE` (or a pk-targeted
-`DO NOTHING` for a pk-only table); the authoritative server row overwrites the provisional local row.
-Declare the exception here, where it lives — the strict invariant stays the default everywhere else.
+**Default.** `"insert"`. The initial load — a fresh subscription or a post-must-refetch re-snapshot —
+assumes an empty table, which is what lets it use COPY or a plain multi-row INSERT. Neither can express
+`ON CONFLICT`, so a row that is already present fails the load rather than being silently merged into.
+
+**When to use `"upsert"`.** Only when that emptiness assumption does not hold: this table legitimately
+receives locally-**derived** provisional rows — e.g. a local trigger on another synced table inserts one
+here — that a backfill could land on top of. The backfill then takes the conflict-tolerant applier and
+the authoritative server row overwrites the provisional local row, at the cost of the faster path.
 
 ### `schema`
 
