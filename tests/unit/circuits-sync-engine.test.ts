@@ -63,6 +63,7 @@ const OFF_A = "11111111-1111-4111-8111-111111111111";
 const OFF_B = "22222222-2222-4222-8222-222222222222";
 const ROW_1 = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const ROW_2 = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+const ROW_3 = "cccccccc-3333-4333-8333-cccccccccccc";
 
 function stubEdge(bodies: Record<string, StreamEnvelope[]>): typeof fetch {
   return (async (input: URL | string) => {
@@ -284,6 +285,67 @@ describe("circuits sync engine", () => {
     second.unsubscribe();
     await drizzleOver(pg).delete(content);
   });
+
+  // The bulk backfill tier loads a leading run of upserts onto an empty table with a statement that
+  // cannot express ON CONFLICT, so what it needs is DISTINCT primary keys. A fresh client reads from
+  // `-1` and the stream is append-only, so on the two-verb wire (ADR-0058) every revision of a row is
+  // its own `upsert` envelope: the leading run of a first delivery repeats the key of anything that
+  // was ever updated. Folding the run to its net rows is what supplies distinctness; without it the
+  // first updated row is a duplicate-key failure that retries, exhausts, and degrades EVERY fresh
+  // client of a stack where any synced row has ever been updated.
+  //
+  // The trailing distinct key matters for the `copy` lane: COPY hands the run's last row back to the
+  // remainder, which would mask a repeat sitting at the very tail.
+  it.each(["json", "copy"] as const)(
+    "a fresh subscription replaying a stream that repeats a key commits the last value (%s)",
+    async (initialInsertMethod) => {
+      await drizzleOver(pg).delete(content);
+      const errors: Error[] = [];
+      const handle = await syncCircuitsShapes({
+        pg,
+        registry,
+        key: null,
+        metadataSchema: METADATA_SCHEMA,
+        maxCommitRetries: 1,
+        readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 0 }),
+        token: () => "t",
+        onSyncError: (error) => errors.push(error),
+        fetch: parkAfter([
+          dsResponse(
+            [
+              envelope(ROW_1, OFF_A),
+              envelope(ROW_2, OFF_A),
+              // The same key again, at a later revision — an UPDATE on the server.
+              envelope(ROW_1, OFF_B),
+              envelope(ROW_3, OFF_A),
+            ],
+            "0000000000000001",
+            true,
+          ),
+        ]),
+        shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", initialInsertMethod } },
+      });
+
+      await settle();
+
+      expect(errors).toEqual([]);
+      // One row per key, and the repeated key holds the LAST value the stream stated.
+      expect(
+        await drizzleOver(pg)
+          .select({ id: content.id, offeringId: content.offeringId })
+          .from(content)
+          .orderBy(asc(content.id)),
+      ).toEqual([
+        { id: ROW_1, offeringId: OFF_B },
+        { id: ROW_2, offeringId: OFF_A },
+        { id: ROW_3, offeringId: OFF_A },
+      ]);
+      expect(handle.isUpToDate).toBe(true);
+
+      handle.unsubscribe();
+      await drizzleOver(pg).delete(content);
+    },
+  );
 
   // The same condition the Electric engine's per-table lock enforced, stated as the requirement it
   // always was: co-tenant shapes need a scoped clear, because the default truncate takes the table.

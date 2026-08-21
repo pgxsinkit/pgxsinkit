@@ -257,27 +257,35 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
             }
           }
 
-          // The bulk backfill fast path: a leading run of inserts onto an empty table. It is only
-          // ever entered on a fresh subscription or straight after a truncate, which is what makes a
-          // plain bulk INSERT safe here.
+          // The bulk backfill fast path: the leading run of upserts, bulk-loaded onto an empty table
+          // (a fresh subscription or a post-truncate re-snapshot) through a tier that cannot express
+          // ON CONFLICT. What that tier requires is DISTINCT primary keys — and on the two-verb wire
+          // (ADR-0058) the run does not supply them: `upsert` asserts a row's value and says nothing
+          // about whether it existed, so a stream read from `-1` carries one envelope per revision
+          // and any key ever updated repeats. That is the ordinary shape of a fresh replay, not an
+          // anomaly. So the run is folded to its net rows first — ADR-0014's fold, the same one the
+          // remainder takes; for an all-upsert run it yields no deletes and exactly one row per key,
+          // last wins in stream order. A plain INSERT of DISTINCT keys onto an empty table is what
+          // the fast path buys.
           if (useBulkBackfill.get(shapeName) && changes.length > 0) {
-            const leadingInserts: ChangeLike[] = [];
+            const leadingUpserts: ChangeLike[] = [];
             const remainder: ChangeLike[] = [];
-            let sawNonInsert = false;
+            let sawDelete = false;
             for (const change of changes) {
-              if (!sawNonInsert && change.headers.operation === "upsert") leadingInserts.push(change);
+              if (!sawDelete && change.headers.operation === "upsert") leadingUpserts.push(change);
               else {
-                sawNonInsert = true;
+                sawDelete = true;
                 remainder.push(change);
               }
             }
+            const backfill = foldChangeBatch(leadingUpserts as never).upserts;
             const method = insertMethod.get(shapeName)!;
             // COPY has no ON CONFLICT clause and cannot be mixed with a following per-row apply of the
-            // same key, so the last insert is handed back to the fold rather than bulk-loaded.
-            if (leadingInserts.length > 0 && method === "copy") remainder.unshift(leadingInserts.pop()!);
+            // same key, so the last net row is handed back to the fold rather than bulk-loaded.
+            if (backfill.length > 0 && method === "copy") remainder.unshift(backfill.pop()!);
             changes = remainder;
 
-            if (leadingInserts.length > 0) {
+            if (backfill.length > 0) {
               // ADR-0045: a table that legitimately receives locally-derived provisional rows must not
               // collide with them here — a trigger firing during another table's apply in the same
               // catch-up can create rows before this snapshot lands.
@@ -287,7 +295,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
                     ? applyUpsertsToTable
                     : applyUpsertsToTableWithJson
                   : bulkAppliers[method];
-              await applyBackfill({ pg: tx, target, messages: leadingInserts as never, debug });
+              await applyBackfill({ pg: tx, target, messages: backfill, debug });
               useBulkBackfill.set(shapeName, false);
             }
           }

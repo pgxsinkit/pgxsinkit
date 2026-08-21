@@ -94,6 +94,12 @@ one ADR ago, by this same migration.
    check rather than a leftover: a pre-existing row means the backfill's emptiness assumption was
    violated.
 
+   That tier also requires **distinct keys within the batch**, which this wire does not hand it: a
+   leading run of `upsert`s legitimately repeats a key, because a fresh client reads an append-only
+   stream from the start and every revision of a row is its own envelope. The run is therefore folded
+   to its net rows (decision 2's fold) before the bulk tier sees it. Without that, the fast path turns
+   the first row that was ever updated into a duplicate-key failure on every fresh client.
+
 5. **Two targeted assertions replace the tripwire**, placed where the invariant lives instead of
    depending on a side-effect of INSERT semantics:
 
