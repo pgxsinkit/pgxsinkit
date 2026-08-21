@@ -68,11 +68,11 @@ The first goal is signal, not perfect benchmarking science. These tests should h
 
 The automated suites now enforce coarse p95 budgets by default. Override those via environment variables when running on slower machines or when validating a deliberately larger scenario. Reports include both the measured percentile values and the evaluated budget results.
 
-The concurrent client lane also uses a scenario-aware convergence timeout while waiting for Electric echoes to clear acknowledged mutations. Override that only when validating on unusually slow infrastructure:
+The concurrent client lane also uses a scenario-aware convergence timeout while waiting for read-path echoes to clear acknowledged mutations. Override that only when validating on unusually slow infrastructure:
 
 - `PGXSINKIT_PERF_CONCURRENT_CONVERGENCE_TIMEOUT_MS`
 
-The concurrent client lane is the end-to-end complement to the existing local-only and server-only suites. It provisions a synthetic registry in PostgreSQL, seeds user-owned rows directly, starts a real batch write server, creates multiple authenticated `createSyncClient(...)` instances, waits for initial sync through Electric, then runs repeated local mutate-plus-flush loops with a representative mix of create, update, and delete mutations while collecting enqueue, flush, and convergence percentiles.
+The concurrent client lane is the end-to-end complement to the existing local-only and server-only suites. It provisions a synthetic registry in PostgreSQL, seeds user-owned rows directly, starts a real batch write server, creates multiple authenticated `createSyncClient(...)` instances, waits for initial sync down the read path, then runs repeated local mutate-plus-flush loops with a representative mix of create, update, and delete mutations while collecting enqueue, flush, and convergence percentiles.
 
 Concurrent lane defaults are driven by two env knobs:
 
@@ -114,11 +114,11 @@ Concurrent test matrix:
 - `PGXSINKIT_PERF_MATRIX_PRESETS=smoke PGXSINKIT_PERF_MATRIX_SCENARIOS=mixed-small-bursts bun run test:performance:concurrent:matrix` runs a single matrix cell through the matrix runner
 - `PGXSINKIT_PERF_MATRIX_FAIL_FAST=true bun run test:performance:concurrent:matrix` stops on the first failing matrix case instead of collecting all failures
 
-The browser lab is intended for browser-based full-cycle testing of the client runtime under large synced datasets. It ships with one-click presets for local-100k, wide-schema, and mixed-pressure runs. In the default live mode it reprovisions a dedicated perf-lab write server for the active synthetic registry, seeds rows into PostgreSQL, waits for those rows to sync into browser PGlite through Electric, stages pending mutations through the real client runtime, flushes them upstream, and waits for the Electric echo to clear overlay state again.
+The browser lab is intended for browser-based full-cycle testing of the client runtime under large synced datasets. It ships with one-click presets for local-100k, wide-schema, and mixed-pressure runs. In the default live mode it reprovisions a dedicated perf-lab write server for the active synthetic registry, seeds rows into PostgreSQL, waits for those rows to sync into browser PGlite down the read path, stages pending mutations through the real client runtime, flushes them upstream, and waits for the read-path echo to clear overlay state again.
 
 Set `PGXSINKIT_PERF_MUTATION_BATCH_SIZE` before `bun run perf:lab` to change how many local mutations the browser lab stages per `client.mutate.batch(...)` call. The default is `1`, which keeps one-mutation-at-a-time behavior.
 
-`bun run perf:lab` owns its own dedicated stack. It first tears down any prior `pgxsinkit-perf-lab` containers and fixed child processes, then starts a fresh PostgreSQL, ElectricSQL, perf-lab write server, and Vite browser server on fixed names and ports. The default live URLs are `http://127.0.0.1:3101/api/mutations` for writes and `http://127.0.0.1:3101/v1/electric-proxy` for Electric proxying. The browser app respects `VITE_WRITE_API_ORIGIN` and `VITE_ELECTRIC_URL` if you intentionally override them.
+`bun run perf:lab` owns its own dedicated stack. It first tears down any prior `pgxsinkit-perf-lab` containers and fixed child processes, then starts a fresh PostgreSQL (`54421`), durable-streams (`3100`), the Circuits engine (`3102`), the perf-lab write server (`3101`), and the Vite browser server (`5174`) on fixed names and ports (`scripts/perf-lab-config.ts`). The lab server hosts the read path's control plane **and** the stream edge alongside the write route, so all three share one origin — production separates the edge, but the lab measures the client, not the topology. The default live URLs are therefore `http://127.0.0.1:3101/api/mutations` for writes, `http://127.0.0.1:3101` for the control plane, and `http://127.0.0.1:3101/v1/stream` for the edge. The browser app respects `VITE_WRITE_API_ORIGIN`, `VITE_CONTROL_PLANE_URL`, and `VITE_STREAM_BASE_URL` if you intentionally override them.
 
 Offline loopback mode remains available for purely local pressure checks, but that is not the default path.
 
@@ -130,15 +130,15 @@ direct (non-synced) read endpoint takes — for the two authorization shapes the
 - **membership fan-out** — visibility via `container IN (SELECT … FROM membership …)`, and
 - **grant-scope** — visibility via a JWT-resident grant set (`app_metadata.authorization.grants`), no join.
 
-Because Electric cannot read RLS, each shape is measured three ways so the numbers are comparable:
+The synced path never runs RLS — a shape's visibility is a predicate the engine evaluates, not a policy — so each shape is measured three ways to make the numbers comparable:
 
 - **baseline** — privileged `SELECT`, no predicate (the floor),
-- **shape-query** — privileged `SELECT` + the resolved row-filter `where` (what Electric runs on the synced path),
+- **shape-query** — privileged `SELECT` + the row filter rendered as SQL (the Postgres spelling of the predicate the engine evaluates on the synced path; the contracts builders emit an AST, so this track renders the text itself),
 - **rls** — `SET ROLE authenticated` + claims, policy active (what a direct read runs).
 
 The `rls` line is run for both the InitPlan-correct policy and a deliberately **naive** (correlated)
 variant, **with and without** the supporting index. The report records `cliffRatioP95` (naive ÷
-correct), `indexSpeedupP95` (no-index ÷ index), and `rlsVsShapeP95` (direct-read RLS ÷ Electric
+correct), `indexSpeedupP95` (no-index ÷ index), and `rlsVsShapeP95` (direct-read RLS ÷ the
 shape query — close to 1 means a direct read costs about what the synced shape query costs), plus an
 `EXPLAIN ANALYZE` capture for the correct and naive plans. The **only asserted** budget is the
 correct, indexed `rls` p95 (`PGXSINKIT_PERF_RLS_P95_MAX_MS`); the naive / no-index lines are reported,

@@ -15,12 +15,12 @@ use directly:
   adapter, PGlite factory, validated options, and stable storage errors.
 - **[@pgxsinkit/client](/api/client/readme/)** — local overlay + journal, batch flush, and read wiring.
 - **[@pgxsinkit/server](/api/server/readme/)** — `createSyncServer`, the apply-function builder, and
-  the Electric shape proxy.
+  the read path's control plane + stream edge.
 - **[@pgxsinkit/react](/api/react/readme/)** — React bindings over the client.
 
-The Electric read-path ingest engine lives inside `@pgxsinkit/client` (`src/sync/`, ADR-0009) rather
-than a separate package, so it is not documented as its own entry — see [Packages](/packages/) for
-where it fits.
+The read-path reader lives inside `@pgxsinkit/client` (`src/circuits/`, ADR-0055) over
+`@durable-streams/client`, rather than in a separate package, so it is not documented as its own entry
+— see [Packages](/packages/) for where it fits.
 
 New to the library? Start with [Core concepts](/concepts/) for the model, then [Packages](/packages/)
 for what to install.

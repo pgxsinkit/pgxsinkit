@@ -178,7 +178,7 @@ moderator holds an identity-free projection with no matching row. The write targ
 locally, so there is no base row to update.
 
 The old way to satisfy `update` here was to **seed a phantom base row** just to pass the presence check. That
-row then lingered forever: no Electric echo ever arrives for a row you can't see, so the acked journal entry
+row then lingered forever: no read-path echo ever arrives for a row you can't see, so the acked journal entry
 and its overlay never clear (the acked-row cleanup is gated on a synced echo reaching the acked version), and
 the phantom row stays in your read model.
 
@@ -207,7 +207,7 @@ A `conflicted` blind write stays dischargeable via `discardConflict`; a `rejecte
 ### The write-only pattern
 
 Because the local journal / overlay / synced tables are provisioned for **every** registered `readwrite`
-entry — `subscription` only gates Electric streaming, not the local DDL — a `readwrite` entry declared
+entry — `subscription` only gates read-path streaming, not the local DDL — a `readwrite` entry declared
 `subscription: "lazy"` and **never activated** still flushes, acks, and retires blind updates cleanly, with
 its consistency group never opened. That combination is a **write-only table**: you author to it (through the
 authoritative endpoint) without ever streaming a row of it into the client. Nothing reads locally, nothing
@@ -216,7 +216,7 @@ shows optimistically, and no acked row lingers.
 ### Lazy read/write groups need an echo
 
 Ordinary optimistic `create`, `update`, and `delete` operations maintain an overlay, and an acknowledged
-journal row retires only after the committed server version returns through Electric. That echo can only
+journal row retires only after the committed server version returns down the read path. That echo can only
 arrive over an open shape — so the target's `subscription: "lazy"` consistency group has to be active by
 the time the server commits.
 
@@ -248,7 +248,7 @@ The convergence driver decides _when_ to run flush/reconcile by asking its `Conv
 while offline. Flip back online and fire one signal, and the queued writes flush and reconcile. No
 teardown, no lost edits.
 
-This pauses the **outbound** half. The **inbound** read path (the Electric shape subscriptions) has no
+This pauses the **outbound** half. The **inbound** read path (the durable-streams subscriptions) has no
 pause/resume today — `client.stop()` halts it but also closes the local store — so an app offline
 toggle built this way still _receives_ remote changes. Suspending both directions without tearing down
 the store is a planned capability.

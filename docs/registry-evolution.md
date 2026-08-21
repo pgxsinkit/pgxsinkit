@@ -23,7 +23,7 @@ fingerprint to the current one:
 
 - **Unchanged** → nothing to do.
 - **Changed, nothing owed locally** → the read cache is dropped and rebuilt at the new shape,
-  the Electric subscriptions are reset so shapes re-stream, and the new fingerprint is
+  the read-path subscriptions are reset so shapes re-stream, and the new fingerprint is
   stamped. Surfaced via `onSchemaChange` with `status: "rebuilt"`.
 - **Changed, writes still owed** (un-flushed/quarantined) → the rebuild is **deferred**
   (`status: "deferred"`) rather than dropping owed writes. Those writes flush and reconcile

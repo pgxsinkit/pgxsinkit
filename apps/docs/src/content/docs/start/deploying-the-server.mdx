@@ -21,10 +21,15 @@ about the runtime around it, not the toolkit code.
 The trivial case. Either export the handler, or use the bundled `start()` helper:
 
 ```ts
-const server = createSyncServer({ registry, db, electricUrl, resolveAuthClaims });
+const server = createSyncServer({ registry, db, resolveAuthClaims, readPath: { engine, key } });
 export default { fetch: server.fetch }; // Bun.serve picks this up
 // or: await server.start();           // the only Bun-specific helper
 ```
+
+`readPath` is what mounts the read path's control plane (`/sync/v1/subscribe`, `/sync/v1/refresh`,
+`/sync/v1/barrier`) beside the mutation route; omit it and the deployment is write-only. It takes the
+`CircuitsEngineClient` for the engine's control API, the stream-token signing key, and — for a registry
+that declares a shared-tier shape — the `entitlements` set backing it.
 
 ## Deno / Supabase Edge Functions
 
@@ -60,8 +65,9 @@ they apply however you deploy. Here they are with their fixes.
    });
    ```
 
-   The **read** path needs no rewrite: `proxyElectricShapeRequest` keys off the query string, not the
-   path, so a shape-proxy function can hand it the request as-is.
+   **Both read functions need the same strip.** The control plane routes on `/sync/v1/*` and the edge
+   on `/v1/stream/*`, so each needs its own function-name prefix removed before the path is
+   recognized — there is no read surface that keys off the query string instead.
 
 2. **Resolve claims from the platform JWT in `resolveAuthClaims`.** `verify_jwt` is a gateway
    concept; the portable move is to verify the token yourself and return its claims. A GoTrue access
@@ -71,32 +77,64 @@ they apply however you deploy. Here they are with their fixes.
    ```ts
    async function resolveAuthClaims(request: Request): Promise<JwtClaims | null> {
      const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-     if (!token) return null; // fail closed: the proxy blocks all rows, the write route rejects
+     if (!token) return null; // fail closed: the write route rejects, the control plane answers 401
      return await verifyHs256(token, Deno.env.get("JWT_SECRET")!); // your HS256 verify → claims | null
    }
    ```
 
    The applier reads `role` to switch the RLS actor and `app_metadata.roles` for any admin predicate;
-   the read proxy reads `sub` + `app_metadata.roles` for the row filter. Both paths share this one
-   adapter, so read and write authorization can never drift.
+   the control plane reads `sub` + `app_metadata.roles` to compile the row filter, expand a shared
+   shape to the subject's scopes, and bind the minted stream token to that subject. Both paths share
+   this one adapter, so read and write authorization can never drift.
+
+   <Aside type="caution" title="Return `null`, never a claims object with no `sub`">
+     Unauthenticated is not a denial. A subscriber told "not entitled" truncates that scope and unsubscribes, so an
+     expired JWT has to present as a **retryable 401** rather than as a per-subscription refusal. The control plane
+     enforces this — it 401s when `resolveAuthClaims` yields no `sub` — because a stream token naming no subject would
+     name a bearer that no revocation reaches.
+   </Aside>
 
 </Steps>
 
-### Read vs write as two functions
+### Three functions: write, control plane, edge
 
-Splitting the write route and the shape proxy into two deployments (e.g. a `write` function and a
-`sync` function) is a deployment choice, not a toolkit one:
+Splitting the deployment into three functions is a deployment choice for the first two and a **design
+requirement** for the third:
 
-- **write** — `createSyncServer({ registry, db, resolveAuthClaims })` **without** `electricUrl`
-  registers only the mutation route. Wrap with the path rewrite from step 1.
-- **sync** — call `proxyElectricShapeRequest(request, claims, { registry, electricUrl })` directly.
-  No rewrite needed. Set the function's idle/wall-clock timeout **above** Electric's bounded
-  long-poll (~25s) so live updates are not cut off mid-cycle. If it is a **same-origin proxy with no
-  CDN**, also force `cache-control: no-store` on the response so the browser never serves a rotated
-  shape handle stale (the 409-loop fix in [Operating in production](/start/operating-in-production/)).
+- **write** — `createSyncServer({ registry, db, resolveAuthClaims })` **without** `readPath` registers
+  only the mutation route. Wrap with the path rewrite from step 1.
+- **control plane** (`sync`) —
+  `createSyncServer({ registry, resolveAuthClaims, readPath: { engine, key } })` serves
+  `/sync/v1/subscribe`, `/sync/v1/refresh` and `/sync/v1/barrier`. It answers per-subject questions and
+  mints stream tokens, so it is **never cacheable**: force `cache-control: no-store`. Its upstream is
+  the Circuits engine's control API, which must not be client-reachable.
+- **edge** (`stream`) — `createStreamGate({ key, durableStreamsUrl })` mounted at `/v1/stream`. It
+  needs **no claims resolver and no database**: the stream token _is_ the authorization, which is what
+  lets this half scale and cache independently of the one that answers per-subject questions. Set its
+  idle/wall-clock timeout **above** the durable-streams long-poll hold so a live subscription is not
+  recycled mid-cycle.
 
-Both import the same registry and share the same `resolveAuthClaims`, which is what keeps the two
-ingress points honest.
+**Put the edge on its own origin.** The cache key is the URL, so the surface a CDN may share between
+subscribers has to be addressable apart from the one that answers per-subject questions. Mounting them
+on one origin forecloses ever putting a CDN in front of the shared tier without also caching the
+private one.
+
+<Aside type="caution" title="Every `createStreamGate` mount must expose the stream headers">
+  Set `Access-Control-Expose-Headers` from the exported `STREAM_READ_EXPOSED_HEADERS` on the **actual** (non-preflight)
+  response — join that constant, never retype the list. CORS lets script read only a short safelist of response headers,
+  and every header durable-streams answers with is outside it, so a cross-origin browser gets a response whose stream
+  headers are simply *not there*. `@durable-streams/client` steers its whole read loop off them (`Stream-Next-Offset`,
+  `Stream-Cursor`, `Stream-Closed`, `Stream-Up-To-Date`), so stripped of them it never learns an offset, never switches
+  to a live long poll, and re-requests from the start of the stream in a hot loop — hundreds of requests per second per
+  shape, with no error raised on either side. `createStreamGate` cannot do this for you: it returns the upstream
+  response unchanged, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision only the
+  mount makes. **Do not rely on the gateway** — a permissive `expose_headers: "*"` at istio/Envoy makes the mount look
+  correct behind that one deployment and hot-loop everywhere else.
+</Aside>
+
+The control plane and the edge share the stream-token signing key, and nothing else. Both read
+functions import the same registry as the write function and share the same `resolveAuthClaims`, which
+is what keeps the ingress points honest.
 
 ### Auth is bearer-token; the built-in CORS is credentialless
 
@@ -313,28 +351,29 @@ createSyncServer({
   archive on `occurredAtUs` if you need temporal order.
 </Aside>
 
-### The gateway must speak HTTP/2 — one long-poll connection per shape
+### The gateway must speak HTTP/2 — one long-poll connection per stream
 
-Electric's client holds **one live long-poll connection open per synced shape**. A client that
-subscribes to six shapes therefore keeps six connections continuously busy. Browsers cap **HTTP/1.1 at
-~6 connections per origin**, so on a plain-HTTP gateway those long-polls consume every slot and the
-**write** request (which shares the origin) gets **Stalled in the browser's connection queue** — it is
-not even dispatched until a long-poll cycle frees a slot, adding seconds of latency that look like a
-slow server but are entirely client-side queuing.
+`@durable-streams/client` holds **one live long-poll connection open per synced stream**, and one
+stream is one shape — so a subject holding K scopes of a shared-tier shape keeps K connections
+continuously busy, not one. Browsers cap **HTTP/1.1 at ~6 connections per origin**, so on a plain-HTTP
+gateway those long-polls consume every slot and the **write** request (which shares the origin) gets
+**Stalled in the browser's connection queue** — it is not even dispatched until a long-poll cycle frees
+a slot, adding seconds of latency that look like a slow server but are entirely client-side queuing.
 
-The fix is to serve the gateway over **HTTP/2** (or HTTP/3), which multiplexes every request over a
-single connection, so the per-origin cap never binds regardless of shape count. Any production-grade
-ingress already does this — Cloud Supabase, Electric Cloud, an istio/Envoy gateway, or any TLS
-reverse proxy. The one place it bites is a **local self-hosted stack served over plain `http://`**:
-browsers only negotiate HTTP/2 over TLS, so a plain-HTTP gateway is stuck on HTTP/1.1. The board demo
-fronts its kong gateway with a small TLS-terminating Caddy sidecar (h2 + h3) for exactly this reason.
+This is **mandatory, not an optimisation**: durable-streams serves one stream per request and the Rust
+server is HTTP/1.1-only with no TLS, so a gateway speaking HTTP/2 (or HTTP/3) to browsers is the only
+thing that keeps the per-origin cap from binding. Any production-grade ingress already does it — Cloud
+Supabase, an istio/Envoy gateway, or any TLS reverse proxy. The one place it bites is a **local
+self-hosted stack served over plain `http://`**: browsers only negotiate HTTP/2 over TLS, so a
+plain-HTTP gateway is stuck on HTTP/1.1. The board demo fronts its Envoy gateway with a small
+TLS-terminating Caddy sidecar (h2 + h3) for exactly this reason.
 
-<Aside type="caution" title="This only shows up with ≥~6 shapes over plain HTTP/1.1">
-  A deployment with one or two shapes will not hit it; the symptom appears once concurrent shape long-polls reach the
+<Aside type="caution" title="This only shows up with ≥~6 streams over plain HTTP/1.1">
+  A deployment with one or two streams will not hit it; the symptom appears once concurrent long-polls reach the
   browser's per-origin connection limit. Node and `curl` never reproduce it — they have no per-host cap — so it is
   invisible to server-side benchmarks and only a real browser surfaces it. If writes feel slow only in the browser and
-  only once several shapes are live, check whether the gateway is HTTP/2: in DevTools → Network, a stuck `write` request
-  shows a long **Stalled** time.
+  only once several streams are live, check whether the gateway is HTTP/2: in DevTools → Network, a stuck `write`
+  request shows a long **Stalled** time.
 </Aside>
 
 <Aside type="note" title="Edge cold starts are a platform property, not a toolkit cost">
@@ -343,8 +382,8 @@ fronts its kong gateway with a small TLS-terminating Caddy sidecar (h2 + h3) for
   convergence machinery is fast (the write applies in a few ms, the echo streams back in well under a second), so this
   shows up as the first write *after idle* lagging while steady-state writes are instant. Two mitigations, both
   platform-level: keep the worker warm with a periodic cheap request, and set the worker's wall-clock budget **above**
-  your busiest held-open shape long-poll so a live subscription is not recycled mid-cycle (forcing a read-path
-  reconnect). A long-lived **Bun** (or Deno) deployment has neither characteristic — one warm process, a pooled
-  connection, no per-request worker lifecycle — which is the simplest answer if first-write latency matters more than
-  serverless scale-to-zero.
+  your busiest held-open long-poll so a live subscription is not recycled mid-cycle (forcing a read-path reconnect — the
+  board demo sets `EDGE_WORKER_TIMEOUT_MS: "600000"`, ten minutes, against the runtime's stock 60s). A long-lived
+  **Bun** (or Deno) deployment has neither characteristic — one warm process, a pooled connection, no per-request worker
+  lifecycle — which is the simplest answer if first-write latency matters more than serverless scale-to-zero.
 </Aside>

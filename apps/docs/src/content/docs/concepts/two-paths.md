@@ -6,17 +6,19 @@ sidebar:
 ---
 
 pgxsinkit moves data in two directions over **two different mechanisms**. They are not symmetric and
-they are not one channel — Electric carries the read direction only, never writes.
+they are not one channel — the read path carries the read direction only, never writes.
 
 ## Read path: server → client
 
 ```
-PostgreSQL  →  ElectricSQL  →  PGlite
+PostgreSQL  →  Circuits engine  →  durable-streams  →  PGlite
 ```
 
-Postgres is the source of truth. ElectricSQL streams **shapes** (filtered row sets, including
-membership fan-out) to the client, where they land in local PGlite. The app reads from PGlite. This
-path is live and continuous. See [The read path](/concepts/read-path/).
+Postgres is the source of truth. ElectricSQL's Circuits engine maintains **shapes** (filtered row
+sets, including membership fan-out) over the logical replication stream and publishes each one into
+durable-streams; the client subscribes through the pgxsinkit control plane and reads those streams
+through the stream edge, where they land in local PGlite. The app reads from PGlite. This path is live
+and continuous. See [The read path](/concepts/read-path/).
 
 ## Write path: client → server
 
@@ -24,17 +26,17 @@ path is live and continuous. See [The read path](/concepts/read-path/).
 client  →  write route  →  PostgreSQL
 ```
 
-Local edits do **not** travel back through Electric. They are staged locally, flushed as a batch to
+Local edits do **not** travel back through the read path. They are staged locally, flushed as a batch to
 a typed write route on the pgxsinkit server, and applied to Postgres by a single in-database
 function. See
 [The write path](/concepts/write-path/).
 
 ## Why the asymmetry matters
 
-- **You cannot "write to Electric."** Electric is read transport only. A mutation that isn't sent to
-  the write route never reaches Postgres, and therefore never comes back down the read path.
+- **The read path is read transport only.** There is nothing to write to: a mutation that isn't sent
+  to the write route never reaches Postgres, and therefore never comes back down the read path.
 - **The loop closes through Postgres.** A local write becomes durable only once the server applies
-  it; it becomes _visible to other clients_ only once Electric streams it back down. The client holds
+  it; it becomes _visible to other clients_ only once the read path streams it back down. The client holds
   the optimistic value in an overlay until that echo returns (see
   [The write path](/concepts/write-path/) and [Timestamps](/concepts/timestamps/)).
 - **Synced tables are replication targets.** Application code must never mutate a synced table
@@ -53,7 +55,7 @@ obeys the one rule.
 ## The one rule
 
 > Read from PGlite. Write through the write route. Never write to a synced table directly, and never
-> expect Electric to carry a write.
+> expect the read path to carry a write.
 
 ## Composition is yours
 

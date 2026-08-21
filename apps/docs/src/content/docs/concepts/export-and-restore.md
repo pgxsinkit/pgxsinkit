@@ -101,7 +101,8 @@ Boot a brand-new client on a store backup by passing the backup file to `restore
 ```ts
 const client = await createSyncClient({
   registry,
-  electricUrl,
+  controlPlaneUrl,
+  streamBaseUrl,
   batchWriteUrl,
   storePath: "my-app-store",
   restoreFrom: backupFile, // a File or Blob from exportStore()

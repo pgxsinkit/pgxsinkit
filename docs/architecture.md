@@ -8,9 +8,11 @@ The repository is split into three boundaries:
 
 ## 2. Sync adapter
 
-`packages/client/src/sync` is the read-path ingest engine — internalized into the client (ADR-0009), originally vendored from upstream `@electric-sql/pglite-sync`. Upstream compatibility is now an explicit anti-goal ([adr/0028](adr/0028-own-the-sync-engine-outright.md)): it is ours to evolve — a serialized commit queue, a registry-item-driven apply ladder, and registry-declared consistency groups. The registry entry is the engine's per-table spec ([adr/0029](adr/0029-registry-item-driven-ingest-engine.md)): apply strategy, `json`/COPY casts, local table identity, and metadata DDL all derive from the Drizzle model — never carried through the option surface, never introspected from `information_schema`. We still sync with Electric via `@electric-sql/client` + `@electric-sql/experimental`.
+The read path is two halves. `packages/client/src/circuits` is the **reader** ([adr/0055](adr/0055-circuits-native-sync-core.md)): it subscribes through the control plane (`subscription-client.ts`), reads each shape's durable-streams log (`stream-source.ts`), stages deliveries by offset (`stream-inbox.ts`), and drives a consistency group (`shape-group.ts`, `group-sync.ts`, `sync-engine.ts`). `packages/client/src/sync` is the **applier** — internalized into the client (ADR-0009), originally vendored from upstream `@electric-sql/pglite-sync`. Upstream compatibility is an explicit anti-goal ([adr/0028](adr/0028-own-the-sync-engine-outright.md)): it is ours to evolve — a serialized commit queue, a registry-item-driven apply ladder, and registry-declared consistency groups. The registry entry is the engine's per-table spec ([adr/0029](adr/0029-registry-item-driven-ingest-engine.md)): apply strategy, `json`/COPY casts, local table identity, and metadata DDL all derive from the Drizzle model — never carried through the option surface, never introspected from `information_schema`.
 
-`@pgxsinkit/client` wraps the internal sync engine (`packages/client/src/shape-sync.ts`) — the place to layer retries and instrumentation. There is no separate sync-engine package (see [adr/0007](adr/0007-absorb-sync-engine.md)).
+The only transport dependency is `@durable-streams/client` (pinned `0.2.6`, `packages/client/package.json`): long-poll, offsets, backoff, and nothing above it (ADR-0055 decision 10).
+
+`@pgxsinkit/client` wraps the internal sync engine (`packages/client/src/circuits/group-sync.ts` + `sync-engine.ts`) — the place to layer retries and instrumentation. There is no separate sync-engine package (see [adr/0007](adr/0007-absorb-sync-engine.md)).
 
 ## 3. Verification harness
 
@@ -25,9 +27,9 @@ The repository is split into three boundaries:
 5. The browser flushes journal entries through the write API.
 6. When RLS is enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims`.
 7. The API writes to PostgreSQL through the in-database apply function `pgxsinkit_apply_mutations` (`POST /api/mutations`).
-8. ElectricSQL exposes shape data from PostgreSQL.
-9. The write API shape proxy (`/v1/electric-proxy`) forwards read requests to Electric and enforces owner filtering for protected tables unless caller role is admin.
-10. PGlite subscribes through the client's internal read-path engine (`packages/client/src/sync`).
+8. The Circuits engine ingests logical replication and materialises each shape into a durable-streams log.
+9. The read path has two server surfaces: the **control plane** (`POST /sync/v1/subscribe`, `POST /sync/v1/refresh`, `GET /sync/v1/barrier`) authorizes a subject, compiles its predicate, creates shapes on the engine, and mints a short-lived stream token; the **stream edge** (`createStreamGate`, mounted at `/v1/stream`) verifies that token, checks entitlement, and proxies durable-streams bytes with no per-read filtering. The edge belongs on its own origin (ADR-0055 decision 8).
+10. PGlite subscribes through the client's read-path reader (`packages/client/src/circuits`), which applies through `packages/client/src/sync`.
 11. Acked overlay rows are cleared only after the synced echo reaches the acknowledged server `updated_at_us` value.
 12. The integration tests assert eventual convergence inside local PGlite.
 
@@ -60,18 +62,19 @@ The `operations_log` table is a Drizzle-managed internal server table included i
 
 - Applications must not directly mutate synced tables.
 - Client writes must go through the mutation runtime, which stages local intent into overlay and journal tables.
-- Synced tables are updated by shape sync from ElectricSQL and are treated as replication targets.
+- Synced tables are updated by the read path and are treated as replication targets.
 - A flush failure is durable and classified (see [adr/0006](adr/0006-local-schema-evolution.md)): a transient error (network / `5xx` / transient `4xx`) stays a retryable `failed` under jittered, capped backoff; a structural `4xx` rejection — or exhausting the hard attempt cap — becomes a terminal `quarantined`, surfaced via the `onQuarantine` callback and never retried.
 
 ## Read-path identity and the token provider contract
 
-The read path and the write path share **one** token lifecycle (see [adr/0013](adr/0013-read-path-identity-refresh.md); the client mirror of [adr/0003](adr/0003-secured-sync-ingress.md)'s server-side one-identity decision). The client consults the consumer's `getAuthToken` **per request** — never frozen at boot:
+The read path and the write path share **one** token lifecycle (see [adr/0013](adr/0013-read-path-identity-refresh.md); the client mirror of [adr/0003](adr/0003-secured-sync-ingress.md)'s server-side one-identity decision). What changed with the native read path is **where each credential lands** — there are two, and they fail in different places:
 
-- Each shape's `Authorization` header is an async function (`async () => Bearer ${await getAuthToken()}`) that Electric resolves on every request and every retry, so a long-lived offline-first session always presents a fresh token instead of one captured at startup. An absent token resolves to an empty value (unauthenticated), never the literal `Bearer undefined`.
-- A read-path auth error (`401`/`403`) is recovered at the per-shape `onError`, which returns retry so Electric re-resolves the header for a fresh token. Electric already auto-retries network/`5xx`/`429`, but **not** `4xx`, so this is the gap the toolkit closes. It never returns `void` for an auth error — `void` stops the stream permanently, which is wrong for offline-first.
-- A persistent auth failure retries forever with jittered backoff (no attempt cap) and surfaces a distinct **`auth-needed`** status through `onStatusChange` (kept separate from `degraded`, a commit-retry exhaustion), so the app can prompt re-login. Sync auto-resumes — the status returns to `ready`/`syncing` — the instant re-authentication makes `getAuthToken` valid again; the read path never silently wedges or permanently dies.
+- **The subject's token reaches only the control plane.** `subscribe`, `refresh` and `barrier` resolve the consumer's `getAuthToken` **per request** (`subscription-client.ts`, the same claims adapter the write path uses), never frozen at boot. The stream edge never sees it.
+- **The edge sees a stream token instead** — short-lived, minted by the control plane, carried as `Authorization: Bearer <stream token>` and re-resolved per request through an async header thunk (`stream-source.ts`). `@durable-streams/client` accepts those thunks, which is why a re-mint takes effect without tearing the stream down (ADR-0055 decision 10).
+- **So an expired credential shows up as a failing subscribe, not a failing read.** Subscribe retries with backoff and classifies: a `ControlPlaneError` whose status is `401`/`403` goes to `onAuthError` and raises the distinct **`auth-needed`** status; anything else goes to `onSubscribeError` and raises `degraded` with reason `stream`. Both are recoverable — the next delivered batch (`onSyncActivity`) clears them — while a commit failure stays sticky by design.
+- **A rejected stream token re-mints exactly once.** `@durable-streams/client` retries only `429`/`503` and throws every other 4xx, so a `403` surfaces rather than disappearing into a retry loop. `createTokenRecovery` is stateful and single-shot: it re-mints on the first `401`/`403` and, if the fresh token is refused too, lets the error propagate — a revocation must surface as something the caller can act on, not a hot spin.
 
-**Provider contract — `getAuthToken` must be refresh-deduping.** It is now called per request by **both** paths, so it must return the cached valid token and refresh **single-flight**: an N-shape consistency group resolves the header per request, and a momentarily-expired token must trigger exactly **one** refresh, not N. The consumer owns this dedup; the toolkit calls the provider and assumes it.
+**Provider contract — `getAuthToken` must be refresh-deduping.** Both paths call it per request, so it must return the cached valid token and refresh **single-flight**: several groups can subscribe or refresh concurrently, and a momentarily-expired token must trigger exactly **one** refresh, not one per call. The consumer owns this dedup; the toolkit calls the provider and assumes it.
 
 ## Client lifecycle and the local store
 

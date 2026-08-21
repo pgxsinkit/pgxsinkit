@@ -24,7 +24,8 @@ jobs:
 
   # The documentation proves the product interface (ADR-0008): the docs site (with its
   # TypeDoc API reference) must build, and a packed downstream fixture must install the
-  # public tarballs and exercise the published entry points. Neither needs Postgres/Electric.
+  # public tarballs and exercise the published entry points. Neither needs Postgres, durable-streams
+  # or the Circuits engine.
   docs-and-fixture:
     runs-on: ubuntu-26.04
     permissions:

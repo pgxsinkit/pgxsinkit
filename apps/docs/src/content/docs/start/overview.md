@@ -1,6 +1,6 @@
 ---
 title: What is pgxsinkit?
-description: An offline-first sync toolkit for Postgres, ElectricSQL, Drizzle, and PGlite — what you install, and how its two paths fit together.
+description: An offline-first sync toolkit for Postgres, ElectricSQL's Circuits engine, Drizzle, and PGlite — what you install, and how its two paths fit together.
 ---
 
 pgxsinkit is an **offline-first sync toolkit**: the `@pgxsinkit/*` packages you install to give a
@@ -17,14 +17,14 @@ product, and not any application's data layer. See [Demo & harness](/demo-and-ha
 ## The two paths
 
 pgxsinkit is built around two **separate, asymmetric** paths — they are not one bidirectional channel.
-Writes do not travel back through Electric; the read and write sides use different mechanisms.
+Writes do not travel back down the read path; the read and write sides use different mechanisms.
 
-|           | Read path                           | Write path                                |
-| --------- | ----------------------------------- | ----------------------------------------- |
-| Direction | server → client                     | client → server                           |
-| Route     | `PostgreSQL → ElectricSQL → PGlite` | `client → write route → PostgreSQL`       |
-| Carries   | shape streams (live rows)           | batches of staged mutations               |
-| Electric? | yes (the read transport)            | **no** — writes never go through Electric |
+|                 | Read path                                                 | Write path                                     |
+| --------------- | --------------------------------------------------------- | ---------------------------------------------- |
+| Direction       | server → client                                           | client → server                                |
+| Route           | `PostgreSQL → Circuits engine → durable-streams → PGlite` | `client → write route → PostgreSQL`            |
+| Carries         | live shape streams (rows)                                 | batches of staged mutations                    |
+| Read transport? | yes (durable-streams)                                     | **no** — writes never go through the read path |
 
 See [The two paths](/concepts/two-paths/) for why the asymmetry matters, then
 [The write path](/concepts/write-path/) and [The read path](/concepts/read-path/) for each side.
@@ -38,16 +38,22 @@ Web-Locks-elected dedicated worker on Chromium and Firefox. A registry can force
 through one `attachSyncClient` surface; inspect the BootReport instead of branching on browser names. See
 [Worker mode](/concepts/worker-mode/).
 
-## A hard prerequisite
+## Hard prerequisites
 
-pgxsinkit relies on ElectricSQL's subquery `where` support for membership fan-out, which is a
-**flagged** preview feature. You must run Electric with
-`ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`. Without it the sync fails **closed** —
-no rows stream, never an unfiltered fan-out. This is not optional. See
-[The Electric subquery requirement](/concepts/electric-subqueries/).
+Three, and none is optional:
+
+- **PostgreSQL with `wal_level = logical`.** The Circuits engine ingests logical replication and
+  creates its own replication slot. Supabase's Postgres images already ship `wal_level = logical`;
+  verify with `postgres -C wal_level` rather than assuming.
+- **An explicit table list for the engine, never `*`.** `ELECTRIC_CIRCUITS_PG_TABLES` names the tables
+  the engine replicates. `*` introspects every `public` table with a primary key, which sweeps in
+  tables you never meant to publish (the write-side operations log among them).
+- **A gateway that speaks HTTP/2.** The client holds one live long-poll per synced stream, so a subject
+  with several scopes exhausts the browser's ~6-connections-per-origin HTTP/1.1 cap and writes starve
+  behind them. See [Deploying the server](/start/deploying-the-server/).
 
 ## Where to go next
 
 - [Getting started](/start/getting-started/) — install and wire a minimal read + write.
-- [Core concepts](/concepts/) — the mental model, in six short pages.
+- [Core concepts](/concepts/) — the mental model, in five short pages.
 - [Packages](/packages/) — which `@pgxsinkit/*` package does what.
