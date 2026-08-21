@@ -105,7 +105,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",
-    "bun-types": "^1.3.14",
+    "bun-types": "^1.4.0",
     "drizzle-kit": "1.0.0-rc.4",
     "drizzle-orm": "1.0.0-rc.4",
     "drizzle-seed": "1.0.0-rc.4",
@@ -124,6 +124,6 @@
   "overrides": {
     "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.2"
   },
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.0",
   "//overrides": "TEMPORARY: alias @electric-sql/pglite to the @pgxsinkit fork, rebased onto upstream 0.5.5. Upstream shipped the initdb-fs-leak (#1060) and formatQuery positional-params (#1056) fixes, so the sole load-bearing reason left is the transaction-end sync fix — transaction() resolves without performing or scheduling a filesystem sync for its terminal COMMIT/ROLLBACK, which pglite-opfs-repacked's durability contract depends on (upstream PR pending). The fork also carries internal IDBFS/opfs-ahp reliability work that no package may depend on. Remove once upstream ships the transaction-end sync fix. See docs/runbooks/pglite-fork-override.md."
 }
