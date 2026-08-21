@@ -55,7 +55,8 @@ describe("createSyncClient precreatedPglite", () => {
     const precreated = createClientPGlite(memoryStoreForTests("precreated-success"));
     client = await createSyncClient({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
       // The precreated store is a memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
@@ -69,7 +70,8 @@ describe("createSyncClient precreatedPglite", () => {
   it("falls back to the storePath create path when the precreated promise REJECTS", async () => {
     client = await createSyncClient({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
       precreatedPglite: Promise.reject(new Error("eager create failed")),
@@ -85,7 +87,8 @@ describe("createSyncClient raw inspection surface", () => {
   it("rawQuery returns rows + fields for a parameterised select", async () => {
     client = await createSyncClient({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
       ...testStoreAcknowledgment(),
@@ -110,7 +113,8 @@ describe("createSyncClient raw inspection surface", () => {
   it("rawExec runs a multi-statement script and returns one Results per statement", async () => {
     client = await createSyncClient({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
       ...testStoreAcknowledgment(),

@@ -2,7 +2,12 @@ import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 
 import { boardSyncRegistry } from "@pgxsinkit/board-schema";
 import type { JwtClaims, RegistryRelations } from "@pgxsinkit/contracts";
-import { createSyncServer, proxyElectricShapeRequest, type EventsEnqueuedHook } from "@pgxsinkit/server";
+import {
+  createCircuitsEngineClient,
+  createSyncServer,
+  importStreamTokenKey,
+  type EventsEnqueuedHook,
+} from "@pgxsinkit/server";
 
 import { stripFunctionPrefix } from "./routing";
 
@@ -26,7 +31,10 @@ export interface BoardWriteHandlerOptions extends BoardHandlerOptions {
 }
 
 export interface BoardSyncHandlerOptions extends BoardHandlerOptions {
-  electricUrl: string;
+  /** The Circuits engine's control API. Never client-reachable — only this function calls it. */
+  circuitsEngineUrl: string;
+  /** The stream-token signing secret, shared with the edge. */
+  streamTokenSecret: string;
 }
 
 export function createBoardWriteHandler(options: BoardWriteHandlerOptions): FetchHandler {
@@ -46,15 +54,32 @@ export function createBoardWriteHandler(options: BoardWriteHandlerOptions): Fetc
   return (request) => server.fetch(stripFunctionPrefix(request, "board-write"));
 }
 
-export function createBoardSyncHandler(options: BoardSyncHandlerOptions): FetchHandler {
+/**
+ * The board's native read-path control plane (ADR-0055): subscribe, re-mint, barrier.
+ *
+ * It answers about streams; it never serves their bytes. Board reads terminate on durable-streams
+ * through the edge, so this function is asked once per subscription and is then out of the read path
+ * — which is exactly what lets those streams be cached at all.
+ *
+ * No entitlement set: the board registry declares no shared-tier shape, and omitting it is the
+ * statement of that fact. Adding one without wiring entitlements then fails loudly at subscribe
+ * rather than quietly serving one member's rows to every visitor.
+ */
+export async function createBoardSyncHandler(options: BoardSyncHandlerOptions): Promise<FetchHandler> {
+  const server = createSyncServer({
+    registry: boardSyncRegistry,
+    db: undefined as never,
+    resolveAuthClaims: options.resolveAuthClaims,
+    readPath: {
+      engine: createCircuitsEngineClient({ baseUrl: options.circuitsEngineUrl }),
+      key: await importStreamTokenKey(options.streamTokenSecret),
+    },
+    logTimings: true,
+    allowedOrigins: options.allowedOrigins,
+  });
+
   return async (request) => {
-    const claims = await options.resolveAuthClaims(request);
-    const response = await proxyElectricShapeRequest(request, claims, {
-      registry: boardSyncRegistry,
-      electricUrl: options.electricUrl,
-      cors: { origins: options.allowedOrigins },
-      logTimings: true,
-    });
+    const response = await server.fetch(stripFunctionPrefix(request, "board-sync"));
     const headers = new Headers(response.headers);
     headers.set("cache-control", "no-store");
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });

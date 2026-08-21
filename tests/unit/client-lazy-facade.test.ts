@@ -199,7 +199,8 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const client = await createSyncClient({
       registry: lazyFacadeRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests(storePath),
     });
@@ -360,7 +361,8 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
 
     const client = await createSyncClient({
       registry: groupRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("lazy-facade-desync-group"),
     });
@@ -396,7 +398,8 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
 
     const client = await createSyncClient({
       registry: ephemeralRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("lazy-facade-discard-ephemeral"),
     });
@@ -455,7 +458,8 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
 
     const client = await createSyncClient({
       registry: mixedRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("lazy-facade-discard-mixed"),
     });
@@ -486,7 +490,8 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
 
     const client = await createSyncClient({
       registry: writableEphemeral,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("lazy-facade-discard-owed"),
     });

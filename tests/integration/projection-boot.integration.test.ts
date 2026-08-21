@@ -64,7 +64,8 @@ async function startClient(pg: Awaited<ReturnType<typeof createLocalStore>>, pro
   // "projects_summary") for the read projection. If either lost its column factory, this throws here.
   const sync = await startConfiguredSync(pg as Parameters<typeof startConfiguredSync>[0], {
     syncConfig: {
-      electricUrl: proxyUrl,
+      controlPlaneUrl: proxyUrl,
+      streamBaseUrl: `${proxyUrl}/v1/stream`,
       tables: {
         projects: memberProjectionRegistry.projects,
         projects_summary: memberProjectionRegistry.projects_summary,
@@ -94,7 +95,8 @@ describe("member-style client boot over asReadonly + defineReadProjection entrie
       registry: memberProjectionRegistry,
       db: serverDb.db,
       resolveAuthClaims: (): JwtClaims => ({ role: "authenticated", sub: AUTH_SUB }),
-      electricUrl: env.electricUrl,
+      controlPlaneUrl: env.controlPlaneUrl,
+      streamBaseUrl: env.streamBaseUrl,
       shapeProxyPath: "/v1/electric-proxy",
     });
 

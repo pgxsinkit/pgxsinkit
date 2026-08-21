@@ -801,7 +801,8 @@ const harness: PlacementHarness = {
     try {
       const client = await createSyncClient({
         registry: placementRegistry,
-        electricUrl: PLACEMENT_ELECTRIC_URL,
+        controlPlaneUrl: PLACEMENT_CONTROL_PLANE_URL,
+        streamBaseUrl: PLACEMENT_STREAM_BASE_URL,
         batchWriteUrl: PLACEMENT_WRITE_URL,
         storePath,
         syncEnabled: false,

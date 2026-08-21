@@ -22,7 +22,7 @@ import {
   mutationEnvelopeSchema,
   type SyncTableEntry,
 } from "@pgxsinkit/contracts";
-import { buildDemoSyncConfig, buildSyntheticRegistry, buildSyntheticRegistrySchemaName } from "@pgxsinkit/schema";
+import { buildSyntheticRegistry, buildSyntheticRegistrySchemaName, demoSyncRegistry } from "@pgxsinkit/schema";
 
 const makeProjectedContractsColumns = () => ({
   id: uuid("id").primaryKey(),
@@ -68,11 +68,9 @@ describe("sync config contracts", () => {
     expect(Object.keys(wrapped)).toEqual(["perf_items_000"]);
   });
 
-  it("exports a shared todo table spec and demo sync config", () => {
-    const config = buildDemoSyncConfig("http://localhost:3000/v1/shape");
-
-    expect(config.tables.authors?.clientProjection?.syncedTable).toBe("authors");
-    expect(config.tables.todos?.clientProjection?.journalTable).toBe("todos_mutations");
+  it("exports shared table specs carrying their client projections", () => {
+    expect(demoSyncRegistry.authors?.clientProjection?.syncedTable).toBe("authors");
+    expect(demoSyncRegistry.todos?.clientProjection?.journalTable).toBe("todos_mutations");
   });
 
   // ─── Registry storage declaration (ADR-0049 decision 1 / ADR-0047) ───────────────────────────────────

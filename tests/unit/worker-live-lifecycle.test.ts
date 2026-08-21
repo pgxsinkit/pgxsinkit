@@ -211,7 +211,8 @@ describe("worker live-query lifecycle races (ADR-0040 fix round)", () => {
       await import("../../packages/client/src/index");
     const host = defineSyncWorker({
       registry: workerRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: true,
       installGlobal: false,

@@ -196,7 +196,8 @@ describe("worker-bridge live-rows hydration across eager + lazy groups (ADR-0021
     const { attachSyncClient, defineSyncWorker } = await import("../../packages/client/src/index");
     const host = defineSyncWorker({
       registry: workerRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: true,
       installGlobal: false,

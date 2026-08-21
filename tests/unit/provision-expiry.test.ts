@@ -570,7 +570,8 @@ describe("the expiry bounds the PROMISE, not the worker-side create attempt", ()
     const opens = { count: 0 };
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,

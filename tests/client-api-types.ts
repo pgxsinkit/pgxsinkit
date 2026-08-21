@@ -135,19 +135,22 @@ const invalidLocallyManagedCreateOnlyPatch: SyncTableUpdateInput<typeof locallyM
 async function check() {
   const client = await createSyncClient({
     registry: demoSyncRegistry,
-    electricUrl: "http://localhost:3000/v1/shape",
+    controlPlaneUrl: "http://localhost:3000",
+    streamBaseUrl: "http://localhost:3000/v1/stream",
     batchWriteUrl: "http://localhost:3001/api/mutations",
   });
 
   const projectedClient = await createSyncClient({
     registry: projectedRegistry,
-    electricUrl: "http://localhost:3000/v1/shape",
+    controlPlaneUrl: "http://localhost:3000",
+    streamBaseUrl: "http://localhost:3000/v1/stream",
     batchWriteUrl: "http://localhost:3001/api/mutations",
   });
 
   const locallyManagedClient = await createSyncClient({
     registry: locallyManagedRegistry,
-    electricUrl: "http://localhost:3000/v1/shape",
+    controlPlaneUrl: "http://localhost:3000",
+    streamBaseUrl: "http://localhost:3000/v1/stream",
     batchWriteUrl: "http://localhost:3001/api/mutations",
   });
 

@@ -10,7 +10,16 @@ import type {
 } from "@pgxsinkit/contracts";
 import { batchEventPaths, getSyncRegistryStreams } from "@pgxsinkit/contracts";
 
-import { proxyElectricShapeRequest } from "./electric-proxy";
+import type { EntitlementSet } from "./circuits/edge";
+import type { CircuitsEngineClient } from "./circuits/engine-client";
+import {
+  barrierPath,
+  createBarrierHandler,
+  createRefreshHandler,
+  createSubscribeHandler,
+  refreshPath,
+  subscribePath,
+} from "./circuits/subscribe";
 import { createPgmqEventQueue } from "./events/pgmq-queue";
 import type { EventQueue } from "./events/queue";
 import { createEventIngestHandler, type EventGate, type EventsEnqueuedHook } from "./events/route";
@@ -77,15 +86,30 @@ export interface CreateSyncServerOptions<
   db: TDb;
   resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
   /**
-   * When set, the server serves a read-path Electric shape proxy that shares the
-   * single `resolveAuthClaims` adapter with the write path (ADR-0003). Without it,
-   * no shape proxy is registered.
+   * When set, the server serves the NATIVE read path's control plane (ADR-0055): subscribe, stream-token
+   * re-mint, and the engine convergence barrier. Without it, none of those routes is registered and the
+   * deployment is write-only.
+   *
+   * They share the single `resolveAuthClaims` adapter with the write path (ADR-0003), so read and write
+   * authorization cannot diverge.
    */
-  electricUrl?: string;
-  /** Path for the shape proxy route. Defaults to `/api/shape`. */
-  shapeProxyPath?: string;
-  /** Optional per-request extra params passed to customWhere/shared filters. */
-  resolveShapeParams?: (request: Request) => Record<string, unknown> | undefined;
+  readPath?: {
+    /** The Circuits engine's control API — never client-reachable; only this process calls it. */
+    engine: CircuitsEngineClient;
+    /**
+     * The live entitlement set backing the shared tier. Omit when the registry declares no shared
+     * shape — a shared subscription is then refused with that reason rather than silently allowed.
+     */
+    entitlements?: EntitlementSet;
+    /** The stream-token signing key, shared with the edge. */
+    key: CryptoKey;
+    /** Per-deployment override of ADR-0055's 5-minute token lifetime. */
+    ttlSeconds?: number;
+    /** How long the barrier answer may be cached. Default 0 — see `createBarrierHandler`. */
+    barrierMaxAgeSeconds?: number;
+    /** Optional per-request extra params passed to the private tier's row filters. */
+    resolveShapeParams?: (request: Request) => Record<string, unknown> | undefined;
+  };
   operationsLog?: {
     enabled?: boolean;
   };
@@ -219,12 +243,10 @@ export function createSyncServer<
     operationsLogReady = Promise.resolve();
   }
 
-  const shapeProxyPath = options.shapeProxyPath ?? "/api/shape";
-
-  // CORS covers the canonical /api/* routes and the shape proxy path when it is relocated outside /api/.
+  // CORS covers the canonical /api/* routes, plus the native control plane's own /sync/v1/* prefix.
   const corsScopes: CorsScope[] = [{ prefix: "/api/" }];
-  if (options.electricUrl) {
-    corsScopes.push({ exact: shapeProxyPath });
+  if (options.readPath) {
+    corsScopes.push({ prefix: "/sync/v1/" });
   }
   router.setCors(
     {
@@ -291,22 +313,34 @@ export function createSyncServer<
     }
   }
 
-  // The read-path shape proxy shares the same resolveAuthClaims adapter, so read and
-  // write authorization can never diverge (ADR-0003).
-  if (options.electricUrl) {
-    const electricUrl = options.electricUrl;
+  // The native control plane (ADR-0055). It shares the same resolveAuthClaims adapter as the write
+  // path, so read and write authorization can never diverge (ADR-0003).
+  //
+  // Note what is NOT here: any route that serves shape DATA. Reads terminate on durable-streams
+  // through the edge, which is the whole point of the topology — this process is asked once, at
+  // subscribe time, and is then out of the read path entirely.
+  if (options.readPath) {
+    const readPath = options.readPath;
     const resolveAuthClaims = options.resolveAuthClaims;
-    const resolveShapeParams = options.resolveShapeParams;
-    router.get(shapeProxyPath, async (request) => {
-      const claims = resolveAuthClaims ? await resolveAuthClaims(request) : null;
-      const extraParams = resolveShapeParams?.(request);
-      return proxyElectricShapeRequest(request, claims, {
-        registry: options.registry,
-        electricUrl,
-        ...(extraParams ? { extraParams } : {}),
-        ...(options.logTimings ? { logTimings: true } : {}),
-      });
-    });
+    const subscribeOptions = {
+      registry: options.registry,
+      engine: readPath.engine,
+      ...(readPath.entitlements ? { entitlements: readPath.entitlements } : {}),
+      key: readPath.key,
+      ...(readPath.ttlSeconds !== undefined ? { ttlSeconds: readPath.ttlSeconds } : {}),
+      ...(resolveAuthClaims ? { resolveAuthClaims } : {}),
+    };
+
+    router.post(subscribePath, createSubscribeHandler(subscribeOptions));
+    router.post(refreshPath, createRefreshHandler(subscribeOptions));
+    router.get(
+      barrierPath,
+      createBarrierHandler({
+        engine: readPath.engine,
+        ...(resolveAuthClaims ? { resolveAuthClaims } : {}),
+        ...(readPath.barrierMaxAgeSeconds !== undefined ? { maxAgeSeconds: readPath.barrierMaxAgeSeconds } : {}),
+      }),
+    );
   }
 
   const fetch = router.fetch;
@@ -410,8 +444,6 @@ export type { ApplyFunctionRenderOptions } from "./mutations/plpgsql-apply";
 export { renderPgxsinkitUtilitiesMigration } from "./migrations/utilities";
 export { ensureOperationsLogSchema, operationsLogRegclassTarget } from "./operations-log/ddl";
 export { operationsLogTable } from "./operations-log/schema";
-export { proxyElectricShapeRequest } from "./electric-proxy";
-export type { ElectricProxyOptions } from "./electric-proxy";
 export { readSqlState } from "./sql-state";
 export {
   createEventIngestHandler,

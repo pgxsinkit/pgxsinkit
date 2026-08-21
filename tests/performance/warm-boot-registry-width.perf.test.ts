@@ -34,7 +34,8 @@ const EXTRA_COLUMN_COUNT = 4;
 
 // Unreachable sync endpoints: boot runs with sync OFF, so these are never dialled. Mirrors the
 // PGlite-only pattern in client-local-optimistic.perf.test.ts.
-const UNREACHABLE_ELECTRIC_URL = "http://127.0.0.1:1/v1/shape";
+const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
+const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const UNREACHABLE_WRITE_URL = "http://127.0.0.1:1/api/mutations";
 
 interface WarmBootMeasurement {
@@ -64,7 +65,8 @@ async function bootAndCapture(tableCount: number, storePath: string): Promise<Wa
   // that survives the first client's close so the second boot is a genuine cold-engine/warm-store boot.
   const client = await createSyncClient({
     registry,
-    electricUrl: UNREACHABLE_ELECTRIC_URL,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: UNREACHABLE_WRITE_URL,
     syncEnabled: false,
     storePath,

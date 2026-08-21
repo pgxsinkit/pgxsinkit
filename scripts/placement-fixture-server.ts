@@ -9,7 +9,7 @@
 import { count, sql } from "drizzle-orm";
 
 import { fkParentsTable, fkSyncRegistry } from "@pgxsinkit/schema";
-import { createSyncServer } from "@pgxsinkit/server";
+import { createCircuitsEngineClient, createSyncServer, importStreamTokenKey } from "@pgxsinkit/server";
 import { createServerDb } from "@pgxsinkit/test-utils";
 
 import { installPlpgsqlBatchFunction } from "../packages/server/src/mutations/plpgsql-apply";
@@ -17,7 +17,8 @@ import { installPlpgsqlBatchFunction } from "../packages/server/src/mutations/pl
 export interface PlacementFixtureServer {
   port: number;
   batchWriteUrl: string;
-  electricProxyUrl: string;
+  /** The native control plane this fixture mounts — subscribe / re-mint / barrier. */
+  controlPlaneUrl: string;
   /** Read the current `fk_parents` row count on the server (exactly-once convergence checks). */
   countParents: () => Promise<number>;
   stop: () => Promise<void>;
@@ -27,8 +28,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 export async function startPlacementFixtureServer(opts: {
   databaseUrl: string;
-  /** The container Electric shape endpoint, e.g. http://127.0.0.1:<port>/v1/shape */
-  electricUrl: string;
+  /** The container's Circuits engine control API, e.g. http://127.0.0.1:<port> */
+  circuitsEngineUrl: string;
   port: number;
   /** Browser origins allowed to read/write (the placement suite preview origin). */
   allowedOrigins: string[];
@@ -38,8 +39,10 @@ export async function startPlacementFixtureServer(opts: {
   const server = createSyncServer({
     registry: fkSyncRegistry,
     db: serverDb.db,
-    electricUrl: opts.electricUrl,
-    shapeProxyPath: "/v1/electric-proxy",
+    readPath: {
+      engine: createCircuitsEngineClient({ baseUrl: opts.circuitsEngineUrl }),
+      key: await importStreamTokenKey("placement-fixture-secret"),
+    },
     allowedOrigins: opts.allowedOrigins,
     // fk_parents carries no RLS, so no claims resolution is required — the write applier + unfiltered shape run
     // without auth (mirrors `write api deferred FK behavior` in tests/integration/write-api.integration.test.ts).
@@ -101,7 +104,7 @@ export async function startPlacementFixtureServer(opts: {
   return {
     port: opts.port,
     batchWriteUrl: `http://127.0.0.1:${opts.port}/api/mutations`,
-    electricProxyUrl: `http://127.0.0.1:${opts.port}/v1/electric-proxy`,
+    controlPlaneUrl: `http://127.0.0.1:${opts.port}`,
     countParents: async () => {
       const [row] = await serverDb.db.select({ n: count() }).from(fkParentsTable);
       return row?.n ?? 0;

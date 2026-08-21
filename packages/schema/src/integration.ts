@@ -10,7 +10,6 @@ import {
   defineSyncTable,
   DENY_ALL,
   clockMicrosecondsSql,
-  type SyncConfigInput,
   type TableSpecInput,
 } from "@pgxsinkit/contracts";
 
@@ -259,25 +258,3 @@ export const membershipFanoutSyncRegistry = defineSyncRegistry({
 });
 
 // Client config: raw entry (the proxy owns filtering, like the demo split).
-export function buildMembershipFanoutSyncConfig(electricUrl: string): SyncConfigInput<{ work_items: TableSpecInput }> {
-  return {
-    electricUrl,
-    tables: {
-      work_items: workItemsSyncEntry,
-    },
-  };
-}
-
-// Client config that also syncs the readonly container + membership tables (the demo's full path).
-export function buildDemoMembershipSyncConfig(
-  electricUrl: string,
-): SyncConfigInput<{ workspaces: TableSpecInput; workspace_members: TableSpecInput; work_items: TableSpecInput }> {
-  return {
-    electricUrl,
-    tables: {
-      workspaces: workspacesSyncEntry,
-      workspace_members: workspaceMembersSyncEntry,
-      work_items: workItemsSyncEntry,
-    },
-  };
-}

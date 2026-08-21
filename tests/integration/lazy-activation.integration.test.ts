@@ -256,7 +256,8 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
       // Boot A — fresh warm store. `todos` is lazy → dormant + empty until activated.
       const clientA = await createSyncClient({
         registry: ephemeralRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl,
         storePath,
       });
@@ -278,7 +279,8 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
       // Boot B — cold worker (new engine), SAME warm store. The ephemeral TEMP cluster is re-created empty.
       const clientB = await createSyncClient({
         registry: ephemeralRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl,
         storePath,
       });

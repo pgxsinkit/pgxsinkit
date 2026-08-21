@@ -44,7 +44,8 @@ const referenceView: Views["reference"] = undefined;
 async function checkViews() {
   const client = await createSyncClient({
     registry: viewsRegistry,
-    electricUrl: "http://localhost:3000/v1/shape",
+    controlPlaneUrl: "http://localhost:3000",
+    streamBaseUrl: "http://localhost:3000/v1/stream",
     batchWriteUrl: "http://localhost:3001/api/mutations",
   });
 

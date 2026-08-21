@@ -438,7 +438,8 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
       const client = await createSyncClient({
         registry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl,
         getAuthToken: async () => assignment.token,
         storePath,
@@ -956,7 +957,8 @@ export async function runConcurrentMixedLoadWorker(
   });
   const client = await createSyncClient({
     registry,
-    electricUrl: env.electricUrl,
+    controlPlaneUrl: env.controlPlaneUrl,
+    streamBaseUrl: env.streamBaseUrl,
     batchWriteUrl,
     getAuthToken: async () => assignment.token,
     storePath,

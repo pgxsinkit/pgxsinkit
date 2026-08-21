@@ -66,7 +66,8 @@ async function bootClient(extra: Record<string, unknown> = {}) {
   capturedCb = null;
   const client = await createSyncClient({
     registry: registry as never,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...memoryStoreForTests(`boot-report-${++bootId}`),
     ...extra,

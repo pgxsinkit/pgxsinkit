@@ -196,7 +196,8 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     const client = await createSyncClient({
       registry: diagnosticRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...(getAuthToken ? { getAuthToken } : {}),
       ...memoryStoreForTests(storePath),

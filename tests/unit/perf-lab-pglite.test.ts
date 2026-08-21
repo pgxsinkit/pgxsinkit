@@ -47,7 +47,8 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "live",
         batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
-        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+        controlPlaneUrl: "http://127.0.0.1:3101",
+        streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
         getAuthToken: async () => "token-user1",
         syncEnabled: true,
       },
@@ -83,7 +84,8 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "offline",
         batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
-        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+        controlPlaneUrl: "http://127.0.0.1:3101",
+        streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
         syncEnabled: true,
       },
     );
@@ -117,7 +119,8 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "live",
         batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
-        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+        controlPlaneUrl: "http://127.0.0.1:3101",
+        streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
         getAuthToken: async () => "token-user1",
         syncEnabled: true,
       },
@@ -150,7 +153,8 @@ describe("perf-lab pglite loader", () => {
       {
         mode: "live",
         batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
-        electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+        controlPlaneUrl: "http://127.0.0.1:3101",
+        streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
         getAuthToken: async () => "token-user1",
         syncEnabled: true,
       },

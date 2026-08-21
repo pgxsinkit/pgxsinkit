@@ -134,7 +134,10 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    * Takes a plain store PATH (ADR-0036); the internal `backendOverride` is the test lane's memory selection.
    */
   createPglite?: (storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>;
-  electricUrl: string;
+  /** The pgxsinkit control plane — subscribe, token re-mint, convergence barrier (ADR-0055). */
+  controlPlaneUrl: string;
+  /** The edge that serves durable-streams reads. */
+  streamBaseUrl: string;
   batchWriteUrl: string;
   /** Static headers on every read + write request (e.g. a gateway `apikey`). See `createSyncClient`. */
   requestHeaders?: Record<string, string>;
@@ -581,7 +584,8 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     // elected dedicated engine boots the OPFS-repacked backend it actually holds instead of racing to `idbfs`.
     bootPromise = createSyncClient<TRegistry>({
       registry,
-      electricUrl: options.electricUrl,
+      controlPlaneUrl: options.controlPlaneUrl,
+      streamBaseUrl: options.streamBaseUrl,
       batchWriteUrl: options.batchWriteUrl,
       storePath,
       // Re-stamp the internal testing marker (ADR-0036) so `createSyncClient`'s option handling selects the

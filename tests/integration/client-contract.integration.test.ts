@@ -153,7 +153,8 @@ describe("client facade contract", () => {
 
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
       });
@@ -193,7 +194,8 @@ describe("client facade contract", () => {
 
       const firstClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
       });
@@ -212,7 +214,8 @@ describe("client facade contract", () => {
 
       const secondClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
       });
@@ -239,7 +242,8 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
       });
@@ -286,7 +290,8 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
       });
@@ -353,7 +358,8 @@ describe("client facade contract", () => {
 
       const firstClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
       });
@@ -379,7 +385,8 @@ describe("client facade contract", () => {
       const events: string[] = [];
       const secondClient = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
         onSchemaChange: (event) => {
@@ -411,7 +418,8 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
         // An interval trigger drives convergence deterministically (no DOM events needed).
@@ -465,7 +473,7 @@ describe("client facade contract", () => {
         return proxyElectricShapeRequest(
           request,
           { role: "authenticated", sub: "01965156-5884-7a0b-a24e-31b5c9be00a1" },
-          { registry: projectsSyncRegistry, electricUrl: env.electricUrl },
+          { registry: projectsSyncRegistry, controlPlaneUrl: env.controlPlaneUrl, streamBaseUrl: env.streamBaseUrl },
         );
       },
     });
@@ -480,7 +488,8 @@ describe("client facade contract", () => {
       const phases: string[] = [];
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: proxyUrl,
+        controlPlaneUrl: proxyUrl,
+        streamBaseUrl: `${proxyUrl}/v1/stream`,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
         // Per-request token (ADR-0013): consulted fresh on every shape fetch and every retry.
@@ -524,7 +533,8 @@ describe("client facade contract", () => {
     try {
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
       });
@@ -569,7 +579,8 @@ describe("client facade contract", () => {
       // foreground server round-trip, so no Electric timing is involved and the assertions are exact.
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
         syncEnabled: false,
@@ -622,7 +633,8 @@ describe("client facade contract", () => {
       const rejected: MutationDetail[] = [];
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
-        electricUrl: env.electricUrl,
+        controlPlaneUrl: env.controlPlaneUrl,
+        streamBaseUrl: env.streamBaseUrl,
         batchWriteUrl: `http://127.0.0.1:${writeApiPort}/api/mutations`,
         storePath,
         syncEnabled: false,

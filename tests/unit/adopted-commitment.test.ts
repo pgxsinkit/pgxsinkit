@@ -280,7 +280,8 @@ function bootRegistry(): SyncTableRegistry {
 function bootAdopting(storePath: string, instance: ClientPGlite): Promise<SyncClient<SyncTableRegistry>> {
   return createSyncClient({
     registry: bootRegistry(),
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     storePath,
@@ -463,7 +464,8 @@ describe("resolveAdoptedCommitmentBarrier — only the ownable states owe the ba
 function bootOwned(storePath: string): Promise<SyncClient<SyncTableRegistry>> {
   return createSyncClient({
     registry: bootRegistry(),
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     storePath,
@@ -520,7 +522,8 @@ describe("no-grant boot over an opfs-committed store — typed refusal, never an
     // accelerator's failure must NOT be swallowed into a silent empty-sibling boot: ONE typed refusal surfaces.
     const bootRefusal = await createSyncClient({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       storePath,

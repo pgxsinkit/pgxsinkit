@@ -155,7 +155,8 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     const { createSyncClient } = await import("../../packages/client/src/index");
     const client = await createSyncClient({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       storePath: "boot-opts",
       ...extra,
@@ -258,7 +259,8 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     // which the provision path uses to mint the spare store — must resolve it to `relaxedDurability: false`.
     const host = defineSyncWorker({
       registry: attachSyncRegistryStorage(bootRegistry(), { durability: "strict" }),
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       installGlobal: false,
     } as Parameters<typeof defineSyncWorker>[0]);
@@ -278,7 +280,8 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     // A registry with no storage declaration resolves to the relaxed default, so the provision mint is relaxed.
     const host = defineSyncWorker({
       registry: bootRegistry(),
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       installGlobal: false,
     } as Parameters<typeof defineSyncWorker>[0]);

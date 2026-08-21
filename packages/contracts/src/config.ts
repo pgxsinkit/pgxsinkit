@@ -459,12 +459,6 @@ export interface TableSpecInput {
   writeMode?: WriteMode;
 }
 
-export interface SyncConfigInput<TTables extends Record<string, TableSpecInput> = Record<string, TableSpecInput>> {
-  electricUrl: string;
-  localSchema?: string;
-  tables: TTables;
-}
-
 export function getLocalSyncPrimaryKey(source: {
   primaryKey: PrimaryKeySpec;
   clientProjection?: Pick<ClientProjectionSpec, "localPrimaryKey">;

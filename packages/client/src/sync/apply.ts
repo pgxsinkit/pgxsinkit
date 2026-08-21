@@ -1,11 +1,10 @@
 // Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
 // Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
-import type { ChangeMessage, Row } from "@electric-sql/client";
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { and, eq, fillPlaceholders, type SQL, sql } from "drizzle-orm";
 import { getTableConfig, type PgColumn } from "drizzle-orm/pg-core";
 
-import { quoteIdentifier, type SyncColumnType } from "@pgxsinkit/contracts";
+import { quoteIdentifier, type SyncChange, type SyncColumnType, type SyncRow } from "@pgxsinkit/contracts";
 
 import type { ApplyTarget } from "../local-tables";
 import { generateCopyData } from "./copy";
@@ -17,7 +16,7 @@ import type { InsertChangeMessage } from "./types";
  * query builder addresses columns by (ADR-0029 D1). A column absent from the local projected table is a
  * config error and surfaces, rather than silently binding to nothing.
  */
-function toDriverRow(target: ApplyTarget, data: Row<unknown>): Record<string, unknown> {
+function toDriverRow(target: ApplyTarget, data: SyncRow): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const name of Object.keys(data)) {
     const propertyKey = target.propertyKeyByName[name];
@@ -89,7 +88,7 @@ function castTypeFor(column: SyncColumnType, tableSchema: string | undefined): s
 export interface ApplyMessageToTableOptions {
   pg: PGliteInterface | Transaction;
   target: ApplyTarget;
-  message: ChangeMessage<Row<unknown>>;
+  message: SyncChange;
   debug: boolean;
 }
 
@@ -189,7 +188,7 @@ async function executeInsertBatch(
   db: ReturnType<typeof drizzleOverPg>,
   target: ApplyTarget,
   colNames: string[],
-  batch: Row<unknown>[],
+  batch: SyncRow[],
 ): Promise<void> {
   const rendered = renderInsert(db, target, colNames, batch.length);
   const values: Record<string, unknown> = {};
@@ -237,7 +236,7 @@ function getValueSize(value: unknown): number {
   }
 }
 
-function getRowSize(row: Row<unknown>, columns: readonly string[]): number {
+function getRowSize(row: SyncRow, columns: readonly string[]): number {
   return columns.reduce((size, column) => {
     const value = row[column];
     if (value === null) return size;
@@ -266,7 +265,7 @@ function getRowSize(row: Row<unknown>, columns: readonly string[]): number {
 }
 
 export async function applyInsertsToTable({ pg, target, messages, debug }: BulkApplyMessagesToTableOptions) {
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) {
     return;
@@ -276,7 +275,7 @@ export async function applyInsertsToTable({ pg, target, messages, debug }: BulkA
   const columns = Object.keys(firstRow);
   const db = drizzleOverPg(pg);
 
-  let currentBatch: Row<unknown>[] = [];
+  let currentBatch: SyncRow[] = [];
   let currentBatchSize = 0;
   let currentBatchParams = 0;
 
@@ -348,7 +347,7 @@ export async function applyUpsertsToTable({ pg, target, messages, debug }: BulkK
   const primaryKey = target.primaryKey;
   if (primaryKey.length === 0) throw new Error("applyUpsertsToTable requires a primary key");
 
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) return;
 
@@ -388,7 +387,7 @@ interface JsonRecordsetColumn {
  * catalog probe: the types are always present, derived from the same Drizzle definitions the local
  * store was rendered from).
  */
-function jsonRecordsetColumns(target: ApplyTarget, firstRow: Row<unknown>): JsonRecordsetColumn[] {
+function jsonRecordsetColumns(target: ApplyTarget, firstRow: SyncRow): JsonRecordsetColumn[] {
   const present = (name: string) => Object.prototype.hasOwnProperty.call(firstRow, name);
   const { schema } = getTableConfig(target.table);
   return target.columnTypes
@@ -434,7 +433,7 @@ async function applyMessagesToTableWithJsonImpl(
 ) {
   if (debug) console.log(`applying messages with json_to_recordset${conflict ? " (upsert)" : ""}`);
 
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) {
     return;
@@ -508,7 +507,7 @@ function copyColumnUdts(target: ApplyTarget): Record<string, string> {
 export async function applyMessagesToTableWithCopy({ pg, target, messages, debug }: BulkApplyMessagesToTableOptions) {
   if (debug) console.log("applying messages with COPY");
 
-  const data: Row<unknown>[] = messages.map((message) => message.value);
+  const data: SyncRow[] = messages.map((message) => message.value);
   const firstRow = data[0];
   if (!firstRow) {
     return;
@@ -569,7 +568,7 @@ export interface BulkKeyedApplyOptions {
   pg: PGliteInterface | Transaction;
   target: ApplyTarget;
   /** Folded messages: for deletes the value carries the PK; for updates the PK plus merged columns. */
-  messages: ChangeMessage<Row<unknown>>[];
+  messages: SyncChange[];
   debug: boolean;
 }
 
@@ -623,7 +622,7 @@ export async function applyBulkUpdatesToTable({ pg, target, messages, debug }: B
   if (messages.length === 0) return;
 
   const pkSet = new Set(primaryKey);
-  const groups = new Map<string, { setColumns: string[]; rows: Row<unknown>[] }>();
+  const groups = new Map<string, { setColumns: string[]; rows: SyncRow[] }>();
   for (const message of messages) {
     const data = message.value;
     const setColumns = Object.keys(data)

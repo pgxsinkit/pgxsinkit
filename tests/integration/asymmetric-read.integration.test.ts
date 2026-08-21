@@ -87,7 +87,8 @@ describe("asymmetric read (role-conditional visibility) integration", () => {
       registry: membershipFanoutSyncRegistry,
       db: serverDb.db,
       resolveAuthClaims: (request) => claimsFromHeader(request),
-      electricUrl: env.electricUrl,
+      controlPlaneUrl: env.controlPlaneUrl,
+      streamBaseUrl: env.streamBaseUrl,
       shapeProxyPath: "/v1/electric-proxy",
     });
 

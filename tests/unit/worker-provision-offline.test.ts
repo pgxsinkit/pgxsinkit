@@ -350,7 +350,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     let creates = 0;
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
@@ -392,7 +393,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -426,7 +428,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
@@ -462,7 +465,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
@@ -501,7 +505,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
@@ -535,7 +540,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
@@ -566,7 +572,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
@@ -596,7 +603,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -626,7 +634,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -660,7 +669,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -701,7 +711,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -729,7 +740,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     let instance: ClientPGlite | null = null;
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -763,7 +775,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
   it("treats a rejected provision as a pure accelerator failure and boots on attach", async () => {
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -805,7 +818,8 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     let instance: ClientPGlite | null = null;
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       installGlobal: false,
@@ -848,7 +862,8 @@ describe("role-selected registry (ADR-0032 S3, config.role → resolveRegistry)"
         roles.push(role);
         return role === "member" ? memberRegistry : todosRegistry;
       },
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A memory precreated store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
@@ -896,7 +911,8 @@ describe("role-selected registry (ADR-0032 S3, config.role → resolveRegistry)"
     const host = defineSyncWorker({
       registry: todosRegistry, // storage-silent → bound opfs default
       resolveRegistry: (role) => (role === "member" ? idbfsRoleRegistry : todosRegistry),
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...testStoreAcknowledgment(),
       precreatedPglite: makePglite(),
@@ -927,7 +943,8 @@ describe("Offline toggle over the bridge (ADR-0032 S3, set-online)", () => {
   it("flips the worker's convergence gate and emits the gate debug both ways", async () => {
     const host = defineSyncWorker({
       registry: todosRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A memory precreated store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),

@@ -224,7 +224,8 @@ type EngineRegistry = typeof engineRegistry;
 function makeEngineHost(): SyncWorkerHost<EngineRegistry> {
   const host = defineSyncWorker({
     registry: engineRegistry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     installGlobal: false,

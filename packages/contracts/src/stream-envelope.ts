@@ -49,3 +49,28 @@ export interface StreamEnvelope {
 export function isDeleteEnvelope(envelope: StreamEnvelope): boolean {
   return envelope.headers.operation === "delete";
 }
+
+/**
+ * One change as the APPLIER consumes it, after an envelope has been resolved against its table.
+ *
+ * Distinct from {@link StreamEnvelope} on purpose. An envelope is the wire form — key-only on a
+ * delete, `upsert` as a first-class operation, headers carrying transport metadata. This is what the
+ * apply path needs instead: a value that is always present (a delete's is its reconstructed primary
+ * key) and an operation narrowed to the three DML verbs a table actually receives.
+ *
+ * `value` is `Record<string, unknown>` rather than {@link StreamRow} because the applier handles
+ * values the wire never carries — a `bigint` id kept as a string for precision, a JSON column
+ * arriving as a parsed object — and narrowing here would only push casts into the codecs.
+ */
+export type SyncRow = Record<string, unknown>;
+
+export type SyncOperation = "insert" | "update" | "delete";
+
+export interface SyncChange<T extends SyncRow = SyncRow> {
+  /** The stringified primary key, as the stream named it. */
+  key: string;
+  value: T;
+  /** Present on an update when the source sent a full replica identity; never required. */
+  old_value?: Partial<T>;
+  headers: { operation: SyncOperation } & Record<string, unknown>;
+}

@@ -28,5 +28,6 @@ export const placementRegistry = defineSyncRegistry({
 export type PlacementRegistry = typeof placementRegistry;
 
 /** The dummy sync endpoints — never contacted (`syncEnabled: false`), but `defineSyncWorker` requires them. */
-export const PLACEMENT_ELECTRIC_URL = "http://127.0.0.1:4299/electric";
+export const PLACEMENT_CONTROL_PLANE_URL = "http://127.0.0.1:4299";
+export const PLACEMENT_STREAM_BASE_URL = "http://127.0.0.1:4299/v1/stream";
 export const PLACEMENT_WRITE_URL = "http://127.0.0.1:4299/api/mutations";

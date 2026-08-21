@@ -128,7 +128,8 @@ async function makeHost(syncEnabled: boolean): Promise<SyncWorkerHost<Registry>>
   const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...testStoreAcknowledgment(),
     precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
@@ -159,7 +160,8 @@ async function makeInProcessClient(storePath: string): Promise<SyncClient<Regist
   const { memoryStoreForTests } = await import("../../packages/client/src/testing");
   const client = await createSyncClient({
     registry,
-    electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+    controlPlaneUrl: "http://127.0.0.1:1",
+    streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     ...memoryStoreForTests(storePath),

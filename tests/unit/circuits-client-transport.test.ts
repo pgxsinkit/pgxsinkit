@@ -29,27 +29,19 @@ const common = {
 };
 
 describe("read transport resolution", () => {
-  it("refuses a boot naming both transports", async () => {
-    const attempt = createSyncClient({
-      ...common,
-      electricUrl: "http://electric",
-      controlPlaneUrl: "http://api",
-      streamBaseUrl: "http://edge",
-    });
+  // Both halves or neither. The control plane grants stream paths and the edge serves them, and they
+  // are separate deployments — so naming one without the other is an incomplete transport, not a
+  // shorthand to be guessed at.
+  it("refuses a boot naming no read path", async () => {
+    // oxlint-disable-next-line typescript/no-explicit-any -- deliberately omitting required options
+    const attempt = createSyncClient({ ...common } as any);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
-    await expect(attempt).rejects.toThrow(/both `electricUrl` and `controlPlaneUrl`/);
+    await expect(attempt).rejects.toThrow(/needs `controlPlaneUrl` \+ `streamBaseUrl`/);
   });
 
-  it("refuses a boot naming neither", async () => {
-    const attempt = createSyncClient({ ...common });
-    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
-    await expect(attempt).rejects.toThrow(/needs a read path/);
-  });
-
-  // The two native options are one transport in two halves, not a URL with an optional extra: the
-  // control plane grants stream paths and the edge serves them, and they are separate deployments.
   it("refuses controlPlaneUrl without streamBaseUrl", async () => {
-    const attempt = createSyncClient({ ...common, controlPlaneUrl: "http://api" });
+    // oxlint-disable-next-line typescript/no-explicit-any -- deliberately omitting a required option
+    const attempt = createSyncClient({ ...common, controlPlaneUrl: "http://api" } as any);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
     await expect(attempt).rejects.toThrow(/needs `streamBaseUrl` beside it/);
   });

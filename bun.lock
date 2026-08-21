@@ -5,7 +5,6 @@
     "": {
       "name": "pgxsinkit",
       "dependencies": {
-        "@electric-sql/client": "^1.5.26",
         "jose": "6.2.9",
       },
       "devDependencies": {
@@ -122,8 +121,6 @@
       "version": "0.0.0",
       "dependencies": {
         "@durable-streams/client": "0.2.6",
-        "@electric-sql/client": "^1.5.26",
-        "@electric-sql/experimental": "^6.0.26",
         "@electric-sql/pglite-tools": "0.4.5",
         "@pgxsinkit/contracts": "workspace:*",
         "@pgxsinkit/pglite-opfs-repacked": "workspace:*",
@@ -289,10 +286,6 @@
     "@drizzle-team/brocli": ["@drizzle-team/brocli@0.12.0", "", {}, "sha512-mlUE+rZ8CatQekLhnaiN91Iemdd+e2gFKooGlnRB3oPTL3VghLfX24dx7HrzMNeC1JrIB/0kpsfyty3f5HNfxQ=="],
 
     "@durable-streams/client": ["@durable-streams/client@0.2.6", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1", "fastq": "^1.19.1" }, "bin": { "intent": "bin/intent.js" } }, "sha512-uHKKbWpsKLhFMeGjG0PgM6LXE3oEIi7FHKlJZkmYGxcqd4Yjjd/QEvnQnDzteRP4Av1uJVM8qjTL7kfKsgeS/w=="],
-
-    "@electric-sql/client": ["@electric-sql/client@1.5.26", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1" }, "optionalDependencies": { "@rollup/rollup-darwin-arm64": "^4.18.1" }, "bin": { "intent": "bin/intent.mjs" } }, "sha512-tiEksNKSTqtetftz0wulFzGc7jTluCMmq1VWLR5UWmN8VWGAcsfqBSgeOUwWk0MLC7/dEjXqfsT8Blg1Yiyh0w=="],
-
-    "@electric-sql/experimental": ["@electric-sql/experimental@6.0.26", "", { "optionalDependencies": { "@rollup/rollup-darwin-arm64": "^4.18.1" }, "peerDependencies": { "@electric-sql/client": "1.5.26" } }, "sha512-fWL52wMo7zIloMlwPuWCnV45BrW9s1aQ9y3D2tqbBmd3m57KYegHzbIzwqs4CV2quaKGNUo6YkqK9ki+Rr5P2g=="],
 
     "@electric-sql/pglite": ["@pgxsinkit/pglite@0.5.5-pgx.2", "", {}, "sha512-K9piqBQpcsTo87BqnvOOy901umYpDQPcq/rtZQCvDfn6LfLCuzvLbvKYB0LnBfF/FRBVnmVZpL4B/RX7wwVsYg=="],
 
@@ -627,8 +620,6 @@
     "@rolldown/binding-win32-x64-msvc": ["@rolldown/binding-win32-x64-msvc@1.2.1", "", { "os": "win32", "cpu": "x64" }, "sha512-Z4eCmn5QJ/5+azF9knpLWKfVd9aidn0mAe9TpJgvBLId9Ax3t0+JVxBmT25Bv7NBbVW1TZyKjQjQReouMeH5UQ=="],
 
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
-
-    "@rollup/rollup-darwin-arm64": ["@rollup/rollup-darwin-arm64@4.62.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-v39RCCvj4He82I9sFmk+M1VZ0PLM9sfsLVikjfx2hYBNALhrrOR2D3JjQA6AhlaSOgcR+RzrKY7e1+bT6SUO/A=="],
 
     "@shikijs/core": ["@shikijs/core@4.2.0", "", { "dependencies": { "@shikijs/primitive": "4.2.0", "@shikijs/types": "4.2.0", "@shikijs/vscode-textmate": "^10.0.2", "@types/hast": "^3.0.4", "hast-util-to-html": "^9.0.5" } }, "sha512-Hc87Ab1Ld/vEbZRCbwx344I5v+4RU8CVToUTRkqXL1+TjbuOp9U5Xa0M23V4GEWHxVn+yO5otb+HkQVm3ptWQQ=="],
 

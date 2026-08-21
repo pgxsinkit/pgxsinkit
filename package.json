@@ -23,8 +23,8 @@
     "board:cloud:secrets": "bun scripts/board-cloud-deploy.ts secrets",
     "board:cloud:seed": "bun scripts/board-cloud-deploy.ts seed",
     "build:public-packages": "bun scripts/build-public-packages.ts",
-    "check": "bun scripts/run-if-changed.ts skills --inputs 'packages/*/skills/**/SKILL.md' 'packages/*/package.json' scripts/validate-skills.ts bun.lock --git-tag -- bun run skills:validate && bun scripts/run-if-changed.ts typecheck --inputs CODE -- bun run typecheck && bun scripts/run-if-changed.ts lint --inputs CODE -- bun run lint && bun scripts/run-if-changed.ts adr --inputs 'docs/adr/**' apps/docs/src/content/docs/decisions/index.md scripts/generate-adr-index.ts -- bun run docs:adr:check && bun scripts/run-if-changed.ts electric --inputs CODE -- bun run electric:check && bun scripts/run-if-changed.ts sync --inputs CODE -- bun run sync:function:check && bun scripts/select-unit-tests.ts",
-    "check:fast": "bun scripts/run-if-changed.ts skills --inputs 'packages/*/skills/**/SKILL.md' 'packages/*/package.json' scripts/validate-skills.ts bun.lock --git-tag -- bun run skills:validate && bun scripts/run-if-changed.ts typecheck --inputs CODE -- bun run typecheck && bun scripts/run-if-changed.ts lint --inputs CODE -- bun run lint && bun scripts/run-if-changed.ts electric --inputs CODE -- bun run electric:check && bun scripts/select-unit-tests.ts",
+    "check": "bun scripts/run-if-changed.ts skills --inputs 'packages/*/skills/**/SKILL.md' 'packages/*/package.json' scripts/validate-skills.ts bun.lock --git-tag -- bun run skills:validate && bun scripts/run-if-changed.ts typecheck --inputs CODE -- bun run typecheck && bun scripts/run-if-changed.ts lint --inputs CODE -- bun run lint && bun scripts/run-if-changed.ts adr --inputs 'docs/adr/**' apps/docs/src/content/docs/decisions/index.md scripts/generate-adr-index.ts -- bun run docs:adr:check && bun scripts/run-if-changed.ts sync --inputs CODE -- bun run sync:function:check && bun scripts/select-unit-tests.ts",
+    "check:fast": "bun scripts/run-if-changed.ts skills --inputs 'packages/*/skills/**/SKILL.md' 'packages/*/package.json' scripts/validate-skills.ts bun.lock --git-tag -- bun run skills:validate && bun scripts/run-if-changed.ts typecheck --inputs CODE -- bun run typecheck && bun scripts/run-if-changed.ts lint --inputs CODE -- bun run lint && bun scripts/select-unit-tests.ts",
     "db:board:events": "bun packages/server/src/cli/generate.ts --events --registry packages/board-schema/src/registry.ts --export boardSyncRegistry --project-dir . --config infra/board-drizzle.config.ts --name board_event_lane",
     "db:board:generate": "drizzle-kit generate --config=infra/board-drizzle.config.ts",
     "db:board:migrate": "bun --bun drizzle-kit migrate --config=infra/board-drizzle.config.ts",
@@ -44,14 +44,10 @@
     "e2e:opfs-repacked:serve": "vite --config tests/e2e/opfs-repacked/vite.config.ts build && vite --config tests/e2e/opfs-repacked/vite.config.ts preview",
     "e2e:placement:serve": "vite --config tests/e2e/placement/vite.config.ts build && vite --config tests/e2e/placement/vite.config.ts preview",
     "edge:build": "bun scripts/build-edge-functions.ts",
-    "electric:bump": "bun scripts/electric-version.ts --bump",
-    "electric:check": "bun scripts/electric-version.ts --check",
     "fixture:smoke": "bun scripts/fixture-smoke.ts",
     "format": "oxfmt --config .oxfmtrc.jsonc --check .",
     "format:write": "oxfmt --config .oxfmtrc.jsonc --write .",
     "guard:tmp-files": "bun scripts/check-temp-file-placement.ts",
-    "infra:circuits:down": "bun scripts/circuits-down.ts",
-    "infra:circuits:up": "bun scripts/circuits-up.ts",
     "infra:down": "bun scripts/infra-down.ts",
     "infra:harness:down": "bun scripts/harness-down.ts",
     "infra:harness:up": "bun scripts/harness-up.ts",
@@ -98,7 +94,6 @@
     "validate:refresh": "PGXSINKIT_FORCE=1 bun run validate:full"
   },
   "dependencies": {
-    "@electric-sql/client": "^1.5.26",
     "jose": "6.2.9"
   },
   "devDependencies": {

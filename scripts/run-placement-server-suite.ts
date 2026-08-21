@@ -41,19 +41,23 @@ function spawnWithCompletion(
 
 async function main(): Promise<void> {
   const postgresPort = await allocatePort();
-  let electricPort = await allocatePort();
-  while (electricPort === postgresPort) electricPort = await allocatePort();
+  let dsPort = await allocatePort();
+  while (dsPort === postgresPort) dsPort = await allocatePort();
+  let enginePort = await allocatePort();
+  while (enginePort === postgresPort || enginePort === dsPort) enginePort = await allocatePort();
   let fixturePort = await allocatePort();
-  while (fixturePort === postgresPort || fixturePort === electricPort) fixturePort = await allocatePort();
+  while (fixturePort === postgresPort || fixturePort === dsPort || fixturePort === enginePort) {
+    fixturePort = await allocatePort();
+  }
 
   const composeProject = `pgxsinkit-placement-${Date.now().toString(36)}-${process.pid}`;
   const composeEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PGXSINKIT_INTEGRATION_POSTGRES_PORT: String(postgresPort),
-    PGXSINKIT_ELECTRIC_PORT: String(electricPort),
+    PGXSINKIT_DS_PORT: String(dsPort),
+    PGXSINKIT_CIRCUITS_ENGINE_PORT: String(enginePort),
   };
   const databaseUrl = composeCredentials.buildLocalDatabaseUrl("127.0.0.1", postgresPort);
-  const electricUrl = `http://127.0.0.1:${electricPort}/v1/shape`;
 
   let composeStarted = false;
   let fixture: Awaited<ReturnType<typeof startPlacementFixtureServer>> | undefined;
@@ -76,7 +80,8 @@ async function main(): Promise<void> {
   console.log("[placement-server] Launching isolated containers", {
     composeProject,
     postgresPort,
-    electricPort,
+    dsPort,
+    enginePort,
     fixturePort,
   });
 
@@ -85,21 +90,23 @@ async function main(): Promise<void> {
     composeStarted = true;
     await waitForTcpService("127.0.0.1", postgresPort, "PostgreSQL", SERVICE_START_TIMEOUT_MS);
     await waitForPgReady(databaseUrl);
-    await waitForTcpService("127.0.0.1", electricPort, "ElectricSQL", SERVICE_START_TIMEOUT_MS);
+    await waitForTcpService("127.0.0.1", dsPort, "durable-streams", SERVICE_START_TIMEOUT_MS);
 
     // db:migrate installs the clock function + every schema/integration table (incl. fk_parents) + the demo
-    // apply artefacts; the fixture then installs the fk registry's batch-apply function on top.
-    runSync("bun", ["run", "db:migrate"], { ...composeEnv, DATABASE_URL: databaseUrl, ELECTRIC_URL: electricUrl });
+    // apply artefacts; the fixture then installs the fk registry's batch-apply function on top. It runs
+    // BEFORE the engine wait: the engine exits when its tables are absent, and its restart is the retry.
+    runSync("bun", ["run", "db:migrate"], { ...composeEnv, DATABASE_URL: databaseUrl });
+    await waitForTcpService("127.0.0.1", enginePort, "circuits-engine", SERVICE_START_TIMEOUT_MS);
 
     fixture = await startPlacementFixtureServer({
       databaseUrl,
-      electricUrl,
+      circuitsEngineUrl: `http://127.0.0.1:${enginePort}`,
       port: fixturePort,
       allowedOrigins: [PLACEMENT_ORIGIN],
     });
     console.log("[placement-server] Fixture server up", {
       batchWriteUrl: fixture.batchWriteUrl,
-      electricProxyUrl: fixture.electricProxyUrl,
+      controlPlaneUrl: fixture.controlPlaneUrl,
     });
 
     const suiteEnv: NodeJS.ProcessEnv = {
@@ -107,7 +114,8 @@ async function main(): Promise<void> {
       PLACEMENT_SERVER_URL: `http://127.0.0.1:${fixturePort}`,
       // Baked into the placement bundle at vite build time (Playwright's webServer inherits this env).
       VITE_PLACEMENT_WRITE_URL: fixture.batchWriteUrl,
-      VITE_PLACEMENT_ELECTRIC_URL: fixture.electricProxyUrl,
+      VITE_PLACEMENT_CONTROL_PLANE_URL: fixture.controlPlaneUrl,
+      VITE_PLACEMENT_STREAM_BASE_URL: `http://127.0.0.1:${dsPort}/v1/stream`,
     };
     const args = [
       "playwright",

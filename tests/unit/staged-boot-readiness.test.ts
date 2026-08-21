@@ -227,7 +227,8 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
     const { createSyncClient } = await import("../../packages/client/src/index");
     return createSyncClient({
       registry: stagedRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests(storePath),
       ...extra,

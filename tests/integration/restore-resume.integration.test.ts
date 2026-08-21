@@ -54,7 +54,8 @@ describe("restore resume (ADR-0046)", () => {
     createdStorePaths.push(storePathA);
     const clientA = await createSyncClient({
       registry: projectsSyncRegistry,
-      electricUrl: env.electricUrl,
+      controlPlaneUrl: env.controlPlaneUrl,
+      streamBaseUrl: env.streamBaseUrl,
       batchWriteUrl: DEAD_WRITE,
       storePath: storePathA,
     });
@@ -81,7 +82,8 @@ describe("restore resume (ADR-0046)", () => {
     createdStorePaths.push(storePathB);
     const clientB = await createSyncClient({
       registry: projectsSyncRegistry,
-      electricUrl: env.electricUrl,
+      controlPlaneUrl: env.controlPlaneUrl,
+      streamBaseUrl: env.streamBaseUrl,
       batchWriteUrl: DEAD_WRITE,
       storePath: storePathB,
       restoreFrom: backup,

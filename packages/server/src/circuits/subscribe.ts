@@ -52,7 +52,15 @@ export interface SubscribeResult {
 export interface SubscribeOptions {
   registry: SyncTableRegistry;
   engine: CircuitsEngineClient;
-  entitlements: EntitlementSet;
+  /**
+   * The live entitlement set backing the SHARED tier.
+   *
+   * Optional, because a registry with no shared-tier shape has nothing to ask it. Omitting it is a
+   * statement that this deployment has none: a shared-tier subscription is then refused with that
+   * reason rather than silently permitted, so adding the first shared shape fails loudly instead of
+   * serving one subject's rows to everyone.
+   */
+  entitlements?: EntitlementSet;
   /** The stream-token signing key, shared with the edge — the same process holds both. */
   key: CryptoKey;
   /** Per-deployment override of ADR-0055's 5-minute default. */
@@ -82,6 +90,9 @@ function expandToScopes(
   if (shape == null) return { scopes: [undefined] };
   if (readShapeTier(shape) === "private") return { scopes: [undefined] };
 
+  if (options.entitlements === undefined) {
+    return { refusal: "shared-tier shape, but this deployment configured no entitlement set" };
+  }
   if (!options.entitlements.ready) return { refusal: "entitlements unavailable" };
   const held = options.entitlements.scopesFor(subject, shapeKey);
   if (held.length === 0) return { refusal: "no entitled scopes" };
@@ -155,7 +166,7 @@ export async function subscribeToShapes(
       // not it is this side that must catch it: the edge checks `permits` on EVERY read, so a scope
       // only `scopesFor` believes in would mint a capability for a stream the client can never
       // actually read. Better a denial it can see now than a stream that 403s forever.
-      if (compiled.tier === "shared" && !options.entitlements.permits(subject, request.shapeKey, scope ?? [])) {
+      if (compiled.tier === "shared" && !options.entitlements?.permits(subject, request.shapeKey, scope ?? [])) {
         deny("not entitled to this scope", scope);
         continue;
       }
@@ -267,7 +278,7 @@ export async function refreshStreamToken(
       granted.push(grant);
       continue;
     }
-    if (!options.entitlements.ready) {
+    if (options.entitlements === undefined || !options.entitlements.ready) {
       revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: "entitlements unavailable" });
       continue;
     }

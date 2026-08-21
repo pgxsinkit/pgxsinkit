@@ -128,7 +128,8 @@ describe("subscribeLiveRows over a same-named-column JOIN (in-process seam)", ()
   async function bootClient(): Promise<SyncClient<CollidingRegistry>> {
     const active = await createSyncClient({
       registry: collidingRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       // A precreated memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
@@ -225,7 +226,8 @@ describe("subscribeLiveRows over a duplicate-output-name query (worker bridge se
     const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: soloRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A precreated memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
@@ -337,7 +339,8 @@ describe("subscribeLiveRows over a same-named-column JOIN (worker bridge seam)",
     const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: collidingRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A precreated memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),

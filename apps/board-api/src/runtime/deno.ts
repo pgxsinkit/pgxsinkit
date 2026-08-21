@@ -17,8 +17,8 @@ export function serveBoardWrite(): void {
   requireDeno().serve(createDenoBoardWriteHandler());
 }
 
-export function serveBoardSync(): void {
-  requireDeno().serve(createDenoBoardSyncHandler());
+export async function serveBoardSync(): Promise<void> {
+  requireDeno().serve(await createDenoBoardSyncHandler());
 }
 
 /**
@@ -86,7 +86,8 @@ function boardEventsDrainUrl(env: Record<string, string | undefined>): string | 
 export function createDenoBoardSyncHandler() {
   const env = readDenoEnv();
   return createBoardSyncHandler({
-    electricUrl: env["ELECTRIC_SHAPE_URL"] ?? "http://electric:3000/v1/shape",
+    circuitsEngineUrl: env["CIRCUITS_ENGINE_URL"] ?? "http://engine:7010",
+    streamTokenSecret: env["STREAM_TOKEN_SECRET"] ?? "dev-stream-token-secret",
     resolveAuthClaims: createBoardClaimsResolver({
       supabaseUrl: requireEnv(
         env,

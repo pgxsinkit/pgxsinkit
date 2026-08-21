@@ -36,7 +36,8 @@ const registry = defineSyncRegistry({
 type TodosRegistry = typeof registry;
 
 // Unreachable / blackholed endpoints — a boot must not dial them on the localReadReady/writeReady path.
-const UNREACHABLE_ELECTRIC = "http://10.255.255.1:81/v1/shape";
+const DEAD_CONTROL_PLANE = "http://10.255.255.1:81";
+const DEAD_STREAM_BASE = "http://10.255.255.1:81/v1/stream";
 const UNREACHABLE_WRITE = "http://10.255.255.1:81/api/mutations";
 
 const TMP_ROOT = path.resolve(process.cwd(), "tmp/staged-boot-offline");
@@ -73,7 +74,8 @@ describe("ADR-0041 staged boot readiness (stage 1) — real PGlite", () => {
     // Boot A — create the warm store (sync OFF) and seed a cached synced row directly into the base table.
     const seed = await createSyncClient<TodosRegistry>({
       registry,
-      electricUrl: UNREACHABLE_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: UNREACHABLE_WRITE,
       syncEnabled: false,
       storePath,
@@ -95,7 +97,8 @@ describe("ADR-0041 staged boot readiness (stage 1) — real PGlite", () => {
     try {
       const client = await createSyncClient<TodosRegistry>({
         registry,
-        electricUrl: UNREACHABLE_ELECTRIC,
+        controlPlaneUrl: DEAD_CONTROL_PLANE,
+        streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: UNREACHABLE_WRITE,
         syncEnabled: true,
         storePath,
@@ -131,7 +134,8 @@ describe("ADR-0041 staged boot readiness (stage 1) — real PGlite", () => {
     // registry fingerprint so the next boot sees a mismatch.
     const seed = await createSyncClient<TodosRegistry>({
       registry,
-      electricUrl: UNREACHABLE_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: UNREACHABLE_WRITE,
       syncEnabled: false,
       storePath,
@@ -152,7 +156,8 @@ describe("ADR-0041 staged boot readiness (stage 1) — real PGlite", () => {
     const events: LocalStoreVersionEvent[] = [];
     const client = await createSyncClient<TodosRegistry>({
       registry,
-      electricUrl: UNREACHABLE_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: UNREACHABLE_WRITE,
       syncEnabled: false,
       storePath,

@@ -1,4 +1,4 @@
-import type { ChangeMessage, Row } from "@electric-sql/client";
+import type { SyncChange, SyncRow } from "@pgxsinkit/contracts";
 
 import type { InsertChangeMessage } from "./types";
 
@@ -15,25 +15,21 @@ type Operation = "insert" | "update" | "delete";
  */
 export interface FoldedShapeBatch {
   /** PKs to delete — net-`delete` keys, plus the clearing delete of each re-created key. */
-  deletes: ChangeMessage<Row<unknown>>[];
+  deletes: SyncChange[];
   /** Full rows to insert — net-`insert` keys, plus each re-created key's new row (merged values). */
   inserts: InsertChangeMessage[];
   /** Merged partial updates — net-`update` keys (carry the PK plus the union of updated columns). */
-  updates: ChangeMessage<Row<unknown>>[];
+  updates: SyncChange[];
 }
 
 /** Clone a representative message, overriding its row value and operation (headers like LSN are kept). */
-function withValue(
-  template: ChangeMessage<Row<unknown>>,
-  value: Row<unknown>,
-  operation: Operation,
-): ChangeMessage<Row<unknown>> {
+function withValue(template: SyncChange, value: SyncRow, operation: Operation): SyncChange {
   return { ...template, value, headers: { ...template.headers, operation } };
 }
 
 /** Shallow-merge the row values of an ordered op segment, last-write-wins per column. */
-function mergeValues(segment: ChangeMessage<Row<unknown>>[]): Row<unknown> {
-  return Object.assign({}, ...segment.map((message) => message.value)) as Row<unknown>;
+function mergeValues(segment: SyncChange[]): SyncRow {
+  return Object.assign({}, ...segment.map((message) => message.value)) as SyncRow;
 }
 
 /**
@@ -56,8 +52,8 @@ function mergeValues(segment: ChangeMessage<Row<unknown>>[]): Row<unknown> {
  * Pure and dependency-free by design (ADR-0014 / ISS-06): property-tested against the oracle
  * *fold-then-bulk ≡ ordered per-row apply* over random same-PK sequences and random initial state.
  */
-export function foldChangeBatch(messages: ChangeMessage<Row<unknown>>[]): FoldedShapeBatch {
-  const groups = new Map<string, ChangeMessage<Row<unknown>>[]>();
+export function foldChangeBatch(messages: SyncChange[]): FoldedShapeBatch {
+  const groups = new Map<string, SyncChange[]>();
   for (const message of messages) {
     let group = groups.get(message.key);
     if (!group) {
@@ -74,7 +70,7 @@ export function foldChangeBatch(messages: ChangeMessage<Row<unknown>>[]): Folded
   return folded;
 }
 
-function foldKey(key: string, ops: ChangeMessage<Row<unknown>>[], folded: FoldedShapeBatch): void {
+function foldKey(key: string, ops: SyncChange[], folded: FoldedShapeBatch): void {
   const lastDeleteIndex = ops.findLastIndex((message) => message.headers.operation === "delete");
 
   // A trailing delete is the net effect regardless of anything before it; emit one DELETE.

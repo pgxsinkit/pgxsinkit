@@ -69,7 +69,8 @@ type LooseClient = SyncClient<SyncTableRegistry>;
 
 // Dead network URLs — boot runs with sync OFF, so nothing is dialled; a stray write POST fails fast
 // (connection refused) rather than hanging, which is exactly the "in-flight then interrupted" shape.
-const DEAD_ELECTRIC = "http://127.0.0.1:1/v1/electric-proxy";
+const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
+const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const DEAD_WRITE = "http://127.0.0.1:1/api/mutations";
 
 const TMP_ROOT = path.resolve(process.cwd(), "tmp/agents/marker");
@@ -97,7 +98,8 @@ async function freshStorePath(label: string): Promise<string> {
 async function bootFsClient(registry: SyncTableRegistry, storePath: string): Promise<LooseClient> {
   const client = (await createSyncClient({
     registry,
-    electricUrl: DEAD_ELECTRIC,
+    controlPlaneUrl: DEAD_CONTROL_PLANE,
+    streamBaseUrl: DEAD_STREAM_BASE,
     batchWriteUrl: DEAD_WRITE,
     syncEnabled: false,
     storePath,
@@ -280,7 +282,8 @@ describe("durable recovery-required marker (slice 2)", () => {
     // `sending` row ends `quarantined`, not auto-flushable.
     const restored = (await createSyncClient({
       registry: todosRegistry,
-      electricUrl: DEAD_ELECTRIC,
+      controlPlaneUrl: DEAD_CONTROL_PLANE,
+      streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: DEAD_WRITE,
       syncEnabled: false,
       restoreFrom: file,

@@ -11,7 +11,6 @@ import type {
   RegistryRelations,
   RegistryTables,
   RegistryViews,
-  SyncConfigInput,
   SyncRuntimeStatus,
   SyncTableCreateInput,
   SyncTableEntry,
@@ -24,7 +23,6 @@ import type {
 } from "@pgxsinkit/contracts";
 import {
   fingerprintRegistry,
-  getSyncRegistrySchema,
   getSyncRegistryStorage,
   isClaimsDependentRowFilter,
   resolveStorageDeclaration,
@@ -35,7 +33,7 @@ import {
 import type { CreateOpfsRepackedPGliteOptions, OpfsRepackedPGlite } from "@pgxsinkit/pglite-opfs-repacked";
 
 import { type BootReport, type BootReportBuilder, createBootReportBuilder } from "./boot-report";
-import { startCircuitsSync } from "./circuits/group-sync";
+import { startCircuitsSync, type CircuitsGroupSyncResult } from "./circuits/group-sync";
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { syncDebug, timeAsync } from "./debug";
 import { describeErrorChain } from "./error-chain";
@@ -92,7 +90,6 @@ import {
   generateEphemeralLocalSchemaSql,
   generateLocalSchemaSql,
 } from "./schema";
-import { startConfiguredSync } from "./shape-sync";
 import {
   resolveDeniedBootAuthority,
   type ResolveStoreBootOptions,
@@ -118,9 +115,8 @@ import {
   storeTargetExists,
   type StorePathInput,
 } from "./store-path";
-import { createSyncEngine, type SyncEngine } from "./sync";
-import { buildShapeHeaders } from "./sync-auth";
 import { DEFAULT_METADATA_SCHEMA } from "./sync/metadata-tables";
+import { deleteSubscriptionState, migrateSubscriptionMetadataTables } from "./sync/subscription-state";
 import { LiveRowsMaterializer } from "./worker/live-diff";
 import {
   createLiveQueryManager,
@@ -393,7 +389,7 @@ export class ClientDisposedError extends Error {
 // sync engine's namespace, attached post-create by `createSyncClient` as the `electric` property (ADR-0032
 // S1) — no longer a create-time extension. The `electric` part is derived from `createSyncEngine`'s real
 // return so the type follows the attached object.
-export type ClientPGlite = PGliteWithLive & { electric: SyncEngine["namespace"] };
+export type ClientPGlite = PGliteWithLive;
 
 /**
  * The pre-warmed PGlite boot assets (the WASM modules + filesystem bundle), consumed by
@@ -485,7 +481,6 @@ const OPFS_STORE_EXTENT_SIZE = 65536;
  * other `degraded` cause there is no Error to describe: Electric's `onFailedAttempt` carries no argument,
  * because the failure never escaped its retry wrapper. The string says what is knowable and no more.
  */
-const READ_STREAM_UNREACHABLE = "read stream unreachable: a shape fetch failed and is retrying with backoff";
 /**
  * Default {@link CreateSyncClientOptions.readSilenceMs}. A healthy Electric read path is never silent —
  * the live long-poll cycles roughly every 20-25s with at least a bare up-to-date, and every cycle fires
@@ -952,31 +947,22 @@ export async function fallbackVirginCandidateToIdb(
 export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   registry: TRegistry;
   /**
-   * The Electric read path's ingress. Mutually exclusive with {@link controlPlaneUrl} — exactly one
-   * read transport must be configured, and a boot naming both or neither is refused rather than
-   * guessed at.
+   * The pgxsinkit control plane: where a client subscribes, re-mints its stream token, and reads the
+   * engine convergence barrier (ADR-0055). Required, with {@link streamBaseUrl}.
    *
-   * Optional only because the native path is the alternative, NOT because it may be omitted. It stays
-   * un-deprecated until the native path can actually replace it: a deprecation marker with no working
-   * replacement in this repo would be noise at every call site and would say something untrue.
+   * The client does not CONSTRUCT stream URLs, it **asks** and is told. Which shapes a subject may
+   * read — and, on the shared tier, which scopes each expands to — is not something the client can
+   * express at all, which is what removes shape selection from the wire.
    */
-  electricUrl?: string;
+  controlPlaneUrl: string;
   /**
-   * NATIVE READ PATH (ADR-0055) — the pgxsinkit control plane, where subscribe, token re-mint and the
-   * engine convergence barrier live. Requires {@link streamBaseUrl}.
+   * The edge that serves durable-streams reads. Granted stream paths are appended to it.
    *
-   * Naming this instead of {@link electricUrl} inverts how the client finds a stream: it no longer
-   * CONSTRUCTS shape URLs from a base, it asks and is told. Which shapes a subject may read — and,
-   * on the shared tier, which scopes each expands to — stops being anything the client can express.
+   * Separate from {@link controlPlaneUrl} because they are different deployments: the control plane
+   * is a small authenticated origin, and this is the CDN-frontable read surface the shared tier
+   * exists to make cacheable.
    */
-  controlPlaneUrl?: string;
-  /**
-   * NATIVE READ PATH — the edge that serves durable-streams reads. Granted stream paths are appended
-   * to it. Separate from {@link controlPlaneUrl} because they are different deployments: the control
-   * plane is a small authenticated origin, and this one is the CDN-frontable read surface the shared
-   * tier exists to make cacheable.
-   */
-  streamBaseUrl?: string;
+  streamBaseUrl: string;
   batchWriteUrl: string;
   getAuthToken?: () => Promise<string | undefined>;
   /**
@@ -1849,51 +1835,29 @@ export function replAdapter(
  * an ingress its caller never named, which is precisely the class of mistake the native path's
  * ask-don't-construct inversion exists to remove.
  */
-type ReadTransport =
-  | { kind: "electric"; electricUrl: string }
-  | { kind: "circuits"; controlPlaneUrl: string; streamBaseUrl: string };
-
-function resolveReadTransport(options: {
-  electricUrl?: string;
-  controlPlaneUrl?: string;
-  streamBaseUrl?: string;
-}): ReadTransport {
-  const hasElectric = options.electricUrl != null && options.electricUrl !== "";
-  const hasNative = options.controlPlaneUrl != null && options.controlPlaneUrl !== "";
-
-  if (hasElectric && hasNative) {
-    throw new Error(
-      "[pgxsinkit] createSyncClient was given both `electricUrl` and `controlPlaneUrl`. They are two " +
-        "different read paths, not a fallback pair — name exactly one.",
-    );
-  }
-  if (hasNative) {
-    if (options.streamBaseUrl == null || options.streamBaseUrl === "") {
-      throw new Error(
-        "[pgxsinkit] `controlPlaneUrl` needs `streamBaseUrl` beside it: the control plane grants stream " +
-          "paths and the edge serves them, and they are separate deployments.",
-      );
-    }
-    return { kind: "circuits", controlPlaneUrl: options.controlPlaneUrl!, streamBaseUrl: options.streamBaseUrl };
-  }
-  if (hasElectric) return { kind: "electric", electricUrl: options.electricUrl! };
-
-  throw new Error(
-    "[pgxsinkit] createSyncClient needs a read path: either `electricUrl`, or `controlPlaneUrl` + " +
-      "`streamBaseUrl` for the Circuits-native path.",
-  );
+interface ReadTransport {
+  controlPlaneUrl: string;
+  streamBaseUrl: string;
 }
 
-/**
- * What a started sync exposes to the client, whichever transport started it.
- *
- * The two runtimes agree on every member the client actually calls; they differ only in what a
- * per-table entry carries, so that is the one place this widens. When the Electric path is retired
- * this collapses to the native result type and nothing else moves.
- */
-type SyncGroupsRuntime = Omit<Awaited<ReturnType<typeof startConfiguredSync>>, "tables"> & {
-  tables: Record<string, { readonly isUpToDate: boolean }>;
-};
+function resolveReadTransport(options: { controlPlaneUrl?: string; streamBaseUrl?: string }): ReadTransport {
+  if (options.controlPlaneUrl == null || options.controlPlaneUrl === "") {
+    throw new Error(
+      "[pgxsinkit] createSyncClient needs `controlPlaneUrl` + `streamBaseUrl` — the control plane grants " +
+        "the streams this client may read, and the edge serves them.",
+    );
+  }
+  if (options.streamBaseUrl == null || options.streamBaseUrl === "") {
+    throw new Error(
+      "[pgxsinkit] `controlPlaneUrl` needs `streamBaseUrl` beside it: the control plane grants stream " +
+        "paths and the edge serves them, and they are separate deployments.",
+    );
+  }
+  return { controlPlaneUrl: options.controlPlaneUrl, streamBaseUrl: options.streamBaseUrl };
+}
+
+/** What a started sync exposes to the client. */
+type SyncGroupsRuntime = CircuitsGroupSyncResult;
 
 export async function createSyncClient<const TRegistry extends SyncTableRegistry>(
   options: CreateSyncClientOptions<TRegistry>,
@@ -1967,15 +1931,11 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // ambiguous: two transports configured is a contradiction and none is an omission, and picking a
   // winner for either would silently sync against something the caller did not name.
   const readTransport = resolveReadTransport(options);
-  // ADR-0032 S4 overlap flag. A restore starts `syncEnabled: false` here, so it never takes the overlap
-  // prefetch path (a restore also never presents a fresh spare store); the flag stays `false` for the whole
-  // boot even when the restore later comes online (which uses the sequential sync-start path, not overlap).
-  //
-  // The native path never overlaps either, and that is a real gap rather than a policy: overlap works by
-  // holding commits on a `dbReady` gate while the streams prefetch, and the native engine has no such gate
-  // yet. Booting native is therefore strictly sequential until it grows one.
-  const overlapPrefetch =
-    syncEnabled && readTransport.kind === "electric" && options.freshStore === true && !options.pgliteInstance;
+  // ADR-0032 S4 overlap prefetch is NOT available on the native read path: it works by holding commits
+  // on a `dbReady` gate while the streams prefetch, and the native engine has no such gate. Boot is
+  // strictly sequential until it grows one (backlog 0012). Kept as a named constant rather than deleted
+  // because the boot report and several branches below are written against the concept.
+  const overlapPrefetch = false;
   // How the store presents at boot (ADR-0034 `storeKind`): a restore boot seeds a brand-new store from a
   // backup; otherwise the caller's fresh-store hint (the same signal as `freshStore`) marks a fresh spare;
   // everything else is a warm (existing persisted) store. Restore wins — a restore boot is never "fresh".
@@ -2260,17 +2220,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   }
 
   // Attach the sync engine explicitly, over the already-created instance, on ALL three provenance paths
-  // (pgliteInstance, precreatedPglite, storePath) — ADR-0032 S1. The engine is no longer a create-time
-  // extension, so the raw store (a `createClientPGlite` mint, or a caller's own instance) carries no
-  // `electric` namespace until this point; the property assignment gives `ClientPGlite` its exact former
-  // structural shape (live + electric) so every `pglite.electric.…` call site is unchanged. It is attached
-  // BEFORE the schema/prepare steps below so a `prepareLocalDbAfterSchema` hook sees the same `.electric` it did when
-  // the extension provided it at create time. `engine.close` (the former extension close hook — abort every
-  // shape stream) is kept private to this client and run explicitly by `stop`/`destroy` at the same moment
-  // `pglite.close()` used to trigger it.
-  const engine: SyncEngine = await createSyncEngine(pglite);
-  (pglite as { electric: SyncEngine["namespace"] }).electric = engine.namespace;
-
   // Whether the read path's first initial sync has completed, so a recovery from `auth-needed` returns to
   // the right steady-state phase (`ready` if already caught up, else `syncing`).
   let initialSyncCompleted = false;
@@ -2309,145 +2258,6 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     }, readSilenceMs);
   };
 
-  // ─── Fresh-store prefetch overlap (ADR-0032 S4 / backlog-0003) ─────────────────────────────────────
-  // On a PROVABLY-FRESH store (the caller's `freshStore` hint — a claimed schemaless spare) the shape
-  // catch-up needs none of the local boot phases, so start it NOW and gate its commits on `dbReady`, which
-  // we resolve once schema exec + journal recovery + registry reconciliation complete. The network then
-  // overlaps those phases instead of running strictly after them. Gated to the schema-owning paths (the
-  // `pgliteInstance` path runs no schema step, so it has nothing to hide); warm stores keep the exact
-  // sequential path. See the `freshStore` option's JSDoc for who sets the hint (the board's claim path).
-  // (`overlapPrefetch` is computed once up front — see the boot-report builder above.)
-  let openDbGate: () => void = () => {};
-  const dbReady = overlapPrefetch
-    ? new Promise<void>((resolve) => {
-        openDbGate = resolve;
-      })
-    : null;
-
-  // The sync-start options, built once and used by BOTH the overlap early-start and the sequential start —
-  // the only per-call difference is the promoted-lazy set (empty on a fresh store) and the overlap gate.
-  const buildStartOptions = (promotedGroups: ReadonlySet<string>): Parameters<typeof startConfiguredSync>[1] => ({
-    syncConfig: buildSyncConfigFromRegistry(
-      options.registry,
-      readTransport.kind === "electric" ? readTransport.electricUrl : "",
-    ),
-    registry: options.registry,
-    promotedGroups,
-    ...(dbReady ? { dbReady } : {}),
-    // Boot observability (ADR-0034): the collector opens a per-boot-group accumulator (rows/requests/fetch/
-    // apply wall) for the eager + promoted groups; lazy on-demand starts get none, so they never enter the report.
-    bootCollector: bootReportBuilder,
-    // Persist a durable lazy group's activation on first on-demand start, so the next boot promotes it.
-    onLazyActivated: (groupKey) => {
-      void writeLazyGroupActivation(pglite, options.registry, groupKey);
-    },
-    // The read path resolves the token per request (ADR-0013), not frozen at boot — so a long-lived session
-    // never wedges on JWT expiry. Read and write share one token lifecycle.
-    ...(options.getAuthToken || options.requestHeaders
-      ? {
-          shapeHeaders: buildShapeHeaders({
-            ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
-            ...(options.requestHeaders ? { requestHeaders: options.requestHeaders } : {}),
-          }),
-        }
-      : {}),
-    ...(options.onTableInitialSync ? { onTableInitialSync: options.onTableInitialSync } : {}),
-    // Per-group readiness (ADR-0032 decision 6): mirror each group's catch-up into `status.groups` and
-    // re-emit, so an app can drive progressive per-group paint off `status` (and `client.groupReady`).
-    onGroupReady: (groupKey) => {
-      status.groups = { ...(status.groups ?? {}), [groupKey]: true };
-      options.onStatusChange?.(status);
-    },
-    onInitialSync: () => {
-      initialSyncCompleted = true;
-      status.phase = "ready";
-      options.onStatusChange?.(status);
-      // Boot complete: the first initial sync landed and `ready` is about to resolve. One monotonic stamp
-      // closes the boot rail opened by `boot pglite.create` (the stamp itself is the number).
-      syncDebug("boot client ready");
-      // Boot observability (ADR-0034): finalize the report at exactly this moment — the `boot client ready`
-      // rail line — and fire the one-shot `onBootReport` push. Idempotent, so the sync-disabled path's own
-      // finalize below never double-fires it.
-      finalizeBootReport();
-      resolveReady();
-      // `ready` is now a CLAIM the watchdog holds to account: silence past the window drops it back to
-      // degraded — the "up to date offline" lie a hung long-poll otherwise sustains.
-      armReadSilenceWatchdog();
-    },
-    onSyncError: (error) => {
-      // A sync commit exhausted its retries (ADR-0009 decision 5): go degraded and surface it, rather than
-      // letting the read cache silently diverge from the server. Sticky (see below).
-      status.phase = "degraded";
-      degradedReason = "commit";
-      // The cause chain, not just the wrapper: a drizzle "Failed query" message hides the actual
-      // database error (SQLSTATE, detail) on `.cause`.
-      status.lastError = describeErrorChain(error);
-      options.onStatusChange?.(status);
-      options.onSyncError?.(error);
-    },
-    // #4: a terminal/transient NON-auth read-stream error → `degraded`, so the runtime never keeps reporting
-    // healthy while the read stream has stalled. Does not override the more-actionable `auth-needed`, nor a
-    // commit-failure degraded. Cleared on the next successful batch below.
-    onReadStreamError: (error) => {
-      // Never mask the more-actionable auth-needed, nor a sticky commit-failure degraded (its lastError is
-      // the more serious signal — a stream blip must not overwrite it).
-      if (status.phase === "auth-needed") return;
-      if (status.phase === "degraded" && degradedReason === "commit") return;
-      // Enter, or refresh, a stream-degraded status. Refreshing keeps `lastError` pointing at the most
-      // recent stream fault (and re-emits) rather than freezing on the first one, so a stream that fails one
-      // way then another reports the current cause (observability).
-      status.phase = "degraded";
-      degradedReason = "stream";
-      status.lastError = describeErrorChain(error);
-      options.onStatusChange?.(status);
-    },
-    // Board ADR-0010: a shape FETCH ATTEMPT failed and Electric is retrying it inside its own backoff
-    // wrapper. This is the only signal an outage produces — a rejected fetch is retryable, so it never
-    // escapes to `onError` and `onReadStreamError` above is never called (Electric retries forever:
-    // "clients may go offline and come back"). Without this the runtime reports `syncing` for as long as
-    // the machine is offline, and a consumer keying off the phase can never say "connection needed". The
-    // two seams partition the failures (see `read-stream-stall.ts`), so this can never pre-empt the
-    // richer classification: an auth 4xx escapes the wrapper and lands on `onAuthError`, not here.
-    //
-    // TRANSITION-only: Electric calls this on every retry tick for as long as the outage lasts, so
-    // re-entering `degraded` would re-emit to every status listener (and, in worker mode, re-broadcast to
-    // every attached tab) roughly once a second, forever. Precedence matches `onReadStreamError`: never
-    // mask `auth-needed` (more actionable) nor a commit-failure degraded (more serious).
-    onReadStreamStalled: () => {
-      if (status.phase === "auth-needed" || status.phase === "degraded") return;
-      status.phase = "degraded";
-      degradedReason = "stream";
-      status.lastError = READ_STREAM_UNREACHABLE;
-      options.onStatusChange?.(status);
-    },
-    // Clear a recoverable status (auth-needed, or a read-stream degraded) the moment a batch is delivered
-    // again. A commit-failure degraded is NOT cleared here — a fetch can succeed while applies keep failing,
-    // so only `onSyncError` clearing (a clean commit) would lift it.
-    onSyncActivity: () => {
-      if (status.phase === "auth-needed" || (status.phase === "degraded" && degradedReason === "stream")) {
-        degradedReason = null;
-        status.phase = initialSyncCompleted ? "ready" : "syncing";
-        options.onStatusChange?.(status);
-      }
-      // Every delivered batch (including a bare up-to-date) is proof of life: re-arm the silence window.
-      // Harmless pre-`ready` — the watchdog's callback only ever acts on a runtime claiming `ready`.
-      armReadSilenceWatchdog();
-    },
-    // ADR-0013 Phase 3: surface a persistent read-path auth failure as a distinct `auth-needed` status (the
-    // app prompts re-login) while the stream keeps retrying for a fresh token. Only wired when a token
-    // provider exists — without one there is no auth lifecycle to track.
-    ...(options.getAuthToken
-      ? {
-          onAuthError: () => {
-            if (status.phase !== "auth-needed") {
-              status.phase = "auth-needed";
-              options.onStatusChange?.(status);
-            }
-          },
-        }
-      : {}),
-  });
-
   /**
    * The native path's auth adapter.
    *
@@ -2466,64 +2276,54 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   /**
    * Start sync on whichever read transport this boot resolved.
    *
-   * The one seam the two paths share. Everything above it — status, readiness, the boot report, the
-   * activation replay — is written against {@link SyncGroupsRuntime} and does not know which ran.
+   * The single place the read path is started. Everything above it — status, readiness, the boot
+   * report, the activation replay — is written against {@link SyncGroupsRuntime}.
    */
-  const startSyncRuntime = (promotedGroups: ReadonlySet<string>): Promise<SyncGroupsRuntime> => {
-    if (readTransport.kind === "circuits") {
-      return startCircuitsSync(pglite, {
-        registry: options.registry,
-        controlPlaneUrl: readTransport.controlPlaneUrl,
-        streamBaseUrl: readTransport.streamBaseUrl,
-        metadataSchema: DEFAULT_METADATA_SCHEMA,
-        promotedGroups,
-        ...(options.getAuthToken || options.requestHeaders ? { authHeaders: nativeAuthHeaders } : {}),
-        onInitialSync: () => {
-          initialSyncCompleted = true;
-          status.phase = "ready";
+  const startSyncRuntime = (promotedGroups: ReadonlySet<string>): Promise<SyncGroupsRuntime> =>
+    startCircuitsSync(pglite, {
+      registry: options.registry,
+      controlPlaneUrl: readTransport.controlPlaneUrl,
+      streamBaseUrl: readTransport.streamBaseUrl,
+      metadataSchema: DEFAULT_METADATA_SCHEMA,
+      promotedGroups,
+      ...(options.getAuthToken || options.requestHeaders ? { authHeaders: nativeAuthHeaders } : {}),
+      onInitialSync: () => {
+        initialSyncCompleted = true;
+        status.phase = "ready";
+        options.onStatusChange?.(status);
+        syncDebug("boot client ready");
+        finalizeBootReport();
+        resolveReady();
+        armReadSilenceWatchdog();
+      },
+      onGroupReady: (groupKey: string) => {
+        status.groups = { ...(status.groups ?? {}), [groupKey]: true };
+        options.onStatusChange?.(status);
+      },
+      onSyncError: (error: Error) => {
+        status.phase = "degraded";
+        degradedReason = "commit";
+        status.lastError = describeErrorChain(error);
+        options.onStatusChange?.(status);
+        options.onSyncError?.(error);
+      },
+      onSyncActivity: () => {
+        // A delivered batch is proof of life, so a runtime that went degraded on READ SILENCE
+        // recovers here. Only that reason: a commit failure is sticky by design (ADR-0009 d5) —
+        // a fetch can keep succeeding while applies keep failing, and clearing on traffic would
+        // report healthy while the store diverges.
+        if (status.phase === "degraded" && degradedReason === "stream") {
+          status.phase = initialSyncCompleted ? "ready" : "syncing";
+          degradedReason = null;
+          delete status.lastError;
           options.onStatusChange?.(status);
-          syncDebug("boot client ready");
-          finalizeBootReport();
-          resolveReady();
-          armReadSilenceWatchdog();
-        },
-        onGroupReady: (groupKey: string) => {
-          status.groups = { ...(status.groups ?? {}), [groupKey]: true };
-          options.onStatusChange?.(status);
-        },
-        onSyncError: (error: Error) => {
-          status.phase = "degraded";
-          degradedReason = "commit";
-          status.lastError = describeErrorChain(error);
-          options.onStatusChange?.(status);
-          options.onSyncError?.(error);
-        },
-        onSyncActivity: () => {
-          armReadSilenceWatchdog();
-        },
-        onLazyActivated: (groupKey: string) => {
-          void writeLazyGroupActivation(pglite, options.registry, groupKey);
-        },
-      });
-    }
-    return startConfiguredSync(
-      pglite as unknown as Parameters<typeof startConfiguredSync>[0],
-      buildStartOptions(promotedGroups),
-    );
-  };
-
-  // Overlap: kick the shape streams off BEFORE schema exec (they buffer catch-up into the memory inbox,
-  // commits gated on `dbReady`). A fresh store has no persisted lazy activations and no subscriptions to
-  // reset, so both DB reads the sequential path makes first are skipped here.
-  let earlySync: Promise<SyncGroupsRuntime> | null = null;
-  let earlySyncStartedAt = 0;
-  if (overlapPrefetch) {
-    status.isRunning = true;
-    status.phase = "syncing";
-    options.onStatusChange?.(status);
-    earlySyncStartedAt = performance.now();
-    earlySync = startSyncRuntime(new Set());
-  }
+        }
+        armReadSilenceWatchdog();
+      },
+      onLazyActivated: (groupKey: string) => {
+        void writeLazyGroupActivation(pglite, options.registry, groupKey);
+      },
+    });
 
   if (!options.pgliteInstance) {
     if (options.prepareLocalDbBeforeSchema) {
@@ -2758,7 +2558,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // The Event lane's in-flight POST is aborted on the same synchronous edge as the write path's: a flush
     // must not still be settling verdicts into a store the teardown is about to close.
     eventLane?.abortInFlight();
-    void engine.close();
+    sync?.unsubscribe();
     void convergenceDriver?.stop();
     void eventFlushDriver?.stop();
   };
@@ -2787,23 +2587,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     if (disposed) return;
     status.isRunning = true;
 
-    // Open the overlap commit gate now the local store is ready (schema exec + journal recovery + reconcile
-    // done): the catch-up the streams prefetched during those phases now drains in one commit train. A no-op
-    // on the sequential path (`openDbGate` is the empty default there).
-    openDbGate();
-
     if (syncEnabled) {
-      if (earlySync) {
-        // Overlap path: the shape streams have been prefetching since before schema exec; adopt the handle
-        // (it resolves as soon as the streams are subscribed — catch-up drains via the gate just lifted, and
-        // `onInitialSync` still gates `ready` on a fully-consistent first paint). The construction was kicked
-        // off before schema exec, so time it here (concurrent-segment wall) into `phases.syncStartMs`.
-        sync = await earlySync;
-        bootReportBuilder.setSyncStartMs(performance.now() - earlySyncStartedAt);
-        bootReportBuilder.markSyncStartDone();
-      } else {
-        // Sequential path (warm store / no fresh hint): apply any explicit subscription resets, promote
-        // durable lazy groups, then start (catch-up strictly after the local phases).
+      {
+        // Apply any explicit subscription resets, promote durable lazy groups, then start — catch-up
+        // strictly after the local phases (ADR-0032 S4's overlap has no native form; backlog 0012).
         const resetKeys =
           versionEvent?.status === "rebuilt"
             ? [...(options.resetSubscriptionKeys ?? []), ...allGroupSubscriptionKeys(options.registry)]
@@ -3361,7 +3148,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // Tear the engine down (abort every shape stream) immediately before closing the DB — the exact
       // point PGlite's own close used to invoke the former extension's close hook (ADR-0032 S1). Order
       // preserved: convergence stop → sync unsubscribe → status → engine close → pglite close.
-      await engine.close();
+      sync?.unsubscribe();
       // Dispose the live-query manager before closing PGlite (ADR-0040 decisions 1 & 6): it cancels any
       // keep-alive timers and awaits every in-flight live `unsubscribe()`, so none races `pglite.close()`.
       await liveManager.dispose();
@@ -3415,7 +3202,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         await pglite.exec(buildWipeLocalStoreSql(options.registry));
         // Same teardown ordering as `stop`: abort the engine's streams before closing the DB, the moment
         // the former extension close hook fired during `pglite.close()` (ADR-0032 S1).
-        await engine.close();
+        sync?.unsubscribe();
         // Dispose the live-query manager before closing PGlite — same close-vs-unsubscribe hang guard as
         // `stop()` (ADR-0040 decisions 1 & 6).
         await liveManager.dispose();
@@ -3800,8 +3587,12 @@ async function resetSubscriptionsIfRequested(pglite: ClientPGlite, keys: string[
     return;
   }
 
-  await pglite.electric.initMetadataTables();
-  await Promise.all(uniqueKeys.map((key) => pglite.electric.deleteSubscription(key)));
+  await migrateSubscriptionMetadataTables({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA });
+  await Promise.all(
+    uniqueKeys.map((key) =>
+      deleteSubscriptionState({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA, subscriptionKey: key }),
+    ),
+  );
 }
 
 function createDrizzleDatabase<TRegistry extends SyncTableRegistry>(
@@ -3877,45 +3668,4 @@ function buildRegistryDrizzleFactory<TRegistry extends SyncTableRegistry>(
     relations: RegistryRelations<TRegistry>;
   }) => PgliteDatabase<RegistryRelations<TRegistry>>;
   return (client) => createDatabase({ client, relations });
-}
-
-function buildSyncConfigFromRegistry<TRegistry extends SyncTableRegistry>(
-  registry: TRegistry,
-  electricUrl: string,
-): SyncConfigInput {
-  return {
-    electricUrl,
-    localSchema: getSyncRegistrySchema(registry),
-    tables: Object.fromEntries(Object.entries(registry).map(([key, entry]) => [key, buildSyncTableInput(entry, key)])),
-  };
-}
-
-function buildSyncTableInput(entry: SyncTableEntry, tableKey: string) {
-  const clientProjection = getClientProjection(entry, tableKey);
-
-  return {
-    name: tableKey,
-    mode: entry.mode,
-    primaryKey: entry.primaryKey,
-    ...(entry.shape !== undefined ? { shape: entry.shape } : {}),
-    clientProjection,
-    // The read-path apply ladder (strategy + json casts) is resolved by the engine directly from the
-    // registry entry via `resolveApplyTarget` (ADR-0029 D1/D2) — `deriveSyncColumnTypes` /
-    // `classifyTableApplyStrategy` on the model, never carried through this config surface.
-    // Carry the consistency group (ADR-0009 decision 2) so the sync starter buckets grouped tables
-    // onto one MultiShapeStream; absent → singleton group.
-    ...(entry.consistencyGroup ? { consistencyGroup: entry.consistencyGroup } : {}),
-    // Carry the lifecycle axes (ADR-0021) so the sync starter can hold lazy groups out of the eager
-    // boot set and provision ephemeral clusters as TEMP; absent → eager/persistent (today's path).
-    ...(entry.subscription ? { subscription: entry.subscription } : {}),
-    ...(entry.retention ? { retention: entry.retention } : {}),
-  };
-}
-
-function getClientProjection(entry: SyncTableEntry, tableKey: string) {
-  if (!entry.clientProjection) {
-    throw new Error(`clientProjection is required for client table ${tableKey}`);
-  }
-
-  return entry.clientProjection;
 }

@@ -187,7 +187,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-test"),
       resetSubscriptionKeys: ["schema.items", "schema.items", "  "],
@@ -230,7 +231,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-prepare-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -271,7 +273,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-prepare-before-schema-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -310,7 +313,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-get-auth-token-shape-header-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -349,7 +353,8 @@ describe("createSyncClient subscription reset", () => {
           },
         },
       } as unknown as SyncTableRegistry,
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-no-auth-token-shape-header-test"),
       resetSubscriptionKeys: ["schema.items"],
@@ -394,7 +399,8 @@ describe("createSyncClient subscription reset", () => {
 
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-degraded-refresh"),
     });
@@ -425,7 +431,8 @@ describe("createSyncClient subscription reset", () => {
     const emissions: string[] = [];
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-stream-stall"),
       onStatusChange: (status) => emissions.push(status.phase),
@@ -460,7 +467,8 @@ describe("createSyncClient subscription reset", () => {
 
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-stall-precedence"),
     });
@@ -483,7 +491,8 @@ describe("createSyncClient subscription reset", () => {
 
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-degraded-commit"),
     });
@@ -516,7 +525,8 @@ describe("createSyncClient subscription reset", () => {
     const emissions: string[] = [];
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-read-silence"),
       readSilenceMs: 40,
@@ -553,7 +563,8 @@ describe("createSyncClient subscription reset", () => {
     const emissions: string[] = [];
     const client = await createSyncClient({
       registry: degradedTestRegistry(),
-      electricUrl: "http://127.0.0.1:3101/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       ...memoryStoreForTests("client-sync-reset-read-silence-stop"),
       readSilenceMs: 40,

@@ -189,7 +189,8 @@ describe("dedup × hydration over the worker bridge (ADR-0040 Slice 3)", () => {
     const { defineSyncWorker } = await import("../../packages/client/src/index");
     return defineSyncWorker({
       registry: workerRegistry,
-      electricUrl: "http://127.0.0.1:1/v1/electric-proxy",
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: true,
       installGlobal: false,

@@ -5,7 +5,8 @@ import { PLACEMENT_ELECTRIC_URL, PLACEMENT_WRITE_URL, placementRegistry } from "
 // mis-wiring SW-direct browsers: ADR-0049 D5 permits this construction value only on elected placement.
 defineSyncWorker({
   registry: placementRegistry,
-  electricUrl: PLACEMENT_ELECTRIC_URL,
+  controlPlaneUrl: PLACEMENT_CONTROL_PLANE_URL,
+  streamBaseUrl: PLACEMENT_STREAM_BASE_URL,
   batchWriteUrl: PLACEMENT_WRITE_URL,
   syncEnabled: false,
   convergenceIntervalMs: 60_000,
