@@ -385,7 +385,7 @@ describe("sync config contracts", () => {
     expect(getTableConfig(projection.localTable).name).toBe("assessment_definition_admin_summary");
     expect(projection.shape?.tableName).toBe("assessment_definition_admin_summary");
     expect(projection.shape?.shapeKey).toBe("assessment_definition_admin_summary");
-    expect(projection.shape?.electricTable).toBe("assessment_definition");
+    expect(projection.shape?.physicalTable).toBe("assessment_definition");
 
     // The local table + client metadata are the SUBSET (PK + requested), heavy column dropped. The
     // registry-facing helpers take a loose `SyncTableEntry`, so view the precisely-typed projection as

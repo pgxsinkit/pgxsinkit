@@ -21,8 +21,8 @@ const publishableKey =
 // (measured: SG↔eu-central-1 = 162ms/statement, ~3s per write). Pinning execution to the DATABASE's
 // region pays the long hop once, on the client→function leg, instead of per statement. Applied to the
 // WRITE function ONLY (board-client wires it via `writeRequestHeaders`): board-write is DB-bound, so it
-// wins from the pin. The read proxy (board-sync) is left UNPINNED — its upstream is Electric Cloud's
-// global CDN, so pinning reads away from the caller would ADD intercontinental hops per catch-up.
+// wins from the pin. The read path is left UNPINNED — the edge is meant to sit behind a CDN, so pinning
+// reads away from the caller would ADD intercontinental hops per catch-up.
 // Set to the project's region (e.g. "eu-central-1") for cloud runs; leave unset locally (nothing to pin).
 const functionsRegion = import.meta.env["VITE_BOARD_FUNCTIONS_REGION"] ?? "";
 
@@ -30,8 +30,17 @@ export const boardConfig = {
   supabaseUrl,
   publishableKey,
   functionsRegion,
-  // board-sync (Electric shape proxy) + board-write (mutation ingress), both behind the gateway.
-  electricUrl: `${supabaseUrl}/functions/v1/board-sync`,
+  // The three deployed surfaces, all behind the gateway:
+  //   board-sync   — the native CONTROL PLANE (`/sync/v1/subscribe`, `/refresh`, `/barrier`)
+  //   board-stream — the EDGE, which gates a stream token and proxies durable-streams bytes
+  //   board-write  — mutation ingress
+  //
+  // The edge is its own origin by design, not by accident (ADR-0055): its responses are the only ones a
+  // CDN can share between subscribers, and it must be frontable without the control plane's per-subject
+  // traffic sharing a cache key with it. Both are overridable so a deployment can front the edge with a
+  // real CDN hostname without rebuilding the config.
+  controlPlaneUrl: import.meta.env["VITE_BOARD_CONTROL_PLANE_URL"] ?? `${supabaseUrl}/functions/v1/board-sync`,
+  streamBaseUrl: import.meta.env["VITE_BOARD_STREAM_BASE_URL"] ?? `${supabaseUrl}/functions/v1/board-stream/v1/stream`,
   batchWriteUrl: `${supabaseUrl}/functions/v1/board-write/api/mutations`,
   // The shared dev password every seeded identity uses (scripts/seed-board.ts). Demo only.
   seedPassword: import.meta.env["VITE_BOARD_SEED_PASSWORD"] ?? "board-demo-password",

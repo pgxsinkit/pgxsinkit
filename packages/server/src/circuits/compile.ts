@@ -57,8 +57,8 @@ export function resolveEntryByShapeKey(registry: SyncTableRegistry, shapeKey: st
  * name that would 404 deep inside shape creation, refuse here with the reason — a real limitation of
  * the engine, tracked against the fork, not something the control plane can paper over.
  */
-function physicalTable(shape: ShapeSpec): { table: string } | { refusal: string } {
-  const target = shape.electricTable ?? shape.tableName;
+function resolveShapeTarget(shape: ShapeSpec): { table: string } | { refusal: string } {
+  const target = shape.physicalTable ?? shape.tableName;
   if (!target.includes(".")) return { table: target };
   const [schema] = target.split(".");
   if (schema === "public") return { table: target.slice("public.".length) };
@@ -100,7 +100,7 @@ export function compileShapeRequest(registry: SyncTableRegistry, request: ShapeR
     return { outcome: "deny", reason: `no shape declares shapeKey "${request.shapeKey}"` };
   }
 
-  const target = physicalTable(shape);
+  const target = resolveShapeTarget(shape);
   if ("refusal" in target) return { outcome: "deny", reason: target.refusal };
 
   const tier = readShapeTier(shape);

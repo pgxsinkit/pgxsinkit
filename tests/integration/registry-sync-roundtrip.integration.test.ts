@@ -3,15 +3,22 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 import { count, eq } from "drizzle-orm";
 import { jsonb, pgSchema, text } from "drizzle-orm/pg-core";
 
-import { authorsTable, buildDemoSyncConfig, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
+import { authorsTable, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
 
+import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createCircuitsTestPGlite } from "../support/circuits-pglite";
 import { drizzleOver } from "../support/drizzle";
-import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
 const env = readIntegrationEnv();
 const localSchemaSql = generateLocalSchemaSql(demoSyncRegistry);
@@ -26,22 +33,28 @@ const subscriptionsMetadataTable = pgSchema("pgxsinkit").table("subscriptions_me
 });
 
 async function createLocalTodoStore() {
-  const pg = await createSyncEngineTestPGlite();
+  const pg = await createCircuitsTestPGlite();
 
   await pg.exec(localSchemaSql);
 
   return pg;
 }
 
-async function startTestSync(localPg: Awaited<ReturnType<typeof createLocalTodoStore>>) {
+async function startTestSync(
+  localPg: Awaited<ReturnType<typeof createLocalTodoStore>>,
+  urls: Pick<NativeSyncStack<unknown>, "controlPlaneUrl" | "streamBaseUrl">,
+  registry: typeof demoSyncRegistry = demoSyncRegistry,
+) {
   let markInitialSyncDone: (() => void) | null = null;
   const initialSyncDone = new Promise<void>((resolve) => {
     markInitialSyncDone = resolve;
   });
 
-  const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
-    syncConfig: buildDemoSyncConfig(env.electricUrl),
-    registry: demoSyncRegistry,
+  const sync = await startCircuitsSync(localPg, {
+    registry,
+    controlPlaneUrl: urls.controlPlaneUrl,
+    streamBaseUrl: urls.streamBaseUrl,
+    metadataSchema: DEFAULT_METADATA_SCHEMA,
     onInitialSync: () => {
       markInitialSyncDone?.();
       markInitialSyncDone = null;
@@ -54,20 +67,17 @@ async function startTestSync(localPg: Awaited<ReturnType<typeof createLocalTodoS
   };
 }
 
-// Bind both demo tables into one consistency group (ADR-0009 decision 2) so they sync on a single
-// MultiShapeStream and commit atomically — the cross-shape path the standalone-per-table wiring
-// never exercised.
-function groupedDemoSyncConfig() {
-  const config = buildDemoSyncConfig(env.electricUrl);
-  return {
-    ...config,
-    tables: Object.fromEntries(
-      Object.entries(config.tables).map(([key, table]) => [key, { ...table, consistencyGroup: "demo" }]),
-    ),
-  };
-}
+// Bind both demo tables into one consistency group (ADR-0009 decision 2) so they sync as one group and
+// commit atomically — the cross-shape path the standalone-per-table wiring never exercised. The group
+// is declared on the REGISTRY, which is where `startCircuitsSync` reads it from.
+const groupedDemoRegistry = {
+  ...demoSyncRegistry,
+  authors: { ...demoSyncRegistry.authors, consistencyGroup: "demo" },
+  todos: { ...demoSyncRegistry.todos, consistencyGroup: "demo" },
+};
 
-describe("electric -> pglite sync integration", () => {
+describe("circuits -> pglite sync integration", () => {
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
   const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
 
@@ -83,14 +93,20 @@ describe("electric -> pglite sync integration", () => {
       await provisioningServer.stop();
     }
 
-    server = createSyncServer({
-      registry: demoSyncRegistry,
-      db: serverDb.db,
-      resolveAuthClaims: () => ({
-        role: "authenticated",
-        sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d",
-      }),
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: demoSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: () => ({
+            role: "authenticated",
+            sub: "179e4f33-69ec-4f39-ba26-8f10c8ac8c9d",
+          }),
+          readPath,
+        }),
     });
+    server = stack.server;
   });
 
   beforeEach(async () => {
@@ -99,7 +115,7 @@ describe("electric -> pglite sync integration", () => {
   });
 
   afterAll(async () => {
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
@@ -144,7 +160,7 @@ describe("electric -> pglite sync integration", () => {
     });
 
     const localPg = await createLocalTodoStore();
-    const { sync, initialSyncDone } = await startTestSync(localPg);
+    const { sync, initialSyncDone } = await startTestSync(localPg, stack);
 
     try {
       await initialSyncDone;
@@ -164,7 +180,7 @@ describe("electric -> pglite sync integration", () => {
 
   it("delivers new API writes to an active pglite subscriber", async () => {
     const localPg = await createLocalTodoStore();
-    const { sync, initialSyncDone } = await startTestSync(localPg);
+    const { sync, initialSyncDone } = await startTestSync(localPg, stack);
 
     try {
       await initialSyncDone;
@@ -282,9 +298,11 @@ describe("electric -> pglite sync integration", () => {
     const initialSyncDone = new Promise<void>((resolve) => {
       markInitialSyncDone = resolve;
     });
-    const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
-      syncConfig: groupedDemoSyncConfig(),
-      registry: demoSyncRegistry,
+    const sync = await startCircuitsSync(localPg, {
+      registry: groupedDemoRegistry,
+      controlPlaneUrl: stack.controlPlaneUrl,
+      streamBaseUrl: stack.streamBaseUrl,
+      metadataSchema: DEFAULT_METADATA_SCHEMA,
       onInitialSync: () => {
         markInitialSyncDone?.();
         markInitialSyncDone = null;
@@ -303,14 +321,19 @@ describe("electric -> pglite sync integration", () => {
       });
 
       // The whole group persists ONE subscription-state row, keyed by the group, whose per-shape
-      // metadata covers both member tables — i.e. it is a single MultiShapeStream, not two streams.
+      // metadata covers both member streams — i.e. one atomically-committing group, not two.
+      //
+      // The per-shape keys are the engine's own STREAM PATHS, not the table names: a shared-tier shape
+      // fans out to one stream per entitled scope (ADR-0055 decision 6), so table names are not unique
+      // within a group and keying by them would silently collapse every scope but the last. Their exact
+      // values are the engine's to choose, so only the count is asserted.
       const subs = await localDb
         .select({ key: subscriptionsMetadataTable.key, shapeMetadata: subscriptionsMetadataTable.shapeMetadata })
         .from(subscriptionsMetadataTable)
         .orderBy(subscriptionsMetadataTable.key);
       expect(subs).toHaveLength(1);
       expect(subs[0]?.key).toBe("demo");
-      expect(Object.keys(subs[0]?.shapeMetadata ?? {}).sort()).toEqual(["authors", "todos"]);
+      expect(Object.keys(subs[0]?.shapeMetadata ?? {})).toHaveLength(2);
     } finally {
       sync.unsubscribe();
       await localPg.close();
@@ -357,7 +380,7 @@ describe("electric -> pglite sync integration", () => {
     });
 
     const localPg = await createLocalTodoStore();
-    const { sync, initialSyncDone } = await startTestSync(localPg);
+    const { sync, initialSyncDone } = await startTestSync(localPg, stack);
 
     try {
       await initialSyncDone;

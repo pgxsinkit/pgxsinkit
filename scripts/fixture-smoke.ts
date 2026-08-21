@@ -193,11 +193,13 @@ await assert.rejects(
 
 // client: stand up a REAL offline client (in-memory PGlite, sync disabled) and prove a local
 // write/read round-trip through the published surface — not just that the factory exists. The
-// DB+Electric round-trip against live infra lives in the integration lane (and createSyncServer
-// touches its db at construction, so it is exercised there, not here).
+// live round-trip against real infra lives in the integration lane (and createSyncServer touches its
+// db at construction, so it is exercised there, not here). The read URLs are never contacted when
+// sync is disabled, but they are required together, so both are given.
 const client = await createSyncClient({
   registry,
-  electricUrl: "http://localhost:3000/v1/shape",
+  controlPlaneUrl: "http://localhost:3001",
+  streamBaseUrl: "http://localhost:3002/v1/stream",
   batchWriteUrl: "http://localhost:3001/api/mutations",
   ...memoryStoreForTests("fixture-smoke"),
   syncEnabled: false,

@@ -1,6 +1,6 @@
 import { createBoardClaimsResolver } from "../core/auth";
 import { createBoardDrainNudge, createBoardIssueViewDrainHandler } from "../core/events-drain";
-import { createBoardSyncHandler, createBoardWriteHandler } from "../core/handlers";
+import { createBoardStreamHandler, createBoardSyncHandler, createBoardWriteHandler } from "../core/handlers";
 import { createDenoBoardDb } from "./deno-db";
 import { parseAllowedOrigins, requireEnv } from "./env";
 
@@ -19,6 +19,10 @@ export function serveBoardWrite(): void {
 
 export async function serveBoardSync(): Promise<void> {
   requireDeno().serve(await createDenoBoardSyncHandler());
+}
+
+export async function serveBoardStream(): Promise<void> {
+  requireDeno().serve(await createDenoBoardStreamHandler());
 }
 
 /**
@@ -86,8 +90,16 @@ function boardEventsDrainUrl(env: Record<string, string | undefined>): string | 
 export function createDenoBoardSyncHandler() {
   const env = readDenoEnv();
   return createBoardSyncHandler({
-    circuitsEngineUrl: env["CIRCUITS_ENGINE_URL"] ?? "http://engine:7010",
-    streamTokenSecret: env["STREAM_TOKEN_SECRET"] ?? "dev-stream-token-secret",
+    circuitsEngineUrl: requireEnv(
+      env,
+      ["CIRCUITS_ENGINE_URL"],
+      "CIRCUITS_ENGINE_URL is not set — board-sync cannot reach the Circuits engine to create shapes.",
+    ),
+    streamTokenSecret: requireEnv(
+      env,
+      ["STREAM_TOKEN_SECRET"],
+      "STREAM_TOKEN_SECRET is not set — board-sync would mint stream tokens the edge cannot verify.",
+    ),
     resolveAuthClaims: createBoardClaimsResolver({
       supabaseUrl: requireEnv(
         env,
@@ -100,13 +112,36 @@ export function createDenoBoardSyncHandler() {
   });
 }
 
+/**
+ * The board's EDGE function. It needs no claims resolver and no database: a stream token IS the
+ * authorization, which is what lets this half scale and cache independently of the control plane.
+ */
+export function createDenoBoardStreamHandler() {
+  const env = readDenoEnv();
+  return createBoardStreamHandler({
+    durableStreamsUrl: requireEnv(
+      env,
+      ["DURABLE_STREAMS_URL"],
+      "DURABLE_STREAMS_URL is not set — board-stream has no log to proxy reads to.",
+    ),
+    streamTokenSecret: requireEnv(
+      env,
+      ["STREAM_TOKEN_SECRET"],
+      "STREAM_TOKEN_SECRET is not set — board-stream cannot verify the tokens board-sync mints.",
+    ),
+    allowedOrigins: parseAllowedOrigins(env["BOARD_ALLOWED_ORIGINS"]),
+  });
+}
+
 function readDenoEnv(): Record<string, string | undefined> {
   const runtime = requireDeno();
   return {
     BOARD_ALLOWED_ORIGINS: runtime.env.get("BOARD_ALLOWED_ORIGINS"),
     BOARD_EVENTS_DRAIN_SECRET: runtime.env.get("BOARD_EVENTS_DRAIN_SECRET"),
     BOARD_EVENTS_DRAIN_URL: runtime.env.get("BOARD_EVENTS_DRAIN_URL"),
-    ELECTRIC_SHAPE_URL: runtime.env.get("ELECTRIC_SHAPE_URL"),
+    CIRCUITS_ENGINE_URL: runtime.env.get("CIRCUITS_ENGINE_URL"),
+    DURABLE_STREAMS_URL: runtime.env.get("DURABLE_STREAMS_URL"),
+    STREAM_TOKEN_SECRET: runtime.env.get("STREAM_TOKEN_SECRET"),
     SUPABASE_DB_URL: runtime.env.get("SUPABASE_DB_URL"),
     SUPABASE_URL: runtime.env.get("SUPABASE_URL"),
   };

@@ -2,22 +2,22 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 import { asc } from "drizzle-orm";
 
-import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
-  buildMembershipFanoutSyncConfig,
   membershipFanoutSyncRegistry,
   workItemsTable,
   workspaceMembersTable,
   workspacesTable,
 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv, startNativeSyncStack, type NativeSyncStack } from "@pgxsinkit/test-utils";
 
+import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createCircuitsTestPGlite } from "../support/circuits-pglite";
+import { claimsFromTestHeader } from "../support/claims";
 import { drizzleOver } from "../support/drizzle";
-import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
 const env = readIntegrationEnv();
 const localSchemaSql = generateLocalSchemaSql(membershipFanoutSyncRegistry);
@@ -30,20 +30,15 @@ const WORKSPACE_1 = "2d5e1e3b-0000-4000-8000-000000000111";
 const VISIBLE_ITEM = "3e6f2f4c-0000-4000-8000-0000000000f1";
 const HIDDEN_ITEM = "3e6f2f4c-0000-4000-8000-0000000000f2";
 
-function claimsFromHeader(request: Request): JwtClaims | null {
-  const sub = request.headers.get("x-test-sub");
-  return sub ? { role: "authenticated", sub } : null;
-}
-
 async function createLocalWorkItemStore() {
-  const pg = await createSyncEngineTestPGlite();
+  const pg = await createCircuitsTestPGlite();
   await pg.exec(localSchemaSql);
   return pg;
 }
 
 async function startMemberSync(
   localPg: Awaited<ReturnType<typeof createLocalWorkItemStore>>,
-  proxyUrl: string,
+  urls: Pick<NativeSyncStack<unknown>, "controlPlaneUrl" | "streamBaseUrl">,
   sub: string,
 ) {
   let markInitialSyncDone: (() => void) | null = null;
@@ -51,10 +46,15 @@ async function startMemberSync(
     markInitialSyncDone = resolve;
   });
 
-  const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
-    syncConfig: buildMembershipFanoutSyncConfig(proxyUrl),
+  // The subject rides the SAME per-request adapter production uses; the control plane resolves it
+  // into claims and fuses them into the shape predicate, so two members of one workspace subscribe
+  // to the same shapeKey and are handed different streams.
+  const sync = await startCircuitsSync(localPg, {
     registry: membershipFanoutSyncRegistry,
-    shapeHeaders: { "x-test-sub": sub },
+    controlPlaneUrl: urls.controlPlaneUrl,
+    streamBaseUrl: urls.streamBaseUrl,
+    metadataSchema: DEFAULT_METADATA_SCHEMA,
+    authHeaders: () => ({ "x-test-sub": sub }),
     onInitialSync: () => {
       markInitialSyncDone?.();
       markInitialSyncDone = null;
@@ -65,9 +65,8 @@ async function startMemberSync(
 }
 
 describe("asymmetric read (role-conditional visibility) integration", () => {
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>;
-  let httpServer!: ReturnType<typeof Bun.serve>;
-  let proxyUrl!: string;
   const serverDb = createServerDb(membershipFanoutSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
@@ -81,19 +80,19 @@ describe("asymmetric read (role-conditional visibility) integration", () => {
       await provisioningServer.stop();
     }
 
-    // createSyncServer serves the shape proxy itself at a chosen path, sharing the one
-    // resolveAuthClaims adapter with the write route (ADR-0003) — no framework wrapper needed.
-    server = createSyncServer({
-      registry: membershipFanoutSyncRegistry,
-      db: serverDb.db,
-      resolveAuthClaims: (request) => claimsFromHeader(request),
-      controlPlaneUrl: env.controlPlaneUrl,
-      streamBaseUrl: env.streamBaseUrl,
-      shapeProxyPath: "/v1/electric-proxy",
+    // createSyncServer serves the native control plane itself, sharing the one resolveAuthClaims
+    // adapter with the write route (ADR-0003) — no framework wrapper needed.
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: membershipFanoutSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: claimsFromTestHeader,
+          readPath,
+        }),
     });
-
-    httpServer = Bun.serve({ port: 0, fetch: server.fetch });
-    proxyUrl = `http://127.0.0.1:${httpServer.port}/v1/electric-proxy`;
+    server = stack.server;
   });
 
   beforeEach(async () => {
@@ -114,16 +113,15 @@ describe("asymmetric read (role-conditional visibility) integration", () => {
   });
 
   afterAll(async () => {
-    await httpServer.stop(true);
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
   it("streams hidden rows to a workspace manager but not to a plain member", async () => {
     const managerPg = await createLocalWorkItemStore();
     const memberPg = await createLocalWorkItemStore();
-    const manager = await startMemberSync(managerPg, proxyUrl, MANAGER_A);
-    const member = await startMemberSync(memberPg, proxyUrl, MEMBER_B);
+    const manager = await startMemberSync(managerPg, stack, MANAGER_A);
+    const member = await startMemberSync(memberPg, stack, MEMBER_B);
 
     try {
       await manager.initialSyncDone;

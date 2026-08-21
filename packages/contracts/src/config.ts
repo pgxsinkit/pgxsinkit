@@ -275,7 +275,7 @@ export interface ShapeSpec {
    * wrong about, the table you are reading), so it is omitted from {@link ShapeSpecInput}. The
    * combinator derives it from the owner; `defineSyncTable` never sets it from input.
    */
-  electricTable?: string;
+  physicalTable?: string;
   rowFilter?: RowFilterSpec;
   /**
    * SHARED TIER (ADR-0055) — the scope columns, resolved to column names, whose values key this
@@ -334,10 +334,10 @@ export function readShapeTier(shape: ShapeSpec): ShapeTier {
 
 /** Input variant of {@link ShapeSpec} where `tableName` and `shapeKey` are optional.
  * When omitted, both default to the top-level `tableName` of the `defineSyncTable` call.
- * `electricTable` is deliberately absent — it is a resolved/internal field, never a consumer input
- * (see {@link ShapeSpec.electricTable}); a read projection over an existing table is authored with
+ * `physicalTable` is deliberately absent — it is a resolved/internal field, never a consumer input
+ * (see {@link ShapeSpec.physicalTable}); a read projection over an existing table is authored with
  * `defineReadProjection`, which derives it from the owner. */
-export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey" | "electricTable"> & {
+export type ShapeSpecInput = Omit<ShapeSpec, "tableName" | "shapeKey" | "physicalTable"> & {
   tableName?: string;
   shapeKey?: string;
 };

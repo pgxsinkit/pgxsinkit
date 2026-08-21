@@ -34,14 +34,15 @@ if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
 // never touches the registry, so the warmed store serves whichever role ends up claiming it.
 //
 // `x-region` stays WRITE-ONLY (writeRequestHeaders) exactly as in-process: the write function is DB-bound
-// and wins from the regional pin, while the read proxy follows Electric Cloud's global CDN. The worker
+// and wins from the regional pin, while the read path is meant to be CDN-fronted. The worker
 // loads PGlite's own boot assets on `create`; those hit the same-origin HTTP cache the login screen's
 // `warmPgliteBootAssets` already primed (the tab warm is pure HTTP-cache priming in worker mode).
 defineSyncWorker({
   registry: boardSyncRegistry,
   resolveRegistry: (role) =>
     role === "member" ? (boardMemberRegistry as typeof boardSyncRegistry) : boardSyncRegistry,
-  electricUrl: boardConfig.electricUrl,
+  controlPlaneUrl: boardConfig.controlPlaneUrl,
+  streamBaseUrl: boardConfig.streamBaseUrl,
   batchWriteUrl: boardConfig.batchWriteUrl,
   // Fallback sweep only — writes flush event-driven the moment they enqueue, so this matches the
   // 15s policy the in-process board trigger (offline.ts) already settled on.

@@ -39,7 +39,13 @@ export interface EntitlementSet {
 export interface StreamGateOptions {
   /** Verifies the stream token. Minted by the control plane in the same process. */
   key: CryptoKey;
-  entitlements: EntitlementSet;
+  /**
+   * The live entitlement set backing the shared tier. Optional for the same reason it is optional on
+   * the control plane: a deployment whose registry declares no shared shape has nothing to ask it.
+   * Absent, a shared-tier grant is DENIED rather than waved through — the two sides then agree that
+   * an unconfigured entitlement set can never permit.
+   */
+  entitlements?: EntitlementSet;
   /**
    * Base URL of the durable-streams server, with whatever stream prefix it is mounted under — the
    * same value the engine is given as `ELECTRIC_CIRCUITS_DS_URL`, since both address the same paths.
@@ -79,8 +85,12 @@ export async function authorizeStreamRead(
 
   if (grant.scope === undefined) return { allow: true, grant };
 
-  if (!options.entitlements.ready) return { allow: false, reason: "entitlements unavailable" };
-  if (!options.entitlements.permits(verified.claims.sub, grant.shapeKey, grant.scope)) {
+  const entitlements = options.entitlements;
+  if (entitlements === undefined) {
+    return { allow: false, reason: "shared-tier grant, but this deployment configured no entitlement set" };
+  }
+  if (!entitlements.ready) return { allow: false, reason: "entitlements unavailable" };
+  if (!entitlements.permits(verified.claims.sub, grant.shapeKey, grant.scope)) {
     return { allow: false, reason: "not entitled to this scope" };
   }
   return { allow: true, grant };

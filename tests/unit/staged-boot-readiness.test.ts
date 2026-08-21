@@ -12,7 +12,7 @@ import { memoryStoreForTests } from "../../packages/client/src/testing";
 //   * `createMutationRuntime` — `runBootRecovery` awaits `recoveryGate` (contrived slow recovery), records
 //     its call order, and `create` records its own; `create` fires `onOrdinaryEnqueue` so ADR-0039
 //     write-activation flows through the real client indirection.
-//   * `startConfiguredSync` — awaits `syncGate`, records order, and records `ensureGroupStarted` calls.
+//   * `startCircuitsSync` — awaits `syncGate`, records order, and records `ensureGroupStarted` calls.
 //   * `reconcileLocalStoreVersion` — records order (proves reconcile runs in the local-read core, before
 //     recovery, on a normal boot).
 // `mock.module` is process-global, so this file runs isolated (registered in scripts/run-unit-tests.ts).
@@ -84,7 +84,7 @@ class FakeLiveQuery {
 }
 const fakeLive = { query: async () => new FakeLiveQuery() };
 
-const startConfiguredSyncMock = mock(async () => {
+const startCircuitsSyncMock = mock(async () => {
   await syncGate.promise;
   order.push("syncStart");
   return {
@@ -118,19 +118,16 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
     }));
     await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async () => undefined,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the reset path now calls directly (there is no engine
+    // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async () => undefined,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => {
@@ -220,7 +217,7 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
     restoreRecovery = false;
     syncUnsubscribed = false;
     capturedOnOrdinaryEnqueue = undefined;
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
   });
 
   async function makeClient(storePath: string, extra: Record<string, unknown> = {}) {
@@ -349,7 +346,7 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
     const stopPromise = client.stop();
     await flush();
     // Sync has not started (the tail never reached sync-start), and it cannot now.
-    expect(startConfiguredSyncMock).not.toHaveBeenCalled();
+    expect(startCircuitsSyncMock).not.toHaveBeenCalled();
 
     // Release recovery: the tail resumes, sees `disposed`, and BAILS before writeReady / sync-start.
     recoveryGate.resolve();
@@ -358,7 +355,7 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
     await flush();
 
     // The tail never started a shape stream, and never set the runtime running.
-    expect(startConfiguredSyncMock).not.toHaveBeenCalled();
+    expect(startCircuitsSyncMock).not.toHaveBeenCalled();
     expect(order).not.toContain("syncStart");
     expect(syncUnsubscribed).toBe(false); // nothing to unsubscribe — nothing was started
     expect(client.status.isRunning).toBe(false);
@@ -448,6 +445,6 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
     // `bootSettled` still RESOLVES as teardown completion (not rejected).
     await client.bootSettled;
     // No sync stream was started after the stop.
-    expect(startConfiguredSyncMock).not.toHaveBeenCalled();
+    expect(startCircuitsSyncMock).not.toHaveBeenCalled();
   });
 });

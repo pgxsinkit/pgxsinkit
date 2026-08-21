@@ -32,7 +32,7 @@ describe("perf-lab scenario schemas", () => {
     const tableConfig = getTableConfig(firstTable!.table);
 
     expect(tableConfig.schema).toBe(schemaName);
-    expect(firstTable?.shape?.electricTable).toBe(`${schemaName}.perf_items_000`);
+    expect(firstTable?.shape?.physicalTable).toBe(`${schemaName}.perf_items_000`);
     expect(firstTable?.shape?.shapeKey).toBe(`${schemaName}.perf_items_000`);
   });
 

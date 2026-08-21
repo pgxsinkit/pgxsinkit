@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // `live-initial` (`hydratingTables`), and posts `live-hydrated` only after the caught-up rows' diff on the
 // SAME port (rows-before-signal). The tab (`attachSyncClient`) turns a non-empty `hydratingTables` into the
 // subscription's `hydrated` promise. Driven over a bun `MessageChannel` with a fully controllable fake
-// `pglite.live` + startConfiguredSync stub — no real PGlite/network (mirrors `client-lazy-facade`).
+// `pglite.live` + startCircuitsSync stub — no real PGlite/network (mirrors `client-lazy-facade`).
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
@@ -71,7 +71,7 @@ function holdGroupReady(groupKey: string): () => void {
 // Fire `onInitialSync` so the worker's engine reaches phase "ready" (the tab awaits `client.ready`), while
 // a held group's `groupReady`/`isGroupReady` stay pending — decoupling boot readiness from a group still
 // catching up, exactly what the hydration signal must observe.
-const startConfiguredSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
+const startCircuitsSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
   opts.onInitialSync?.();
   return {
     unsubscribe: () => undefined,
@@ -102,19 +102,16 @@ describe("worker-bridge live-rows hydration across eager + lazy groups (ADR-0021
     }));
     await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async () => undefined,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the reset path now calls directly (there is no engine
+    // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async () => undefined,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => undefined,
@@ -181,7 +178,7 @@ describe("worker-bridge live-rows hydration across eager + lazy groups (ADR-0021
     liveInitialRows = [];
     createdLiveQueries.length = 0;
     groupReadyDeferreds.clear();
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
   });
 
   afterEach(() => {

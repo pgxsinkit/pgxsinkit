@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 
 import { classifyTableApplyStrategy, type ApplyStrategy, type SyncTableRegistry } from "@pgxsinkit/contracts";
 
+import { nowMs, type GroupBootStamp } from "../boot-report";
 import { resolveApplyTarget, type ApplyTarget } from "../local-tables";
 import {
   applyBulkDeletesToTable,
@@ -69,6 +70,11 @@ export interface CircuitsSyncOptions {
   /** Reads the engine barrier through the control plane. Consulted once per alignment generation. */
   readBarrier: () => Promise<ConvergenceBarrier>;
   sessionScoped?: boolean;
+  /**
+   * Boot observability (ADR-0034). Present only for a BOOT group — an on-demand lazy activation gets
+   * none, so post-boot traffic never enters a finalized report.
+   */
+  bootStamp?: GroupBootStamp;
   onInitialSync?: () => void;
   onSyncError?: (error: Error) => void;
   onSyncActivity?: () => void;
@@ -132,6 +138,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
     debug = false,
     maxCommitRetries = DEFAULT_MAX_COMMIT_RETRIES,
     commitRetryDelayMs = defaultRetryDelayMs,
+    bootStamp,
   } = options;
 
   const shapeNames = Object.keys(shapes);
@@ -210,6 +217,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
    * does not advance — a later resume re-streams exactly that batch.
    */
   const commitHeld = async (): Promise<boolean> => {
+    const appliedAt = nowMs();
     const held = inbox.peekAll();
     const epochsAtPeek = inbox.snapshotEpochs();
     const offsets = inbox.pendingOffsets();
@@ -322,6 +330,9 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
       try {
         await runCommit();
         if (unsubscribed) return false;
+        // ADR-0034: the apply wall for this group, recorded BEFORE `signalInitialSyncIfReady` — the
+        // ready edge freezes the accumulator, and the commit that caused it must still be counted.
+        bootStamp?.onApply(nowMs() - appliedAt);
         inbox.ackAll(epochsAtPeek);
         for (const shapeName of shapesToTruncate) truncateNeeded.delete(shapeName);
         signalInitialSyncIfReady();
@@ -420,6 +431,10 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
     // A delivered batch means a fetch just succeeded — the read path is alive, so a runtime can clear
     // an auth-needed status once a fresh token starts working again (ADR-0013).
     options.onSyncActivity?.();
+
+    // ADR-0034: one delivered response, carrying its change rows — the fetch/rows half of the group's
+    // boot stamp. Recorded before the apply so a report attributes network wait and apply wall apart.
+    bootStamp?.onBatchDelivered(batch.envelopes.length);
 
     const target = targets.get(batch.shape)!;
     inbox.ingestBatch(

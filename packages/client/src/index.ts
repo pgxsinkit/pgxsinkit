@@ -489,6 +489,8 @@ const OPFS_STORE_EXTENT_SIZE = 65536;
 const READ_SILENCE_MS = 45_000;
 /** `status.lastError` for the read-silence watchdog: nothing failed — that is exactly the problem. */
 const READ_STREAM_SILENT = "read stream silent: no server response inside the silence window while reporting ready";
+/** `status.lastError` while subscribe keeps failing for a reason the subject cannot act on. */
+const CONTROL_PLANE_UNREACHABLE = "control plane unreachable: subscribe is failing and retrying";
 /**
  * Non-enumerable brand stamped on an opfs-repacked instance {@link createClientPGlite} mints (ADR-0049): the
  * opfs-repacked VFS owns its store on a dedicated OPFS directory and reports NO `dataDir` (a custom VFS, the
@@ -2286,6 +2288,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       streamBaseUrl: readTransport.streamBaseUrl,
       metadataSchema: DEFAULT_METADATA_SCHEMA,
       promotedGroups,
+      // ADR-0034: the per-group rows of the boot report. Only the boot starts open an accumulator.
+      bootCollector: bootReportBuilder,
+      // Teardown must be able to reach the read path BEFORE this promise resolves. A stop while the
+      // first subscribe is still in flight has no runtime handle to unsubscribe — and that is exactly
+      // the window where a stop is most likely, since an unreachable control plane is why the boot is
+      // still running. Without this, `stop()` waits on a TCP connect to a host that is not answering.
+      signal: readPathAbort.signal,
       ...(options.getAuthToken || options.requestHeaders ? { authHeaders: nativeAuthHeaders } : {}),
       onInitialSync: () => {
         initialSyncCompleted = true;
@@ -2307,12 +2316,44 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         options.onStatusChange?.(status);
         options.onSyncError?.(error);
       },
+      // A subscribe that keeps failing on the deployment's side. Recoverable, so it takes the
+      // `stream` reason rather than `commit`: the first delivered batch clears it.
+      //
+      // Precedence, and both halves matter. It never masks `auth-needed` (more actionable — the
+      // subject can fix that one themselves), and it never masks a commit-failure degraded (more
+      // serious — its `lastError` names a store that is diverging, which a transport blip must not
+      // overwrite, and which the delivered-batch recovery must not then lift).
+      //
+      // It DOES refresh a stream-degraded status on each new fault rather than freezing on the
+      // first, so a control plane that fails one way and then another reports its current cause.
+      onSubscribeError: (error: Error) => {
+        if (status.phase === "auth-needed") return;
+        if (status.phase === "degraded" && degradedReason === "commit") return;
+        status.phase = "degraded";
+        degradedReason = "stream";
+        status.lastError = `${CONTROL_PLANE_UNREACHABLE}: ${describeErrorChain(error)}`;
+        options.onStatusChange?.(status);
+      },
+      // ADR-0013: a persistent read-path auth failure is its own status — the app prompts re-login
+      // while subscribe keeps retrying for a fresh token. Only wired when a token provider exists;
+      // without one there is no auth lifecycle to track.
+      ...(options.getAuthToken
+        ? {
+            onAuthError: () => {
+              if (status.phase === "auth-needed") return;
+              status.phase = "auth-needed";
+              delete status.lastError;
+              options.onStatusChange?.(status);
+            },
+          }
+        : {}),
       onSyncActivity: () => {
-        // A delivered batch is proof of life, so a runtime that went degraded on READ SILENCE
-        // recovers here. Only that reason: a commit failure is sticky by design (ADR-0009 d5) —
-        // a fetch can keep succeeding while applies keep failing, and clearing on traffic would
-        // report healthy while the store diverges.
-        if (status.phase === "degraded" && degradedReason === "stream") {
+        // A delivered batch is proof of life, so the two RECOVERABLE statuses clear here: an
+        // `auth-needed` whose fresh token has started working (ADR-0013), and a `degraded` whose
+        // reason was the read stream. Never a commit failure — that one is sticky by design
+        // (ADR-0009 d5), because a fetch can keep succeeding while applies keep failing, and
+        // clearing it on traffic would report healthy while the store diverges.
+        if (status.phase === "auth-needed" || (status.phase === "degraded" && degradedReason === "stream")) {
           status.phase = initialSyncCompleted ? "ready" : "syncing";
           degradedReason = null;
           delete status.lastError;
@@ -2520,6 +2561,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // to tell "sync disabled" (trivially ready) apart from "sync pending" (not yet ready / hydrating).
   const isSyncPending = (): boolean => syncEnabled && sync == null && !disposed;
 
+  /** Aborts the read path's control-plane traffic on teardown — see `haltActivity`. */
+  const readPathAbort = new AbortController();
+
   // Quiesce the background write/sync tail before a teardown (ADR-0041 BLOCKER 2). `stop()`/`destroy()` can be
   // called while the tail is still in flight (React StrictMode mount/unmount). Flag disposal so the tail bails
   // at its next stage boundary (never starting sync after this), gracefully release any read seam parked on
@@ -2558,6 +2602,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // The Event lane's in-flight POST is aborted on the same synchronous edge as the write path's: a flush
     // must not still be settling verdicts into a store the teardown is about to close.
     eventLane?.abortInFlight();
+    // Covers the read path whether or not sync has finished starting: `sync` is still null while the
+    // first subscribe is in flight, and that is the case this abort exists for.
+    readPathAbort.abort();
     sync?.unsubscribe();
     void convergenceDriver?.stop();
     void eventFlushDriver?.stop();
@@ -2586,6 +2633,17 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // started once teardown has begun.
     if (disposed) return;
     status.isRunning = true;
+
+    // Provision the subscription metadata store BEFORE anything reads it. The Electric engine did this
+    // in `createSyncEngine`; the native path has no engine object, so it belongs here.
+    //
+    // Unconditional, outside the `syncEnabled` branch, for two reasons. Every sync-enabled boot reads a
+    // cursor whether or not a reset was asked for — and `desync`/`discardEphemeral` clear one on a
+    // client that may have booted with sync off, so the relations cannot be a function of a runtime
+    // flag. It is also cheap and idempotent: `IF NOT EXISTS` throughout, and the session-scoped halves
+    // (ADR-0042) have to be re-created every boot regardless, since they live in `pg_temp`.
+    await migrateSubscriptionMetadataTables({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA });
+    if (disposed) return;
 
     if (syncEnabled) {
       {
@@ -3587,7 +3645,7 @@ async function resetSubscriptionsIfRequested(pglite: ClientPGlite, keys: string[
     return;
   }
 
-  await migrateSubscriptionMetadataTables({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA });
+  // No migrate here: boot provisions the metadata relations unconditionally, before this can run.
   await Promise.all(
     uniqueKeys.map((key) =>
       deleteSubscriptionState({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA, subscriptionKey: key }),

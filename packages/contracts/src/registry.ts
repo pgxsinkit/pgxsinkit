@@ -752,7 +752,7 @@ export function defineSyncTable<
       ? {
           tableName: shape?.tableName ?? tableName,
           shapeKey: shape?.shapeKey ?? shape?.tableName ?? tableName,
-          // `electricTable` is never set from input (it is not in ShapeSpecInput) — an owner reads its
+          // `physicalTable` is never set from input (it is not in ShapeSpecInput) — an owner reads its
           // own table. It is filled by `attachSyncRegistrySchema` (schema qualification) or by
           // `defineReadProjection` (which points a projection at the owning physical table).
           ...(resolvedRowFilter != null ? { rowFilter: resolvedRowFilter } : {}),
@@ -821,7 +821,7 @@ export function defineSyncTable<
  * not the jsonb), while the learner keeps reading the full table through the owner's shape.
  *
  * It is the *obvious, DRY* way to express "another shape over this table", versus the bare
- * `shape.electricTable` string it replaces (a footgun — config that silently un-asserts table
+ * `shape.physicalTable` string it replaces (a footgun — config that silently un-asserts table
  * ownership):
  *
  * - **Owns nothing.** The returned entry's `table` IS `owner.table` (the same object), so there is no
@@ -832,7 +832,7 @@ export function defineSyncTable<
  *   Electric `columns` allow-list so an omitted (e.g. heavy jsonb) column never crosses the wire. The
  *   primary key is always kept. Omit `columns` to sync every column.
  * - **Source is derived, never named.** The physical Electric target is taken from the owner — there is
- *   no consumer-facing source field to get wrong (see {@link ShapeSpec.electricTable}).
+ *   no consumer-facing source field to get wrong (see {@link ShapeSpec.physicalTable}).
  * - **Readonly.** A projection has no write path; the engine resolves an incoming shape request by its
  *   unique `shapeKey` (= `as`) and consults the derived physical target only on egress.
  *
@@ -1083,7 +1083,7 @@ export function defineReadProjection<
   const shape: ShapeSpec = {
     tableName: opts.as,
     shapeKey: opts.as,
-    electricTable: physicalTable,
+    physicalTable: physicalTable,
     ...(rowFilter != null ? { rowFilter } : {}),
   };
 
@@ -1177,7 +1177,7 @@ function localShapeIdentity(entry: SyncTableEntry<AnyPgTable>): string {
  * ({@link localShapeIdentity}) — the PGlite table a client reads and the `shapeKey` the proxy resolves a
  * request by — so two entries sharing it would collide locally (one shadows the other) and make the
  * shape unresolvable. A read PROJECTION over a shared physical table does NOT trip this: it carries a
- * DISTINCT local identity (`as`) and points at the owning table via the derived `shape.electricTable`,
+ * DISTINCT local identity (`as`) and points at the owning table via the derived `shape.physicalTable`,
  * so several shapes read one physical table while their local identities stay unique. Fails closed at
  * module-eval, for every consumer.
  */
@@ -1397,10 +1397,10 @@ export function attachSyncRegistrySchema<TRegistry extends SyncTableRegistry>(re
     const qualifiedTableName = `${normalizedSchema}.${entry.shape.tableName}`;
     entry.shape = {
       ...entry.shape,
-      // A read projection sets electricTable to the owner's (bare) physical name; qualify it the same
+      // A read projection sets physicalTable to the owner's (bare) physical name; qualify it the same
       // way the owner's own target is qualified, so both shapes hit one schema-qualified table on egress.
-      // An owner (no electricTable) qualifies its own tableName. An already-qualified value is left as-is.
-      electricTable: entry.shape.electricTable ? qualify(entry.shape.electricTable) : qualifiedTableName,
+      // An owner (no physicalTable) qualifies its own tableName. An already-qualified value is left as-is.
+      physicalTable: entry.shape.physicalTable ? qualify(entry.shape.physicalTable) : qualifiedTableName,
       ...(entry.shape.shapeKey === entry.shape.tableName ? { shapeKey: qualifiedTableName } : {}),
     };
   }

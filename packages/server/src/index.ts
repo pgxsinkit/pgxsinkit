@@ -322,13 +322,26 @@ export function createSyncServer<
   if (options.readPath) {
     const readPath = options.readPath;
     const resolveAuthClaims = options.resolveAuthClaims;
+    // Refused at construction, not at the first subscribe. Every read is bound to a subject in both
+    // tiers (ADR-0055): the private tier fuses it into the predicate and the shared tier checks it
+    // against the entitlement set, and a stream token with no subject would name a bearer no
+    // revocation could ever reach. So a read path with no way to resolve a subject cannot grant
+    // anything — it is a contradiction, and the only useful moment to say so is now, rather than as
+    // a 401 every client then sits in.
+    if (resolveAuthClaims === undefined) {
+      throw new Error(
+        "[pgxsinkit] createSyncServer: `readPath` was configured without `resolveAuthClaims`. The native " +
+          "read path mints a per-subject stream token, so it cannot serve a deployment that has no way to " +
+          "resolve a subject. Provide `resolveAuthClaims`, or drop `readPath` for a write-only deployment.",
+      );
+    }
     const subscribeOptions = {
       registry: options.registry,
       engine: readPath.engine,
       ...(readPath.entitlements ? { entitlements: readPath.entitlements } : {}),
       key: readPath.key,
       ...(readPath.ttlSeconds !== undefined ? { ttlSeconds: readPath.ttlSeconds } : {}),
-      ...(resolveAuthClaims ? { resolveAuthClaims } : {}),
+      resolveAuthClaims,
     };
 
     router.post(subscribePath, createSubscribeHandler(subscribeOptions));
@@ -337,7 +350,7 @@ export function createSyncServer<
       barrierPath,
       createBarrierHandler({
         engine: readPath.engine,
-        ...(resolveAuthClaims ? { resolveAuthClaims } : {}),
+        resolveAuthClaims,
         ...(readPath.barrierMaxAgeSeconds !== undefined ? { maxAgeSeconds: readPath.barrierMaxAgeSeconds } : {}),
       }),
     );

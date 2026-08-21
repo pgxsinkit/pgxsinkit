@@ -55,7 +55,7 @@ const started = new Set<string>();
 // When true, the NEXT ensureGroupStarted rejects once (then self-clears) — to prove a failed activation
 // is swallowed by the client's fire-and-forget `.catch` and never becomes an unhandled rejection.
 let failNextActivation = false;
-const startConfiguredSyncMock = mock(async () => ({
+const startCircuitsSyncMock = mock(async () => ({
   unsubscribe: () => undefined,
   tables: {},
   ensureGroupStarted: async (groupKey: string) => {
@@ -98,19 +98,16 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
     }));
     await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async () => undefined,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the reset path now calls directly (there is no engine
+    // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async () => undefined,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => undefined,
@@ -178,7 +175,7 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
 
   beforeEach(() => {
     started.clear();
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
     capturedOnOrdinaryEnqueue = undefined;
     failNextActivation = false;
     warnings = [];

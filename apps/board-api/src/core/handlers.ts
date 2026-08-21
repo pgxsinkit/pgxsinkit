@@ -4,6 +4,7 @@ import { boardSyncRegistry } from "@pgxsinkit/board-schema";
 import type { JwtClaims, RegistryRelations } from "@pgxsinkit/contracts";
 import {
   createCircuitsEngineClient,
+  createStreamGate,
   createSyncServer,
   importStreamTokenKey,
   type EventsEnqueuedHook,
@@ -34,6 +35,13 @@ export interface BoardSyncHandlerOptions extends BoardHandlerOptions {
   /** The Circuits engine's control API. Never client-reachable — only this function calls it. */
   circuitsEngineUrl: string;
   /** The stream-token signing secret, shared with the edge. */
+  streamTokenSecret: string;
+}
+
+export interface BoardStreamHandlerOptions extends Pick<BoardHandlerOptions, "allowedOrigins"> {
+  /** durable-streams, which the edge proxies reads to. Never client-reachable directly. */
+  durableStreamsUrl: string;
+  /** The stream-token signing secret, shared with the control plane. */
   streamTokenSecret: string;
 }
 
@@ -84,4 +92,59 @@ export async function createBoardSyncHandler(options: BoardSyncHandlerOptions): 
     headers.set("cache-control", "no-store");
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   };
+}
+
+/**
+ * The board's EDGE: verify the stream token, then proxy durable-streams bytes.
+ *
+ * A separate function from `board-sync`, and that separation is the point rather than tidiness. The
+ * cache key is the URL, so the surface a CDN may share between subscribers has to be addressable
+ * apart from the one that answers per-subject questions. Splitting them is what leaves the door open
+ * to putting a CDN in front of this one and nothing in front of the other.
+ *
+ * No entitlement set, matching `board-sync`: the board declares no shared-tier shape, so a scoped
+ * grant can only arrive if someone added one without wiring entitlements — and it is denied.
+ */
+export async function createBoardStreamHandler(options: BoardStreamHandlerOptions): Promise<FetchHandler> {
+  const key = await importStreamTokenKey(options.streamTokenSecret);
+  const handleStreamRead = createStreamGate({ key, durableStreamsUrl: options.durableStreamsUrl });
+
+  return async (request) => {
+    const stripped = stripFunctionPrefix(request, "board-stream");
+    const { pathname } = new URL(stripped.url);
+
+    const cors: Record<string, string> = {
+      "Access-Control-Allow-Origin": corsOriginFor(request, options.allowedOrigins),
+      "Access-Control-Allow-Methods": "GET,OPTIONS",
+      "Access-Control-Allow-Headers": "authorization,apikey,content-type",
+      Vary: "Origin",
+    };
+
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    if (!pathname.startsWith(`${STREAM_MOUNT_PATH}/`)) {
+      return new Response(JSON.stringify({ error: "not a stream path" }), {
+        status: 404,
+        headers: { ...cors, "content-type": "application/json" },
+      });
+    }
+
+    // `now` is the request-start time so a long poll held across the token's expiry is judged by when
+    // it started, rather than being killed mid-flight at the TTL boundary.
+    const response = await handleStreamRead(
+      stripped,
+      pathname.slice(STREAM_MOUNT_PATH.length + 1),
+      Math.floor(Date.now() / 1000),
+    );
+    const headers = new Headers(response.headers);
+    for (const [name, value] of Object.entries(cors)) headers.set(name, value);
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  };
+}
+
+/** The board's edge mount, matching the `streamBaseUrl` the client is configured with. */
+const STREAM_MOUNT_PATH = "/v1/stream";
+
+function corsOriginFor(request: Request, allowedOrigins: string[]): string {
+  const origin = request.headers.get("Origin");
+  return origin && allowedOrigins.includes(origin) ? origin : (allowedOrigins[0] ?? "*");
 }

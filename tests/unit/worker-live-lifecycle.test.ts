@@ -81,7 +81,7 @@ const fakeLive = {
   },
 };
 
-const startConfiguredSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
+const startCircuitsSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
   opts.onInitialSync?.();
   return {
     unsubscribe: () => undefined,
@@ -114,19 +114,16 @@ describe("worker live-query lifecycle races (ADR-0040 fix round)", () => {
     }));
     await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async () => undefined,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the reset path now calls directly (there is no engine
+    // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async () => undefined,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => undefined,
@@ -195,7 +192,7 @@ describe("worker live-query lifecycle races (ADR-0040 fix round)", () => {
     releaseRegistration = null;
     holdGroupStarted = false;
     releaseGroupStarted = null;
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
   });
 
   afterEach(() => {

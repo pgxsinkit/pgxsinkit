@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sql";
-import { PgDialect, type AnyPgTable } from "drizzle-orm/pg-core";
+import type { AnyPgTable } from "drizzle-orm/pg-core";
 import { getColumns } from "drizzle-orm/utils";
 import { createSchemaFactory } from "drizzle-orm/zod";
 import { Hono } from "hono";
@@ -9,7 +9,6 @@ import { z } from "zod";
 
 import {
   batchMutationRequestSchema,
-  buildOwnershipShapeWhere,
   quoteIdentifier as quoteIdent,
   type BatchMutationRequest,
   type MutationAck,
@@ -25,7 +24,6 @@ import {
   buildSyntheticTruncateSql,
   countSyntheticWorkloadRows,
   defaultSyntheticPerfLabScenario,
-  demoJwtHasRole,
   findSyntheticPerfLabScenarioDefinition,
   syntheticPerfLabScenarioDefinitions,
   type DemoJwtClaims,
@@ -33,15 +31,28 @@ import {
 
 import { parseDemoAuthClaimsFromRequest } from "../apps/write-api/src/demo-auth";
 import {
+  barrierPath,
+  createBarrierHandler,
+  createCircuitsEngineClient,
+  createRefreshHandler,
+  createStreamGate,
+  createSubscribeHandler,
+  importStreamTokenKey,
+  refreshPath,
+  subscribePath,
+} from "../packages/server/src/circuits/index";
+import {
   buildPlpgsqlBatchFunctionDdl,
   executePlpgsqlBatch,
   expectedApplyFingerprint,
 } from "../packages/server/src/mutations/plpgsql-apply";
 import type { TransactionClient } from "../packages/server/src/mutations/types";
 import {
+  PERF_LAB_CIRCUITS_ENGINE_URL,
   PERF_LAB_DATABASE_URL,
-  PERF_LAB_ELECTRIC_URL,
+  PERF_LAB_DURABLE_STREAMS_URL,
   PERF_LAB_HOST,
+  PERF_LAB_STREAM_MOUNT_PATH,
   PERF_LAB_WRITE_API_PORT,
 } from "./perf-lab-config";
 
@@ -67,7 +78,6 @@ type PreparedPerfRegistry = {
   tableCount: number;
   extraColumnCount: number;
   tableNames: string[];
-  electricTables: string[];
   registry: SyncTableRegistry;
 };
 
@@ -85,7 +95,8 @@ declare const Bun: {
 };
 
 const databaseUrl = process.env["DATABASE_URL"] ?? PERF_LAB_DATABASE_URL;
-const electricUrl = process.env["ELECTRIC_URL"] ?? PERF_LAB_ELECTRIC_URL;
+const circuitsEngineUrl = process.env["CIRCUITS_ENGINE_URL"] ?? PERF_LAB_CIRCUITS_ENGINE_URL;
+const durableStreamsUrl = process.env["DURABLE_STREAMS_URL"] ?? PERF_LAB_DURABLE_STREAMS_URL;
 const host = process.env["WRITE_API_HOST"] ?? PERF_LAB_HOST;
 const port = readPort(process.env["WRITE_API_PORT"], PERF_LAB_WRITE_API_PORT);
 
@@ -304,14 +315,42 @@ app.post("/api/mutations", async (context) => {
   }
 });
 
-app.get("/v1/electric-proxy", async (context) => {
-  const claims = parseDemoAuthClaimsFromRequest(context.req.raw);
+// ── The native read path (ADR-0055) ───────────────────────────────────────────────────────────────
+//
+// The perf lab provisions its registry at RUNTIME (`/api/perf-lab/provision` picks a table/column
+// count), so the subscribe handler is built per request over whichever registry is active rather than
+// once at startup. Everything else is the shipped code path: the predicate comes from the registry's
+// own `shape.rowFilter`, so the ownership filter this file used to splice onto a shape URL by hand is
+// now compiled by the same code a production deployment runs.
+const engine = createCircuitsEngineClient({ baseUrl: circuitsEngineUrl });
+const streamTokenKey = await importStreamTokenKey("perf-lab-stream-token-secret");
+const resolveAuthClaims = (request: Request) => parseDemoAuthClaimsFromRequest(request);
 
-  if (!activeRegistry) {
-    return context.json({ message: "Perf-lab registry is not ready yet." }, 503);
-  }
+const handleStreamRead = createStreamGate({ key: streamTokenKey, durableStreamsUrl });
 
-  return await proxyShapeRequest(context.req.raw, claims, activeRegistry);
+function requireActiveRegistry(): PreparedPerfRegistry | null {
+  return activeRegistry;
+}
+
+app.post(subscribePath, async (context) => {
+  const registry = requireActiveRegistry();
+  if (!registry) return context.json({ message: "Perf-lab registry is not ready yet." }, 503);
+  return createSubscribeHandler({ registry: registry.registry, engine, key: streamTokenKey, resolveAuthClaims })(
+    context.req.raw,
+  );
+});
+
+app.post(refreshPath, (context) => createRefreshHandler({ key: streamTokenKey, resolveAuthClaims })(context.req.raw));
+
+app.get(barrierPath, (context) => createBarrierHandler({ engine, resolveAuthClaims })(context.req.raw));
+
+app.get(`${PERF_LAB_STREAM_MOUNT_PATH}/*`, (context) => {
+  const { pathname } = new URL(context.req.url);
+  return handleStreamRead(
+    context.req.raw,
+    pathname.slice(PERF_LAB_STREAM_MOUNT_PATH.length + 1),
+    Math.floor(Date.now() / 1000),
+  );
 });
 
 app.onError((error, context) => {
@@ -415,9 +454,6 @@ async function ensurePreparedRegistry(options: { tableCount: number; extraColumn
     tableCount: options.tableCount,
     extraColumnCount: options.extraColumnCount,
     tableNames: bundle.tableNames,
-    electricTables: Object.values(bundle.registry)
-      .map((entry) => entry.shape?.electricTable ?? entry.shape?.tableName ?? "")
-      .filter((tableName) => tableName.length > 0),
     registry: bundle.registry,
   };
 
@@ -480,77 +516,6 @@ function buildSeedInsertRows(
   }
 
   return rows;
-}
-
-async function proxyShapeRequest(request: Request, claims: DemoJwtClaims | null, registry: PreparedPerfRegistry) {
-  const targetUrl = buildShapeTargetUrl(request, claims, registry);
-  const response = await fetch(targetUrl, {
-    method: "GET",
-    headers: forwardHeaders(request.headers),
-    signal: request.signal,
-  });
-
-  const headers = new Headers(response.headers);
-  headers.set("Cache-Control", "private, no-store, no-cache, must-revalidate, max-age=0");
-  headers.set("Pragma", "no-cache");
-  headers.set("Expires", "0");
-  headers.set("Vary", appendVaryHeader(headers.get("Vary"), "Authorization"));
-
-  return new Response(response.body, {
-    status: response.status,
-    headers,
-  });
-}
-
-function buildShapeTargetUrl(request: Request, claims: DemoJwtClaims | null, registry: PreparedPerfRegistry) {
-  const requestUrl = new URL(request.url);
-  const targetUrl = new URL(electricUrl);
-  const activeTables = new Set(registry.electricTables);
-
-  targetUrl.search = requestUrl.search;
-
-  const table = targetUrl.searchParams.get("table");
-
-  if (!table || !activeTables.has(table) || (claims && demoJwtHasRole(claims, "admin"))) {
-    return targetUrl.toString();
-  }
-
-  const ownershipFilter = renderOwnershipShapeFilter(registry, table, claims?.sub);
-  const existingWhere = targetUrl.searchParams.get("where");
-
-  if (!existingWhere) {
-    targetUrl.searchParams.set("where", ownershipFilter);
-    return targetUrl.toString();
-  }
-
-  targetUrl.searchParams.set("where", `(${existingWhere}) AND (${ownershipFilter})`);
-  return targetUrl.toString();
-}
-
-/**
- * The ownership `where` the proxy pins onto a non-admin shape request, authored from the registry's
- * real owner COLUMN via `buildOwnershipShapeWhere` (bare column + typed subject; `DENY_ALL` = `false`
- * when unauthenticated) and rendered inline once for the shape URL. The rendered text carries a QUOTED
- * bare column (`"owner_id" = '…'`) — Electric's shape grammar accepts quoted bare columns, and `false`
- * exactly as it accepted the old hand-written `1 = 0`.
- */
-function renderOwnershipShapeFilter(
-  registry: PreparedPerfRegistry,
-  electricTable: string,
-  subject: string | undefined,
-) {
-  const entry = Object.values(registry.registry).find(
-    (candidate) => (candidate.shape?.electricTable ?? candidate.shape?.tableName) === electricTable,
-  );
-  // Index-signature access (registry columns are dynamic by construction); every synthetic perf-lab
-  // table defines `ownerId`, and `electricTables` above derives from this same registry.
-  const ownerColumn = entry ? getColumns(entry.table as AnyPgTable)["ownerId"] : undefined;
-
-  if (!ownerColumn) {
-    throw new Error(`Perf-lab registry has no ownerId column for shape table ${electricTable}`);
-  }
-
-  return new PgDialect().sqlToQuery(buildOwnershipShapeWhere(ownerColumn, subject).inlineParams()).sql;
 }
 
 function findManagedFieldViolations(
@@ -738,40 +703,6 @@ function isValidationError(error: unknown): error is { issues: unknown[] } {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function forwardHeaders(headers: Headers) {
-  const next = new Headers();
-
-  for (const [name, value] of headers.entries()) {
-    const lowerName = name.toLowerCase();
-
-    if (lowerName === "host" || lowerName === "authorization") {
-      continue;
-    }
-
-    next.set(name, value);
-  }
-
-  return next;
-}
-
-function appendVaryHeader(existingValue: string | null, nextValue: string) {
-  if (!existingValue) {
-    return nextValue;
-  }
-
-  const values = existingValue
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-
-  if (values.includes(nextValue)) {
-    return values.join(", ");
-  }
-
-  values.push(nextValue);
-  return values.join(", ");
 }
 
 function enqueueProvision(task: () => Promise<void>) {

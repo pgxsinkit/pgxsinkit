@@ -261,7 +261,7 @@ function diffProjection(
 }
 
 /**
- * Shape changes. The Electric target (table/shapeKey/electricTable) and the row filter both
+ * Shape changes. The Electric target (table/shapeKey/physicalTable) and the row filter both
  * govern which rows stream; a change to either needs a re-sync so the local cache is not left
  * holding rows selected under the old definition (risky). The row filter's `customWhere` body
  * is invisible to the fingerprint, so a change confined to it is not detectable here.
@@ -273,7 +273,7 @@ function diffShape(
   changes: RegistryChange[],
 ): void {
   const target = (shape: CanonicalTable["shape"]): string | null =>
-    shape ? `${shape.tableName}|${shape.shapeKey}|${shape.electricTable ?? ""}` : null;
+    shape ? `${shape.tableName}|${shape.shapeKey}|${shape.physicalTable ?? ""}` : null;
 
   if (target(previous) !== target(next)) {
     changes.push({ severity: "risky", table, detail: "shape target changed (re-sync required)" });

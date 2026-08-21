@@ -3,9 +3,11 @@ import { and, eq, getTableName, isNull, type SQL } from "drizzle-orm";
 
 import type { PredicateValue, SyncTableEntry, SyncTableRegistry } from "@pgxsinkit/contracts";
 
+import type { BootStampCollector, GroupBootStamp } from "../boot-report";
 import { resolveApplyTarget, type ApplyTarget } from "../local-tables";
 import type { drizzleOverPg } from "../sync/drizzle-executor";
 import {
+  ControlPlaneError,
   openSubscriptionSession,
   type GrantedStream,
   type RefusedStream,
@@ -71,6 +73,11 @@ export interface CircuitsGroupSyncOptions {
    * Lazy groups whose activation persisted from a previous boot (ADR-0021), started eagerly here.
    */
   promotedGroups?: ReadonlySet<string>;
+  /**
+   * Boot observability (ADR-0034). Only the BOOT starts (eager + promoted) open an accumulator, so an
+   * on-demand lazy activation never enters a finalized report.
+   */
+  bootCollector?: BootStampCollector;
   /** Fired the first time every eager/promoted group has caught up. */
   onInitialSync?: () => void;
   onGroupReady?: (groupKey: string) => void;
@@ -80,7 +87,33 @@ export interface CircuitsGroupSyncOptions {
   onLazyActivated?: (groupKey: string) => void;
   /** Called with the scopes the control plane refused or later revoked. */
   onRefused?: (refused: readonly RefusedStream[]) => void;
+  /**
+   * The subject's own credential was refused by the control plane (401/403), and subscribe is still
+   * retrying (ADR-0013). The app prompts for re-login; nothing here needs restarting, because the
+   * auth adapter is consulted fresh on every attempt.
+   *
+   * Distinct from `onSyncError`, which reports a fault the subject cannot act on.
+   */
+  onAuthError?: (error: ControlPlaneError) => void;
+  /**
+   * Subscribe failed for a reason the subject cannot act on — the control plane is down, degraded,
+   * or unreachable — and is still retrying.
+   *
+   * Separate from `onSyncError` because the two recover differently: a failed subscribe clears the
+   * moment a batch is delivered, while a commit failure is sticky by design (ADR-0009 decision 5) —
+   * reads can keep succeeding while applies keep failing.
+   */
+  onSubscribeError?: (error: Error) => void;
   live?: boolean;
+  /**
+   * Tears the whole read path down from OUTSIDE, including mid-boot.
+   *
+   * `unsubscribe()` cannot cover that window: it lives on the handle this function returns, and a boot
+   * whose control plane is unreachable has not returned one yet. A client stopped in that window would
+   * otherwise sit on a TCP connect with nothing able to cancel it — which is precisely when a stop is
+   * most likely, because the network being down is why the boot is still running.
+   */
+  signal?: AbortSignal;
   fetch?: typeof fetch;
 }
 
@@ -224,6 +257,18 @@ function shareBarrierReads(read: () => Promise<ConvergenceBarrier>): () => Promi
   };
 }
 
+/**
+ * Exponential backoff for a failing subscribe, capped so a long outage still retries promptly once
+ * it clears. The first retry is immediate-ish, because the overwhelmingly common case is a token
+ * that a refresh already fixed by the time we ask again.
+ */
+function subscribeBackoffMs(attempt: number): number {
+  return Math.min(SUBSCRIBE_RETRY_BASE_MS * 2 ** attempt, SUBSCRIBE_RETRY_MAX_MS);
+}
+
+const SUBSCRIBE_RETRY_BASE_MS = 250;
+const SUBSCRIBE_RETRY_MAX_MS = 10_000;
+
 export async function startCircuitsSync(
   pg: PGliteInterface,
   options: CircuitsGroupSyncOptions,
@@ -262,16 +307,36 @@ export async function startCircuitsSync(
     });
   }
 
+  /**
+   * Aborts in-flight control-plane requests on teardown — the other half of the same problem the
+   * `teardown` promise solves. A subscribe sitting on a TCP connect to an unreachable host can take
+   * minutes to fail on its own, and `stop()` waits for the boot tail.
+   */
+  const controlPlaneRequests = new AbortController();
+
   const readBarrier = shareBarrierReads(
     createBarrierReader({
       controlPlaneUrl: options.controlPlaneUrl,
       ...(options.authHeaders ? { authHeaders: options.authHeaders } : {}),
+      signal: controlPlaneRequests.signal,
       ...(options.fetch ? { fetch: options.fetch } : {}),
     }),
   );
 
   let torn = false;
   let initialSyncSignalled = false;
+
+  /**
+   * Resolved by `unsubscribe`, so a retry parked on its backoff wakes immediately on teardown.
+   *
+   * Not a nicety: `stop()` awaits the boot tail, and the tail awaits these starts, so a sleep that
+   * only checks `torn` on the far side would hold a teardown open for a whole backoff window — up to
+   * ten seconds per group, on every stop of an offline client.
+   */
+  let signalTorn!: () => void;
+  const teardown = new Promise<void>((resolve) => {
+    signalTorn = resolve;
+  });
 
   const eagerKeys = [...groups.values()]
     .filter((group) => group.subscription === "eager" || promoted.has(group.groupKey))
@@ -293,6 +358,86 @@ export async function startCircuitsSync(
   }
 
   /**
+   * Subscribe one group, retrying until it succeeds or the runtime is torn down.
+   *
+   * Retrying rather than failing is ADR-0013's requirement carried onto the native path: a client
+   * whose JWT expired between boots must surface `auth-needed` and resume the moment a fresh one
+   * works, with no restart. Failing the start instead would leave the app holding a client that
+   * never syncs again, which is the exact wedge that ADR predates.
+   *
+   * The same loop covers an outage. A 503 from the control plane and a dead socket are both "not
+   * now, try again"; only the STATUS differs, and only because a stale credential is the one failure
+   * the subject can personally fix.
+   */
+  async function subscribeWithRetry(
+    group: GroupRuntime,
+    onFirstAttempt?: () => void,
+  ): Promise<SubscriptionSession | null> {
+    let reportedFirstAttempt = false;
+    const reportAttempt = () => {
+      if (reportedFirstAttempt) return;
+      reportedFirstAttempt = true;
+      onFirstAttempt?.();
+    };
+
+    for (let attempt = 0; !torn; attempt += 1) {
+      try {
+        const session = await openSubscriptionSession(
+          {
+            controlPlaneUrl: options.controlPlaneUrl,
+            streamBaseUrl: options.streamBaseUrl,
+            ...(options.authHeaders ? { authHeaders: options.authHeaders } : {}),
+            signal: controlPlaneRequests.signal,
+            ...(options.fetch ? { fetch: options.fetch } : {}),
+            onRevoked: (revoked) => {
+              group.refused.push(...revoked);
+              options.onRefused?.(revoked);
+            },
+          },
+          group.specs.map((spec) => ({ shapeKey: spec.shapeKey })),
+        );
+        if (torn) {
+          reportAttempt();
+          session.close();
+          return null;
+        }
+        // Deliberately no `reportAttempt()` here. A subscribe that SUCCEEDED holds the boot for the
+        // rest of the start, so a boot that reached the control plane still comes back with its
+        // groups streaming — the release below is only for the case where it could not.
+        return session;
+      } catch (error) {
+        if (torn) {
+          reportAttempt();
+          return null;
+        }
+        if (error instanceof ControlPlaneError && error.isAuthFailure) {
+          options.onAuthError?.(error);
+        } else {
+          options.onSubscribeError?.(error instanceof Error ? error : new Error(String(error)));
+        }
+        // The first failure releases the boot: it keeps retrying in the background, but an offline
+        // client must still reach `localReadReady` rather than waiting on a control plane that may
+        // be down for hours.
+        reportAttempt();
+        await sleepUntil(subscribeBackoffMs(attempt));
+      }
+    }
+    reportAttempt();
+    return null;
+  }
+
+  /** Sleep, but wake at once on teardown — and leave no timer behind either way. */
+  function sleepUntil(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      void teardown.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  /**
    * Subscribe one group and start syncing it.
    *
    * One session PER GROUP rather than one for the whole client. ADR-0055 decision 6's batching
@@ -302,26 +447,15 @@ export async function startCircuitsSync(
    * the same object: activation opens one, `stopGroup` closes one, and no group can hold a grant
    * alive for a group that has stopped.
    */
-  async function startGroup(group: GroupRuntime): Promise<void> {
+  async function startGroup(
+    group: GroupRuntime,
+    onFirstAttempt?: () => void,
+    bootStamp?: GroupBootStamp,
+  ): Promise<void> {
     const specsByShapeKey = new Map(group.specs.map((spec) => [spec.shapeKey, spec]));
 
-    const session = await openSubscriptionSession(
-      {
-        controlPlaneUrl: options.controlPlaneUrl,
-        streamBaseUrl: options.streamBaseUrl,
-        ...(options.authHeaders ? { authHeaders: options.authHeaders } : {}),
-        ...(options.fetch ? { fetch: options.fetch } : {}),
-        onRevoked: (revoked) => {
-          group.refused.push(...revoked);
-          options.onRefused?.(revoked);
-        },
-      },
-      group.specs.map((spec) => ({ shapeKey: spec.shapeKey })),
-    );
-    if (torn) {
-      session.close();
-      return;
-    }
+    const session = await subscribeWithRetry(group, onFirstAttempt);
+    if (session === null) return;
 
     group.session = session;
     group.refused.push(...session.refused);
@@ -332,6 +466,7 @@ export async function startCircuitsSync(
       // Nothing was granted. The group is "ready" in the only sense available to it — there is
       // nothing to wait for — and saying so is what stops a boot hanging on an entitlement the
       // subject simply does not hold.
+      bootStamp?.markReady();
       markReady(group);
       return;
     }
@@ -342,6 +477,7 @@ export async function startCircuitsSync(
       key: group.groupKey,
       metadataSchema: options.metadataSchema,
       sessionScoped: group.retention === "ephemeral",
+      ...(bootStamp ? { bootStamp } : {}),
       shapes,
       token: () => session.token(),
       onTokenRejected: async () => session.refresh(),
@@ -350,7 +486,12 @@ export async function startCircuitsSync(
       ...(options.live !== undefined ? { live: options.live } : {}),
       ...(options.onSyncError ? { onSyncError: options.onSyncError } : {}),
       ...(options.onSyncActivity ? { onSyncActivity: options.onSyncActivity } : {}),
-      onInitialSync: () => markReady(group),
+      onInitialSync: () => {
+        // Stamp readyAtMs and freeze the accumulator at the group's ready edge, so later live traffic
+        // never mutates a finalized report.
+        bootStamp?.markReady();
+        markReady(group);
+      },
     });
 
     if (torn) {
@@ -393,10 +534,67 @@ export async function startCircuitsSync(
     });
   }
 
+  /** Tear the whole read path down: stop retrying, abort in-flight requests, drop every stream. */
+  function tearDown(): void {
+    torn = true;
+    signalTorn();
+    controlPlaneRequests.abort();
+    for (const group of groups.values()) {
+      group.handle?.unsubscribe();
+      group.session?.close();
+    }
+  }
+
+  // Wired BEFORE the boot loop, so a stop that lands while the first subscribe is still in flight
+  // reaches the same teardown the returned handle would.
+  if (options.signal) {
+    if (options.signal.aborted) tearDown();
+    else options.signal.addEventListener("abort", tearDown, { once: true });
+  }
+
+  /**
+   * Start one eager group for BOOT, and wait only as far as its first subscribe attempt.
+   *
+   * Two things this deliberately does not wait for. Not the catch-up — `bootSettled` means sync START
+   * done (ADR-0041), and a client that blocked boot on catch-up would make every cold start as slow as
+   * its slowest shape. And not a SUCCESSFUL subscribe — an unreachable control plane retries in the
+   * background, so an offline boot still reaches `localReadReady` with `ready` correctly left pending,
+   * rather than hanging until the network returns.
+   */
+  async function startGroupForBoot(groupKey: string): Promise<void> {
+    const group = groups.get(groupKey);
+    if (group === undefined) return;
+    if (group.startPromise) return group.startPromise;
+
+    let markAttempted!: () => void;
+    const firstAttempt = new Promise<void>((resolve) => {
+      markAttempted = resolve;
+    });
+    const bootStamp = options.bootCollector?.beginGroup(groupKey, group.specs.length);
+    const started = startGroup(group, markAttempted, bootStamp).catch((error: unknown) => {
+      // A failed start must not be remembered as started: clearing the latch lets a later reference
+      // try again rather than resolving instantly against a group that never subscribed.
+      group.startPromise = null;
+      throw error;
+    });
+    group.startPromise = started;
+    // Boot is released by whichever comes first: the start settling, or the retry loop reporting that
+    // its first attempt failed and it is now retrying in the background.
+    void started.then(markAttempted, markAttempted);
+    // A start that fails PAST the boot release has no caller left to throw at, so it is reported here
+    // or it is lost. `onSyncError` rather than `onSubscribeError` because this is not the retried
+    // path: subscribe already succeeded, something after it did not, and nothing will try again.
+    void started.catch((error: unknown) => {
+      if (torn) return;
+      options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
+    });
+    await firstAttempt;
+  }
+
   // Boot: every eager group, plus any lazy group a previous boot promoted. Started concurrently —
   // they are independent consistency groups, and serializing them would make boot the sum of their
-  // catch-ups rather than the slowest.
-  await Promise.all(eagerKeys.map((groupKey) => ensureGroupStarted(groupKey)));
+  // subscribes rather than the slowest.
+  await Promise.all(eagerKeys.map((groupKey) => startGroupForBoot(groupKey)));
 
   const tables: Record<string, CircuitsTableSyncResult> = {};
   for (const spec of specs) {
@@ -408,13 +606,7 @@ export async function startCircuitsSync(
   }
 
   return {
-    unsubscribe: () => {
-      torn = true;
-      for (const group of groups.values()) {
-        group.handle?.unsubscribe();
-        group.session?.close();
-      }
-    },
+    unsubscribe: tearDown,
     tables,
     ensureGroupStarted,
     stopGroup,

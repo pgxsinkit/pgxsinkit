@@ -2,22 +2,28 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 import { count, eq } from "drizzle-orm";
 
-import { type JwtClaims } from "@pgxsinkit/contracts";
 import {
-  buildMembershipFanoutSyncConfig,
   membershipFanoutSyncRegistry,
   workItemsTable,
   workspaceMembersTable,
   workspacesTable,
 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
 
+import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { startConfiguredSync } from "../../packages/client/src/shape-sync";
+import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
+import { createCircuitsTestPGlite } from "../support/circuits-pglite";
+import { claimsFromTestHeader } from "../support/claims";
 import { drizzleOver } from "../support/drizzle";
-import { createSyncEngineTestPGlite } from "../support/sync-engine-pglite";
 
 const env = readIntegrationEnv();
 const localSchemaSql = generateLocalSchemaSql(membershipFanoutSyncRegistry);
@@ -45,21 +51,15 @@ const MEMBERSHIP_A_W1 = uuid();
 const MEMBERSHIP_B_W1 = uuid();
 const MEMBERSHIP_C_W2 = uuid();
 
-// Per-request identity from a test header (the proxy + write-API both resolve claims this way).
-function claimsFromHeader(request: Request): JwtClaims | null {
-  const sub = request.headers.get("x-test-sub");
-  return sub ? { role: "authenticated", sub } : null;
-}
-
 async function createLocalWorkItemStore() {
-  const pg = await createSyncEngineTestPGlite();
+  const pg = await createCircuitsTestPGlite();
   await pg.exec(localSchemaSql);
   return pg;
 }
 
 async function startMemberSync(
   localPg: Awaited<ReturnType<typeof createLocalWorkItemStore>>,
-  proxyUrl: string,
+  urls: Pick<NativeSyncStack<unknown>, "controlPlaneUrl" | "streamBaseUrl">,
   sub: string,
 ) {
   let markInitialSyncDone: (() => void) | null = null;
@@ -67,10 +67,12 @@ async function startMemberSync(
     markInitialSyncDone = resolve;
   });
 
-  const sync = await startConfiguredSync(localPg as Parameters<typeof startConfiguredSync>[0], {
-    syncConfig: buildMembershipFanoutSyncConfig(proxyUrl),
+  const sync = await startCircuitsSync(localPg, {
     registry: membershipFanoutSyncRegistry,
-    shapeHeaders: { "x-test-sub": sub },
+    controlPlaneUrl: urls.controlPlaneUrl,
+    streamBaseUrl: urls.streamBaseUrl,
+    metadataSchema: DEFAULT_METADATA_SCHEMA,
+    authHeaders: () => ({ "x-test-sub": sub }),
     onInitialSync: () => {
       markInitialSyncDone?.();
       markInitialSyncDone = null;
@@ -89,9 +91,8 @@ const itemCount = async (pg: Awaited<ReturnType<typeof createLocalWorkItemStore>
   (await drizzleOver(pg).select({ count: count() }).from(workItemsTable))[0]?.count ?? 0;
 
 describe("membership fan-out (readwrite) integration", () => {
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof membershipFanoutSyncRegistry>>;
-  let httpServer!: ReturnType<typeof Bun.serve>;
-  let proxyUrl!: string;
   const serverDb = createServerDb(membershipFanoutSyncRegistry, env.databaseUrl);
 
   beforeAll(async () => {
@@ -105,19 +106,19 @@ describe("membership fan-out (readwrite) integration", () => {
       await provisioningServer.stop();
     }
 
-    // createSyncServer serves both the write route and the shape proxy from the one server,
+    // createSyncServer serves both the write route and the native control plane from the one server,
     // each resolving the test identity from the x-test-sub header via the shared adapter.
-    server = createSyncServer({
-      registry: membershipFanoutSyncRegistry,
-      db: serverDb.db,
-      resolveAuthClaims: (request) => claimsFromHeader(request),
-      controlPlaneUrl: env.controlPlaneUrl,
-      streamBaseUrl: env.streamBaseUrl,
-      shapeProxyPath: "/v1/electric-proxy",
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: membershipFanoutSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: claimsFromTestHeader,
+          readPath,
+        }),
     });
-
-    httpServer = Bun.serve({ port: 0, fetch: server.fetch });
-    proxyUrl = `http://127.0.0.1:${httpServer.port}/v1/electric-proxy`;
+    server = stack.server;
   });
 
   beforeEach(async () => {
@@ -137,8 +138,7 @@ describe("membership fan-out (readwrite) integration", () => {
   });
 
   afterAll(async () => {
-    await httpServer.stop(true);
-    await server.stop();
+    await stack.stop();
     await serverDb.close();
   });
 
@@ -150,8 +150,8 @@ describe("membership fan-out (readwrite) integration", () => {
 
     const coMemberPg = await createLocalWorkItemStore();
     const nonMemberPg = await createLocalWorkItemStore();
-    const coMember = await startMemberSync(coMemberPg, proxyUrl, MEMBER_B);
-    const nonMember = await startMemberSync(nonMemberPg, proxyUrl, NON_MEMBER_C);
+    const coMember = await startMemberSync(coMemberPg, stack, MEMBER_B);
+    const nonMember = await startMemberSync(nonMemberPg, stack, NON_MEMBER_C);
 
     try {
       await coMember.initialSyncDone;
@@ -197,7 +197,7 @@ describe("membership fan-out (readwrite) integration", () => {
       .values({ id: REV_ITEM, workspaceId: REV_WS, ownerId: REV_MEMBER, body: "revoke me" });
 
     const memberPg = await createLocalWorkItemStore();
-    const member = await startMemberSync(memberPg, proxyUrl, REV_MEMBER);
+    const member = await startMemberSync(memberPg, stack, REV_MEMBER);
 
     try {
       await member.initialSyncDone;
@@ -244,7 +244,7 @@ describe("membership fan-out (readwrite) integration", () => {
 
     // Session 1: sync, receive the item, persist the tag-set + offset, then go OFFLINE (unsubscribe)
     // while keeping the local store.
-    const first = await startMemberSync(memberPg, proxyUrl, RES_MEMBER);
+    const first = await startMemberSync(memberPg, stack, RES_MEMBER);
     await first.initialSyncDone;
     await waitFor(async () => {
       expect(await itemCount(memberPg)).toBe(1);
@@ -255,7 +255,7 @@ describe("membership fan-out (readwrite) integration", () => {
     await server.drizzle.delete(workspaceMembersTable).where(eq(workspaceMembersTable.id, RES_MEMBERSHIP));
 
     // Session 2: resume on the SAME store. Catch-up from the persisted offset must deliver the move-out.
-    const second = await startMemberSync(memberPg, proxyUrl, RES_MEMBER);
+    const second = await startMemberSync(memberPg, stack, RES_MEMBER);
     try {
       await second.initialSyncDone;
       await waitFor(async () => {
@@ -286,7 +286,7 @@ describe("membership fan-out (readwrite) integration", () => {
       .values({ id: MVI_ITEM, workspaceId: MVI_WS, ownerId: MVI_MEMBER, body: "appear on join" });
 
     const memberPg = await createLocalWorkItemStore();
-    const member = await startMemberSync(memberPg, proxyUrl, MVI_MEMBER);
+    const member = await startMemberSync(memberPg, stack, MVI_MEMBER);
 
     try {
       await member.initialSyncDone;
@@ -328,7 +328,7 @@ describe("membership fan-out (readwrite) integration", () => {
 
     // Session 1: sync as a non-member (sees nothing), persist the offset, then go OFFLINE (unsubscribe)
     // while keeping the local store.
-    const first = await startMemberSync(memberPg, proxyUrl, MIN_MEMBER);
+    const first = await startMemberSync(memberPg, stack, MIN_MEMBER);
     await first.initialSyncDone;
     expect(await itemCount(memberPg)).toBe(0);
     first.sync.unsubscribe();
@@ -339,7 +339,7 @@ describe("membership fan-out (readwrite) integration", () => {
       .values({ id: MIN_MEMBERSHIP, workspaceId: MIN_WS, memberId: MIN_MEMBER, role: "member" });
 
     // Session 2: resume on the SAME store. Catch-up from the persisted offset must deliver the move-in.
-    const second = await startMemberSync(memberPg, proxyUrl, MIN_MEMBER);
+    const second = await startMemberSync(memberPg, stack, MIN_MEMBER);
     try {
       await second.initialSyncDone;
       await waitFor(async () => {

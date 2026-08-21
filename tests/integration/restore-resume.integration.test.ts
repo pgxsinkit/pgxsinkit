@@ -4,8 +4,9 @@
  * pre-ADR-0046 always-offline restore this is the exact production failure: the restored client reports
  * `ready` but never syncs, so it is silently stale forever.
  *
- * Runs against real Electric+Postgres on the repo's Podman lane (DATABASE_URL/ELECTRIC_URL are set by
- * scripts/run-integration-suite.ts; the `projects` server table is provisioned by `db:migrate`). The store is
+ * Runs against the real Circuits engine + durable-streams on the repo's Podman lane (DATABASE_URL /
+ * CIRCUITS_ENGINE_URL / DURABLE_STREAMS_URL are set by scripts/run-integration-suite.ts; the `projects` server
+ * table is provisioned by `db:migrate`). The control plane and the edge are in-process. The store is
  * file-backed under the repo-local `tmp/agents` (gitignored) per the temp-file rule.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
@@ -17,20 +18,40 @@ import { eq } from "drizzle-orm";
 
 import { createSyncClient } from "@pgxsinkit/client";
 import { projectsSyncRegistry, projectsTable } from "@pgxsinkit/schema";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import { createSyncServer } from "@pgxsinkit/server";
+import {
+  createServerDb,
+  readIntegrationEnv,
+  startNativeSyncStack,
+  waitFor,
+  type NativeSyncStack,
+} from "@pgxsinkit/test-utils";
+
+import { fixedTestClaims } from "../support/claims";
 
 const env = readIntegrationEnv();
 // A well-formed but dead write endpoint. This test never writes/flushes (a clean journal, no `autoSync`), so
-// the write path is never exercised — only read/sync convergence matters, which rides `electricUrl`.
+// the write path is never exercised — only read/sync convergence matters, which rides the read path.
 const DEAD_WRITE = "http://127.0.0.1:1/api/mutations";
 const STORE_ROOT = "tmp/agents";
 
 describe("restore resume (ADR-0046)", () => {
   const serverDb = createServerDb(projectsSyncRegistry, env.databaseUrl);
   const createdStorePaths: string[] = [];
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof projectsSyncRegistry>>>;
 
   beforeAll(async () => {
     await mkdir(STORE_ROOT, { recursive: true });
+    stack = await startNativeSyncStack({
+      env,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: projectsSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: fixedTestClaims,
+          readPath,
+        }),
+    });
   });
 
   beforeEach(async () => {
@@ -41,6 +62,7 @@ describe("restore resume (ADR-0046)", () => {
     for (const path of createdStorePaths.splice(0)) {
       await rm(path, { recursive: true, force: true }).catch(() => undefined);
     }
+    await stack.stop();
     await serverDb.close();
   });
 
@@ -54,8 +76,8 @@ describe("restore resume (ADR-0046)", () => {
     createdStorePaths.push(storePathA);
     const clientA = await createSyncClient({
       registry: projectsSyncRegistry,
-      controlPlaneUrl: env.controlPlaneUrl,
-      streamBaseUrl: env.streamBaseUrl,
+      controlPlaneUrl: stack.controlPlaneUrl,
+      streamBaseUrl: stack.streamBaseUrl,
       batchWriteUrl: DEAD_WRITE,
       storePath: storePathA,
     });
@@ -82,8 +104,8 @@ describe("restore resume (ADR-0046)", () => {
     createdStorePaths.push(storePathB);
     const clientB = await createSyncClient({
       registry: projectsSyncRegistry,
-      controlPlaneUrl: env.controlPlaneUrl,
-      streamBaseUrl: env.streamBaseUrl,
+      controlPlaneUrl: stack.controlPlaneUrl,
+      streamBaseUrl: stack.streamBaseUrl,
       batchWriteUrl: DEAD_WRITE,
       storePath: storePathB,
       restoreFrom: backup,

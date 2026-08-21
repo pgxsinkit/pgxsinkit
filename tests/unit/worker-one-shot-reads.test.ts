@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 //
 // The harness boots a REAL in-process engine over a prepopulated in-memory PGlite behind `defineSyncWorker`,
 // driven by `attachSyncClient` across a bun `MessageChannel` (no real Worker), so Drizzle's result mapping is
-// exercised for real. ONLY `startConfiguredSync` is mocked — a controllable sync stub whose `ensureGroupStarted`
+// exercised for real. ONLY `startCircuitsSync` is mocked — a controllable sync stub whose `ensureGroupStarted`
 // records activation — so the lazy-activation assertions (tests 3 & 7) can observe a guarded read starting a
 // lazy group exactly as `client-lazy-facade`/`lazy-guard` prove in-process, while everything else (PGlite,
 // Drizzle, schema, mutation, local store) runs unmocked. mock.module → this file is registered in the
@@ -77,13 +77,13 @@ const registry = defineSyncRegistry({
 });
 type Registry = typeof registry;
 
-// ─── Controllable sync stub (only `startConfiguredSync` is mocked) ───────────────────────────────────
+// ─── Controllable sync stub (only `startCircuitsSync` is mocked) ───────────────────────────────────
 // 1 group per table (`<key>-shape`); `ensureGroupStarted` records activation so `isTableStarted` reflects it,
 // mirroring the in-process `client-lazy-facade` stub. `onInitialSync` fires so the engine reaches phase
 // "ready" without any network. Reset per test.
 const startedGroups = new Set<string>();
 const ensureGroupStartedCalls: string[] = [];
-const startConfiguredSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
+const startCircuitsSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
   opts.onInitialSync?.();
   return {
     unsubscribe: () => undefined,
@@ -106,7 +106,7 @@ let hosts: SyncWorkerHost<Registry>[] = [];
 let inProcessClients: SyncClient<Registry>[] = [];
 let channels: MessageChannel[] = [];
 
-// Dynamic import so the `startConfiguredSync` mock (set in beforeAll) is in place before `index` binds it.
+// Dynamic import so the `startCircuitsSync` mock (set in beforeAll) is in place before `index` binds it.
 async function indexModule() {
   return import("../../packages/client/src/index");
 }
@@ -195,8 +195,8 @@ async function seedLibrary(client: Pick<SyncClient<Registry>, "rawQuery">): Prom
 }
 
 beforeAll(async () => {
-  await mock.module("../../packages/client/src/shape-sync", () => ({
-    startConfiguredSync: startConfiguredSyncMock,
+  await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+    startCircuitsSync: startCircuitsSyncMock,
   }));
 });
 
@@ -205,7 +205,7 @@ afterAll(() => mock.restore());
 beforeEach(() => {
   startedGroups.clear();
   ensureGroupStartedCalls.length = 0;
-  startConfiguredSyncMock.mockClear();
+  startCircuitsSyncMock.mockClear();
 });
 
 afterEach(async () => {

@@ -101,6 +101,7 @@ async function main(): Promise<void> {
     fixture = await startPlacementFixtureServer({
       databaseUrl,
       circuitsEngineUrl: `http://127.0.0.1:${enginePort}`,
+      durableStreamsUrl: `http://127.0.0.1:${dsPort}`,
       port: fixturePort,
       allowedOrigins: [PLACEMENT_ORIGIN],
     });
@@ -115,7 +116,7 @@ async function main(): Promise<void> {
       // Baked into the placement bundle at vite build time (Playwright's webServer inherits this env).
       VITE_PLACEMENT_WRITE_URL: fixture.batchWriteUrl,
       VITE_PLACEMENT_CONTROL_PLANE_URL: fixture.controlPlaneUrl,
-      VITE_PLACEMENT_STREAM_BASE_URL: `http://127.0.0.1:${dsPort}/v1/stream`,
+      VITE_PLACEMENT_STREAM_BASE_URL: fixture.streamBaseUrl,
     };
     const args = [
       "playwright",

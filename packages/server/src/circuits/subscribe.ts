@@ -210,6 +210,19 @@ export function createSubscribeHandler(
 
     const claims = options.resolveAuthClaims ? await options.resolveAuthClaims(request) : null;
 
+    // Unauthenticated is NOT a denial, for the same reason an engine outage is not: a client told
+    // "not entitled" truncates the scope and unsubscribes, so answering an expired JWT that way
+    // turns a re-login into data loss. 401 is what makes it a distinct, recoverable status the
+    // client can retry through (ADR-0013).
+    //
+    // The check is on the SUBJECT, not on the claims object: a verified token with no `sub` names a
+    // bearer no revocation could ever reach, so it is exactly as unusable as no token at all. A
+    // deployment with no auth adapter never reaches here — `createSyncServer` refuses that pairing
+    // at construction.
+    if (typeof claims?.sub !== "string" || claims.sub === "") {
+      return Response.json({ error: "unauthenticated" }, { status: 401 });
+    }
+
     let result: SubscribeResult;
     try {
       result = await subscribeToShapes(options, claims, body.subscriptions, Math.floor(Date.now() / 1000));
@@ -320,6 +333,13 @@ export function createRefreshHandler(
     }
 
     const claims = options.resolveAuthClaims ? await options.resolveAuthClaims(request) : null;
+    // Same as subscribe: an unauthenticated re-mint is a credential problem, not a revocation. The
+    // difference matters more here — a `revoked` answer makes the client truncate, and a token
+    // expiring is the single most ordinary thing that happens on this route.
+    if (typeof claims?.sub !== "string" || claims.sub === "") {
+      return Response.json({ error: "unauthenticated" }, { status: 401 });
+    }
+
     const result = await refreshStreamToken(options, claims, body.token, Math.floor(Date.now() / 1000));
     return Response.json(result);
   };

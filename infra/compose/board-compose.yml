@@ -8,7 +8,8 @@
 #
 # Trimmed vs. full self-hosted: dropped realtime, storage, imgproxy, analytics, vector, supavisor
 # (Storage/attachments are a board v2). Kept: db / auth / rest / meta + studio / envoy / functions
-# (edge-runtime) + electric. Board-only ports so it coexists with the harness. Every service connects
+# (edge-runtime) + the Circuits stack (durable-streams + engine). Board-only ports so it coexists with
+# the harness. Every service connects
 # as `postgres`/`authenticator`/`supabase_auth_admin` (passwords set to ${POSTGRES_PASSWORD} by the
 # image + the official roles.sql). Bring up with `bun run infra:up`.
 
@@ -18,6 +19,9 @@ services:
   db:
     image: docker.io/supabase/postgres:17.6.1.143
     container_name: board-db
+    # Not optional: the Circuits engine creates its own replication slot at startup and fails closed
+    # without logical decoding.
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10"]
     # Supabase's OWN init scripts (vendored byte-unmodified), mounted at the SAME paths the official
     # self-hosted compose uses. Order matters: the image's migrate.sh runs init-scripts/*.sql under
     # `set -e`, so 99-roles.sql (which ALTERs supabase_functions_admin's password) MUST be preceded by
@@ -169,26 +173,60 @@ services:
       SUPABASE_ANON_KEY: ${BOARD_PUBLISHABLE_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${BOARD_SECRET_KEY}
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      ELECTRIC_SHAPE_URL: http://electric:3000/v1/shape
+      # board-sync (control plane) talks to the engine; board-stream (edge) proxies to durable-streams.
+      # Neither is client-reachable — reaching them is what the two functions are for.
+      CIRCUITS_ENGINE_URL: http://engine:7010
+      DURABLE_STREAMS_URL: http://ds:8791
+      # One secret: board-sync mints stream tokens with it and board-stream verifies them.
+      STREAM_TOKEN_SECRET: ${BOARD_STREAM_TOKEN_SECRET:-board-dev-stream-token-secret}
       BOARD_ALLOWED_ORIGINS: ${BOARD_SITE_URL},http://localhost:5174
       # Keep a board-sync long-poll worker alive ~10min instead of the stock 60s, so the read path
       # is not forced to reconnect every minute when the worker hits its wall-clock budget (read by
       # the vendored main router). Demo realism: Cloud Supabase manages worker lifetime for you.
       EDGE_WORKER_TIMEOUT_MS: "600000"
 
-  electric:
-    image: docker.io/electricsql/electric:1.7.11
-    container_name: board-electric
+  # The log the board's clients actually READ from, through board-stream. Official published image,
+  # pinned — only the engine is built from source, and only because it needs the repo's Dockerfile.
+  ds:
+    image: docker.io/electricax/durable-streams-server-rust:0.1.5
+    container_name: board-ds
+    environment:
+      DS_PORT: 8791
+      DS_DATA_DIR: /data
+      # In-memory: the board replays from Postgres on every bring-up, so paying fsync-per-append would
+      # buy durability that nothing here reads.
+      DS_MEMORY: "1"
+    ports:
+      - "54341:8791"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8791 || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # The Circuits engine: replication ingest, shape maintenance, and the control API board-sync calls.
+  # Built from an electric-circuits checkout — a Rust release build, so bring it up with `--build`.
+  engine:
+    container_name: board-engine
+    build:
+      context: ${PGXSINKIT_CIRCUITS_REPO:?set PGXSINKIT_CIRCUITS_REPO to an electric-circuits checkout}
+      dockerfile: docker/Dockerfile.engine
+    environment:
+      ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
+      ELECTRIC_CIRCUITS_PG_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # Explicit table list, never `*`: `*` introspects every public table with a primary key, which
+      # sweeps in the operations log and pgmq's own relations (docs/research/0001).
+      ELECTRIC_CIRCUITS_PG_TABLES: ${BOARD_CIRCUITS_PG_TABLES:?set the explicit board table list}
+      ELECTRIC_CIRCUITS_BIND: 0.0.0.0:7010
     depends_on:
       db:
         condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
-      ELECTRIC_INSECURE: "true"
-      # Preview feature the board's membership row-filters require (cross-table subquery `where`).
-      ELECTRIC_FEATURE_FLAGS: allow_subqueries,tagged_subqueries
+      ds:
+        condition: service_healthy
+    # The engine exits if its tables are absent; a restart is the retry, and migrations land between.
+    restart: unless-stopped
     ports:
-      - "54330:3000"
+      - "54342:7010"
 
   # warmer — keeps the board-write + board-sync edge workers hot (board dogfooding finding).
   #
@@ -216,7 +254,9 @@ services:
           curl -fsS -o /dev/null -X POST "http://envoy:8000/functions/v1/board-write/api/mutations" \
             -H "apikey: $$BOARD_PUBLISHABLE_KEY" -H "Authorization: Bearer $$BOARD_PUBLISHABLE_KEY" \
             -H "Content-Type: application/json" -d '{"mutations":[]}' 2>/dev/null || true
-          curl -fsS -o /dev/null "http://envoy:8000/functions/v1/board-sync?table=team&offset=-1" \
+          curl -fsS -o /dev/null "http://envoy:8000/functions/v1/board-sync/sync/v1/barrier" \
+            -H "apikey: $$BOARD_PUBLISHABLE_KEY" -H "Authorization: Bearer $$BOARD_PUBLISHABLE_KEY" 2>/dev/null || true
+          curl -fsS -o /dev/null "http://envoy:8000/functions/v1/board-stream/v1/stream/warm" \
             -H "apikey: $$BOARD_PUBLISHABLE_KEY" -H "Authorization: Bearer $$BOARD_PUBLISHABLE_KEY" 2>/dev/null || true
           sleep 8
         done

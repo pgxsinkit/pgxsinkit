@@ -32,6 +32,34 @@ export interface RefusedStream {
   reason: string;
 }
 
+/**
+ * A control-plane call that did not return 2xx, carrying the status so a caller can tell an AUTH
+ * failure from an outage.
+ *
+ * That distinction is the whole reason this is a class rather than a bare `Error`. A 401 means the
+ * subject's own credential is stale and an app can fix it by prompting for re-login (ADR-0013); a
+ * 503 means the engine is unreachable and only time fixes it. Both retry, but only one of them is
+ * worth telling the user about.
+ */
+export class ControlPlaneError extends Error {
+  readonly status: number;
+  readonly path: string;
+  readonly body: string;
+
+  constructor(status: number, path: string, body: string) {
+    super(`[pgxsinkit] control plane ${path} → ${status}: ${body}`);
+    this.name = "ControlPlaneError";
+    this.status = status;
+    this.path = path;
+    this.body = body;
+  }
+
+  /** Whether this is the subject's credential failing, rather than the deployment. */
+  get isAuthFailure(): boolean {
+    return this.status === 401 || this.status === 403;
+  }
+}
+
 export interface SubscriptionClientOptions {
   /** Base URL of the control plane — the pgxsinkit server. */
   controlPlaneUrl: string;
@@ -51,6 +79,14 @@ export interface SubscriptionClientOptions {
   refreshSkewSeconds?: number;
   /** Called when a scope is revoked. The subscriber truncates that scope and unsubscribes. */
   onRevoked?: (revoked: RefusedStream[]) => void;
+  /**
+   * Aborts in-flight control-plane requests on teardown.
+   *
+   * Load-bearing rather than tidy: a client stopped while its control plane is unreachable has a
+   * subscribe sitting on a TCP connect that can take minutes to fail, and `stop()` waits for the boot
+   * tail. Without this, teardown is held hostage by a network that is already gone.
+   */
+  signal?: AbortSignal;
   fetch?: typeof fetch;
 }
 
@@ -100,9 +136,10 @@ export async function openSubscriptionSession(
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok) {
-      throw new Error(`[pgxsinkit] control plane ${path} → ${response.status}: ${await response.text()}`);
+      throw new ControlPlaneError(response.status, path, await response.text());
     }
     return (await response.json()) as Record<string, unknown>;
   }
@@ -179,16 +216,19 @@ export async function openSubscriptionSession(
  * control plane that is briefly down costs boot latency, not correctness.
  */
 export function createBarrierReader(
-  options: Pick<SubscriptionClientOptions, "controlPlaneUrl" | "authHeaders" | "fetch">,
+  options: Pick<SubscriptionClientOptions, "controlPlaneUrl" | "authHeaders" | "signal" | "fetch">,
 ): () => Promise<ConvergenceBarrier> {
   const doFetch = options.fetch ?? fetch;
   const controlPlane = options.controlPlaneUrl.replace(/\/+$/, "");
 
   return async () => {
     const headers = new Headers(await (options.authHeaders?.() ?? {}));
-    const response = await doFetch(`${controlPlane}/sync/v1/barrier`, { headers });
+    const response = await doFetch(`${controlPlane}/sync/v1/barrier`, {
+      headers,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
     if (!response.ok) {
-      throw new Error(`[pgxsinkit] barrier → ${response.status}`);
+      throw new ControlPlaneError(response.status, "/sync/v1/barrier", await response.text());
     }
     const body = (await response.json()) as Partial<ConvergenceBarrier>;
     return { sync: body.sync === true, pendingFlips: body.pendingFlips ?? 0 };

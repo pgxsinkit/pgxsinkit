@@ -47,7 +47,7 @@ export interface CanonicalTable {
   shape: {
     tableName: string;
     shapeKey: string;
-    electricTable: string | null;
+    physicalTable: string | null;
     rowFilter: CanonicalRowFilter | null;
     /** Shared-tier scope columns, in declaration order — the order parameterizes the family. */
     scope: string[] | null;
@@ -181,7 +181,7 @@ function canonicalizeTable(key: string, entry: SyncTableEntry): CanonicalTable {
     ? {
         tableName: entry.shape.tableName,
         shapeKey: entry.shape.shapeKey,
-        electricTable: entry.shape.electricTable ?? null,
+        physicalTable: entry.shape.physicalTable ?? null,
         rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
         scope: entry.shape.scope ? [...entry.shape.scope] : null,
         where: canonicalizePredicate(entry.shape.where),
@@ -272,7 +272,7 @@ export interface CanonicalReadContract {
   shape: {
     tableName: string;
     shapeKey: string;
-    electricTable: string | null;
+    physicalTable: string | null;
     rowFilter: CanonicalRowFilter | null;
     /** Shared-tier scope columns, in declaration order — the order parameterizes the family. */
     scope: string[] | null;
@@ -293,7 +293,7 @@ export function canonicalizeReadContract(entry: SyncTableEntry): CanonicalReadCo
     ? {
         tableName: entry.shape.tableName,
         shapeKey: entry.shape.shapeKey,
-        electricTable: entry.shape.electricTable ?? null,
+        physicalTable: entry.shape.physicalTable ?? null,
         rowFilter: canonicalizeRowFilter(entry.shape.rowFilter),
         scope: entry.shape.scope ? [...entry.shape.scope] : null,
         where: canonicalizePredicate(entry.shape.where),

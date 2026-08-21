@@ -63,7 +63,7 @@ function holdGroupReady(groupKey: string): () => void {
   groupReadyDeferreds.set(groupKey, { promise, resolve });
   return resolve;
 }
-const startConfiguredSyncMock = mock(async () => ({
+const startCircuitsSyncMock = mock(async () => ({
   unsubscribe: () => undefined,
   tables: {},
   ensureGroupStarted: async (groupKey: string) => {
@@ -102,21 +102,20 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
     // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so the recording namespace
     // now lives on `createSyncEngine`'s return rather than on the mocked `PGlite.create` instance.
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async (key: string) => {
-            deleteSubscriptionCalls.push(key);
-          },
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the desync/discard paths now call directly (there is no
+    // engine namespace to route through). `deleteSubscriptionState` is what the ADR-0021 assertions
+    // observe — the persisted cursor being cleared is the difference between a re-activation that
+    // re-streams and one that resumes over an emptied table.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async ({ subscriptionKey }: { subscriptionKey: string }) => {
+        deleteSubscriptionCalls.push(subscriptionKey);
+      },
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => undefined,
@@ -192,7 +191,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
       rejectedCount: 0,
       ackedCount: 0,
     };
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
   });
 
   async function makeClient(storePath: string) {

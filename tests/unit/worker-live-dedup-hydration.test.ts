@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // SQL with DIFFERENT `use` sets against a consistency group that is still catching up. The assertions: ONE
 // PGlite registration is shared (dedup — `use` is excluded from the fingerprint), and EACH tab's hydration
 // flow settles independently with rows-before-`live-hydrated` on its own port. Uses the same fully-mocked
-// `pglite.live` + startConfiguredSync harness as `worker-live-hydration.test.ts` (no real PGlite/network).
+// `pglite.live` + startCircuitsSync harness as `worker-live-hydration.test.ts` (no real PGlite/network).
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
@@ -64,7 +64,7 @@ function holdGroupReady(groupKey: string): () => void {
   groupReadyDeferreds.set(groupKey, { promise, resolve });
   return resolve;
 }
-const startConfiguredSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
+const startCircuitsSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
   opts.onInitialSync?.();
   return {
     unsubscribe: () => undefined,
@@ -95,19 +95,16 @@ describe("dedup × hydration over the worker bridge (ADR-0040 Slice 3)", () => {
     }));
     await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
     await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
-    await mock.module("../../packages/client/src/sync", () => ({
-      createSyncEngine: async () => ({
-        namespace: {
-          initMetadataTables: async () => undefined,
-          deleteSubscription: async () => undefined,
-          syncShapesToTables: async () => undefined,
-          syncShapeToTable: async () => undefined,
-        },
-        close: async () => undefined,
-      }),
+    // The subscription metadata store, which the reset path now calls directly (there is no engine
+    // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
+    await mock.module("../../packages/client/src/sync/subscription-state", () => ({
+      migrateSubscriptionMetadataTables: async () => undefined,
+      deleteSubscriptionState: async () => undefined,
+      getSubscriptionState: async () => null,
+      updateSubscriptionState: async () => undefined,
     }));
-    await mock.module("../../packages/client/src/shape-sync", () => ({
-      startConfiguredSync: startConfiguredSyncMock,
+    await mock.module("../../packages/client/src/circuits/group-sync", () => ({
+      startCircuitsSync: startCircuitsSyncMock,
     }));
     await mock.module("../../packages/client/src/local-store", () => ({
       reconcileLocalStoreVersion: async () => undefined,
@@ -174,7 +171,7 @@ describe("dedup × hydration over the worker bridge (ADR-0040 Slice 3)", () => {
     liveInitialRows = [];
     createdLiveQueries.length = 0;
     groupReadyDeferreds.clear();
-    startConfiguredSyncMock.mockClear();
+    startCircuitsSyncMock.mockClear();
   });
 
   afterEach(() => {

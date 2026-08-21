@@ -11,8 +11,8 @@
 // The helpers mint plain options objects that ALSO carry the module-internal {@link TEST_STORE_BACKEND}
 // marker at runtime — invisible in the public return type. Consumers SPREAD them into the client options:
 //
-//   createSyncClient({ ...memoryStoreForTests("my-test"), registry, electricUrl, batchWriteUrl })
-//   createSyncClient({ ...testStoreAcknowledgment(), pgliteInstance, registry, electricUrl, batchWriteUrl })
+//   createSyncClient({ ...memoryStoreForTests("my-test"), registry, controlPlaneUrl, streamBaseUrl, batchWriteUrl })
+//   createSyncClient({ ...testStoreAcknowledgment(), pgliteInstance, registry, controlPlaneUrl, streamBaseUrl, batchWriteUrl })
 
 import { TEST_STORE_BACKEND } from "./store-path";
 

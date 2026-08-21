@@ -75,7 +75,7 @@ import {
   buildSyntheticUpdatePatch,
 } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
-import { createServerDb, readIntegrationEnv, waitFor } from "@pgxsinkit/test-utils";
+import { createServerDb, readIntegrationEnv, startNativeReadPath, waitFor } from "@pgxsinkit/test-utils";
 
 import { parseDemoAuthClaimsFromRequest } from "../../../apps/write-api/src/demo-auth";
 import { installPlpgsqlBatchFunction } from "../../../packages/server/src/mutations/plpgsql-apply";
@@ -181,6 +181,9 @@ interface ConcurrentMixedLoadWorkerInput {
   coordinatorUrl: string;
   storePath: string;
   batchWriteUrl: string;
+  /** The parent process hosts the control plane and the edge; a worker is told where they are. */
+  controlPlaneUrl: string;
+  streamBaseUrl: string;
 }
 
 interface ConcurrentMixedLoadWorkerResult {
@@ -387,6 +390,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
   let server: ReturnType<typeof createSyncServer<typeof registry>> | undefined;
   let httpServer: Server | undefined;
+  let readPath: Awaited<ReturnType<typeof startNativeReadPath>> | undefined;
   const dataDirs: string[] = [];
   const clientHandles: Array<
     ConcurrentClientHandle & { client: Awaited<ReturnType<typeof createSyncClient<typeof registry>>> }
@@ -416,6 +420,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
       await provisioningServer.stop();
     }
 
+    readPath = await startNativeReadPath({ env });
     server = createSyncServer({
       registry,
       db: serverDb.db,
@@ -423,11 +428,15 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
       },
+      readPath: readPath.readPath,
     });
 
     const startedFetchServer = await startFetchServer(server.fetch, 0);
     httpServer = startedFetchServer.server;
-    const batchWriteUrl = `http://127.0.0.1:${startedFetchServer.port}/api/mutations`;
+    const origin = `http://127.0.0.1:${startedFetchServer.port}`;
+    const batchWriteUrl = `${origin}/api/mutations`;
+    const controlPlaneUrl = origin;
+    const streamBaseUrl = readPath.streamBaseUrl;
 
     for (let clientIndex = 0; clientIndex < config.concurrentClients; clientIndex += 1) {
       const assignment = users[clientIndex % users.length]!;
@@ -438,8 +447,8 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
 
       const client = await createSyncClient({
         registry,
-        controlPlaneUrl: env.controlPlaneUrl,
-        streamBaseUrl: env.streamBaseUrl,
+        controlPlaneUrl,
+        streamBaseUrl,
         batchWriteUrl,
         getAuthToken: async () => assignment.token,
         storePath,
@@ -515,6 +524,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
   } finally {
     await Promise.all(clientHandles.map((handle) => handle.client.stop()));
     await stopHttpServer(httpServer);
+    await readPath?.stop();
     await server?.stop();
     await serverDb.close();
     await Promise.all(dataDirs.map((storePath) => rm(storePath, { recursive: true, force: true })));
@@ -532,6 +542,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
 
   let server: ReturnType<typeof createSyncServer<typeof registry>> | undefined;
   let httpServer: Server | undefined;
+  let readPath: Awaited<ReturnType<typeof startNativeReadPath>> | undefined;
   let coordinatorServer: Server | undefined;
   const dataDirs: string[] = [];
   const sharedRowPoolsByUser = new Map<string, SharedConcurrentRowPoolState>();
@@ -559,6 +570,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
       await provisioningServer.stop();
     }
 
+    readPath = await startNativeReadPath({ env });
     server = createSyncServer({
       registry,
       db: serverDb.db,
@@ -566,11 +578,15 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
         const claims = parseDemoAuthClaimsFromRequest(request);
         return claims ? { ...claims } : null;
       },
+      readPath: readPath.readPath,
     });
 
     const startedFetchServer = await startFetchServer(server.fetch, 0);
     httpServer = startedFetchServer.server;
-    const batchWriteUrl = `http://127.0.0.1:${startedFetchServer.port}/api/mutations`;
+    const origin = `http://127.0.0.1:${startedFetchServer.port}`;
+    const batchWriteUrl = `${origin}/api/mutations`;
+    const controlPlaneUrl = origin;
+    const streamBaseUrl = readPath.streamBaseUrl;
 
     for (const assignment of users) {
       if (sharedRowPoolsByUser.has(assignment.key)) {
@@ -616,6 +632,8 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
         coordinatorUrl,
         storePath,
         batchWriteUrl,
+        controlPlaneUrl,
+        streamBaseUrl,
       });
     }
 
@@ -644,6 +662,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
   } finally {
     await stopHttpServer(coordinatorServer);
     await stopHttpServer(httpServer);
+    await readPath?.stop();
     await server?.stop();
     await serverDb.close();
     await Promise.all(dataDirs.map((storePath) => rm(storePath, { recursive: true, force: true })));
@@ -951,14 +970,15 @@ export async function runConcurrentMixedLoadWorker(
   input: ConcurrentMixedLoadWorkerInput,
 ): Promise<ConcurrentMixedLoadWorkerResult> {
   const { assignment, clientIndex, config, coordinatorUrl, storePath, batchWriteUrl } = input;
+  const { controlPlaneUrl, streamBaseUrl } = input;
   const { registry, tableNames } = buildSyntheticRegistry({
     tableCount: Math.max(1, config.tableCount),
     extraColumnCount: config.extraColumnCount,
   });
   const client = await createSyncClient({
     registry,
-    controlPlaneUrl: env.controlPlaneUrl,
-    streamBaseUrl: env.streamBaseUrl,
+    controlPlaneUrl,
+    streamBaseUrl,
     batchWriteUrl,
     getAuthToken: async () => assignment.token,
     storePath,
