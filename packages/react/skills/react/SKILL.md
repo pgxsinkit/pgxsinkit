@@ -67,9 +67,10 @@ if (rows.length === 0) return <EmptyState />;
 ## Gate authenticated lazy groups until the session exists
 
 A live query that references one `subscription: "lazy"` relation activates its **whole consistency
-group**. The first shape request uses the claims available at that moment. If the group's row filters
-return `DENY_ALL` without a user claim, mounting the query while auth is unresolved starts an anonymous,
-empty subscription; a later auth notification then has to rotate/refetch the shape.
+group**. It subscribes with the claims available at that moment. If the group's row filters return
+`DENY_ALL_PREDICATE` without a user claim, mounting the query while auth is unresolved subscribes
+anonymously — the control plane grants nothing, and the group stays empty rather than filling in when the
+session arrives.
 
 Use the hook's `ready` option to make first activation coincide with the authenticated session:
 
@@ -82,9 +83,9 @@ useLiveDrizzleRows((client) => client.drizzle.select({ id: workflowView.id }).fr
 ```
 
 You no longer need a separate activator component for writes. An ordinary optimistic create/update/delete
-self-activates its target's lazy group at enqueue, so the Postgres commit echoes back through Electric and
-retires the acknowledged journal row on its own. But that write-triggered activation still uses the claims
-available at the time, so gate the **write** on auth the same way — do not write to an authenticated-only
+self-activates its target's lazy group at enqueue, so the Postgres commit echoes back down the read path
+and retires the acknowledged journal row on its own. But that write-triggered activation still uses the
+claims available at the time, so gate the **write** on auth the same way — do not write to an authenticated-only
 group before the session exists. (`updateBlind` is different: it has no overlay, does not activate its
 group, and deliberately retires on the authoritative ack without an echo.) Activating a claims-denied group
 with no token — by read or by write — now logs a `console.warn` naming the group.
@@ -116,7 +117,7 @@ to that safe shape, so this only affects hand-written raw SQL.
 The read hooks are read-only. Mutate via `client.tables.<table>.create/update/delete` (or
 `useSyncClient()` inside a component). Each call stages an optimistic local write (the live query
 re-renders this frame) and **flushes on enqueue** — the optimistic overlay clears when the server value
-streams back through Electric. See the `core` skill for the write model and `operating` for convergence
+streams back down the read path. See the `core` skill for the write model and `operating` for convergence
 cadence and the `globalThis.__pgxsinkitDebug` latency instrumentation.
 
 ## Common mistakes
@@ -127,8 +128,8 @@ cadence and the `globalThis.__pgxsinkitDebug` latency instrumentation.
   saturates the single WASM thread.
 - Mutating local tables directly instead of through `client.tables.<t>` (the one write path).
 - Reading before the client is ready instead of gating with `ready: false`.
-- Reading OR writing an authenticated lazy group before auth resolves — it activates against anonymous
-  claims (now flagged by a console warning) and the shape stays empty until a later rotation/refetch. Gate
-  on the session, not on a manual activator (writes self-activate their group).
+- Reading OR writing an authenticated lazy group before auth resolves — it subscribes against anonymous
+  claims (now flagged by a console warning), is granted nothing, and stays empty. Gate on the session, not
+  on a manual activator (writes self-activate their group).
 
 Reference: <https://pgxsinkit.github.io/>.
