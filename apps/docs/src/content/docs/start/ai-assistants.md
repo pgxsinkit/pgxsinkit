@@ -33,10 +33,10 @@ travels with the dependency.
 
 | Skill                    | Package                           | Load it before…                                                                                                                                                                                                                                                     |
 | ------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`core`**               | `@pgxsinkit/client`               | wiring sync at all — the two asymmetric paths, the single in-database write path, the mandatory fail-closed subquery flag, and why local PGlite is not full DDL parity.                                                                                             |
-| **`registry-authoring`** | `@pgxsinkit/contracts`            | defining a registry — the writable-table rules (a server-version field **and** a conflict policy), server-managed fields, `enum::text` in shape filters, and deriving the read filter and RLS from one predicate.                                                   |
+| **`core`**               | `@pgxsinkit/client`               | wiring sync at all — the two asymmetric paths, the single in-database write path, how the read path fails closed (401 at the control plane, 403 at the edge), and why local PGlite is not full DDL parity.                                                          |
+| **`registry-authoring`** | `@pgxsinkit/contracts`            | defining a registry — the writable-table rules (a server-version field **and** a conflict policy), server-managed fields, authoring row filters with the `p.*` predicate builders, and deriving the read filter and RLS from one predicate.                         |
 | **`operating`**          | `@pgxsinkit/client`               | shipping to production — runtime latency, capability-driven worker placement (Safari SW-direct; Chromium/Firefox elected), OPFS-vs-idb durability, relocation outcomes, backend permanence and destruction, diagnostics, and the forwarded debug rail.              |
-| **`deploying`**          | `@pgxsinkit/server`               | deploying the server + shape proxy on Bun / Deno / Supabase Edge / Workers — bundling for Deno, the function-name path rewrite, and resolving claims from the platform JWT.                                                                                         |
+| **`deploying`**          | `@pgxsinkit/server`               | deploying the write API, the read path's control plane, and the stream edge on Bun / Deno / Supabase Edge / Workers — bundling for Deno, the function-name path rewrite, and resolving claims from the platform JWT.                                                |
 | **`react`**              | `@pgxsinkit/react`                | building React components — `createSyncClientHooks`, the live read hooks, the snake_case→field-key remap, and that writes go through `client.tables.<t>`, not the hooks.                                                                                            |
 | **`operating`**          | `@pgxsinkit/pglite-opfs-repacked` | constructing the constant-handle OPFS backend in a capability-proven worker scope — dedicated workers on Chromium/Firefox, SharedWorkers on real Safari — plus factory-owned durability, extent identity, complete-directory recreation, and stable error remedies. |
 
@@ -49,15 +49,18 @@ bunx @tanstack/intent@latest load @pgxsinkit/client#core   # print one skill
 bunx @tanstack/intent@latest install                       # add "load a matching skill first" guidance to AGENTS.md / CLAUDE.md
 ```
 
-(Use the `@latest` form: `@electric-sql/client` also installs an `intent` binary, so a bare `intent` in
-`node_modules/.bin` can resolve to the wrong CLI.)
+(Use the `@latest` form: `@durable-streams/client` — which `@pgxsinkit/client` depends on for the read
+path's transport — also installs an `intent` binary, so a bare `intent` in `node_modules/.bin` can
+resolve to the wrong CLI.)
 
 ## The six things assistants get wrong
 
 1. **It is a toolkit, not a demo or a data layer.** The `@pgxsinkit/*` packages are the product.
-2. **The two paths are separate and asymmetric.** Writes do not travel back through Electric.
+2. **The two paths are separate and asymmetric.** Writes do not travel back down the read path.
 3. **There is one write path.** No selectable backend; one in-database apply function.
-4. **The Electric subquery flag is mandatory** and fails closed without it.
+4. **The engine's table list is explicit, never `*`.** `ELECTRIC_CIRCUITS_PG_TABLES` names bare table
+   names; `*` sweeps in every `public` table with a primary key. A schema-qualified registry is refused
+   outright — the engine keys tables by bare name end to end.
 5. **Local PGlite schema is not full DDL parity** with Postgres.
 6. **Browser storage is capability-selected, not browser-named.** Capability worker mode prefers
    OPFS-repacked: real Safari runs SW-direct, Chromium/Firefox elect a dedicated worker, and idb is the
@@ -73,12 +76,17 @@ and each silently makes a live app feel slow or flaky. An assistant wiring a rea
 
 - **Writes flush on enqueue, not on the interval.** The convergence interval is a _fallback_; keep it
   long (idle CPU), do not shorten it to chase write latency.
-- **A same-origin Electric shape proxy must force `cache-control: no-store`**, or a rotated shape handle
-  serves stale and loops on 409s.
-- **A browser opens one long-poll connection per shape.** With several shapes the HTTP/1.1 ~6-per-origin
-  cap starves writes — serve the gateway over **HTTP/2**.
+- **The stream edge belongs on its own origin**, with `cache-control: no-store` on the control plane
+  beside it and the stream token excluded from the cache key. The edge is the only cacheable read
+  surface, and it can only be fronted if it is addressable apart from the private one.
+- **Every `createStreamGate` mount must set `Access-Control-Expose-Headers`** from the exported
+  `STREAM_READ_EXPOSED_HEADERS`. Without it a cross-origin browser cannot read the stream headers the
+  client steers its read loop off, and it re-requests from the start of the stream in a hot loop — with
+  no error raised on either side.
+- **A browser opens one long-poll connection per stream.** With several streams the HTTP/1.1
+  ~6-per-origin cap starves writes — serve the gateway over **HTTP/2**.
 - **Serverless edges cold-start.** The first write after idle lags; warm the worker and set its
-  wall-clock timeout above Electric's ~25s long-poll.
+  wall-clock timeout above the durable-streams long-poll hold.
 - **Debug latency with `globalThis.__pgxsinkitDebug`**, and measure at the network boundary — polling
   PGlite in a loop inflates the number it reports.
 - **In a browser, attach through a SharedWorker** (`defineSyncWorker` + `attachSyncClient`) to take

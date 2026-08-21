@@ -29,7 +29,7 @@ export interface ShapeRequest {
    * different things: arity is checked strictly rather than padded.
    */
   scope?: readonly PredicateValue[];
-  /** Deployment-supplied runtime params, as the Electric proxy's `extraParams`. */
+  /** Deployment-supplied runtime params, handed to `rowFilter.customPredicate` as its second argument. */
   params?: Record<string, unknown>;
 }
 

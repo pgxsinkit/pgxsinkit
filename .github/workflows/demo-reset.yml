@@ -1,11 +1,18 @@
 name: Demo reset
 
-# Nightly full rebuild of the hosted board /demo's shared backend (board ADR-0009):
-# purge → migrate → reseed.
+# RETIRED 2026-08-21, and no longer scheduled. The hosted board /demo (board ADR-0009) it reset is
+# retired — Electric Cloud is being shut down, and the demo's read path was the classic Electric path
+# removed in ADR-0055 — so there is no nightly backend to restore. `workflow_dispatch` is kept
+# deliberately: the job is still the supported way to rebuild a cloud board database from the
+# committed migration history, which is useful whether or not a demo is hosted, and restoring the
+# nightly cadence is just putting the `schedule:` block back. (The DEMO_BOARD_* variables and secrets
+# it reads can be unset in repo settings; the `if:` gate then skips it.)
 #
-# The /demo is a PUBLIC, signed-in-as-a-fixture, writable board — anyone can create/move issues and
-# post chat. This job restores it to the known seeded fixtures every night so vandalism (offensive
-# issue titles, chat spam) never persists — and it rebuilds the SCHEMA, not just the rows:
+# Full rebuild of a hosted board's shared backend: purge → migrate → reseed.
+#
+# The /demo was a PUBLIC, signed-in-as-a-fixture, writable board — anyone could create/move issues and
+# post chat. This job restored it to the known seeded fixtures every night so vandalism (offensive
+# issue titles, chat spam) never persisted — and it rebuilds the SCHEMA, not just the rows:
 #   1. `purge:board` drops every migration-created board object in public (model-derived drop list)
 #      plus the `drizzle` bookkeeping schema;
 #   2. `db:board:migrate` re-applies the latest committed history from scratch;
@@ -19,7 +26,7 @@ name: Demo reset
 # connection path (the direct host is IPv6-only and unreachable from GitHub runners; see below).
 #
 # It talks ONLY to the managed services (GoTrue admin API + the project's Postgres via the Supavisor
-# SESSION pooler); no Postgres/Electric containers, no Pages deploy. Inputs:
+# SESSION pooler); no containers of any kind, no Pages deploy. Inputs:
 #   - var    DEMO_BOARD_SUPABASE_URL   the project URL (public; the GoTrue admin gateway)
 #   - secret DEMO_BOARD_SECRET_KEY     the project's sb_secret_… key (admin API auth)
 #   - secret DEMO_BOARD_DATABASE_URL   the SESSION pooler connection (pooler host, port 5432,
@@ -32,13 +39,12 @@ name: Demo reset
 # a public demo's sign-in password is public by design, so there is nothing to inject here.
 #
 # Gated on the public variable so a fork (which has neither the variable nor the secrets) skips it
-# instead of failing every night. Disable open signups on the Supabase project so the only accounts
-# are the seeded fixtures (the reset truncates all board ROWS regardless of author, but only deletes
-# the FIXTURE auth identities) — see the hosted-demo guide.
+# instead of failing. If a public board is ever hosted again, disable open signups on the Supabase
+# project so the only accounts are the seeded fixtures (the reset truncates all board ROWS regardless
+# of author, but only deletes the FIXTURE auth identities).
 
 on:
-  schedule:
-    - cron: "0 3 * * *" # 03:00 UTC daily
+  # No `schedule:` — retired, see above. Restoring the nightly cadence means adding it back.
   workflow_dispatch: # manual reset on demand
 
 concurrency:
@@ -63,7 +69,7 @@ jobs:
         run: bun run db:board:migrate
         env:
           BOARD_DATABASE_URL: ${{ secrets.DEMO_BOARD_DATABASE_URL }}
-      - name: Reseed the hosted demo
+      - name: Reseed the fixtures
         run: bun run seed:board
         env:
           BOARD_GATEWAY_URL: ${{ vars.DEMO_BOARD_SUPABASE_URL }}

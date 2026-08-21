@@ -6,7 +6,7 @@ sidebar:
 ---
 
 By default `createSyncClient` runs the whole local-first engine **in the tab that called it** — PGlite,
-the Local schema, the mutation journal, the Electric shape streams, and the convergence loop all execute
+the Local schema, the mutation journal, the read-path stream subscriptions, and the convergence loop all execute
 on that tab's thread. **Worker mode** leaves the tab a thin view and uses a native `SharedWorker` as the
 communication centre. A real OPFS open at boot decides the engine's home:
 Safari runs it inside that SharedWorker; Chromium and Firefox elect one tab-spawned dedicated worker.
@@ -21,9 +21,10 @@ calling thread.
 
 Worker mode is a facade **pair** with the same client shape as `createSyncClient`:
 
-- **The worker entry** (a file bundled for both worker kinds) calls `defineSyncWorker({ registry,
-electricUrl, batchWriteUrl, … })` at module top level. It hosts the engine directly or acts as its router. The
-  registry is **code** and must be _imported_ by the worker file — never cloned or serialized into it.
+- **The worker entry** (a file bundled for both worker kinds) calls
+  `defineSyncWorker({ registry, controlPlaneUrl, streamBaseUrl, batchWriteUrl, … })` at module top
+  level. It hosts the engine directly or acts as its router. The registry is **code** and must be
+  _imported_ by the worker file — never cloned or serialized into it.
 - **The tab** calls `attachSyncClient({ worker, registry })`, which returns the same surface as
   `createSyncClient` (the write API, Drizzle reads, live rows, `localReadReady`/`writeReady`/`ready`/`status`/
   `stop`), transparently proxied to the shared engine, plus `notifyAuthChanged` and `setOnline`.
@@ -41,7 +42,10 @@ import { registry } from "./registry";
 
 defineSyncWorker({
   registry,
-  electricUrl: "/api/shape",
+  // The control plane mounts its own `/sync/v1/*` paths under this base; the edge is a separate
+  // deployment, so in production these two are usually different origins.
+  controlPlaneUrl: "/",
+  streamBaseUrl: "/v1/stream",
   batchWriteUrl: "/api/mutations",
   // No placement or durability options here: where the engine runs is a runtime capability
   // decision, and storage backend + durability are declared on the registry (registry.storage).
@@ -143,7 +147,7 @@ report?.storageFallbackReason; // present only when an OPFS-capable boot actuall
 ```
 
 The worker is named by its store id, so N tabs attach through one communication centre and ultimately
-share **one store, one Electric connection set, and one convergence loop**. On Safari the SharedWorker
+share **one store, one durable-streams subscription set, and one convergence loop**. On Safari the SharedWorker
 owns that engine directly. On Chromium and Firefox, Web Locks elect one tab's dedicated engine worker;
 per-tab pipes connect tabs directly to it, and the OPFS VFS's exclusive handles remain the hard
 single-owner guard.

@@ -109,7 +109,7 @@ issue_viewed: defineEventStream({
 });
 ```
 
-It is the same obligation `rowFilter.revision` carries for a `customWhere` closure, for the same reason: a
+It is the same obligation `rowFilter.revision` carries for a `customPredicate` closure, for the same reason: a
 hash can only see what it can serialize.
 
 The lock diff grades the three stream-level changes differently: **adding** a stream is `compatible` (it

@@ -5,7 +5,7 @@
 Unit tests must stay fast and deterministic. They cover:
 
 - contract parsing and normalization
-- sync URL and shape configuration
+- read-path URL and shape configuration
 - write payload mapping
 - local mutation journaling semantics, including atomic client-side batch enqueue and per-entity sequencing
 - explicit edge cases such as blank titles or invalid UUIDs
@@ -20,9 +20,10 @@ The first published contract is intentionally narrow, and focused tests pin its 
   `tests/integration/client-contract.integration.test.ts`, `tests/integration/server-contract.integration.test.ts`,
   and `tests/integration/board-smoke.integration.test.ts`.
 - Registry row filters are authored through the typed-column callback exposed by `defineSyncTable` and
-  `defineReadProjection`; resolved `customWhere` output remains the server proxy contract. Coverage:
-  `tests/unit/contracts.test.ts`, `tests/unit/registry-projection.test.ts`, and
-  `tests/unit/row-filter-shape.test.ts`.
+  `defineReadProjection`; the resolved `customPredicate` output — a predicate AST, never SQL text — is
+  what the control plane compiles into a shape, and a `rowFilter` that restricts nothing is refused.
+  Coverage: `tests/unit/contracts.test.ts`, `tests/unit/registry-projection.test.ts`, and
+  `tests/unit/row-filter-predicate.test.ts`.
 - Local preparation hooks are named by timing: `prepareLocalDbBeforeSchema` and
   `prepareLocalDbAfterSchema`. Coverage: `tests/unit/client-sync-reset.test.ts` and
   `tests/unit/worker-bridge.test.ts`.
@@ -94,7 +95,9 @@ both directions: destroying an `idb-authoritative` store deletes its database, l
 namespace as empty as it found it, and lets the next boot mint `opfs-repacked`; destroying a
 COMMITTED opfs store leaves no store directory, no sentinel, no meta record and no idb sibling.
 
-The server-backed lanes run the real write API + Electric stack. `bun run test:integration:placement`
+The server-backed lanes run the real write API plus the native read stack — durable-streams and the
+Circuits engine, stood up by `startNativeSyncStack` (`packages/test-utils/src/native-read-path.ts`),
+with the edge mounted in process. `bun run test:integration:placement`
 selects Chromium and is appended to `test:integration`, matching CI's installed browser.
 `bun run test:browser:placement:server` runs the same server family without a project filter and is
 the separate all-browser gate. It adds offline-first journal survival, delayed-write relocation
@@ -133,16 +136,16 @@ test:
   since that lane builds with path routing while the Pages build uses hash routing). Every other
   same-origin GET — hashed bundles, the PGlite wasm/data blobs, the worker scripts — is cache-first with
   background fill. Only full same-origin 200s are stored (`response.type === "basic"`), never partials,
-  opaque responses or errors; range requests and cross-origin traffic (Supabase auth, Electric, the write
-  API) are left to the network so an offline failure stays honest. There is no cache pruning:
+  opaque responses or errors; range requests and cross-origin traffic (Supabase auth, the stream edge, the
+  write API) are left to the network so an offline failure stays honest. There is no cache pruning:
   superseded content-hashed entries are accepted garbage, never wrong answers.
 - **The connection-needed pattern** (`apps/board/src/connection-needed.ts`). Where data cannot exist
   offline the surface says so instead of showing an indefinite skeleton or a dead button. Chat composes
   the existing `settled` convention with `isBackendUnreachable(useBoardSyncStatus())` — the signal is the
-  runtime phase `degraded`, which a network-level shape-stream failure reaches through
-  `backoffOptions.onFailedAttempt` (it never escapes Electric's retry wrapper, so it is not a stream
-  error and `onReadStreamError` never sees it), and which clears back to `syncing`/`ready` on the next
-  delivered batch, so the state is derived at render time and never latched. `navigator.onLine` is not
+  runtime phase `degraded` with reason `stream`, which a read path that cannot reach the server reaches
+  two ways (a subscribe that keeps failing for a non-auth reason, via `onSubscribeError`; or the
+  read-silence watchdog below), and which clears back to `syncing`/`ready` on the next delivered batch,
+  so the state is derived at render time and never latched. `navigator.onLine` is not
   consulted, and the board's
   Offline toggle pauses only the outbound convergence driver, so flipping it must NOT produce the state.
   Sign-in renders outside the sync provider and therefore keys off the auth error's shape instead:
@@ -150,28 +153,26 @@ test:
   `signInAs` translates to a `SignInConnectionError`; a 5xx of the same class, and any `AuthApiError`
   (a rejected credential), stay verbatim. This makes the auth-error vocabulary an upgrade gate — a
   supabase-js bump that changes it must be re-pinned here.
-- **The outage signal the pattern keys off** (`packages/client/src/read-stream-stall.ts`). Electric
-  retries a failed shape fetch forever inside `createFetchWithBackoff` and only re-throws a non-retryable
-  4xx, so a network outage never reaches `ShapeStream.onError` at all; the client passes
-  `backoffOptions.onFailedAttempt` on every read shape and turns it into the existing `degraded` phase
-  (`degradedReason: "stream"`). Three things are pinned against the REAL `ShapeStream`: a rejecting fetch
-  and a 5xx report a stall while the stream's error channel stays silent; an escaping 4xx does NOT (401/
-  403/404/409 reach `createShapeErrorHandler`, which owns them with a real message, so the two seams
-  partition the failures); and a deliberate abort — teardown, hidden tab, live-request timeout, system
-  wake, live-tail nudge — is not a failure and must not report one. The runtime side pins the transition:
-  degrade ONCE however long the outage lasts (Electric calls back on every retry tick), never mask
-  `auth-needed` or a commit-failure degraded, and clear on the next delivered batch. Coverage:
-  `tests/unit/read-stream-stall.test.ts` (probe + `startConfiguredSync` wiring, including a lazy group
-  activated after boot) and `tests/unit/client-sync-reset.test.ts` (the status machine).
-- **The read-silence watchdog** (`readSilenceMs`, default 45s). The stall probe hears only SETTLED
-  attempts, so a connection that dies by HANGING (a physically pulled cable mid-long-poll) produces no
+- **The outage signal the pattern keys off — the subscribe classifier.** `@durable-streams/client`
+  retries only `429`/`503` and throws every other 4xx, and the control plane is where a credential or a
+  reachability problem actually lands, so the classification happens on subscribe: a `ControlPlaneError`
+  whose status is `401`/`403` raises `auth-needed` through `onAuthError`; anything else raises
+  `degraded`/`stream` through `onSubscribeError` while subscribe keeps retrying with backoff. The runtime
+  side pins the transitions: never mask `auth-needed` or a commit-failure `degraded` with a stream one,
+  refresh a stream-degraded status on each new fault so the reported cause is the current one, and clear
+  on the next delivered batch (`onSyncActivity`). Coverage: `tests/unit/client-sync-reset.test.ts` (the
+  status machine) and `tests/unit/circuits-subscribe.test.ts` + `tests/unit/circuits-group-sync.test.ts`
+  (the classification and the retry).
+- **The read-silence watchdog** (`readSilenceMs`, default 45s). A connection that dies by HANGING (a
+  physically pulled cable mid-long-poll) settles no attempt and fails no subscribe, so it produces no
   signal at all — and a runtime that reached `ready` this session kept claiming "up to date" for the whole
-  outage, broadcasting that claim to every attaching tab in worker mode. A healthy Electric stream is
-  never silent (the live long-poll cycles ~every 20-25s with at least a bare up-to-date, each firing
-  `onSyncActivity`), so silence past the window while claiming `ready` drops the phase to the same
-  self-recovering stream-degraded state. Pinned in `tests/unit/client-sync-reset.test.ts`: activity inside
-  every window holds `ready`; silence past it degrades with a lastError naming the silence; the next batch
-  returns `ready`; and `stop()` clears the armed timer (no post-stop emission).
+  outage, broadcasting that claim to every attaching tab in worker mode. A healthy read path is never
+  silent: durable-streams answers `204` with the up-to-date header on every long-poll timeout, so every
+  cycle fires `onSyncActivity` even for a shape with nothing to send. Silence past the window while
+  claiming `ready` therefore drops the phase to the same self-recovering stream-degraded state. Pinned in
+  `tests/unit/client-sync-reset.test.ts`: activity inside every window holds `ready`; silence past it
+  degrades with a lastError naming the silence; the next batch returns `ready`; and `stop()` clears the
+  armed timer (no post-stop emission).
 
 The proof lane is a chromium offline-return e2e in the existing worker harness (`test:integration:worker`,
 which serves the BUILT app): sign in online, boot fully, write, close the page, flip the same browser
@@ -243,7 +244,10 @@ The accepted raw remainder is the justified tier-③ set — SQL that genuinely 
 - `GRANT`/`REVOKE` to Supabase roles such as `authenticated` (Drizzle policies do not grant table privileges by themselves).
 - PL/pgSQL function DDL and execution paths intentionally generated as SQL artifacts.
 - Session/constraint commands (`SET`, `ALTER CONSTRAINT ... DEFERRABLE`) and `COPY` bulk-load paths.
-- Electric shape-grammar `where` probes and planner-experiment text exercised as literal strings.
+- Planner-experiment text exercised as literal strings — the RLS read-load track's `shape-query` mode
+  renders the row filter's Postgres spelling itself (`tests/performance/support/rls-read-load.ts`),
+  because the contracts builders now emit a predicate AST that is deliberately never SQL, and the
+  comparison it makes is against a query planner.
 
 Run them by slice when possible:
 
@@ -267,7 +271,7 @@ These verify the lower-level integration behavior behind the facades.
 
 The canonical scenarios are:
 
-- initial sync from PostgreSQL through ElectricSQL into PGlite
+- initial sync from PostgreSQL through the Circuits engine and durable-streams into PGlite
 - server-side writes becoming visible to a running PGlite subscriber
 - write API validation failures and successful persistence
 - local batch submission through the public client facade, including create-plus-update chains before flush
@@ -276,7 +280,7 @@ The canonical scenarios are:
 
 ## Upgrade gates
 
-When changing PostgreSQL, ElectricSQL, PGlite, or the internalized read-path engine (`packages/client/src/sync`), add at least one regression test for any newly observed drift.
+When changing PostgreSQL, the Circuits engine, durable-streams, PGlite, or the internalized read path (the reader in `packages/client/src/circuits`, the applier in `packages/client/src/sync`), add at least one regression test for any newly observed drift.
 
 Recorded apply-semantics drift (read-path engine):
 
@@ -323,7 +327,7 @@ The performance lanes are intentionally distinct:
 - `test:performance:concurrent`: end-to-end multi-client mutate, flush, sync-echo, and convergence behavior under contention
 - `test:performance:server`: server-only concurrent `/api/mutations` pressure
 
-The browser lab at `apps/perf-lab/` is the manual companion for those client-runtime scenarios. `bun run perf:lab` launches a dedicated fixed-name stack for the lab itself, tears any prior `pgxsinkit-perf-lab` processes and containers down first, and writes browser-lab logs under `tmp/perf-lab/`. Its default live mode reprovisions the active synthetic registry on the dedicated write server, seeds PostgreSQL, waits for those rows to sync into browser PGlite through Electric, stages local mutations, flushes them upstream, and waits for the Electric echo plus reconcile pass to settle before calling the full cycle complete.
+The browser lab at `apps/perf-lab/` is the manual companion for those client-runtime scenarios. `bun run perf:lab` launches a dedicated fixed-name stack for the lab itself, tears any prior `pgxsinkit-perf-lab` processes and containers down first, and writes browser-lab logs under `tmp/perf-lab/`. It stands the native read path up itself (`scripts/perf-lab-server.ts`, `scripts/perf-lab-config.ts` — durable-streams, the engine, and an in-process control plane + edge on one origin). Its default live mode reprovisions the active synthetic registry on the dedicated write server, seeds PostgreSQL, waits for those rows to sync into browser PGlite down the read path, stages local mutations, flushes them upstream, and waits for the read-path echo plus reconcile pass to settle before calling the full cycle complete.
 
 The concurrent client lane now uses scenario-driven mixed mutation traffic keyed by `PGXSINKIT_PERF_SCENARIO_KEY`, with create and delete probabilities configurable alongside the existing burst-shape knobs. The first pass covers `mixed-small-bursts`, `mixed-small-plus-large`, and `hot-partition-overlap`. Same-row conflicts, disconnect/reconnect, restart-resume, and deliberate server-failure scenarios still belong in the same lane but remain follow-up work.
 

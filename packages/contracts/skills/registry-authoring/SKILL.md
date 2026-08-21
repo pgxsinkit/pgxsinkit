@@ -2,16 +2,16 @@
 name: registry-authoring
 description: >-
   Load when defining or changing a pgxsinkit sync registry with @pgxsinkit/contracts —
-  defineSyncRegistry / defineSyncTable, sync modes, managed fields, conflict policy, filters, RLS.
-  Teaches the rules that throw or fail closed if missed: every readwrite table needs a
-  server-version managed field plus a conflictPolicy (no default), authClaim/nowMicroseconds fields are
-  server-assigned and rejected in client payloads, enum columns must be cast to text, read filter and RLS
-  policy must derive from one predicate, and the apply function is provisioned by the pgxsinkit-generate
-  CLI as a drizzle-kit migration. Covers per-client mode projection (ADR-0025,
-  asReadonly + assertReadContractPreserved) and Event-stream registration (ADR-0053): the streams key,
-  defineEventStream, name limits at module eval, claimPath identity stamping, compatibility-bound payload
-  evolution, and streams riding the lock/diff but never the fingerprint. Load before authoring a registry,
-  adding a table, registering an Event stream, or wiring RLS.
+  defineSyncRegistry/defineSyncTable, sync modes, managed fields, conflict policy, filters, RLS.
+  Teaches the rules that throw or fail closed: every readwrite table needs a server-version managed field
+  plus a conflictPolicy (no default), authClaim/nowMicroseconds fields are server-assigned and rejected in
+  client payloads, a read filter is a predicate AST from the p.* builders over Drizzle columns (one
+  restricting nothing is refused) deriving from the RLS policy's own predicate, and the apply function
+  comes from the pgxsinkit-generate CLI as a drizzle-kit migration. Covers per-client mode projection
+  (asReadonly + assertReadContractPreserved) and Event-stream registration (ADR-0053): defineEventStream,
+  name limits, claimPath identity stamping, compatible-only payload evolution, and streams riding the
+  lock/diff but never the fingerprint. Load before authoring a registry, adding a table, registering an
+  Event stream, or wiring RLS.
 metadata:
   type: core
   library: "@pgxsinkit/contracts"
@@ -21,9 +21,9 @@ metadata:
 
 # Authoring a pgxsinkit registry
 
-The registry (`defineSyncRegistry` over `defineSyncTable`) is the single source of truth both paths read
-from — the read proxy and the write apply function are generated from it, so getting the registry right
-is what keeps read and write authorization from drifting.
+The registry (`defineSyncRegistry` over `defineSyncTable`) is the single source of truth both paths read from
+— the read path's shapes (compiled by the control plane at subscribe) and the write apply function are derived
+from it, so getting it right is what keeps read and write authorization from drifting.
 
 ## Writable tables have two hard requirements (or it throws)
 
@@ -79,19 +79,20 @@ produce), so pgxsinkit DDL matches plain-Postgres inline-PK DDL and drizzle-kit 
 - **Rejected:** a table-level `primaryKey(...)` through `extras`/`policies`, and more than one column-level
   `.primaryKey()` — declare composite keys via the `primaryKey` option instead.
 
-## `applyMode` — CDC insert-apply policy (default stays strict)
+## `applyMode` — the **backfill** conflict policy (default stays strict)
 
-`applyMode` chooses how a **server CDC insert** for this table is applied on the client (ADR-0045).
-**`"insert"` (default)** is a plain INSERT with no conflict clause, so a genuine primary-key collision
-**surfaces** (the ADR-0014 invariant — a synced cache table is server-authoritative, and a duplicate insert
-is a real bug). **`"upsert"`** applies it idempotently as `INSERT … ON CONFLICT (pk) DO UPDATE` (or a
-pk-targeted `DO NOTHING` for a pk-only table), so the authoritative server row overwrites the provisional
-local one.
+`applyMode` no longer chooses how steady-state changes apply (ADR-0058). The engine's wire vocabulary is
+`upsert | delete` — an `upsert` states a row's value without claiming it is new — so **every** streamed change
+applies as `INSERT … ON CONFLICT (pk) DO UPDATE`, whatever this says. What survives is the **initial load**: a
+fresh subscription or a post-must-refetch re-snapshot lands on a table assumed empty, which is what lets it
+use COPY or a plain multi-row INSERT, neither of which can express `ON CONFLICT`.
 
-**Use `"upsert"` only** when this table legitimately receives locally-**derived** provisional rows — a local
-trigger on another synced table writes a row here that the server independently creates too, so its CDC insert
-would otherwise collide (23505) and degrade the engine. It routes all three CDC-insert paths through the
-idempotent applier. Declare the exception where it lives; never weaken the default repo-wide.
+**`"insert"` (default)** keeps that fast path, so a row already sitting there surfaces as a real precondition
+failure. **Use `"upsert"` only** when the emptiness assumption does not hold — this table legitimately
+receives locally-**derived** provisional rows (a local trigger on another synced table writes a row here that
+the server independently creates too) that a backfill could land on top of. It then takes the
+conflict-tolerant applier, at the cost of the faster path. Declare the exception where it lives; never weaken
+the default repo-wide.
 
 ## Managed fields are server-assigned — never send them
 
@@ -128,31 +129,32 @@ that is not a writable (projected) column splits into exactly two cases:
 The rule that follows: **write a server-only (omitted) column outside the sync rail** — a server-side
 `UPDATE`, a trigger, or a managed field (`governance.managedFields`); the route rejects it in a payload.
 
-## Read-path filtering: `customWhere` runs in Electric, not Postgres
+## Read-path filtering: `customPredicate` compiles to a predicate AST, not SQL
 
-A table's `shape.rowFilter.customWhere` builds the Electric shape `where`, which **Electric** evaluates (not
-Postgres) — so **return a Drizzle `SQL` fragment built from the table's columns**: reference each column
-through `c(column)` and embed request-derived values directly, where they become **bound `$n` params**, not
-hand-escaped literals.
+A table's `shape.rowFilter.customPredicate` is compiled by the **control plane** at shape creation — once per
+(shape, subject), not per request — and posted to the Circuits engine as a **predicate AST**. No SQL text is
+involved: build the predicate with the `p.*` builders over the table's **real Drizzle columns**, and
+request-derived values ride as typed JSON scalars.
 
 ```ts
-function widgetsReadFilter(claims) {
+function widgetsReadFilter(claims: JwtClaims): Predicate | null {
   if (isAdmin(claims)) return null; // null = no filter (all rows visible)
-  if (!claims.sub) return DENY_ALL; // sql`false` — the deny-all sentinel (no rows visible)
-  return sql`${c(widgets.ownerId)} = ${claims.sub}`; // claims.sub is a bound $1 param
+  if (!claims.sub) return DENY_ALL_PREDICATE; // the deny-all sentinel (no rows visible)
+  return p.eq(widgets.ownerId, claims.sub);
 }
 ```
 
-Two Electric where-grammar rules: columns must be **plain** (unqualified) — `c()` emits the bare
-`"owner_id"`, never Drizzle's qualified `"widgets"."owner_id"` (Electric rejects that) — and an **enum column
-must be cast to text** (`${c(widgets.role)}::text = 'manager'`). Subqueries must be self-contained (not
-correlated). A raw **string** is the escape hatch: escape embedded values yourself with `escapeSqlLiteral`,
-and return `DENY_ALL` (not `"1 = 0"`) to block all rows.
+The builders are `p.eq`/`p.ne`/`p.lt`/`p.lte`/`p.gt`/`p.gte`, `p.like`/`p.notLike`, `p.isNull`/`p.isNotNull`,
+`p.and`/`p.or`/`p.not`, and `p.in`/`p.notIn` over a `p.subquery` (below) — namespaced so they never collide
+with `drizzle-orm`'s `eq`/`and`/`or`. Every comparison is checked against the column's own TypeScript type, so
+a mistyped enum label, a `null` against a NOT NULL column, or a `jsonb`/`Date` column with no scalar wire form
+is a **compile error**. **No `::text` casts** — values are typed JSON scalars; render a `Date` as the column
+stores it and pass the string.
 
 **Inline (all-in-one `defineSyncTable`) — `rowFilter` as a function of the columns.** The example above
 assumes the table is built _elsewhere_. Declaring a table and its filter in **one** call, the table object
-does not exist yet — so don't fall back to column-name strings: give `shape.rowFilter` a **function of the
-built columns** (the typed columns `extras` gets), still with `c()`:
+does not exist yet — so give `shape.rowFilter` a **function of the built columns** (the typed columns `extras`
+gets) rather than falling back to column-name strings:
 
 ```ts
 defineSyncTable({
@@ -160,50 +162,52 @@ defineSyncTable({
   makeColumns: () => ({ id: uuid("id").primaryKey(), ownerId: uuid("owner_id") }),
   shape: {
     rowFilter: (columns) => ({
-      customWhere: (claims) => (claims.sub ? sql`${c(columns.ownerId)} = ${claims.sub}` : DENY_ALL),
+      customPredicate: (claims) => (claims.sub ? p.eq(columns.ownerId, claims.sub) : DENY_ALL_PREDICATE),
     }),
   },
 });
 ```
 
-The column callback is the only authoring form. **Prefer the typed fragment over the string hatch:** a
-`customWhere` returning `null`/`""` means _no filter — every row visible_, so an owner filter returning `null`
-for "no claim" silently exposes every row; the typed form makes `DENY_ALL` the obvious deny.
+The column callback is the only authoring form. **Say deny explicitly:** a `customPredicate` returning `null`
+means _no filter — every row visible_, so an owner filter returning `null` for "no claim" exposes every row.
+`DENY_ALL_PREDICATE` is the deny, recognised by reference: the control plane declines to create the shape at
+all, so a denied subject holds no stream. It must also be **pure** (called per shape creation, and probed with
+empty claims to detect claims-dependence), and a `rowFilter` restricting nothing — no `customPredicate`, no
+`columns` allow-list — **throws at definition time** rather than compiling to a shape with no subject test.
 
-## Cross-table filters: compose a self-contained subquery from the typed columns, never a string
+## Cross-table filters: `p.subquery` over another table's column
 
-A **membership fan-out** — "sync a row only if the subject belongs to its container" — is a `customWhere`
-whose predicate is a **subquery over another table**. Author it the same typed way as an owner filter, never
-as a hand-built string: `c()` for every column (bare, as Electric needs), the **table object** for the
-`FROM`, and the subject as a **bound param**. Factor it into a helper so the read filter and any narrower
-variant share one definition (the read-path twin of the membership RLS predicate):
+A **membership fan-out** — "sync a row only if the subject belongs to its container" — is a `customPredicate`
+whose test is a **subquery over another table**. `p.subquery(projectedColumn, where?)` names the inner set by
+the column it projects, so there is no table name to get wrong and no way to project a column that table does
+not have. Factor it into a helper the read filter and any narrower variant share (the read-path twin of the
+membership RLS predicate):
 
 ```ts
-// Self-contained (not correlated): it gets its own FROM, so `membership`'s bare names resolve to it.
-function memberContainers(subject: string): SQL {
-  return sql`select ${c(membership.containerId)} from ${membership} where ${c(membership.memberId)} = ${subject}`;
+// Uncorrelated by construction: the inner `where` reads the membership table's own columns only.
+function memberContainers(subject: string): SubqueryRef<string> {
+  return p.subquery(membership.containerId, p.eq(membership.memberId, subject));
 }
 
-function widgetsReadFilter(claims: JwtClaims): SQL {
-  if (!claims.sub) return DENY_ALL; // no claim → deny (NOT null, which would expose every row)
-  return sql`${c(widgets.containerId)} in (${memberContainers(claims.sub)})`;
+function widgetsReadFilter(claims: JwtClaims): Predicate {
+  if (!claims.sub) return DENY_ALL_PREDICATE; // no claim → deny (NOT null, which would expose every row)
+  return p.in(widgets.containerId, memberContainers(claims.sub));
 }
 ```
 
-What the typed form buys: columns stay rename-safe and existence-checked, and the subject is a `$n` param
-(`params: ["…"]`), never an escaped literal — so a quote in the value can't break or inject the predicate.
-**Subqueries nest by interpolation** — wrap one `sql` fragment in another to narrow a fan-out: `` sql`${c(post.offeringId)} in (${memberOfferings(sub)}) and (${c(post.groupId)} is null or ${c(post.groupId)} in (${memberGroups(sub)}))` `` (each `${sub}`
-is its own bound param). Two constraints: the subquery must stay **self-contained**, and the subquery
-`where` is the **flagged Electric preview** — run Electric with `allow_subqueries,tagged_subqueries` or the
-shape fails closed (no rows); on managed Electric Cloud, Electric staff activate it per source on request
-(no self-serve toggle yet). Combine with the function form when the table is defined all-in-one: the row's
-own column comes from `(columns) => …`, the foreign table is imported built.
+What the AST form buys: columns stay rename-safe and existence-checked, the projected column's type rides on
+the `SubqueryRef` so `p.in` refuses an outer column it cannot be compared with, and the engine maintains the
+inner set **incrementally and shares it across every shape referencing the same subquery** — an
+entitlement-shaped membership costs one index, not one per shape. Two constraints: `IN` is **single-column**
+(no composite `(a, b) IN (…)`), and the subquery stays **uncorrelated** — its `where` never references the
+outer row. Combine with the function form when the table is defined all-in-one: the row's own column comes
+from `(columns) => …`, the foreign table is imported built.
 
 ## RLS: derive read and write from the same Drizzle columns
 
-Authorization runs in two engines (Postgres RLS for writes, the Electric `where` for reads). Build both from
-the **same Drizzle columns**, so a rename or typo can never make a row readable-but-unwritable (or vice
-versa):
+Authorization runs in two engines (Postgres RLS for writes, the shape predicate the Circuits engine
+evaluates for reads). Build both from the **same Drizzle columns**, so a rename or typo can never make a
+row readable-but-unwritable (or vice versa):
 
 - Common shapes: `buildSupabaseOwnerOrAdminNativePolicies({ role, ownerColumn })` and
   `buildSupabaseMembershipNativePolicies({ role, containerColumn, membershipTable, … })`. They take **real
@@ -217,17 +221,19 @@ versa):
   SECURITY DEFINER membership helper, a `current_setting('request.jwt.claims')` admin check), and inline that
   predicate rather than referencing a not-yet-created function. For "compare OLD vs NEW" rules RLS cannot
   help (`WITH CHECK` sees only NEW, `USING` only OLD) — use a `BEFORE UPDATE` trigger.
-- **Do not hand-write the read half — every policy family ships its read-path mirror.** Electric cannot
-  read RLS, so the shape `where` must re-derive the same visible set in JS, from the same declaration:
-  `buildOwnershipShapeWhere(ownerColumn, claims.sub)`, `buildOwnerOrAdminShapeWhere(ownerColumn, claims)`
-  (admin → `null`, i.e. no filter, mirroring the policy's bypass branch),
-  `buildMembershipShapeWhere(columns, claims)` (pass the **same** options object you gave the policy
-  builder — write-only fields are ignored), and `buildGrantScopeAccessShapeWhere(scopeColumn, claims, …)`
-  (bypass grant → `null` too; bare `resolveGrantScopeIds` + `buildGrantScopeShapeWhere` cannot see it).
-  Return each straight from `customWhere`; they deny with `DENY_ALL`, so the filter probes claims-dependent.
-- Two mirror properties: they cover **SELECT only** (write-gate branches stay with the INSERT/UPDATE/DELETE
-  policies), and the two surfaces render containment in **different dialects on purpose** — RLS emits
-  `= ANY(ARRAY(select …))` for the InitPlan/index-scan discipline, Electric plain `IN (subquery)`.
+- **Do not hand-write the read half — every policy family ships its read-path mirror.** The sync engine
+  cannot read RLS, so the shape predicate re-derives the same visible set in JS from the same declaration:
+  `buildOwnershipShapePredicate`, `buildOwnerOrAdminShapePredicate` (admin → `null`, mirroring the policy's
+  bypass branch), `buildMembershipShapePredicate` (pass the **same** options object you gave the policy
+  builder), and `buildGrantScopeAccessShapePredicate` (bypass grant → `null` too; bare
+  `resolveGrantScopeIds` + `buildGrantScopeShapePredicate` cannot see it). Each takes the column plus the
+  claims; return it straight from `customPredicate` — they deny with `DENY_ALL_PREDICATE`, so the filter
+  probes claims-dependent.
+- Two mirror properties: they cover **SELECT only** (write-gate branches stay with the
+  INSERT/UPDATE/DELETE policies), and the two surfaces express containment in **different forms on
+  purpose** — RLS emits `= ANY(ARRAY(select …))` for the InitPlan/index-scan discipline, the read half a
+  first-class `p.in` over a `p.subquery` the engine maintains incrementally and shares between shapes. (A
+  grant set lives in the JWT, not a table, so that mirror is an `OR` of equalities instead.)
 
 Give drizzle-kit `entities: { roles: { provider: "supabase" } }` in `drizzle.config.ts` so the Supabase roles
 (`authenticated`/`anon`/`service_role`/…) are treated as externally managed — referenced in a policy's `to:`,
@@ -287,12 +293,12 @@ assertReadContractPreserved(authoritativeRegistry, teacherRegistry, { label: "te
 assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "learner" });
 ```
 
-- **Generate the server (apply function + proxy) from the authoritative registry** — it emits a branch per
-  table and stamps managed fields / reject-if-stale from the entry's write contract, so it must see the
-  writable entry. A claims-branching `customWhere` then serves every client.
-- A projection may differ **only** in write capability and lifecycle (`subscription`/`retention`/group),
-  never in the read contract — `assertReadContractPreserved` enforces it (it can't see the `customWhere`
-  body, so bump `rowFilter.revision` on a logic change).
+- **Run the server (apply function + control plane) off the authoritative registry** — the generated apply
+  function emits a branch per table and stamps managed fields / reject-if-stale from the entry's write
+  contract, so it must see the writable entry. A claims-branching `customPredicate` then serves every client.
+- A projection may differ **only** in write capability and lifecycle (`subscription`/`retention`/group), never
+  in the read contract — `assertReadContractPreserved` enforces it (it cannot see the `customPredicate` body,
+  so bump `rowFilter.revision` on a logic change).
 - The full registry fingerprint differs between the writable and readonly variants — expected and fine:
   it is client-local (guards each client's own store rebuild) and the server never sees it.
 
@@ -309,7 +315,7 @@ export const assessmentDefinition = defineSyncTable({ tableName: "assessment_def
 export const assessmentDefinitionAdminSummary = defineReadProjection(assessmentDefinition, {
   as: "assessment_definition_admin_summary", // distinct local table + shapeKey
   columns: ["offeringId", "assessmentType", "title", "state"], // typed subset of owner keys; PK always kept
-  rowFilter: (c) => ({ customWhere: adminOrgFilter(c.offeringId), revision: "admin-summary-1" }),
+  rowFilter: (c) => ({ customPredicate: adminOrgFilter(c.offeringId), revision: "admin-summary-1" }),
 });
 ```
 
@@ -319,44 +325,33 @@ export const assessmentDefinitionAdminSummary = defineReadProjection(assessmentD
   types restricted to those keys** (Picked from the owner), so a row typechecks by property key with no
   casts. The PK is always kept **at runtime**, but the type is a safe **under-claim** — a PK column not in
   `columns` is synced yet absent from the type, so list it to read it typed. Column definitions are reused
-  (never restated), and the subset becomes the Electric `columns` allow-list, so an omitted (heavy) column is
-  **never fetched**, not merely stripped.
-- The physical Electric table is **derived** from the owner — you never name a source string. The `rowFilter`
-  callback receives the OWNER's full columns (the `customWhere` runs in Electric on the physical table, so it
-  may reference a column the subset omits).
+  (never restated), and the subset becomes the shape's **emitted** column set, so an omitted (heavy) column
+  is **never streamed**, not merely stripped.
+- The physical table it reads is **derived** from the owner — you never name a source string (the resolved
+  `physicalTable` is internal, not a registry input). The `rowFilter` callback receives the OWNER's full
+  columns: the engine matches on the physical table's columns independently of what the shape emits, so the
+  predicate may reference a column the subset omits.
 - It is **readonly**; put it in the authoritative registry under its own key and in the reading client's
   registry. RLS for its reads lives on the **owner** (a projection adds no DDL to a table it doesn't own), so
-  its `customWhere` must be a subset of what that RLS allows. The proxy resolves each shape by its unique
+  its `customPredicate` must be a subset of what that RLS allows. The control plane resolves each shape by
   `shapeKey`, so owner and projection coexist over one physical table.
 
-### Redacting projection: a secure "window" over a keyed table
+### Redacting projection: keep the secret out of the row, not out of the response
 
-A projection can carry its own `serverProjection` (an egress `rowTransform`, resolved by its `shapeKey`) —
-e.g. stream a `jsonb` item body while stripping the answer key per row. When the transform must READ a column
-outside the client shape (a `keysWithheld` control flag), list it in `serverOnlyColumns`: it joins the
-Electric fetch allow-list (so the transform sees it) yet stays out of the client keep-set. Egress order is
-**transform first, then omission**.
+**Redact in Postgres, not in flight.** Nothing rewrites rows on the read path — the engine materialises a
+shape and the edge proxies bytes — so model a "window" over a keyed table as SCHEMA: compute the redacted
+value into its own column (generated or trigger-maintained), sync THAT, and split the projections by predicate
+on the control flag. The engine matches on columns a shape does not emit, so the flag never reaches the client
+and the raw value never enters durable-streams storage.
 
-```ts
-export const secureItemWindow = defineReadProjection(secureItem, {
-  as: "secure_item_window",
-  columns: ["payload", "metadata"], // client keep-set (PK always kept)
-  serverProjection: {
-    rowTransform: (row) => (row.keys_withheld === true ? { ...row, payload: stripKey(row.payload) } : row),
-  },
-  serverOnlyColumns: ["keysWithheld"], // fetched for the transform, never on the client wire
-});
-```
-
-`serverOnlyColumns` requires BOTH `serverProjection.rowTransform` and `columns`, and must be disjoint from
-`columns` and the PK — each is a loud error. **No inheritance — enforced.** A projection does NOT inherit its owner's `serverProjection`: an inherited
-transform whose input column is absent from the projection's fetch list reads `undefined` and fails OPEN.
-Since a bare projection over a redacting owner would then egress the RAW row, `defineReadProjection` THROWS
-when the owner declares an egress `rowTransform` unless the projection declares its posture — its own
-`serverProjection` (usually the same fn) + `serverOnlyColumns`, or the explicit opt-out `serverProjection:
-"unredacted"` (only after confirming the kept columns leak nothing; it attaches no transform but records the
-raw-egress decision at the definition site). `"unredacted"` over a transform-less owner is itself rejected — a
-stale opt-out would pre-authorize a leak if the owner later gained one.
+`serverProjection` (an egress `rowTransform`) and `serverOnlyColumns` remain registry declarations whose
+guards fire at definition time: `serverOnlyColumns` requires BOTH `serverProjection.rowTransform` and
+`columns`, and must be disjoint from `columns` and the PK. **No inheritance — enforced:**
+`defineReadProjection` THROWS when the owner declares an egress `rowTransform` unless the projection states
+its own (usually the same fn, plus `serverOnlyColumns` for its control-flag inputs) or opts out with the
+literal `serverProjection: "unredacted"` — only after confirming the kept columns leak nothing. `"unredacted"`
+over a transform-less owner is itself rejected, so a stale opt-out cannot pre-authorize a leak the owner gains
+later.
 
 ## Classify rows and assert registry invariants (ADR-0052)
 
@@ -374,9 +369,9 @@ assertRegistryInvariant(registry, {
   name: "team-scoped rows are invisible to an anonymous caller",
   appliesTo: ["team-scoped"], // classes (or a predicate); an undeclared class / zero matches throws
   claimsFixtures: { anonymous: {}, member: { sub: memberId }, admin: adminClaims },
-  holds: ({ fixtureName, renderedWhere, renderedPolicies }) =>
+  holds: ({ fixtureName, readPredicate, renderedPolicies }) =>
     fixtureName !== "anonymous" ||
-    (renderedWhere?.where === "false" && renderedPolicies.every((p) => p.using !== "true")) ||
+    (deniesAllRows(readPredicate) && renderedPolicies.every((policy) => policy.using !== "true")) ||
     "anonymous is not denied on one of the two surfaces", // reported as `entry (fixture): reason`
 });
 ```
@@ -384,13 +379,14 @@ assertRegistryInvariant(registry, {
 So a table added next month cannot inherit the obligation invisibly (omit `rowClasses` and `rowClass` is
 unconstrained, as the bare registry-map form always is). Projections carry the class (`asReadonly`,
 `asEphemeral`; `defineReadProjection` inherits the owner's, overridable). Each cell gets that persona's
-RENDERED artifacts — `renderedWhere` is the proxy's own `buildRowFilterShape(…)` (`null` =
-unfiltered), `renderedPolicies` the table's RLS as inline SQL — so one predicate covers both surfaces, and
-ALL failing cells aggregate into one error. `rowClass` is authoring metadata, deliberately in NEITHER
-fingerprint (classifying never wipes a cache); the **lock** carries it, so losing a class is a `risky` diff.
-It complements `RowFilterSpec.revision`: only `revision` makes a `customWhere` logic change move the
-fingerprint (rebuilding the cache, resetting the subscription), while the assertion renders that logic — for
-the fixtures you hand it, and no others.
+RESOLVED artifacts — `readPredicate` is the entry's `customPredicate` output for those claims, exactly what
+the control plane compiles into the shape (`null` = unfiltered), `renderedPolicies` the table's RLS as inline
+SQL — so one predicate covers both surfaces and ALL failing cells aggregate into one error. Match on STRUCTURE
+(`deniesAllRows`, the `isXPredicate` guards), never a rendered string. `rowClass` is authoring metadata,
+deliberately in NEITHER fingerprint (classifying never wipes a cache); the **lock** carries it, so losing a
+class is a `risky` diff. It complements `RowFilterSpec.revision`: only `revision` makes a `customPredicate`
+logic change move the fingerprint (rebuilding the cache, resetting the subscription), while the assertion
+renders that logic — for the fixtures you hand it, and no others.
 
 ## Storage declaration: `storage.backend` and `storage.durability` (browser stores)
 
@@ -413,18 +409,21 @@ It scopes the **browser** store only; Node mints stay `file://` and export clone
 
 ## Consistency groups: scope them to the joined cluster
 
-`consistencyGroup` binds tables onto one shape stream committing **atomically** at a shared LSN frontier —
-a reader never sees one grouped table advanced past another for the same server transaction. Default is
-none (per-table singleton, independent frontier). Three scoping rules:
+`consistencyGroup` binds tables into one subscription that commits **atomically** — a reader never sees one
+grouped table advanced past another for the same server transaction. Each member is its own stream, and the
+group commits only when **every** member's most recent response asserted up-to-date (offsets are per-stream,
+so the gate is that predicate rather than a shared frontier; each alignment generation's first commit also
+waits on the engine's barrier). Default is none — a per-table singleton committing on its own. Three scoping
+rules:
 
 1. **Group the transactionally-joined cluster** — tables written together in one server transaction and
-   rendered joined (FK parent + children); that is what the atomic frontier protects. If the app otherwise
+   rendered joined (FK parent + children); that is what the atomic commit protects. If the app otherwise
    needs post-ack re-reads to hide half-applied transactions, the tables belong in a group.
-2. **Quiet members are affordable.** A rarely-written reference table once held its whole group for a full
-   long-poll cycle (~41s on CDN-fronted Electric); the live-tail sibling nudge now caps that at ~one
-   catch-up round trip per gated commit, so don't keep a lookup table out of its natural group.
-3. **Don't group "everything".** Every gated commit nudges each lagging member — unrelated clusters go in
-   separate groups or stay singletons.
+2. **Quiet members are affordable.** durable-streams answers every long-poll timeout with `204` and the
+   up-to-date header, so a rarely-written reference table re-asserts freshness each cycle rather than
+   holding its group behind a stale watermark — don't keep a lookup table out of its natural group.
+3. **Don't group "everything".** A group commits at the pace of its slowest member; unrelated clusters go
+   in separate groups or stay singletons.
 
 All members of a group must agree on `subscription`, `retention`, `writeMode` (or the registry rejects it).
 
@@ -478,8 +477,9 @@ export const registry = defineSyncRegistry({
 - Trying to write an `omitColumns` (server-only) column from a client payload — the write route
   **400-rejects** it (an unknown typo is instead silently dropped, surfaced by a per-process `console.warn`);
   write them outside the sync rail (a server `UPDATE`, a trigger, or a managed field).
-- In a `customWhere`: comparing an enum without `::text`, qualifying a column (use `c()` for a bare ref),
-  or hand-escaping a value into a string instead of binding it via a Drizzle `sql` fragment.
+- In a `customPredicate`: returning `null` for "no claim" (that is _every row_ — return `DENY_ALL_PREDICATE`),
+  a `rowFilter` that restricts nothing (throws), a correlated `p.subquery`, or SQL text where a `p.*` builder
+  exists.
 - A multi-dimensional array column, an array PK, or a managed field on an array column — each fails at
   generate time; single-dimension arrays are fully supported on both paths.
 - Letting the read filter and RLS policy diverge instead of building both from the same Drizzle columns.
@@ -495,5 +495,5 @@ export const registry = defineSyncRegistry({
   client-supplied and can lie), a non-strict object payload (the registry throws), projecting a registry
   without re-declaring `streams`, evolving a payload incompatibly, or a `.refine` change with no `revision`.
 
-For the surrounding model (two paths, one write path, fail-closed subquery flag), load the `core` skill
-from `@pgxsinkit/client`. Full prose: <https://pgxsinkit.github.io/start/getting-started/>.
+For the surrounding model (two paths, one write path, the fail-closed control plane and edge), load the
+`core` skill from `@pgxsinkit/client`. Full prose: <https://pgxsinkit.github.io/start/getting-started/>.

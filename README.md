@@ -10,7 +10,7 @@
 
 # pgxsinkit
 
-`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> ElectricSQL -> PGlite` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/board`), the minimal reference server (`apps/write-api`), and the integration + performance harness exist to prove and harden them.
+`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> Circuits engine -> durable-streams -> PGlite` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/board`), the minimal reference server (`apps/write-api`), and the integration + performance harness exist to prove and harden them.
 
 Canonical timestamps are stored as bigint microseconds since the unix epoch and cross API/sync boundaries as decimal strings.
 
@@ -18,34 +18,19 @@ Canonical timestamps are stored as bigint microseconds since the unix epoch and 
 
 ## Requirements
 
-`pgxsinkit` row filters may use cross-table subquery `where` clauses — for example membership
-fan-out, where a row in a container streams to every member of that container:
+The read path runs on ElectricSQL's **Circuits engine** (pgxsinkit pins a published image of its own
+fork, `ghcr.io/pgxsinkit/electric-circuits/engine`) writing into a **durable-streams** log that the
+client reads through a token-gated stream edge. Three things it requires:
 
-```sql
-container_id IN (SELECT container_id FROM memberships WHERE member_id = <subject>)
-```
-
-The electric-proxy forwards this verbatim as the Electric shape `where`, so streaming it relies on
-a **required** ElectricSQL capability:
-
-- **ElectricSQL >= 1.7** running with `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`.
-
-This is a hard prerequisite, not an optional optimisation. Subquery `where` support is a flagged
-preview feature (still flagged as of 1.7.3); without the flag Electric rejects any subquery `where`
-with HTTP 400 (`{"where":["Subqueries are not supported"]}`). The sync then fails **closed** — no rows
-stream — it never silently fans out unfiltered data.
-
-On **managed Electric Cloud** the subquery preview is currently **activated per source by Electric staff
-on request** (no self-serve toggle yet; ElectricSQL intends to make it the default) — so ask Electric to
-enable it for your source, or self-host Electric with the flag set. A self-hosted stack sets the flag
-directly.
-
-A second point follows from the same grammar: **a PostgreSQL `enum` column referenced in a shape
-`where` must be cast to `text`** — `"role"::text = 'manager'`, not `"role" = 'manager'`. The enum
-column itself stays an enum everywhere else — RLS and the write path keep using it natively, so there
-is no enum→text migration. See
-[The Electric subquery requirement](https://pgxsinkit.github.io/concepts/electric-subqueries/) for the
-full story.
+- **PostgreSQL 17+ with `wal_level = logical`.** The engine ingests logical replication and creates its
+  own replication slot. Supabase Postgres ships this already.
+- **An explicit table list for the engine** (`ELECTRIC_CIRCUITS_PG_TABLES`), never `*`. `*` introspects
+  every `public` table that has a primary key and replicates all of them — including tables you never
+  meant to publish. The names are **bare** and unqualified: the engine introspects `public` by bare name,
+  and the shape compiler matches it.
+- **A gateway that speaks HTTP/2 to browsers.** Each subscription is one held long-poll, so a subject
+  with several scopes exhausts the browser's ~6-connections-per-origin ceiling on HTTP/1.1 and writes
+  starve behind held reads. HTTP/2 multiplexes them onto one connection.
 
 ## Install
 
@@ -63,7 +48,7 @@ paths and provision the in-database apply function.
 ## Quick start — run the board demo
 
 The substantial example (`apps/board`, a Linear-style board + chat) drives the full read and write
-paths end-to-end against a partial Supabase + Electric stack:
+paths end-to-end against a partial Supabase + Circuits stack (durable-streams + the engine):
 
 1. `mise install`
 2. `bun install`
@@ -91,7 +76,7 @@ There is no selectable backend — the in-database bulk apply is the only strate
 Contributor setup, the canonical vocabulary, and the agent guide live in [`AGENTS.md`](./AGENTS.md)
 and [`CONTEXT.md`](./CONTEXT.md). The repository is a Bun workspace:
 
-- `apps/board` — the substantial demo (Linear-style board + chat) on a partial Supabase + Electric stack.
+- `apps/board` — the substantial demo (Linear-style board + chat) on a partial Supabase + Circuits stack.
 - `apps/write-api` — the minimal `@pgxsinkit/server` reference (Bun, no web framework).
 - `packages/contracts` · `client` · `server` · `react` — the published sync toolkit.
 - `packages/pglite-opfs-repacked` — the published OPFS storage engine for PGlite.

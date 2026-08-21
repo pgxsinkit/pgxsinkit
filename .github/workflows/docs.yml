@@ -6,26 +6,30 @@ name: Docs
 # the bare-root org-pages URL must come from the `<owner>.github.io` repo, so the build is
 # pushed there rather than served from this repo.
 #
-# The hosted board /demo (board ADR-0009) ships in the SAME publish: the board is built into
-# `apps/docs/dist/demo/` so the docs + demo deploy as one atomic artifact at
-# https://pgxsinkit.github.io/demo/. peaceiris uses force_orphan, so co-publishing (not a second
-# racing workflow) is the only way the demo survives a docs deploy. The demo build is skipped
-# (docs still deploy) when the public DEMO_BOARD_* repo variables are unset — e.g. on a fork.
+# The hosted board /demo (board ADR-0009) is RETIRED and is no longer built here. Electric Cloud is
+# being shut down, and the demo's read path was the classic Electric path removed in ADR-0055. A
+# static notice page (`apps/docs/public/demo/index.html`) now occupies /demo/ — Starlight copies
+# `public/` into `dist/`, so it ships with the site and needs no step of its own.
+#
+# Re-enabling it (internal note): delete that notice page, and restore a step that runs
+# `bun run demo:build` AFTER the docs build and BEFORE the deploy. The board must be built into
+# `apps/docs/dist/demo/` so docs + demo deploy as ONE atomic artifact — peaceiris uses force_orphan,
+# so co-publishing rather than a second racing workflow is the only way the demo survives a docs
+# deploy. The step took VITE_BOARD_SUPABASE_URL / VITE_BOARD_PUBLISHABLE_KEY / VITE_BOARD_FUNCTIONS_REGION
+# from public DEMO_BOARD_* repo variables, and was gated on them so forks still got a clean docs
+# deploy. On the native read path that backend also needs a hosted Circuits engine + durable-streams,
+# which nothing in this repo provisions — see docs/runbooks/board-on-cloud.md.
 #
 # Prerequisites (one-time, GitHub-side):
 #   - a `pgxsinkit/pgxsinkit.github.io` repo exists
 #   - this repo has a `PGXSINKIT_PAGES_DEPLOY_KEY` secret (an SSH deploy key whose public half
 #     is registered as a write-enabled deploy key on pgxsinkit.github.io)
-#   - for the /demo: repo VARIABLES DEMO_BOARD_SUPABASE_URL + DEMO_BOARD_PUBLISHABLE_KEY (both
-#     public — baked into client JS). The cloud backend they point at is provisioned per the
-#     board-on-cloud runbook; nightly reset is the separate demo-reset.yml workflow.
 
 on:
   push:
     branches: [main]
     paths:
       - "apps/docs/**"
-      - "apps/board/**"
       - "apps/perf-lab/**"
       - "packages/**"
       - "brand/**"
@@ -46,23 +50,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install
       - run: bun run --cwd apps/docs build
-      # Build the board into apps/docs/dist/demo so it co-deploys at /demo. The two VITE_BOARD_*
-      # values are public (the publishable key and project URL are baked into client JS by design);
-      # the demo:build script sets the base path, output dir, and hash-routing flag. Skipped when the
-      # variables are unset so forks still get a clean docs deploy.
-      - name: Build the hosted board /demo (board ADR-0009)
-        if: ${{ vars.DEMO_BOARD_SUPABASE_URL != '' && vars.DEMO_BOARD_PUBLISHABLE_KEY != '' }}
-        run: bun run demo:build
-        env:
-          VITE_BOARD_SUPABASE_URL: ${{ vars.DEMO_BOARD_SUPABASE_URL }}
-          VITE_BOARD_PUBLISHABLE_KEY: ${{ vars.DEMO_BOARD_PUBLISHABLE_KEY }}
-          # Optional public variable: the project's region (e.g. eu-central-1). Sent as `x-region` so
-          # edge functions execute next to the DATABASE — without it they run near each visitor and
-          # every function→DB statement pays a cross-region round trip (~3s writes from far away).
-          VITE_BOARD_FUNCTIONS_REGION: ${{ vars.DEMO_BOARD_FUNCTIONS_REGION }}
       # Build the storage benchmark page into apps/docs/dist/bench so it co-deploys at /bench/
-      # (`bun run bench:publish`). Runs AFTER the docs build (which regenerates dist) and, like the
-      # /demo, before the deploy. Dependency-free with no secrets, so it always runs.
+      # (`bun run bench:publish`). Runs AFTER the docs build (which regenerates dist) and before the
+      # deploy, for the same force_orphan reason as the retired /demo. Dependency-free with no
+      # secrets, so it always runs.
       - name: Build the storage benchmark page /bench
         run: bun run bench:publish
       - uses: peaceiris/actions-gh-pages@v4

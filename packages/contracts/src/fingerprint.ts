@@ -248,7 +248,7 @@ export function fingerprintRegistry(registry: SyncTableRegistry): string {
 /**
  * The **read contract** of a single sync table: the subset of its canonical shape that decides what
  * data streams down and how a row is identified and filtered — synced-table name, columns, primary key
- * (and any local-PK override), column omission, and the shape (electric table + row filter). It is the
+ * (and any local-PK override), column omission, and the shape (physical table + row filter). It is the
  * stable identity a writable entry shares with its {@link asReadonly} projection.
  *
  * Deliberately EXCLUDES the two axes a per-client projection may legitimately differ on:

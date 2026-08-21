@@ -13,8 +13,8 @@ function renderInlineSql(fragment: SQL): string {
 }
 
 // Walk a dotted claim path defensively (unverified claims may be any shape): anything that is not a
-// plain object on the way down yields `undefined` rather than throwing. Shared by every Electric
-// read-path mirror below — each family's mirror sits beside its own policies and reads exactly the
+// plain object on the way down yields `undefined` rather than throwing. Shared by every read-path
+// predicate mirror below — each family's mirror sits beside its own policies and reads exactly the
 // claim the policy's SQL reads.
 function readClaimsPath(claims: JwtClaims | null, path: string[]): unknown {
   let current: unknown = claims;
@@ -121,8 +121,9 @@ function buildOwnerOrAdminPolicyName(tableName: string, command: SupabaseOwnerOr
 
 // ---------------------------------------------------------------------------
 // Shared predicate leaves (used by both policy families). RLS is the *write* path
-// (Postgres), so columns may serialize qualified — unlike the Electric read `where`,
-// which needs bare columns. The only bits that stay raw `sql` are genuinely-Postgres
+// (Postgres), so these render to SQL text with columns qualified — unlike the read-path
+// mirrors, which carry the column objects themselves in a predicate AST and render no SQL
+// at all. The only bits that stay raw `sql` are genuinely-Postgres
 // expressions with no Drizzle operator: the JWT-subject `(select current_setting(...)::type)`
 // and the admin-roles `EXISTS`. Literal values use `eq(col, value).inlineParams()` so the
 // value is inlined into the DDL — a bare `$n` is something `CREATE POLICY` cannot carry.
@@ -275,13 +276,13 @@ export const supabaseOwnerOrAdminDefaults = {
 } as const;
 
 // ---------------------------------------------------------------------------
-// Electric read-path mirror of the owner-or-admin policies. Electric cannot read RLS, so the proxy has
-// to reach the same verdict in JS, from the same claims: the policy's `OR` admin branch becomes "no
-// filter at all" (every row streams), and its owner branch becomes the ownership shape `where`. One
+// Read-path mirror of the owner-or-admin policies. The read path never runs RLS, so the control plane
+// has to reach the same verdict in JS, from the same claims: the policy's `OR` admin branch becomes "no
+// filter at all" (every row streams), and its owner branch becomes the ownership shape predicate. One
 // declaration — the owner column plus the admin role name — two enforcement surfaces, so a row can
 // never be writable-but-unreadable (or the reverse).
 //
-// SELECT only, by construction: a shape `where` filters a read stream, so it mirrors the `select`
+// SELECT only, by construction: a shape predicate filters a read stream, so it mirrors the `select`
 // policy. INSERT/UPDATE/DELETE remain the policies' business.
 // ---------------------------------------------------------------------------
 
@@ -358,7 +359,8 @@ export function buildOwnerOrAdminShapePredicate(
 // leaves stay `sql`: the `IN (subquery)` containment (Drizzle's `inArray` cannot wrap a raw subquery)
 // and the `(select current_setting(...)::type)` JWT-subject expression (wrapped in a scalar subquery —
 // the Supabase per-statement-eval RLS perf idiom). Columns serialize qualified
-// (`"work_items"."workspace_id"`) — fine for Postgres RLS (the write path, unlike Electric's bare rule).
+// (`"work_items"."workspace_id"`) — fine for Postgres RLS, which is the write path; the read mirror
+// builds a predicate AST from the same column objects and serializes no SQL at all.
 //
 // The `select` half of this family is mirrored on the read path by
 // {@link buildMembershipShapePredicate}, built from the same column declarations — the sync engine cannot
@@ -517,22 +519,22 @@ export function buildSupabaseMembershipNativePolicies(options: SupabaseMembershi
 }
 
 // ---------------------------------------------------------------------------
-// Electric read-path mirror of the membership policies. Electric cannot read RLS, so the proxy must
-// re-derive the same visible set in the shape `where`, from the SAME Drizzle columns the policies were
+// Read-path mirror of the membership policies. The read path never runs RLS, so the control plane must
+// re-derive the same visible set in the shape predicate, from the SAME Drizzle columns the policies were
 // built from — one declaration, two enforcement surfaces, so a row can never be readable-but-unwritable
 // (or the reverse) through a rename or a typo.
 //
 // SELECT only, by construction: the mirror reproduces the family's `select` predicate — plain
 // membership of the container. The owner/manager branches and the write-state gate are WRITE-side
-// concerns (INSERT/UPDATE/DELETE) and are deliberately absent here; a shape `where` filters a read
+// concerns (INSERT/UPDATE/DELETE) and are deliberately absent here; a shape predicate filters a read
 // stream and has nothing to gate.
 //
-// The two surfaces render the SAME containment differently, on purpose:
+// The two surfaces express the SAME containment differently, on purpose:
 //   - RLS (`membershipMatch`) renders `= ANY(ARRAY(select …))` — the InitPlan/bitmap-index-scan
 //     discipline Postgres needs for a runtime-resolved set (see that function's comment).
-//   - Electric renders a plain `IN (subquery)`, because that is what Electric's shape `where` grammar
-//     accepts; there is no Postgres planner on this side to appease.
-// Same columns, two dialects — that is exactly what the mirror is for.
+//   - The mirror emits `p.in(col, p.subquery(…))` — an AST node the engine plans itself. There is no
+//     Postgres planner on this side to appease, and no SQL text for anything to lex.
+// Same columns, two forms — that is exactly what the mirror is for.
 // ---------------------------------------------------------------------------
 
 /**
@@ -755,9 +757,9 @@ export function buildSupabaseGrantScopeNativePolicies(options: SupabaseGrantScop
 }
 
 // ---------------------------------------------------------------------------
-// Electric read-path mirror of the grant-scope policy. Electric cannot read RLS, so the proxy must
-// resolve the same visible scope-id set from the claims in JS and inject a literal `IN (…)` shape
-// `where`. These helpers are the read-path counterpart to the policy above — one declaration,
+// Read-path mirror of the grant-scope policy. The read path never runs RLS, so the control plane must
+// resolve the same visible scope-id set from the claims in JS and emit it as a literal `in` predicate.
+// These helpers are the read-path counterpart to the policy above — one declaration,
 // two enforcement surfaces, derived from the same grant data so they cannot drift.
 //
 // The policy's OR bypass branch has a mirror too: {@link resolveGrantScopeAccess} reports it and

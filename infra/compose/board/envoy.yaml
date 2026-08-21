@@ -6,8 +6,9 @@
 #
 # Routes one origin (http://localhost:54331 → :8000) so `@supabase/supabase-js` uses a single
 # SUPABASE_URL: /auth/v1/* → GoTrue, /functions/v1/* → the edge-runtime main router (board-sync /
-# board-write). PostgREST (/rest/v1) is deliberately NOT routed (the board never uses the auto-CRUD
-# data API; reads go through board-sync, writes through board-write).
+# board-stream / board-write). PostgREST (/rest/v1) is deliberately NOT routed (the board never uses
+# the auto-CRUD data API; reads are subscribed through board-sync and served by board-stream, writes
+# go through board-write).
 #
 # Filter chain: cors → lua (new-API-key translation) → router. The Lua mirrors the Cloud gateway:
 # it swaps an opaque `apikey` for the matching internal role JWT, but leaves a real session JWT in
@@ -38,12 +39,13 @@ static_resources:
                       typed_per_filter_config:
                         envoy.filters.http.cors:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
-                          # Permissive demo CORS. `expose_headers: "*"` lets the browser read Electric's
-                          # `electric-*` response headers (offset/handle/schema/cursor) the sync client
-                          # needs — a too-narrow list is the classic Electric MissingHeadersError. The
-                          # native read path's `stream-*` headers are the same story, but the board's edge
-                          # function exposes those itself (`STREAM_READ_EXPOSED_HEADERS`) rather than
-                          # relying on this: a mount correct only behind this gateway hot-loops elsewhere.
+                          # Permissive demo CORS. `expose_headers: "*"` would let the browser read the
+                          # durable-streams `stream-*` response headers (next-offset/up-to-date/cursor/
+                          # closed) the sync client drives its read loop off — a too-narrow list hides
+                          # them all and the reader wedges with no error. It is deliberately NOT what the
+                          # board relies on: the edge function exposes that set itself
+                          # (`STREAM_READ_EXPOSED_HEADERS`), because a mount correct only behind this
+                          # gateway hot-loops elsewhere.
                           allow_origin_string_match:
                             - safe_regex: { regex: ".*" }
                           allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD"
@@ -56,8 +58,8 @@ static_resources:
                           route: { cluster: auth, prefix_rewrite: "/", timeout: 30s }
                         - name: functions-v1
                           # The edge-runtime main router dispatches by the first path segment, so
-                          # strip the /functions/v1 prefix (board ADR-0001). 150s covers an Electric
-                          # long-poll held open by board-sync (~25s) with comfortable margin.
+                          # strip the /functions/v1 prefix (board ADR-0001). 150s covers a
+                          # durable-streams long-poll held open by board-stream with comfortable margin.
                           match: { prefix: "/functions/v1/" }
                           route: { cluster: functions, prefix_rewrite: "/", timeout: 150s }
                 http_filters:

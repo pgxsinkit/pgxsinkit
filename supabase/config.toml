@@ -1,7 +1,8 @@
 # Supabase CLI config for deploying the board demo's edge functions to a Cloud project (board ADR-0008).
 # Used only by the cloud path (`bun run board:cloud:deploy` → `supabase functions deploy …`); the LOCAL
 # demo serves these same functions through the vendored edge-runtime main router (infra/compose), not
-# the CLI, so nothing here affects `bun run infra:up`.
+# the CLI, so nothing here affects `bun run infra:up`. That cloud path is retired for reads — see the
+# banner in scripts/board-cloud-deploy.ts.
 #
 # `project_id` is a local label; scripts pass BOARD_SUPABASE_PROJECT_REF as `--project-ref`.
 project_id = "pgxsinkit-board"
@@ -24,6 +25,18 @@ entrypoint = "./functions-dist/board-write/index.js"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions-dist/board-sync/index.js"
+
+# The read path's EDGE (pgxsinkit ADR-0055). Declared here for completeness; note the deploy script's
+# function list does NOT name it yet, so `board:cloud:deploy` will not push it — that gap is recorded
+# in scripts/board-cloud-deploy.ts.
+#
+# verify_jwt = false for the same reason as its siblings and then some: this function's Authorization
+# header carries a STREAM TOKEN minted by board-sync, not a GoTrue session JWT, so the platform gateway
+# could not verify it even if asked to. The gate is the function's own signature + entitlement check.
+[functions.board-stream]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions-dist/board-stream/index.js"
 
 # The Event lane's serverless drain (pgxsinkit ADR-0053, amendment 2026-08-02). Cloud-only: nothing here can
 # host the long-lived consumer runner the local stack uses, so a Supabase Cron schedule (set up by

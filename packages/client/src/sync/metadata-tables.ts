@@ -58,7 +58,11 @@ export function assertValidMetadataSchema(metadataSchema: string): void {
 export interface MetadataTables {
   /** `<schema>.subscriptions_metadata` — one row per subscription key. */
   readonly subscriptionsMetadata: ReturnType<typeof buildSubscriptionsMetadata>;
-  /** `<schema>.shape_row_tags` — the tagged-subquery reason-set store (ADR-0023). */
+  /**
+   * `<schema>.shape_row_tags` — the tagged-subquery reason-set store (ADR-0023), whose mechanism
+   * ADR-0057 retired. Still provisioned by `migrateSubscriptionMetadataTables`; nothing reads or
+   * writes it on the native path.
+   */
   readonly shapeRowTags: ReturnType<typeof buildShapeRowTags>;
 }
 

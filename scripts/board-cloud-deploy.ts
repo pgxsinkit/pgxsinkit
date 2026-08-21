@@ -1,10 +1,27 @@
-// Deploy the board demo to managed BaaS — Supabase Cloud + Electric Cloud (board ADR-0008).
+// Deploy the board demo to managed BaaS — Supabase Cloud (board ADR-0008).
+//
+// ── RETIRED 2026-08-21 (read path only) ────────────────────────────────────────────────────────────
+// Electric Cloud is being shut down, and the read path this script provisions for was the classic
+// Electric path removed in ADR-0055. Nothing below is changed — the write path, auth, migrations, the
+// seed and the Event lane drain are all still correct — but the read half no longer connects to
+// anything, and TWO KNOWN GAPS must be closed before it could:
+//
+//   1. `ELECTRIC_SHAPE_URL` is still a REQUIRED input (validated, and pushed as a function secret) for
+//      a path that no longer exists. A revival replaces it with the three the native read path needs:
+//      CIRCUITS_ENGINE_URL, DURABLE_STREAMS_URL, STREAM_TOKEN_SECRET (cf. the `functions` service in
+//      infra/compose/board-compose.yml).
+//   2. `boardSupabaseFunctionsArgs` below deploys board-write, board-sync and board-events-drain — it
+//      does NOT deploy `board-stream`, the read path's edge. Even with an engine and a durable-streams
+//      server running, reads would have no gate deployed.
+//
+// Neither the engine nor durable-streams is hosted by Supabase Cloud or provisioned by anything here.
+// See docs/runbooks/board-on-cloud.md.
+// ───────────────────────────────────────────────────────────────────────────────────────────────────
 //
 // Wraps the REPEATABLE steps a developer runs after the one-time manual setup in the runbook
-// (docs/runbooks/board-on-cloud.md): create the project, create the Electric Cloud source on its
-// database, and `supabase login`. Reads credentials from `board.cloud.env` (gitignored;
-// copy from board.cloud.env.example). Each step is also a separate `board:cloud:*` script so you can
-// re-run just one.
+// (docs/runbooks/board-on-cloud.md): create the project and `supabase login`. Reads credentials from
+// `board.cloud.env` (gitignored; copy from board.cloud.env.example). Each step is also a separate
+// `board:cloud:*` script so you can re-run just one.
 //
 //   bun run board:cloud:deploy      # migrate → secrets → functions → cron → seed (the whole repeatable path)
 //   bun run board:cloud:reset       # purge → migrate → seed (rebuild the cloud DB from the committed
@@ -23,7 +40,7 @@
 // What the platform provides vs. what we set: Supabase Cloud auto-injects SUPABASE_URL (→ JWKS) and
 // SUPABASE_DB_URL (the pooler → board-write) into every function, and the `SUPABASE_` prefix is
 // RESERVED (the CLI rejects secrets with it). So the function secrets to set are ELECTRIC_SHAPE_URL
-// (board-sync's upstream, with the Cloud source_id+secret) and BOARD_EVENTS_DRAIN_SECRET (the shared
+// (retired — see the banner above) and BOARD_EVENTS_DRAIN_SECRET (the shared
 // secret gating the Event lane's drain function). BOARD_ALLOWED_ORIGINS defaults to the
 // local Vite origin, which is what the frontend uses against the cloud backend, so it needs no secret.
 

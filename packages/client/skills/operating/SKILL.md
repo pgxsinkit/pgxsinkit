@@ -1,17 +1,17 @@
 ---
 name: operating
 description: >-
-  Load when deploying or operating a live pgxsinkit app, when diagnosing a sync/write that "feels slow"
-  in a browser even though the server is fast, or when wiring backups/export/restore. Covers the runtime
-  and deployment properties (not toolkit bugs) that decide whether an app feels fast: convergence cadence
-  (writes flush on enqueue; the interval is a fallback), serverless edge cold starts and warming,
-  cache-control:no-store on a same-origin shape proxy, the browser HTTP/2 connection budget, the edge
-  worker timeout vs Electric's long-poll, globalThis.__pgxsinkitDebug + the BootReport, worker mode
-  (defineSyncWorker/attachSyncClient — capability-driven engine placement, factories, relocation outcomes,
-  the forwarded rail), the store lifecycle surface (storePath naming, durability, backend permanence,
-  supervised destruction, the three exports, restoreFrom), and Event-lane
-  observability: onOutboxStatus, onEventLaneReport verdicts including deferred-on-skew, and the Outbox in
-  destroy/restore/backup/dropReadCache.
+  Load when deploying or operating a pgxsinkit app, when a sync/write "feels slow" in a browser
+  but the server is fast, or when wiring backups/export/restore. Covers the runtime/deployment
+  properties (not toolkit bugs) deciding whether an app feels fast: convergence cadence (writes
+  flush on enqueue; the interval is a fallback), serverless edge cold starts, the read path's cache
+  split (no-store control plane, cacheable edge on its own origin, token out of the cache key), the
+  browser HTTP/2 connection budget, the edge worker timeout vs the durable-streams long-poll hold,
+  globalThis.__pgxsinkitDebug + the BootReport, worker mode (defineSyncWorker/attachSyncClient —
+  capability-driven engine placement, relocation outcomes, the forwarded rail), the store lifecycle
+  surface (storePath naming, durability, backend permanence, destruction, the three exports,
+  restoreFrom), and Event-lane observability: onOutboxStatus, onEventLaneReport verdicts including
+  deferred-on-skew, and the Outbox across destroy/restore/backup.
 metadata:
   type: task
   library: "@pgxsinkit/client"
@@ -36,34 +36,36 @@ retries/recovery/cross-tab.
 Therefore **keep the interval long.** A short interval is the dominant idle cost: every PGlite query is
 ~50ms of WASM work on one thread, and an unconditional reconcile each tick re-runs every live query. The
 demo uses `intervalMs: 15_000`, cutting idle CPU from ~70% of a core to ~2% with **no change to convergence
-latency** (latency is bounded by the Electric echo). Do **not** shorten it to "make writes faster".
+latency** (latency is bounded by the read-path echo). Do **not** shorten it to "make writes faster".
 
 ## Serve the gateway over HTTP/2 (the connection budget)
 
-Electric's client holds **one live long-poll connection open per synced shape**, and browsers cap
-**HTTP/1.1 at ~6 connections per origin** — so over plain HTTP six shapes' long-polls consume every slot and
-the same-origin **write** request is **Stalled in the browser's connection queue** for a whole long-poll
-cycle before it is even dispatched. This presents as multi-second writes invisible to `curl`/Node (no
-per-host cap); only a real browser shows it (DevTools → Network → a stuck `write` with a long **Stalled**
-time). Fix: serve the gateway over **HTTP/2** (or HTTP/3), which multiplexes every request over one
-connection. Any production ingress already does; it only bites a local stack on plain `http://` (browsers
-only negotiate HTTP/2 over TLS).
+`@durable-streams/client` holds **one live long-poll connection open per subscribed stream** (a subject in K
+scopes of a shared shape holds K streams), and browsers cap **HTTP/1.1 at ~6 connections per origin** — so over
+plain HTTP six streams' long-polls consume every slot and the same-origin **write** request is **Stalled in the
+browser's connection queue** for a whole long-poll cycle before it is even dispatched. This presents as
+multi-second writes invisible to `curl`/Node (no per-host cap); only a real browser shows it (DevTools → Network
+→ a stuck `write` with a long **Stalled** time). Fix: serve the gateway over **HTTP/2** (or HTTP/3), which
+multiplexes every request over one connection. Any production ingress already does; it only bites a local stack
+on plain `http://` (browsers only negotiate HTTP/2 over TLS).
 
 ## Serverless edge cold starts
 
-On a serverless edge a worker is suspended when idle and evicted after longer idle, so the **first write
-after a quiet period** pays a cold start while steady-state writes are instant (measured: ~20ms warm, ~0.45s
-after ~15s idle, ~5.8s on a cold module cache). That is the deployment target, not pgxsinkit — a long-lived
-Bun/Deno process or a managed warm pool has none. Mitigate: keep the worker warm with a periodic cheap
-request (an empty `{"mutations":[]}` POST, rejected at validation before any DB work), and set the worker
-wall-clock timeout **above** Electric's ~25s long-poll so a live subscription is not recycled mid-cycle.
+On a serverless edge a worker is suspended when idle and evicted after longer idle, so the **first write after a
+quiet period** pays a cold start while steady-state writes are instant (measured: ~20ms warm, ~0.45s after ~15s
+idle, ~5.8s on a cold module cache). That is the deployment target, not pgxsinkit — a long-lived Bun/Deno
+process or a managed warm pool has none. Mitigate: keep the worker warm with a periodic cheap request (an empty
+`{"mutations":[]}` POST, rejected at validation before any DB work), and set the worker wall-clock timeout
+**above** the durable-streams long-poll hold so a live subscription is not recycled mid-cycle (the board gives
+its read functions `EDGE_WORKER_TIMEOUT_MS: "600000"`, not the stock 60s).
 
-Region-pin **only the DB-bound write function**, not read proxies. Pinning it to the database's region
-(Supabase `x-region`) keeps its chatty function→DB protocol on a ~1ms loop; a read proxy's upstream is
-Electric Cloud's global CDN, so pinning reads away from a distant caller instead **adds** intercontinental
-hops per catch-up (~1.2s vs ~300ms). `createSyncClient` splits this: `requestHeaders` is the shared base
-(reads AND writes — e.g. a gateway `apikey`), `writeRequestHeaders` is merged over it on the write path
-only. Put the region header in `writeRequestHeaders`, never in the shared `requestHeaders`.
+Region-pin **only the DB-bound write function**, never the two read functions. Pinning it to the database's
+region (Supabase `x-region`) keeps its chatty function→DB protocol on a ~1ms loop; the read halves are not
+DB-bound at all — the control plane's upstream is the Circuits engine, the edge's is durable-streams — and the
+edge wants to sit near the CALLER, so catch-up bytes take the short hop. `createSyncClient` splits this:
+`requestHeaders` is the shared base (reads AND writes — e.g. a gateway `apikey`), `writeRequestHeaders` is
+merged over it on the write path only. Put the region header in `writeRequestHeaders`, never in the shared
+`requestHeaders`.
 
 ## Pre-warming PGlite's boot assets
 
@@ -121,9 +123,10 @@ its class) and carries the refused `storePath`; a no-grant `provision` declines 
 reason rather than pre-minting the sibling.
 
 **Two-file pattern.** One worker entry, bundled for both SharedWorker and dedicated Worker, calls
-`defineSyncWorker({ registry, electricUrl, batchWriteUrl, … })` at module top level — no placement or
-durability option (both are runtime/registry concerns); the registry is CODE, _imported_ by the worker
-file, never cloned/serialized in. Give each store a stable SharedWorker name and always pass
+`defineSyncWorker({ registry, controlPlaneUrl, streamBaseUrl, batchWriteUrl, … })` at module top level (read
+URLs both-or-neither, as on `createSyncClient`) — no placement or durability option (both are
+runtime/registry concerns); the registry is CODE, _imported_ by the worker file, never cloned/serialized
+in. Give each store a stable SharedWorker name and always pass
 `extendedLifetime: true` (Chromium 148+ grace period; ignore-safe elsewhere). The tab calls
 `attachSyncClient({ worker, registry, getToken })`. Prefer the **factory** form (`worker: () => SharedWorker`)
 over a bare instance or a raw `port` — a SharedWorker cannot be reconstructed from itself, so **in elected
@@ -173,25 +176,25 @@ disposes live queries before closing that client's engine and store.
 expiry (any tab answers via `getToken`, first wins). The worker NEVER refreshes — exactly one refresher, so
 GoTrue refresh-token reuse detection can't be tripped by a second client.
 
-**Boot: spare-as-worker + internal prefetch overlap.** The spare store (see above) becomes a pre-spawned
-schemaless worker at the login screen (create + initdb off every thread that matters); the userId→storeId
-registry stays tab-side in localStorage so binding resolves before attach (SharedWorker naming needs it).
-Call `provisionSyncWorker` with the same `worker` input as attach (the factory form, so elected-mode recovery
-is armed for provisioning too); an elected pre-open shares the tab's one election coordinator and derives the
-engine from the SharedWorker's own script URL. `provisionExpiryMs` (default 60000) is ONE deadline: it
-retires the abandoned elected claim AND settles the returned promise with the typed `ProvisionExpiredError`
-in both modes, so a provision behind a dead SharedWorker connection fails loudly rather than hanging. It
-bounds YOUR promise; the worker-side create attempt follows the placement. SW-direct: the attempt is left
-running — a later attach adopts it if it completed and waits on it if it is stuck, and a retried provision
-re-acks the same attempt rather than opening a second. Elected: the deadline also releases the provision
-claim, and a LAST-claim release retires and terminates the engine with that attempt inside it, so the next
-attach elects a fresh one (an attach that adopted the coordinator earlier keeps its claim, and that engine).
-Fire-and-forget callers should `.catch()` it like any un-awaited promise. Claim = bind id, attach, push
-config + token. On a PROVABLY-fresh claimed store pass `attachSyncClient({ freshStore: true })` (never for a
-mapped/returning store) and the worker overlaps the shape catch-up with schema/journal/store-version
-recovery — far-user boot bounded by `max(create+schema, catch-up)`, not their sum. Boot-rail stamps: `boot
-spare store ensured`, `boot mapped store prewarm`, `boot store claimed`, `boot shape prefetch start`,
-`boot commits opened`.
+**Boot: spare-as-worker.** The spare store (see above) becomes a pre-spawned schemaless worker at the login
+screen (create + initdb off every thread that matters); the userId→storeId registry stays tab-side in
+localStorage so binding resolves before attach (SharedWorker naming needs it). Call `provisionSyncWorker` with
+the same `worker` input as attach (the factory form, so elected-mode recovery is armed for provisioning too); an
+elected pre-open shares the tab's one election coordinator and derives the engine from the SharedWorker's own
+script URL. `provisionExpiryMs` (default 60000) is ONE deadline: it retires the abandoned elected claim AND
+settles the returned promise with the typed `ProvisionExpiredError` in both modes, so a provision behind a dead
+SharedWorker connection fails loudly rather than hanging. It bounds YOUR promise; the worker-side create attempt
+follows the placement. SW-direct: the attempt is left running — a later attach adopts it if it completed and
+waits on it if it is stuck, and a retried provision re-acks the same attempt rather than opening a second.
+Elected: the deadline also releases the provision claim, and a LAST-claim release retires and terminates the
+engine with that attempt inside it, so the next attach elects a fresh one (an attach that adopted the
+coordinator earlier keeps its claim, and that engine). Fire-and-forget callers should `.catch()` it like any
+un-awaited promise. Claim = bind id, attach, push config + token. On a PROVABLY-fresh claimed store pass
+`attachSyncClient({ freshStore: true })` (never for a mapped/returning store): it asserts freshness, so streams
+start from the beginning and the subscription-state read is skipped — a wrong `true` on a warm store
+re-snapshots instead of resuming. It buys no catch-up/schema OVERLAP (that needed a commit gate the native read
+path has no equivalent of, so boot is strictly sequential); what the spare removes is the store create itself.
+Board boot-rail stamps: `boot spare store ensured`, `boot mapped store prewarm`, `boot store claimed`.
 
 **`ready` unchanged; per-group readiness exposed.** `client.ready` still gates on every eager group; for
 progressive paint use `await client.groupReady(tableKey)` or read `status.groups`.
@@ -201,10 +204,11 @@ progressive paint use `await client.groupReady(tableKey)` or read `status.groups
 clock and re-printed as `[pgxsinkit·w <ms>ms] …`, gated by that tab's own `globalThis.__pgxsinkitDebug`. The
 front half of boot runs on the FIRST attach before any tab is listening, so the worker buffers those
 pre-attach lines in a bounded ring (last 500) and replays them `[replay]`-marked to the first attaching tab.
-The worker's NETWORK traffic is invisible the same way: shape requests never appear in the page's Network
-panel — "rail shows `shape request start`, Network tab shows nothing" is worker mode working as designed.
-Inspect the worker itself (`chrome://inspect/#workers`) for the real requests, status codes, and errors (CORS
-rejections surface only there). Full model: <https://pgxsinkit.github.io/concepts/worker-mode/>.
+The worker's NETWORK traffic is invisible the same way: the subscribe calls and the streams' long-polls never
+appear in the page's Network panel — "the app is syncing but the Network tab shows nothing" is worker mode
+working as designed. Inspect the worker itself (`chrome://inspect/#workers`) for the real requests and errors
+(CORS rejections surface only there, a missing `Access-Control-Expose-Headers` on the edge included). Full
+model: <https://pgxsinkit.github.io/concepts/worker-mode/>.
 
 **Placement and relocation diagnostics.** Pull `client.bootReport()` and inspect `storageBackend`
 (`opfs-repacked`/`idbfs`/`filesystem`/`memory`), `engineHome` (`shared-worker`/`elected-worker`/
@@ -392,32 +396,28 @@ is the escape hatch. `dropReadCache()` never touches it (not read cache). `expor
 quarantine restored Outbox rows** — the deliberate asymmetry with the mutation journal: they resume flushing
 normally, because event delivery is idempotent end-to-end (`eventId` dedupe), which mutation replay is not.
 
-## Proxying Electric: force `cache-control: no-store`
+## The read path's cache split: uncacheable control plane, cacheable edge
 
-Electric tags shape responses with a CDN-oriented `cache-control` (`max-age`, `stale-while-revalidate`), so
-behind a **same-origin proxy with no CDN** the browser cache serves them **stale** the moment a shape handle
-rotates (re-seed, re-login, restart) and the client loops on "expired shape handle" **409s** until it
-self-heals. Force `cache-control: no-store` on the proxied response:
+The two read halves have opposite caching postures. The **control plane** (`/sync/v1/subscribe`, `/refresh`,
+`/barrier`) answers per-subject questions and mints stream tokens, so force `cache-control: no-store` on it. The
+**edge** (`createStreamGate` at `/v1/stream`) is the only surface a CDN may share, and durable-streams already
+labels its responses for one — a catch-up read returns `cache-control: public, max-age=60,
+stale-while-revalidate=300` and an `etag`, exactly where the bytes are. Sharing is a **shared-tier** property
+only: a `rowFilter` fuses the subject into the predicate, so those bytes are shareable with nobody.
 
-```ts
-const response = await proxyElectricShapeRequest(request, claims, { registry, electricUrl });
-const headers = new Headers(response.headers);
-headers.set("cache-control", "no-store");
-return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-```
+**Put the edge on its own origin, and keep the stream token out of the cache key.** The cache key is the URL, so
+a same-origin mount makes the cacheable and uncacheable surfaces share one key and forecloses ever fronting the
+shared tier; the token rides in `Authorization` (never a query parameter) for the same reason, and the cache
+must not vary on that header. Revocation latency then follows the deployment: behind a hit-serving CDN it is
+bounded by the token TTL (5 minutes by default), behind a cache sitting _behind_ the edge's verifier it is
+entitlement-propagation latency.
 
-Resumption stays cheap because Electric's offset/handle bookkeeping (in the local store) makes it cheap, not
-the HTTP cache. Upstream direction, hosted Electric behind a CDN: live long-polls can be answered by a layer blind to fresh
-commits (consecutive full-hold `up-to-date` responses at an unmoved offset → ~40–90s cross-client
-propagation). The proxy appends a unique `cache-buster` to every `live=true` upstream request by default
-(`bustLiveUpstreamCache`; catch-up stays unbusted for CDN cold-fanout sharing). TEMPORARY upstream-defect
-mitigation — it defeats Electric's sanctioned live-poll coalescing (per-client origin fan-out at scale), so
-flip it off once Electric Cloud wakes coalesced polls reliably; distinct from the ADR-0033 sibling nudge,
-which is permanent protocol behavior. Running your own CDN in front of self-hosted Electric: key on the FULL
-query string (every param is load-bearing), respect origin cache-control, keep SWR windows modest, let
-coalesced live polls complete immediately on origin response, read-timeouts 60s+, then VERIFY with bust off
-— cross-client render ≲3s = healthy, ~a full hold cycle = live path served blind (full checklist:
-operating-in-production docs page). Harmless self-hosted; set `false` to restore untouched forwarding.
+**Every `createStreamGate` mount must set `Access-Control-Expose-Headers` from the exported
+`STREAM_READ_EXPOSED_HEADERS`.** CORS lets script read only a short safelist, and every header durable-streams
+answers with is outside it, so a cross-origin browser gets a response whose stream headers are simply not there:
+`@durable-streams/client` steers its read loop off them, never learns an offset, and re-requests from the
+start in a hot loop, with no error raised on either side. It presents as "sync does nothing, and the console
+is clean". Mount details: the `deploying` skill.
 
 ## Debugging latency: `globalThis.__pgxsinkitDebug`
 
@@ -429,18 +429,17 @@ globalThis.__pgxsinkitDebug = true; // reproduce, then filter the console to "pg
 ```
 
 Read the **gaps** between phases: `mutation staged {mutationId, table}` (correlate by id with the later
-sent/acked lines); `convergence pass requested` → `flush` / `reconcile`; `board-write auth token resolved
-{ms}` (a stalling token fetch); `board-write responded {status, ms}` (a cold worker or a connection stall);
-`sync received change batch` → `sync applied {ms}` (fires only when the batch committed; a batch gated behind
-a quiet sibling's watermark instead logs `sync change batch held by group frontier` and `live-tail sibling
-nudge {shape}`, ADR-0033); `live query updated → re-render`. The read path has its own pair: `shape request
-start` → `shape request done {shape, status, ms, upToDate?}` for EVERY Electric HTTP cycle, plus `must-refetch
-received {shape}` when the server rotates a shape (the truncate + re-snapshot trigger — what to look for when
-a table unexpectedly re-syncs). Server-side, `createSyncServer({ logTimings: true })` emits matching
-`[pgxsinkit-timing]` lines (the `deploying` skill); client-observed minus server `totalMs` isolates routing +
-network. Boot too: `boot pglite.create` → `boot client ready` (store open, schema apply, journal recovery,
-store-version reconcile, sync start) attributes a slow first paint to a phase; `boot pglite assets warm` times
-the optional pre-warm.
+sent/acked lines); `convergence pass requested (event-driven, …)` → `convergence flush` / `convergence
+reconcile`; `flushBatch sending to board-write`; `board-write auth token resolved {ms}` (a stalling token
+fetch); `board-write responded {status, ms}` (a cold worker or a connection stall); `board-write acks`; and
+`live-query register|dedup-hit|retained|evicted|teardown-complete` (digests only). **The read path emits no rail
+lines** — its cost is routing latency rather than phases, so read it off the `BootReport`'s per-group rows
+(below) and off `status` / `status.lastError` (`degraded`/stream = subscribe failing or the stream silent;
+`auth-needed` = the control plane refused this credential), and inspect the real requests in the worker's own
+DevTools. Server-side, `createSyncServer({ logTimings: true })` emits matching `[pgxsinkit-timing]` lines (the
+`deploying` skill); client-observed minus server `totalMs` isolates routing + network. Boot too: `boot
+pglite.create` → `boot client ready` (store open, schema apply, journal recovery, store-version reconcile, sync
+start) attributes a slow first paint to a phase; `boot pglite assets warm` times the optional pre-warm.
 
 **Structured boot numbers — the `BootReport`.** The rail is for a human reading a console; for
 machine-keepable numbers (dashboards, CI budget gates) every boot ALSO builds a versioned `BootReport`,
@@ -453,17 +452,17 @@ per-group `groups[]`. Two reading caveats: groups catch up CONCURRENTLY on one W
 `totalMs` partition; and a non-null `provision` block is a spare's off-thread `initdb` made visible (then
 `phases.pgliteCreateMs` is `null`).
 
-A `catch-up watermark aligned {floor}` line marks the one moment a group finished its initial catch-up and
-aligned its commit floors (ADR-0031). Electric's catch-up responses are CDN-cacheable and carry the
-`up-to-date` watermark inside the cached body, so a quiet shape's stale cached watermark would otherwise hold
-a busy shape's fresh changes until the quiet shape's first live long-poll (~41s on Electric Cloud — the
-"stale board that rearranges itself" symptom). The client aligns once to the freshest asserted head instead;
-the trade is a sub-second torn view of a multi-table transaction at load, self-healing in one round trip.
-The same hold recurs on the **live tail**, where the engine **nudges** the laggards instead of waiting —
-`sync change batch held by group frontier` → `live-tail sibling nudge {shape, target, round}` → commit on
-the refreshed watermarks; `live-tail nudge exhausted` means a sibling never advanced and the engine degraded
-to waiting out its poll (ADR-0033). Full prose:
-<https://pgxsinkit.github.io/start/operating-in-production/>.
+**How a group decides to commit (ADR-0056), and the one state that is terminal.** There is **no commit floor**
+and no cross-shape position comparison — offsets are per-stream and comparable only within one — so a group
+commits when **every** one of its shapes' most recent responses asserted up-to-date. That is safe because
+durable-streams answers each long-poll timeout with `204` plus the up-to-date header, so a quiet shape
+re-asserts freshness every cycle instead of holding a busy sibling behind a stale watermark. The **first**
+commit of each alignment generation (boot, and after any must-refetch) also reads the engine's convergence
+barrier through the control plane's `/sync/v1/barrier`, aligning only with `pendingFlips` at zero — no computed
+membership revocation still undelivered. A barrier the client cannot READ is a delay: the group stays on the
+pre-alignment gate and retries. `flipFailures > 0` is **terminal**: the engine abandoned membership-flip
+batches, those effects are lost, and the client refuses to align and goes `degraded` rather than waiting —
+restart the engine and re-subscribe. Full prose: <https://pgxsinkit.github.io/start/operating-in-production/>.
 
 **Measure at the network boundary, not by polling PGlite.** Each PGlite query is ~50ms on one thread, so
 a tight `setInterval` reading PGlite to "watch" a value inflates the very latency it reports. Trust the
@@ -487,8 +486,9 @@ a real rollback, route a permanent policy denial to `quarantined` — never mis-
 ## Common mistakes
 
 - Shortening the convergence interval to chase write latency (no effect; wastes CPU).
-- Serving many-shape sync over plain HTTP/1.1 and blaming the server for stalled writes.
-- Omitting `cache-control: no-store` on a same-origin shape proxy → intermittent 409 loops.
+- Serving many-stream sync over plain HTTP/1.1 and blaming the server for stalled writes.
+- Mounting the stream edge on the control plane's origin (one cache key for both read surfaces), or
+  omitting `Access-Control-Expose-Headers` on it — that one hot-loops the client, silently on both sides.
 - Treating an edge cold start as a toolkit/sync-rail problem.
 - Measuring latency by polling PGlite in a loop instead of at the network boundary.
 - Treating `deferred` as a failure and "cleaning up" the Outbox — it is rollout skew, and those rows drain

@@ -181,12 +181,12 @@ export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTa
    */
   conflictPolicy?: ConflictPolicy;
   /**
-   * Consistency group (ADR-0009 decision 2). Tables sharing a `consistencyGroup` are synced on one
-   * `MultiShapeStream` and committed atomically at a shared LSN frontier, so a local reader never
-   * sees one grouped table advanced past another for the same server transaction. Omitted → the
-   * table is its own singleton group (independent frontier, no cross-table atomicity — the resolution
-   * for a table that declares no group). The latency cost (a group advances only as fast as its
-   * slowest shape) is contained to the tables that opt in.
+   * Consistency group (ADR-0009 decision 2). Tables sharing a `consistencyGroup` are synced as one set
+   * of streams and committed atomically — held until every stream reports up-to-date, then applied in
+   * one transaction (ADR-0056) — so a local reader never sees one grouped table advanced past another
+   * for the same server transaction. Omitted → the table is its own singleton group (its own stream, no
+   * cross-table atomicity — the resolution for a table that declares no group). The latency cost (a
+   * group advances only as fast as its slowest shape) is contained to the tables that opt in.
    */
   consistencyGroup?: string;
   /**
@@ -423,8 +423,8 @@ export type SyncTableInput<
    */
   conflictPolicy?: ConflictPolicy;
   /**
-   * Bind this table into a consistency group (ADR-0009 decision 2): grouped tables sync on one
-   * `MultiShapeStream` and commit atomically. Omit for the default singleton group. See
+   * Bind this table into a consistency group (ADR-0009 decision 2): grouped tables sync as one set of
+   * streams and commit atomically. Omit for the default singleton group. See
    * {@link SyncTableEntry.consistencyGroup}.
    */
   consistencyGroup?: string;
@@ -863,12 +863,12 @@ export function defineSyncTable<
  *   and `shape` are its own. `readProjection` is set so generators skip it.
  * - **DRY columns.** `columns` is a typed subset of the owner's column keys; the local table is built by
  *   filtering the owner's own column definitions (never restated), and the same subset becomes the
- *   Electric `columns` allow-list so an omitted (e.g. heavy jsonb) column never crosses the wire. The
+ *   shape's `columns` allow-list so an omitted (e.g. heavy jsonb) column never crosses the wire. The
  *   primary key is always kept. Omit `columns` to sync every column.
- * - **Source is derived, never named.** The physical Electric target is taken from the owner — there is
+ * - **Source is derived, never named.** The physical source table is taken from the owner — there is
  *   no consumer-facing source field to get wrong (see {@link ShapeSpec.physicalTable}).
- * - **Readonly.** A projection has no write path; the engine resolves an incoming shape request by its
- *   unique `shapeKey` (= `as`) and consults the derived physical target only on egress.
+ * - **Readonly.** A projection has no write path; the control plane resolves an incoming subscription by
+ *   its unique `shapeKey` (= `as`) and consults the derived physical target when it creates the shape.
  *
  * The `rowFilter` callback receives the OWNER's full columns — the predicate is evaluated against
  * the physical table, so it may reference a column the local subset omits. RLS for the projection's
@@ -891,7 +891,7 @@ export function defineSyncTable<
  *
  * `serverOnlyColumns` are owner column keys the transform must READ but that are NOT in the client shape
  * (e.g. a `keysWithheld` control flag). Such a key stays omitted from the client keep-set, yet is ADDED
- * to the Electric fetch allow-list — so it is fetched from Electric, visible to the transform, and then
+ * to the shape's `columns` allow-list — so it is fetched, visible to the transform, and then
  * stripped on egress by the same omission pass, never reaching the client. It requires a
  * `serverProjection.rowTransform` (a fetch no transform reads is dead weight) AND `columns` (with
  * `columns` omitted every column is already kept, so "server-only" is a contradiction), and must be
@@ -925,7 +925,7 @@ export function defineReadProjection<
   opts: {
     /** The projection's distinct local identity — its PGlite table name AND its `shapeKey`. */
     as: TAs;
-    /** Column keys (of the owner) to sync locally + fetch from Electric. The PK is always kept. Omit → all. */
+    /** Column keys (of the owner) to sync locally + fetch on the shape. The PK is always kept. Omit → all. */
     columns?: TColumns;
     /** Row filter for this shape; the callback form receives the owner's full (physical) columns. */
     rowFilter?: (columns: TableColumnsShape<TOwnerTable>) => RowFilterSpec;
@@ -945,8 +945,8 @@ export function defineReadProjection<
     serverProjection?: ServerProjectionSpec | "unredacted";
     /**
      * Owner column keys the `serverProjection.rowTransform` must READ but which are NOT part of the client
-     * shape (e.g. a `keysWithheld` control flag). They are added to the Electric fetch allow-list so the
-     * transform can see them, then stripped on egress before the client wire. Requires
+     * shape (e.g. a `keysWithheld` control flag). They are added to the shape's `columns` allow-list so
+     * the transform can see them, then stripped on egress before the client wire. Requires
      * `serverProjection.rowTransform` and `columns`; must be disjoint from `columns` and the primary key.
      */
     serverOnlyColumns?: readonly TableColumnKey<TOwnerTable>[];
@@ -999,9 +999,9 @@ export function defineReadProjection<
   const omittedKeys = allKeys.filter((key) => !keep.has(key));
 
   // serverOnlyColumns — owner keys the egress rowTransform must READ but that are NOT in the client
-  // keep-set. They stay omitted client-side (so local DDL/apply exclude them AND the proxy strips them on
-  // egress), yet are added to the Electric fetch allow-list below so the transform can see them. Each
-  // guard fails loud: a mis-declared server-only column would silently mis-fetch or fail open.
+  // keep-set. They stay omitted client-side (so local DDL/apply exclude them AND egress strips them on
+  // the way out), yet are added to the shape's `columns` allow-list below so the transform can see them.
+  // Each guard fails loud: a mis-declared server-only column would silently mis-fetch or fail open.
   // Fail-closed posture guard. A projection does NOT inherit its owner's egress `serverProjection`
   // (see the docblock's no-inheritance caution: an inherited transform whose input column is unfetched
   // reads `undefined` and fails OPEN — half-protection worse than none). So if the OWNER redacts on
@@ -1060,7 +1060,7 @@ export function defineReadProjection<
       if (!allKeys.includes(key)) {
         throw new Error(
           `defineReadProjection: projection "${opts.as}" serverOnlyColumns names "${key}", which is not a ` +
-            `column of owner "${physicalTable}". It feeds the Electric fetch allow-list, so a typo would ` +
+            `column of owner "${physicalTable}". It feeds the shape's "columns" allow-list, so a typo would ` +
             `silently mis-fetch — name an existing owner column key.`,
         );
       }
@@ -1094,10 +1094,10 @@ export function defineReadProjection<
   // physical table, so it may reference a column the subset omits).
   const resolvedRowFilter = opts.rowFilter?.(getColumns(owner.table) as unknown as TableColumnsShape<TOwnerTable>);
 
-  // When a subset is requested, set the Electric `columns` allow-list to the KEPT physical column names
+  // When a subset is requested, set the shape's `columns` allow-list to the KEPT physical column names
   // so an omitted (e.g. heavy jsonb) column is never fetched over the wire — not merely stripped after.
   // serverOnlyColumns are added ON TOP of the kept names: a server-only column must be FETCHED (so the
-  // egress rowTransform can read it) even though it is omitted from the client keep-set — proxy omission
+  // egress rowTransform can read it) even though it is omitted from the client keep-set — egress omission
   // then strips it after the transform runs. Resolve key -> physical name the same way getProjectedColumns
   // does (the drizzle column's `.name`), never a hand-map. A full-width projection (no omitted keys, hence
   // no serverOnlyColumns — validated above) declares no allow-list at all.
@@ -1240,7 +1240,7 @@ function validateRegistryTableUniqueness(registry: SyncTableRegistry) {
 
 /**
  * ADR-0021 §4 / ADR-0022 §1–2: subscription timing, retention, and write-mode are properties of a
- * **consistency group**, not a single table — a group commits atomically on one `MultiShapeStream`
+ * **consistency group**, not a single table — a group's streams commit atomically together
  * (so it cannot be partly lazy or partly ephemeral) and a consistency group *is* the static
  * write-unit (so it cannot be partly pessimistic). Reject a registry whose grouped tables disagree on
  * any of the three. Tables without a `consistencyGroup` are their own singleton group and are

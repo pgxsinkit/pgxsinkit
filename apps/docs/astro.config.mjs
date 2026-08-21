@@ -17,7 +17,8 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "pgxsinkit",
-      description: "An offline-first sync toolkit for PostgreSQL/Supabase, ElectricSQL, Drizzle, and PGlite.",
+      description:
+        "An offline-first sync toolkit for PostgreSQL/Supabase, ElectricSQL's Circuits engine, Drizzle, and PGlite.",
       logo: {
         light: "./src/assets/pgxsinkit-wordmark.svg",
         dark: "./src/assets/pgxsinkit-wordmark-dark.svg",
@@ -37,7 +38,7 @@ export default defineConfig({
         starlightLlmsTxt({
           projectName: "pgxsinkit",
           description:
-            "pgxsinkit is an offline-first sync toolkit for the PostgreSQL -> ElectricSQL -> PGlite read path and the client -> write API -> PostgreSQL write path. The @pgxsinkit/* packages are the product; a demo app and an integration + performance harness prove and harden them. It targets engineers building local-first apps on Postgres/Supabase with Drizzle, Electric, and PGlite.",
+            "pgxsinkit is an offline-first sync toolkit for the PostgreSQL -> Circuits engine -> durable-streams -> PGlite read path and the client -> write API -> PostgreSQL write path. Subscriptions are granted by a control plane and every read is gated at a stream edge. The @pgxsinkit/* packages are the product; a demo board app and an integration + performance harness prove and harden them. It targets engineers building local-first apps on Postgres/Supabase with Drizzle, ElectricSQL's Circuits engine, and PGlite.",
         }),
         contractsTypeDoc({
           entryPoints: ["../../packages/contracts/src/index.ts"],

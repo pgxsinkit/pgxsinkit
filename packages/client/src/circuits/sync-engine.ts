@@ -321,8 +321,8 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
 
         if (key !== null) {
           // The offsets ride the SAME transaction as the rows they acknowledge. `last_lsn` has no
-          // native meaning — ADR-0056 makes the per-shape offset the only frontier — and the column
-          // goes when the Electric path does.
+          // native meaning — ADR-0056 makes the per-shape offset the only frontier — so it is written
+          // as a constant until the vestigial column itself is dropped.
           await updateSubscriptionState({
             pg: tx,
             metadataSchema,
@@ -517,8 +517,9 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
  * K shapes may share one table (ADR-0055 decision 4), but only when each brings a scoped clear.
  *
  * The default must-refetch is a TRUNCATE of the whole table, which would wipe a co-tenant scope's
- * rows — so this is the same condition the Electric engine's per-table lock enforced, stated as the
- * requirement it always was rather than as a prohibition on sharing.
+ * rows — so this is the same condition the removed ingest engine's one-shape-per-table guard enforced
+ * (ADR-0055 decision 4), stated as the requirement it always was rather than as a prohibition on
+ * sharing.
  *
  * Returns the shapes that are the **sole occupant** of their table, which is the set
  * {@link assertClearLeftNoResidue} can check: for those, and only those, "this shape's rows are

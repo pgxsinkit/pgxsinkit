@@ -1,81 +1,65 @@
 ---
 title: Run the board on managed BaaS
-description: Run the board demo against real Supabase Cloud + Electric Cloud with your own credentials.
+description: The managed-BaaS run of the board demo is retired — what that path was, and what a native read path would need in its place.
 sidebar:
   label: Board on the cloud
 ---
 
-The board demo (`apps/board`) runs against **managed BaaS — Supabase Cloud + Electric Cloud** with the
-**same code** it runs locally; you supply your own credentials. The local compose stack
-([Demo & harness](/demo-and-harness/)) is just a faithful, version-matched mirror of that managed shape.
+**This path is retired.** The board's managed-BaaS run targeted Supabase Cloud plus a managed
+read-path service that is being shut down, and the read path it drove was the classic one this toolkit
+no longer ships. The `board:cloud:*` scripts remain in the repository, but they were written for that
+topology and are not a working deployment path for the current one.
 
-It is **not** a one-command push. It is: do a little one-time console setup, fill in a credentials file,
-then run one deploy command — after which `bun run dev:board` drives the cloud backend.
-
-For a public, always-on, browser-ready instance of this same setup — served at
-[pgxsinkit.github.io/demo](https://pgxsinkit.github.io/demo/) and reset nightly — see
-[The hosted board /demo](/demo-and-harness/hosted-demo/).
-
-## What it looks like
+**Run the board locally instead.** The local compose stack is the version-matched, CI-gated proof of
+the whole topology, and it is the same `apps/board` code:
 
 ```bash
-# one-time (manual console steps — see the runbook):
-#   • create a Supabase project          • create an Electric Cloud source on its database
-cp board.cloud.env.example board.cloud.env   # fill in your project + Electric Cloud values
-
-bun run board:cloud:deploy   # migrate → secrets → deploy the three edge functions → cron → seed
-bun run dev:board            # local Vite, pointed at the cloud backend
+mise install && bun install
+mkcert -install       # one-time: trust the local CA so the browser accepts the gateway's TLS cert
+cp .env.example .env
+bun run infra:up      # the board stack via Podman compose
+bun run seed:board    # GoTrue identities + deterministic fixtures
+bun run dev:board
 ```
 
-`board:cloud:deploy` is a thin wrapper over the repeatable steps; each is also its own
-`board:cloud:migrate` / `:secrets` / `:functions` / `:cron` / `:seed` script.
-
-Use `bun run board:cloud:preview` to build the board with the cloud browser configuration and serve the
-compiled artifact locally at `http://localhost:5173`. `board:cloud:dev` remains the source-mode Vite server.
-Every Supabase CLI mutation receives the explicit `BOARD_SUPABASE_PROJECT_REF`; the commands do not
-depend on whichever project another checkout may have linked. CLI authentication similarly comes
-from `BOARD_SUPABASE_ACCESS_TOKEN`, not global profile state, so separate Supabase accounts stay
-separate.
+See [Demo & harness](/demo-and-harness/). The hosted public instance is also retired — see
+[The hosted board /demo](/demo-and-harness/hosted-demo/).
 
 ## How it fits together
 
-- **Auth is Supabase's new asymmetric model** — ES256 sessions verified against the project JWKS, with
-  the new `sb_publishable_`/`sb_secret_` API keys (no HS256). The board functions are the single auth
-  point; the gateway only translates the opaque keys into role JWTs. Board
+Everything below still describes the board as it runs today; what has gone is the managed backend the
+read half used to point at.
+
+- **Auth is Supabase's asymmetric model** — ES256 sessions verified against the project JWKS, with the
+  `sb_publishable_`/`sb_secret_` API keys (no HS256). The board functions are the single auth point;
+  the gateway only translates the opaque keys into role JWTs. Board
   [ADR-0007](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0007-supabase-asymmetric-auth-only.md).
-- **The read path needs no toolkit change** — `board-sync` forwards to
-  `https://api.electric-sql.cloud/v1/shape?source_id=…&secret=…`; the proxy only rewrites `where`/`columns`,
-  so the Cloud source credentials ride through, server-side only.
+- **The read path is two functions over two services.** `board-sync` is the **control plane**: it
+  serves `/sync/v1/subscribe`, `/sync/v1/refresh` and `/sync/v1/barrier`, compiling each shape's row
+  filter and minting stream tokens against the **Circuits engine**'s control API. `board-stream` is the
+  **edge**, on its own origin: it verifies a stream token, checks the grant, and proxies **durable-streams**
+  bytes. Neither the engine nor durable-streams is client-reachable — reaching them is what the two
+  functions are for, and they share nothing but the stream-token signing key.
+- **The engine and durable-streams are services you run.** There is no managed offering of either, and
+  these docs do not currently cover deploying them to a cloud environment. That is the concrete reason
+  a managed-BaaS board is not a documented path today: the front half (Postgres, auth, the functions)
+  maps onto a managed platform straightforwardly, and the read half has nowhere to land. The
+  `board:cloud:*` deploy script also predates the edge — its function list does not include
+  `board-stream`.
 - **The edge functions deploy as pre-built bundles** (`supabase/config.toml` entrypoints,
   `verify_jwt = false`), because the demo registry `@pgxsinkit/board-schema` is unpublished. Board
   [ADR-0008](https://github.com/pgxsinkit/pgxsinkit/blob/main/apps/board/docs/adr/0008-board-on-managed-baas.md).
 - **The client sends its publishable key** via `@pgxsinkit/client`'s `requestHeaders` option, alongside
   the per-request `Authorization`.
-- **The Event lane drains through a third function on this stack.** Locally the board runs the toolkit's
-  long-lived consumer runner (`bun run dev:board:consumer`); managed Supabase has no process to host one, so
-  the cloud deploy adds `board-events-drain` — an edge function that runs one bounded
-  [`drainOnce()`](/start/deploying-the-server/) pass per invocation. A **Supabase Cron schedule (every 10s)
-  is the delivery guarantee**, and `board-write` **nudges** the function on enqueue so a click archives
-  immediately; a lost nudge costs latency only. Its callers are machines with no session, so the gate is a
-  shared secret (`BOARD_EVENTS_DRAIN_SECRET`) compared in constant time — set it in `board.cloud.env`.
+- **The Event lane needs a fourth function on a serverless platform.** Locally the board runs the
+  toolkit's long-lived consumer runner (`bun run dev:board:consumer`); a managed platform with no
+  process to host one uses `board-events-drain` instead — an edge function running one bounded
+  [`drainOnce()`](/start/deploying-the-server/) pass per invocation, with a **cron schedule as the
+  delivery guarantee** and a `board-write` **nudge** for latency. Its callers are machines with no
+  session, so the gate is a shared secret (`BOARD_EVENTS_DRAIN_SECRET`) compared in constant time.
 
-:::caution[Activate subqueries on your Electric Cloud source]
-The board's membership-scoped shapes use a cross-table `where` subquery — a flagged Electric preview. On
-managed Electric Cloud it is **activated per source by Electric staff on request** (no self-serve toggle
-yet; default-on intended), so **ask Electric to enable subqueries for your source**. Until then a normal
-member's shapes return `{"where":["Subqueries are not supported"]}` (an admin, all-rows, works). Or
-self-host Electric with the flags. See [The Electric subquery requirement](/concepts/electric-subqueries/).
-:::
+## What's verified
 
-## What's verified, and what's yours to verify
-
-The **local** stack mirrors the cloud shape exactly and is covered by the board smoke
-(`bun run test:integration:board`, 8/8): the new-API-key flow, ES256/JWKS verification, and the full
-read/write topology. The **managed endpoints themselves** are operator-verified — they need your
-Supabase + Electric Cloud accounts, so the cloud run is supported and documented, not CI-gated.
-
-## The full runbook
-
-Step-by-step (project creation, the Electric source, connection strings, the credentials file, and
-troubleshooting) is in
-[**docs/runbooks/board-on-cloud.md**](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/runbooks/board-on-cloud.md).
+The **local** stack is covered by the board smoke (`bun run test:integration:board`): the API-key flow,
+ES256/JWKS verification, and the full read/write topology through the gateway, the three functions, the
+engine and durable-streams. Nothing about a managed deployment is verified.

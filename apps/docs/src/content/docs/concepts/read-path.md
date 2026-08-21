@@ -1,34 +1,42 @@
 ---
 title: The read path
-description: Shapes stream Postgres → Electric → PGlite, through an ownership-enforcing proxy.
+description: Rows stream PostgreSQL → the Circuits engine → durable-streams → PGlite, granted by a control plane and gated at the edge.
 sidebar:
   order: 4
 ---
 
-The read path streams rows from Postgres **through ElectricSQL** to the client and keeps local PGlite
-up to date — nothing goes from Postgres to the client directly. The app reads exclusively from PGlite;
-it never queries Postgres or Electric directly at read time.
+The read path streams rows from Postgres **through ElectricSQL's Circuits engine and
+durable-streams** to the client and keeps local PGlite up to date — nothing goes from Postgres to the
+client directly. The app reads exclusively from PGlite; it never queries Postgres or the engine
+directly at read time.
 
 ## The flow
 
 ```
-PostgreSQL  →  ElectricSQL  →  shape proxy  →  PGlite (local)
+PostgreSQL  →  Circuits engine  →  durable-streams  →  the edge  →  PGlite (local)
 ```
 
-1. **Shapes** define what a client may see — a table plus a `where` filter. Filters can be
-   cross-table subqueries, e.g. membership fan-out where a container row streams to every member:
+1. **Shapes** define what a client may see. Every shape declares one of two tiers, and _which field it
+   declares_ is what picks the tier:
 
-   ```sql
-   container_id IN (SELECT container_id FROM memberships WHERE member_id = <subject>)
-   ```
+   - **Private** — `rowFilter` fuses the caller's claims into the predicate. One shape per subject;
+     the right home for data whose row set genuinely differs per user, which is most data.
+   - **Shared** — `scope` names the columns whose values key the shape family, and a separate
+     entitlement rule maps claims to the scope values a subject may read. One shape per scope value,
+     shared by every entitled subject.
 
-   You do not hand-write that. Membership is one of the shipped policy families, and every family ships
-   a read-path mirror that **generates exactly the predicate above** from the very same columns object
-   you hand the policy builder — one declaration, both engines, so a rename or a typo can never leave a
-   row writable but unreadable:
+   Declaring both is refused at definition time, so a shape's tier is evident from its authoring and
+   can never be ambiguous.
+
+   A private-tier filter yields a **predicate AST**, built with the `p.*` builders over real Drizzle
+   column objects — no SQL text exists on this path at any point, and each comparison is type-checked
+   against the column it names. Membership fan-out (a container row streaming to every member) is one
+   of the shipped policy families, and every family ships a read-path mirror that generates the
+   predicate from the very same columns object you hand the policy builder — one declaration, both
+   surfaces, so a rename or a typo can never leave a row writable but unreadable:
 
    ```ts
-   import { buildMembershipShapeWhere } from "@pgxsinkit/contracts";
+   import { buildMembershipShapePredicate } from "@pgxsinkit/contracts";
 
    // The same object `buildSupabaseMembershipNativePolicies(…)` takes; write-only fields are ignored.
    const membership = {
@@ -38,43 +46,74 @@ PostgreSQL  →  ElectricSQL  →  shape proxy  →  PGlite (local)
      membershipSubjectColumn: memberships.memberId,
    };
 
-   const widgetsReadFilter = (claims) => buildMembershipShapeWhere(membership, claims);
+   shape: {
+     rowFilter: () => ({
+       customPredicate: (claims) => buildMembershipShapePredicate(membership, claims),
+     }),
+   }
    ```
 
-   It renders the `IN (subquery)` form above with the subject bound as a param, and denies with
-   `DENY_ALL` when the claims carry no subject.
+   That builds "the row's container is one the subject is a member of" as a first-class subquery node
+   over the membership table — the engine maintains the inner set incrementally and shares it across
+   every shape referencing the same subquery — and denies with
+   [`DENY_ALL_PREDICATE`](/api/contracts/variables/deny_all_predicate/) when the claims carry no
+   subject.
 
-   Reach for a hand-built predicate only past the shipped families — and then use the typed Drizzle
-   helpers, never a string: `c()` for each (bare) column, the table object for the `FROM`, and the
-   subject as a **bound param** (so a quote in the value can't inject the predicate).
+   Reach for a hand-built predicate only past the shipped families — and then still through `p.*`,
+   which takes the same real column objects and carries the subject as a typed JSON scalar rather than
+   text that has to be escaped:
 
    ```ts
-   import { c, DENY_ALL } from "@pgxsinkit/contracts";
-   import { sql, type SQL } from "drizzle-orm";
+   import { DENY_ALL_PREDICATE, p, type Predicate } from "@pgxsinkit/contracts";
 
-   const memberContainers = (subject: string): SQL =>
-     sql`select ${c(memberships.containerId)} from ${memberships} where ${c(memberships.memberId)} = ${subject}`;
-
-   const widgetsReadFilter = (claims) =>
-     claims.sub ? sql`${c(widgets.containerId)} in (${memberContainers(claims.sub)})` : DENY_ALL;
+   shape: {
+     rowFilter: (columns) => ({
+       customPredicate: (claims): Predicate => {
+         if (!claims.sub) return DENY_ALL_PREDICATE;
+         return p.in(
+           columns.containerId,
+           p.subquery(memberships.containerId, p.eq(memberships.memberId, claims.sub)),
+         );
+       },
+     }),
+   }
    ```
 
-   The subquery must be **self-contained** (not correlated). See
+   The subquery must be **uncorrelated**: its inner `where` reads the membership table's own columns
+   only, never the outer row's. See
    [Authoring a registry → cross-table filters](/start/getting-started/) for the full pattern and the
-   `null` (no filter) vs `DENY_ALL` (no rows) trap.
+   `null` (no filter, every row) vs `DENY_ALL_PREDICATE` (no rows) trap.
 
-2. **ElectricSQL** turns each shape into a live stream from Postgres.
-3. **The shape proxy** (`proxyElectricShapeRequest`, served by the pgxsinkit server — `createSyncServer`
-   mounts it at `/api/shape` by default, but the path is yours to choose) forwards shape requests to
-   Electric and **enforces owner filtering** for protected tables unless the caller is an admin. In
-   the real path, clients talk to the proxy, not to Electric directly.
-4. **PGlite** subscribes through `@pgxsinkit/client`'s internal Electric ingest engine (`src/sync/`,
-   ADR-0009) and applies the stream into local tables. The app reads from there.
+2. **The Circuits engine** ingests Postgres logical replication and maintains each shape, created
+   through its native `POST /shapes` with the predicate AST. The stream itself lives in
+   **durable-streams**, not in the engine.
 
-## The proxy is the gateway
+3. **The control plane** (`/sync/v1/subscribe`, `/sync/v1/refresh`, `/sync/v1/barrier`, mounted by
+   `createSyncServer` when it is configured with `readPath`) is where read authorization happens. The
+   client names a **shape key and nothing else**: the control plane compiles the private tier's
+   predicate from the caller's verified claims — or expands a shared shape to every scope the subject
+   is entitled to — creates the shape, and hands back the granted stream paths together with a
+   short-lived **signed stream token**. A request it cannot resolve a subject for is answered `401`.
 
-Reads do not hit Electric directly in a deployed system — they go through the shape proxy, which is
-where ownership is enforced. Treat synced tables in PGlite as **replication
+4. **The edge** (`createStreamGate`, mounted at `/v1/stream`) serves the durable-streams reads: it
+   verifies the stream token, checks the grant against the live entitlement set, and proxies bytes.
+
+5. **PGlite** subscribes through `@pgxsinkit/client`'s own reader (`readShapeStream`, over
+   `@durable-streams/client`) and applies the stream into local tables. The app reads from there.
+
+## The edge is the gate
+
+Clients address neither the engine nor durable-streams directly in a deployed system, and read
+authorization is split across the two surfaces above: the control plane decides **what a subject may
+subscribe to** and mints a capability saying so, and the edge decides **whether that capability still
+grants this stream** on every read. Predicates were resolved at shape creation, so there is no
+per-read filtering and no per-read rewriting at the edge — it is a gate, not a pipeline — and an
+entitlement set that is catching up, stale or unavailable **denies**.
+
+Losing entitlement means losing the _subscription_, not losing rows: the client takes `403` on its
+next poll, truncates that scope, and unsubscribes.
+
+Treat synced tables in PGlite as **replication
 targets**: they are written by this path and must never be mutated by application code (writes go
 through [the write path](/concepts/write-path/)).
 
@@ -124,7 +163,7 @@ const reportView = registry.report.view!; // `.view` is populated only for readw
 client.query((c) => c.drizzle.select({ id: reportView.id }).from(reportView));
 ```
 
-This is the read-side twin of optimistic writes returning through Electric: the write is visible
+This is the read-side twin of optimistic writes returning down the read path: the write is visible
 immediately only because you read the overlay view; the base table catches up when the committed row
 streams back.
 
@@ -214,7 +253,8 @@ const { rows } = useLiveDrizzleRows(
 // Worker/client-wide policy: a default grace period plus hard budgets (LRU-evicted past them).
 defineSyncWorker({
   registry,
-  electricUrl,
+  controlPlaneUrl,
+  streamBaseUrl,
   batchWriteUrl,
   liveQueries: {
     defaultKeepAliveMs: 0, // default: no retention — tear down on last unmount
@@ -248,9 +288,20 @@ for (const q of await client.liveQueryDiagnostics()) {
 }
 ```
 
-## Hard prerequisite
+## Hard prerequisites
 
-Subquery `where` (used for fan-out) is a flagged ElectricSQL preview feature. The proxy forwards the
-`where` verbatim, so Electric must run with `allow_subqueries,tagged_subqueries`. Without the flag
-Electric rejects the shape with HTTP 400 and the sync fails **closed** — no rows stream, never an
-unfiltered fan-out. See [The Electric subquery requirement](/concepts/electric-subqueries/).
+Three things the read path needs from the deployment underneath it:
+
+- **Postgres running `wal_level = logical`.** The engine opens its own replication slot. Supabase's
+  Postgres image already ships it — check with `postgres -C wal_level` rather than re-adding flags.
+- **An explicit table list for the engine, never `*`.** `ELECTRIC_CIRCUITS_PG_TABLES` names the tables
+  it ingests, by bare name. `*` introspects every `public` table carrying a primary key, which sweeps
+  in tables that were never sync state.
+- **A gateway speaking HTTP/2 to browsers.** One long-poll is held per stream, so a subject in K
+  scopes holds K concurrent connections; without HTTP/2 they hit the browser's
+  ~6-connections-per-origin ceiling and the sync stalls.
+
+Read authorization fails **closed** at both surfaces: the control plane answers `401` when it cannot
+resolve a subject, so no shape is created and no stream is granted; the edge answers `403` when the
+token does not grant the stream or the entitlement behind it is gone, including while its own
+entitlement subscription is still catching up.

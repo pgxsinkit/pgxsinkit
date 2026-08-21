@@ -10,15 +10,24 @@ This page gets you from zero to a working read + write path. For what each packa
 
 ## Prerequisites
 
-- **PostgreSQL 17+** (Supabase-compatible; the write path uses Supabase-style auth claims for RLS).
-- **ElectricSQL ≥ 1.7**, run with the subquery feature flag — this is **mandatory**:
+- **PostgreSQL 17+** (Supabase-compatible; the write path uses Supabase-style auth claims for RLS),
+  running with **`wal_level = logical`** — the Circuits engine ingests logical replication and creates
+  its own replication slot. Supabase's images already ship it; verify with `postgres -C wal_level`.
+- **The read path's two services**: ElectricSQL's **Circuits engine**
+  (`ghcr.io/pgxsinkit/electric-circuits/engine`, pinned by sha tag) and a **durable-streams** server
+  (`docker.io/electricax/durable-streams-server-rust:0.1.5`). The engine is configured entirely through
+  four environment variables:
 
   ```bash
-  ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries
+  ELECTRIC_CIRCUITS_PG_URL=postgres://…      # the database it replicates from
+  ELECTRIC_CIRCUITS_DS_URL=http://ds:8791    # the durable-streams server it publishes into
+  ELECTRIC_CIRCUITS_PG_TABLES=issue,team,…   # an EXPLICIT list of bare table names — never `*`
+  ELECTRIC_CIRCUITS_BIND=0.0.0.0:7010        # its control API, which must not be client-reachable
   ```
 
-  Without it, sync fails closed (no rows stream). See
-  [The Electric subquery requirement](/concepts/electric-subqueries/).
+  `*` introspects every `public` table with a primary key, which sweeps in tables you never meant to
+  publish. The engine exits if a listed table is absent, so run it under a restart policy while
+  migrations land.
 
 - **The `pgmq` extension**, but only if you use the [event lane](/concepts/event-lane/). Its generated
   migration runs `CREATE EXTENSION IF NOT EXISTS pgmq`, so the extension has to be present in the PostgreSQL
@@ -28,11 +37,6 @@ This page gets you from zero to a working read + write path. For what each packa
   Functions**, Cloudflare Workers, etc. The server core is runtime-neutral and framework-free
   (web-standard `Request`/`Response`, with the DB client injected); only the optional `server.start()`
   helper is Bun-specific. And **Drizzle** (`drizzle-orm@1.0.0-rc.4`+) for schema.
-
-<Aside type="caution" title="Enum columns in shape filters">
-  A PostgreSQL `enum` referenced in a shape `where` must be cast to `text` — `"role"::text = 'manager'`, not `"role" =
-  'manager'`. The column stays an enum everywhere else.
-</Aside>
 
 ## Install
 
@@ -173,20 +177,26 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
      --project-dir ./db --config drizzle.config.ts
    ```
 
-3. **Create the server** and serve its `fetch`. All writes go through `POST /api/mutations`; the
-   ownership-enforcing shape proxy is served from the same app.
+3. **Create the server** and serve its `fetch`. All writes go through `POST /api/mutations`; adding
+   `readPath` also mounts the read path's **control plane** — `/sync/v1/subscribe`, `/sync/v1/refresh`,
+   `/sync/v1/barrier` — beside it, in the same app.
 
    ```ts
-   import { createSyncServer } from "@pgxsinkit/server";
+   import { createCircuitsEngineClient, createSyncServer, importStreamTokenKey } from "@pgxsinkit/server";
    import { registry } from "./sync-registry";
 
    const server = createSyncServer({
      registry,
      db, // your Drizzle database
-     electricUrl: process.env.ELECTRIC_URL!, // e.g. http://localhost:3000/v1/shape
      resolveAuthClaims: async (_request) => {
-       // verify the request's JWT and return its claims, or null to block all rows
+       // verify the request's JWT and return its claims, or null — never a claims object with no `sub`
        return null;
+     },
+     readPath: {
+       // The engine's control API. Only shape LIFECYCLE goes through it; reads never do.
+       engine: createCircuitsEngineClient({ baseUrl: process.env.CIRCUITS_ENGINE_URL! }),
+       // The stream-token signing key, shared with the edge and with nothing else.
+       key: await importStreamTokenKey(process.env.STREAM_TOKEN_SECRET!),
      },
    });
 
@@ -195,9 +205,12 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
    // Functions, or Cloudflare Workers. Only the optional `server.start()` helper needs Bun.
    ```
 
-   Deploying onto a non-Bun runtime (Deno / Supabase Edge Functions) has a couple of concrete steps —
-   a path rewrite and resolving claims from the platform's JWT. See
-   [Deploying the server](/start/deploying-the-server/).
+   `readPath` **requires** `resolveAuthClaims` — `createSyncServer` refuses the combination without it,
+   because the control plane cannot mint a stream token for a subject it cannot resolve. The **edge**
+   that serves the stream bytes is a separate mount on its own origin; see
+   [Deploying the server](/start/deploying-the-server/), which also covers the two concrete steps a
+   non-Bun runtime (Deno / Supabase Edge Functions) needs — a path rewrite and resolving claims from
+   the platform's JWT.
 
 </Steps>
 
@@ -210,34 +223,44 @@ pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql
   (`auth.uid()` is just `request.jwt.claims ->> 'sub'`). The owner/author column itself is stamped
   from those same claims by an `authClaim` managed field at a claim path — `["sub"]` is the old
   `auth.uid()` owner, but it can be any verified claim (e.g. `["app_metadata","person_id"]`).
-- **Read path — the shape `rowFilter`:** the proxy builds the Electric shape `where` and
-  **Electric** runs it, not Postgres — so a `customWhere` returns a Drizzle `SQL` fragment built from
-  the table's columns: reference each column through `c()` (a bare identifier, as Electric requires)
-  and bind the authorizing claim (`claims.sub` by default) as a `$n` param rather than hand-escaping
-  it, with any enum cast to `text`.
-  Return `DENY_ALL` to block all rows, or `null` to bypass filtering — note `null`/`""` means _no
-  filter, all rows visible_, so an owner filter must return `DENY_ALL` (not `null`) when the claim is
-  absent. When you define the table and its filter **together in one `defineSyncTable`**, write
-  `shape.rowFilter` as a **function of the built columns** — `rowFilter: (columns) => ({ customWhere:
-(claims) => … c(columns.ownerId) … })` — so `c()` references the real typed columns this call is
-  creating (the same columns `extras` receives), with no separately-built table needed.
+- **Read path — the shape `rowFilter`:** the control plane compiles the filter into a **predicate AST**
+  once per shape, at subscribe, and the **sync engine** evaluates it — not Postgres. So a
+  `customPredicate` returns a `Predicate` built with the `p.*` builders over the real Drizzle column
+  objects: `p.eq`, `p.and`/`p.or`/`p.not`, `p.isNull`, `p.in`/`p.notIn`. Comparisons are checked
+  against each column's own TypeScript type, so a mistyped enum label or a `null` against a NOT NULL
+  column is a compile error rather than a silently-wrong filter. There is no cast to write: the AST
+  carries typed JSON scalars, so an `enum` column compares against its label directly.
+  Return `DENY_ALL_PREDICATE` to block all rows, or `null` to bypass filtering — `null` means _no
+  filter, all rows visible_, so an owner filter must return `DENY_ALL_PREDICATE` (not `null`) when the
+  claim is absent. When you define the table and its filter **together in one `defineSyncTable`**,
+  write `shape.rowFilter` as a **function of the built columns** — `rowFilter: (columns) => ({
+customPredicate: (claims) => … p.eq(columns.ownerId, claims.sub) … })` — so the predicate references
+  the real typed columns this call is creating (the same columns `extras` receives), with no
+  separately-built table needed.
 
-For a **cross-table membership fan-out** (sync a row only if the subject belongs to its container), the
-`customWhere` predicate is a subquery — author it the same typed way, never a string: `c()` for each
-column, the **table object** for the `FROM`, the subject as a **bound param**, factored into a helper so
-read filter and any narrower variant share it:
+`defineSyncTable` and `defineReadProjection` **refuse** a `rowFilter` that restricts nothing — one with
+neither a `customPredicate` nor a column allow-list. A filter that filters nothing is either an
+authoring mistake or an unfinished one, and both fail at definition time instead of shipping open.
+
+For a **cross-table membership fan-out** (sync a row only if the subject belongs to its container),
+`p.subquery` names the inner set by the column it projects — the table is read off that column, so there
+is no table name to get wrong. Factor it into a helper so every filter that needs it shares one:
 
 ```ts
-const memberContainers = (subject: string): SQL =>
-  sql`select ${c(memberships.containerId)} from ${memberships} where ${c(memberships.memberId)} = ${subject}`;
-const widgetsReadFilter = (claims: JwtClaims) =>
-  claims.sub ? sql`${c(widgets.containerId)} in (${memberContainers(claims.sub)})` : DENY_ALL;
+import { DENY_ALL_PREDICATE, p, type Predicate, type SubqueryRef } from "@pgxsinkit/contracts";
+
+const memberContainers = (subject: string): SubqueryRef<string> =>
+  p.subquery(memberships.containerId, p.eq(memberships.memberId, subject));
+
+const widgetsReadFilter = (claims: JwtClaims): Predicate =>
+  claims.sub ? p.in(widgets.containerId, memberContainers(claims.sub)) : DENY_ALL_PREDICATE;
 ```
 
-Subqueries **nest** by interpolation (wrap one `sql` fragment in another to narrow a fan-out) and must
-be **self-contained** (not correlated). The subquery `where` is the flagged Electric preview — run with
-`allow_subqueries,tagged_subqueries` or it fails closed. `apps/board`'s `packages/board-schema/src/registry.ts`
-is a worked end-to-end example.
+Sharing that helper is not just tidiness: the engine maintains the inner set **incrementally** and
+shares it across every shape that references it, so N filters over one membership cost one index
+between them rather than N. The subquery must be **uncorrelated** — its inner `where` reads the
+membership table's own columns only. `packages/board-schema/src/schema.ts` is a worked end-to-end
+example.
 
 For RLS, `@pgxsinkit/contracts` ships `buildSupabaseOwnerOrAdminNativePolicies` and
 `buildSupabaseMembershipNativePolicies` for the owner and membership shapes — they take **Drizzle
@@ -247,24 +270,26 @@ silently drift. For anything beyond them (e.g. collaborative any-member writes),
 from `pgPolicy` + Drizzle operators (`and`/`or`/`eq`).
 
 Each family also ships the **read half** of that one declaration, so you never hand-write the mirror:
-return `buildOwnerOrAdminShapeWhere(ownerColumn, claims)` (an admin gets `null` — no filter — mirroring
-the policy's bypass; everyone else gets `buildOwnershipShapeWhere`), `buildMembershipShapeWhere(columns,
-claims)`, or `buildGrantScopeAccessShapeWhere(scopeColumn, claims, options)` for a JWT-resident grant set
-(a bypass grant → `null` too; the bare `resolveGrantScopeIds` + `buildGrantScopeShapeWhere` pair cannot
-see one) — hand each the _same_ options object you gave the policy builder — straight from `customWhere`.
-Each denies with `DENY_ALL` when the claims resolve to no access: the ownership, owner-or-admin and
-membership mirrors when there is no subject, the grant-scope mirror when the resolved grant set is empty.
-They mirror the **SELECT** policy only (a shape `where` filters a read stream), and they render
-containment as Electric's plain `IN (subquery)` where the policy renders `= ANY(ARRAY(select …))` for
-Postgres' index-scan discipline — same columns, two dialects.
+return `buildOwnerOrAdminShapePredicate(ownerColumn, claims)` (an admin gets `null` — no filter —
+mirroring the policy's bypass; everyone else gets `buildOwnershipShapePredicate`),
+`buildMembershipShapePredicate(columns, claims)`, or
+`buildGrantScopeAccessShapePredicate(scopeColumn, claims, options)` for a JWT-resident grant set (a
+bypass grant → `null` too; the bare `resolveGrantScopeIds` + `buildGrantScopeShapePredicate` pair cannot
+see one) — hand each the _same_ options object you gave the policy builder — straight from
+`customPredicate`. Each denies with `DENY_ALL_PREDICATE` when the claims resolve to no access: the
+ownership, owner-or-admin and membership mirrors when there is no subject, the grant-scope mirror when
+the resolved grant set is empty. They mirror the **SELECT** policy only (a row filter filters a read
+stream), and they render containment as the AST's `IN (subquery)` where the policy renders
+`= ANY(ARRAY(select …))` for Postgres' index-scan discipline — same columns, two dialects.
 
 </Aside>
 
 ## Stand up the read path
 
 The client writes locally into an overlay + a durable journal, flushes the journal to the server's
-write route, and subscribes to Electric shapes that land in local PGlite. Reads are served from
-PGlite; the server's **shape proxy** forwards shape requests to Electric and enforces ownership.
+write route, and subscribes to shape streams that land in local PGlite. Reads are served from PGlite.
+The client does not construct stream URLs: it **asks** the control plane what it may read and is told,
+then reads those streams through the edge, which checks the token it was granted.
 
 ```ts
 import { createSyncClient } from "@pgxsinkit/client";
@@ -272,7 +297,8 @@ import { registry } from "./sync-registry";
 
 const client = await createSyncClient({
   registry,
-  electricUrl: "/api/shape", // your shape-proxy path (createSyncServer's default route)
+  controlPlaneUrl: "/", // where /sync/v1/subscribe|refresh|barrier are mounted
+  streamBaseUrl: "https://stream.example.com/v1/stream", // the edge, on its own origin
   batchWriteUrl: "/api/mutations", // the exact pgxsinkit batch endpoint
   getAuthToken: async () => currentJwt(),
 });
@@ -301,7 +327,8 @@ Pass a `storePath` to name the local store — a plain name, **never** a storage
 ```ts
 const client = await createSyncClient({
   registry,
-  electricUrl: "/api/shape",
+  controlPlaneUrl: "/",
+  streamBaseUrl: "https://stream.example.com/v1/stream",
   batchWriteUrl: "/api/mutations",
   storePath: "my-app-store", // a plain name; omit it to use the built-in default
 });
@@ -323,7 +350,8 @@ import { memoryStoreForTests } from "@pgxsinkit/client/testing";
 
 const client = await createSyncClient({
   registry,
-  electricUrl: "/api/shape",
+  controlPlaneUrl: "/",
+  streamBaseUrl: "https://stream.example.com/v1/stream",
   batchWriteUrl: "/api/mutations",
   ...memoryStoreForTests("my-test"),
 });
@@ -353,7 +381,7 @@ the shape/row filter) intact.
 import { asReadonly, assertReadContractPreserved, defineSyncRegistry } from "@pgxsinkit/contracts";
 import { postingRestriction } from "./tables"; // defineSyncTable(…, { mode: "readwrite", conflictPolicy, governance })
 
-// One authoritative registry — the server's apply function + shape proxy are generated from this.
+// One authoritative registry — the server's apply function + read-path shapes are generated from this.
 export const authoritativeRegistry = defineSyncRegistry({ posting_restriction: postingRestriction });
 
 // Per-client projections: the teacher writes the table; the learner only reads it.
@@ -377,12 +405,12 @@ assertReadContractPreserved(authoritativeRegistry, learnerRegistry, { label: "le
 <Aside type="note" title="Generate the server from the authoritative registry">
   The apply function emits a write branch for **every** table and stamps managed fields / reject-if-stale from the
   entry's write contract, so it must be generated from the writable entry — generate from the authoritative registry,
-  not a readonly projection. A claims-branching `customWhere` then serves every client from one shape definition (each
-  request carries its own claims). A projection may differ **only** in write capability and lifecycle
+  not a readonly projection. A claims-branching `customPredicate` then serves every client from one shape definition
+  (each request carries its own claims). A projection may differ **only** in write capability and lifecycle
   (`subscription`/`retention`/group), never in the read contract — that is what `assertReadContractPreserved` enforces.
-  It cannot see the `customWhere` body, so bump `rowFilter.revision` on a logic change. The full registry fingerprint
-  differs between the writable and readonly variants — expected and fine: it is client-local, guarding each client's own
-  store, and the server never sees it. See
+  It cannot see the `customPredicate` body, so bump `rowFilter.revision` on a logic change. The full registry
+  fingerprint differs between the writable and readonly variants — expected and fine: it is client-local, guarding each
+  client's own store, and the server never sees it. See
   [ADR-0025](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0025-per-client-mode-projection.md).
 </Aside>
 
@@ -432,22 +460,24 @@ cache — but it does add a deploy step (per-stream queues) and a consumer proce
 ## Try the demo
 
 The repository's `apps/board` (a Linear-style board + chat) drives all of the above end-to-end
-against a partial Supabase + Electric stack:
+against a trimmed Supabase + Circuits stack — Postgres, GoTrue, an Envoy gateway, durable-streams, the
+Circuits engine, and three edge functions (`board-write`, `board-sync` for the control plane, and
+`board-stream` for the edge):
 
 ```bash
 mise install && bun install
 mkcert -install       # one-time: trust the local CA so the browser accepts the gateway's TLS cert
 cp .env.example .env
-bun run infra:up      # the full board stack (Supabase + Electric) via Podman compose
+bun run infra:up      # the full board stack via Podman compose
 bun run seed:board    # GoTrue identities + fixtures
 bun run dev:board
 ```
 
 <Aside type="note" title="The board's gateway is served over HTTPS (HTTP/2) — mkcert is a prerequisite">
-  The browser holds one Electric long-poll connection **per synced shape**, and the board syncs six. Over plain HTTP/1.1
-  those long-polls exhaust the browser's ~6-connections-per-origin cap and writes starve behind them (see [Deploying the
-  server → the gateway must speak HTTP/2](/start/deploying-the-server/)). So the demo fronts its gateway with a
-  TLS-terminating **HTTP/2 + HTTP/3** Caddy sidecar, and the board's browser origin is `https://localhost:54343`.
+  `@durable-streams/client` holds one live long-poll connection **per synced stream**, and the board syncs six. Over
+  plain HTTP/1.1 those long-polls exhaust the browser's ~6-connections-per-origin cap and writes starve behind them (see
+  [Deploying the server → the gateway must speak HTTP/2](/start/deploying-the-server/)). So the demo fronts its gateway
+  with a TLS-terminating **HTTP/2 + HTTP/3** Caddy sidecar, and the board's browser origin is `https://localhost:54343`.
   `infra:up` issues the cert with [`mkcert`](https://github.com/FiloSottile/mkcert), but the local CA must be
   **trusted** first — `mkcert -install` (one-time) — because a browser `fetch()` to an untrusted cert fails outright (no
   click-through), and HTTP/3's QUIC refuses an untrusted cert entirely. Without mkcert the stack still comes up on plain
@@ -455,4 +485,5 @@ bun run dev:board
 </Aside>
 
 For the minimal `@pgxsinkit/server` reference instead, use `bun run infra:harness:up` (PostgreSQL +
-Electric) + `bun run dev:api`. See [Demo & harness](/demo-and-harness/) for what each is for.
+durable-streams + the Circuits engine) + `bun run dev:api`. See [Demo & harness](/demo-and-harness/)
+for what each is for.

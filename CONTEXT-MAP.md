@@ -19,8 +19,8 @@ This repo holds three bounded contexts with deliberately separate vocabularies.
 
 - **Board → Toolkit (Consumer)**: the Board installs `@pgxsinkit/*` and declares
   a sync registry; the toolkit interprets that registry to generate the local
-  schema, proxy Electric shapes, and apply mutations. The registry is the entire
-  contract between them.
+  schema, compile read-path shapes, gate stream reads, and apply mutations. The
+  registry is the entire contract between them.
 - **Vocabulary stays separated**: the Toolkit owns sync vocabulary (shape,
   overlay, mutation journal, consistency group, convergence barrier); the Board
   owns domain vocabulary (Team, Issue, Channel, Message). Neither borrows the

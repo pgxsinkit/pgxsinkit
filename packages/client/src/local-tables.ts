@@ -507,7 +507,7 @@ export function getReadModelView<TRegistry extends SyncTableRegistry, TKey exten
  * appliers need is derived once from the registry entry — the real projected synced table object, its
  * columns indexed by DB column name, the primary-key column names, and the model-derived column types —
  * so the appliers author over Drizzle objects (no name/schema strings, no `information_schema` probe).
- * Resolved once per shape at subscribe time; reused for every message. Electric change rows are keyed
+ * Resolved once per shape at subscribe time; reused for every message. Streamed change rows are keyed
  * by DB **column name**, while Drizzle DML keys by **property key**, so both indexes are carried.
  */
 export interface ApplyTarget {

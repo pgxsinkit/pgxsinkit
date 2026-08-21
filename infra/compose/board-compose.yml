@@ -1,4 +1,4 @@
-# Board demo — a TRIMMED but VERSION-MATCHED self-hosted Supabase + Electric stack (board ADR-0001).
+# Board demo — a TRIMMED but VERSION-MATCHED self-hosted Supabase + Circuits stack (board ADR-0001).
 #
 # Mirrors the official Supabase self-hosted compose at a single matched release (image tags + their
 # UNMODIFIED init scripts in ./board/db-init = Supabase's own roles.sql + jwt.sql). We never modify a
@@ -81,7 +81,8 @@ services:
       - "54334:9999"
 
   # NB: PostgREST (the `rest` service) is intentionally absent. The board does not use the auto-CRUD
-  # data API — reads go through board-sync (Electric, registry-filtered) and writes through
+  # data API — reads are subscribed through board-sync (the control plane, which compiles the
+  # registry's row filter into a shape) and served by board-stream (the edge), and writes go through
   # board-write (the governed mutation ingress) — and exposing it would let an authenticated user
   # bypass board-write to reach tables directly. RLS governs every table regardless, but dropping the
   # service + its gateway route removes the surface entirely. (Studio's table editor needs PostgREST, so
@@ -134,8 +135,9 @@ services:
       - "54331:8000"
 
   # caddy — TLS-terminating HTTP/2 + HTTP/3 front for the gateway (board dogfooding finding). The
-  # browser holds one Electric long-poll connection PER synced shape — 6 for the board (the TEAM_SCOPE
-  # group's team/team_member/channel/issue, plus singleton profile + message). Over plain HTTP/1.1 the
+  # browser holds one durable-streams long-poll connection PER subscribed stream — 6 for the board (the
+  # TEAM_SCOPE group's team/team_member/channel/issue, plus singleton profile + message), and K scopes
+  # would mean K streams. Over plain HTTP/1.1 the
   # browser's ~6-connections-per-origin cap is fully consumed by those long-polls, so board-write (and
   # chat sends) sit Stalled in the browser's queue for a whole long-poll cycle (~6–13s) before they are
   # even dispatched — the demo's "writes are slow" symptom. h2/h3 multiplex every request over ONE
@@ -161,9 +163,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # The vendored official main router (functions-dist/main) dispatches /board-write and /board-sync
-    # to their bundled workers. VERIFY_JWT=false: the board functions verify the GoTrue token
-    # themselves (apps/board-api/src/core/auth.ts), keeping that the single, runtime-portable auth point.
+    # The vendored official main router (functions-dist/main) dispatches /board-write, /board-sync and
+    # /board-stream to their bundled workers (scripts/build-edge-functions.ts). VERIFY_JWT=false: each
+    # board function verifies its own credential — board-write and board-sync the GoTrue token
+    # (apps/board-api/src/core/auth.ts), board-stream the stream token board-sync minted — keeping that
+    # the single, runtime-portable auth point.
     command: ["start", "--main-service", "/home/deno/functions/main"]
     volumes:
       - ../../supabase/functions-dist:/home/deno/functions:ro
@@ -241,10 +245,11 @@ services:
   # cache after longer idle. Without warming, a learner's first drag after a quiet period pays an
   # edge cold start: ~5.8s to import the board-write bundle, or ~0.45s to re-establish the worker's
   # Postgres connection after a shorter idle — felt as the convergence dot lingering for seconds even
-  # though the sync rail itself is fast (~75ms Electric echo, ~20ms apply). A cheap request every 8s
+  # though the sync rail itself is fast (~75ms read-path echo, ~20ms apply). A cheap request every 8s
   # keeps the workers active, so real writes stay ~20ms. The empty-`mutations` POST is rejected at
-  # validation (400) *before* any DB work — the cheapest request that still reaches the worker — and
-  # the anon `board-sync` shape (200, empty) warms the read proxy. Pure demo realism: a managed BaaS
+  # validation (400) *before* any DB work — the cheapest request that still reaches the worker — while
+  # `board-sync/sync/v1/barrier` and `board-stream/v1/stream/warm` warm the two read surfaces without
+  # needing a subject or a stream token. Pure demo realism: a managed BaaS
   # (Cloud Supabase) keeps functions warm for you, so nothing like this ships in the app.
   warmer:
     image: docker.io/curlimages/curl:8.21.0

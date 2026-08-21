@@ -1,16 +1,17 @@
 ---
 name: core
 description: >-
-  Load when writing or reviewing code that uses @pgxsinkit/* (client, server, contracts, react) — the
-  offline-first sync toolkit for the Postgres -> ElectricSQL -> PGlite read path and the client -> write
-  API -> Postgres write path. Teaches the mental model the source does not make obvious: the two sync
-  paths are separate and asymmetric, there is exactly one write path (an in-database apply function, not
-  per-table CRUD), a third non-sync Event lane carries append-only facts, the Electric subquery flag is
-  mandatory and fails closed, local PGlite schema is not full DDL parity, writable tables must declare a
-  conflict policy plus managed fields, ordinary writes self-activate their lazy group, and authenticated
-  groups must not activate before claims exist. Load this before wiring sync, defining a registry, adding
-  an Event stream, or debugging "writes don't appear" / "an acked write stays pending" / "no rows stream"
-  / "a removed member still sees rows".
+  Load when writing or reviewing code that uses @pgxsinkit/* — the offline-first sync toolkit for the
+  Postgres -> Circuits engine -> durable-streams -> PGlite read path and the client -> write API ->
+  Postgres write path. Teaches the model the source does not make obvious: the two sync paths are
+  separate and asymmetric, exactly one write path (an in-database apply function, not per-table CRUD), a
+  non-sync Event lane carries append-only facts, a client asks the control plane for its streams
+  (controlPlaneUrl + streamBaseUrl, both or neither) and reads fail closed twice — 401 control plane, 403
+  edge — local PGlite schema is not full DDL parity, writable tables must declare a conflict policy plus
+  managed fields, ordinary writes self-activate their lazy group, and authenticated groups must not
+  activate before claims exist. Load before wiring sync, defining a registry, adding an Event stream, or
+  debugging "writes don't appear" / "an acked write stays pending" / "no rows stream" / "a removed
+  member still sees rows".
 metadata:
   type: core
   library: "@pgxsinkit/client"
@@ -21,14 +22,17 @@ metadata:
 # Using pgxsinkit correctly
 
 pgxsinkit is a **toolkit**, not a database, a framework, or the demo app. The `@pgxsinkit/*` packages
-are the product: `contracts` (the registry + shared types), `server` (the write API + Electric shape
-proxy), `client` (local PGlite store + mutation runtime + convergence), and `react` (hooks). A consumer
-installs these and wires them; they do not "run pgxsinkit".
+are the product: `contracts` (the registry + shared types), `server` (the write API, the read path's
+**control plane**, and the **stream edge**), `client` (local PGlite store + mutation runtime +
+convergence), and `react` (hooks). A consumer installs these and wires them; they do not "run pgxsinkit".
 
 ## The one idea everything else follows from: two separate, asymmetric sync paths
 
-- **Read path:** Postgres → ElectricSQL → a server-side shape **proxy** (ownership-filtered) → local
-  **PGlite**. Reads are served from PGlite.
+- **Read path:** Postgres → the **Circuits engine** (ingests logical replication and maintains the shapes
+  the control plane creates) → **durable-streams** → the **edge** (token-gated) → local **PGlite**. The
+  client does not
+  construct a stream URL: it subscribes through the **control plane**, which decides which streams that
+  subject may read and hands back their paths. Reads are served from PGlite.
 - **Write path:** client stages an optimistic local write → flushes a batch to the **write API** → one
   **in-database apply function** (`pgxsinkit_apply_mutations`) applies it under RLS → Postgres.
 
@@ -36,10 +40,10 @@ Those two are the **sync rail**, and almost everything below is about it. Beside
 deliberately non-sync lane — the **Event lane** — for data that was never sync state (see below). So the
 accurate count is two sync paths plus one event lane, not three paths.
 
-**Writes do not travel back to the writer through Electric.** The loop closes through Postgres: your
-write lands in Postgres, then streams back to _every_ subscriber (including you) as a normal Electric
-change, which clears the optimistic overlay. Do not look for a write to "come back" on the write
-channel, and do not try to write through Electric — Electric is read-only here.
+**Writes do not travel back to the writer on the write channel.** The loop closes through Postgres: your
+write lands in Postgres, then streams back to _every_ subscriber (including you) as an ordinary read-path
+change, which clears the optimistic overlay. Do not look for a write to "come back" on the write channel,
+and do not try to write down the read path — it is read transport only.
 
 ## There is exactly one write path
 
@@ -100,17 +104,18 @@ first-row-or-null variants. (Reactive equivalents: `useLiveDrizzleRows` for pure
 `useLiveQueryRaw({ use, build })` for raw fragments.)
 
 **Auth-gated lazy groups.** A query that references one lazy relation activates its **whole consistency
-group** with the claims available to that shape request. If the row filter returns `DENY_ALL` without a
-user claim, do not let an authenticated-only query run while auth is unresolved: gate it (`ready: false`
-in the React hooks) until the session exists. Making the group eager is not an equivalent fix — it can
-open the same anonymous subscription during boot. A later auth notification can rotate/refetch the shape,
-but the intended path is to activate it once with the correct claims. Activating a claims-denied group
+group**, subscribing with the claims available at that moment. If the row filter returns
+`DENY_ALL_PREDICATE` without a user claim, do not let an authenticated-only query run while auth is
+unresolved: gate it (`ready: false` in the React hooks) until the session exists. Making the group eager
+is not an equivalent fix — it can open the same anonymous subscription during boot. The control plane
+declines a denied shape outright, so the group settles "ready" with nothing granted and stays empty;
+activate it once with the correct claims instead. Activating a claims-denied group
 with no auth token now emits a `console.warn` naming the group, so an accidental anonymous activation is
 visible rather than silent.
 
 Writes self-activate. An ordinary optimistic create/update/delete on a lazy `readwrite` entry activates
 its group automatically at enqueue (a write is a reference, and a reference activates), so the Postgres
-commit can echo through Electric and retire the acknowledged journal row — no manual activator query is
+commit can echo down the read path and retire the acknowledged journal row — no manual activator query is
 needed. Because that activation uses the claims available when the write runs, an authenticated-only group
 still should not be written before the session exists (gate the write on auth, same as a read).
 `updateBlind` is the deliberate exception: it has no overlay, does not activate its group, and retires on
@@ -129,7 +134,7 @@ redundant `use` (autofixable), the two things the types can't. (oxlint `jsPlugin
   (not-yet-synced) writes on top of the synced base rows. Read it from the entry's **`.view`**
   (`registry.<name>.view`) — **not** its `.table`. Selecting the base `.table` of a readwrite entry
   silently omits the writer's own pending writes, so a just-issued create/edit/delete will not appear
-  locally until it round-trips through Postgres and streams back via Electric.
+  locally until it round-trips through Postgres and streams back down the read path.
 
 ```ts
 // readonly entry → base table
@@ -140,7 +145,7 @@ const reportView = registry.report.view!; // `.view` is populated only for readw
 client.query((c) => c.drizzle.select({ id: reportView.id, status: reportView.status }).from(reportView));
 ```
 
-This is the read-side twin of "writes return through Electric": your optimistic write is visible
+This is the read-side twin of "writes return down the read path": your optimistic write is visible
 immediately **only because you read the overlay view**; the base table catches up when Postgres streams the
 committed row back. (`c.views.<name>` is the client's accessor for the same overlay views; the entry's
 `.view` object is the direct handle. Type note: `.view` is typed as optional on a `SyncTableEntry`, so a
@@ -174,11 +179,10 @@ directly (a test, a perf harness, a diagnostic), not a replacement for it.
 
 ## Non-negotiables (each fails closed or throws)
 
-1. **The Electric subquery flag is mandatory.** Run Electric with
-   `ELECTRIC_FEATURE_FLAGS=allow_subqueries,tagged_subqueries`. Without it, sync **fails closed** — no
-   rows stream — which looks like a bug but is a missing flag. On **managed Electric Cloud** the flag is
-   activated per source by Electric staff on request (no self-serve toggle yet; default-on intended) —
-   ask Electric to enable subqueries for your source, or self-host Electric with the flag.
+1. **The read path is two URLs, both or neither.** `createSyncClient` / `defineSyncWorker` take
+   `controlPlaneUrl` (subscribe, stream-token re-mint, the convergence barrier) **and** `streamBaseUrl`
+   (the edge that serves durable-streams reads). They are separate deployments — the edge belongs on its
+   own origin, because the cache key is the URL — so supplying one without the other **throws** at boot.
 2. **Writable tables have two hard requirements.** `defineSyncRegistry` throws unless every `readwrite`
    table declares **both** a server-version managed field (a `nowMicroseconds`-on-update column,
    conventionally `updated_at_us`, that optimistic convergence keys on) **and** a `conflictPolicy`
@@ -187,9 +191,14 @@ directly (a test, a perf harness, a diagnostic), not a replacement for it.
 3. **Managed fields are server-assigned.** Fields stamped by `authClaim` (a verified claim at a JSON path —
    `["sub"]` is the old `auth.uid()` owner idiom) / `nowMicroseconds` are set by the apply function; the
    write API **rejects** a client payload that includes them. Never send them.
-4. **Enum columns in a shape `where` must be cast to `text`** — `"role"::text = 'manager'`, not
-   `"role" = 'manager'`. The column stays an enum everywhere else. This is because **Electric**, not
-   Postgres, evaluates the shape filter.
+4. **Read authorization fails closed in two places, and they mean different things.** The control plane
+   answers **401** when the deployment's `resolveAuthClaims` yields no `sub` (the client reports
+   `auth-needed` and keeps retrying for a fresh token — an expired JWT is retryable, not a refusal); the
+   edge answers **403** for a stream token that expired or names a scope the subject no longer holds — the
+   client re-mints once, and a second rejection is read as revocation, so it truncates that scope and
+   unsubscribes. A `rowFilter` that restricts nothing —
+   no `customPredicate` and no `columns` allow-list — is **refused at definition time** rather than
+   quietly compiled into a shape with no subject test.
 
 ## Authorization runs in two engines — derive both from one predicate
 
@@ -198,25 +207,31 @@ engines, so the subject is referenced two ways:
 
 - **Write path — RLS in Postgres:** policies use `auth.uid()` / `current_setting('request.jwt.claims')`;
   the applier sets the claims before applying a batch.
-- **Read path — the shape `rowFilter`:** the proxy builds the Electric `where` and **Electric** runs it, so
-  a `customWhere` returns a Drizzle `SQL` fragment — reference columns through `c()` (bare, as Electric
-  needs) and bind `claims.sub` as a `$n` param (no hand-escaping); enum cast to `text`; `DENY_ALL` blocks
-  all rows.
+- **Read path — the shape `rowFilter`:** the **control plane** compiles the filter once, at shape creation,
+  and posts it to the engine — so `customPredicate` returns a **predicate AST**, not SQL text. Author it
+  with the `p.*` builders over real Drizzle columns (`p.eq`, `p.and`/`p.or`/`p.not`, `p.in` +
+  `p.subquery`); `null` bypasses filtering (every row) and `DENY_ALL_PREDICATE` denies. There is no string
+  to escape and no grammar to satisfy, and comparisons are checked against the column's own TypeScript
+  type — a mistyped enum label or a `jsonb`/`Date` column with no scalar wire form is a compile error.
 
 Use `buildSupabaseOwnerOrAdminNativePolicies` / `buildSupabaseMembershipNativePolicies` for the common
 owner/membership shapes — they take **Drizzle columns**, so call them in `defineSyncTable`'s `extras`
 callback; compose your own from `pgPolicy` + Drizzle operators for anything beyond them (e.g. collaborative
-any-member writes). Build the read filter and the RLS policy from the same Drizzle columns so they cannot
-drift.
+any-member writes). Each ships its read-path mirror (`buildOwnerOrAdminShapePredicate`,
+`buildMembershipShapePredicate`, `buildGrantScopeAccessShapePredicate`), so build the read filter and the
+RLS policy from the same Drizzle columns and they cannot drift.
 
 ## Membership changes converge the local store — both ways, even offline
 
-A subquery (membership) read filter is reactive in **both** directions, against a running client with no
-re-subscribe: granting a membership **materialises** the container's rows in the member's local PGlite;
-revoking one **evicts** them (a row reachable through a second membership survives until its last grant is
-gone). This holds **live and across an offline gap** — a client disconnected when the membership changed
-converges on reconnect (the resume replays it), so a revoked member's read access never lingers offline.
-Observe it on the live subscription or a normal resume, not by re-probing a shape at `offset=-1`.
+A subquery (membership) read filter — `p.in(col, p.subquery(…))` — is reactive in **both** directions,
+against a running client with no re-subscribe: granting a membership **materialises** the container's rows
+in the member's local PGlite; revoking one **evicts** them (a row reachable through a second membership
+survives until its last grant is gone). The engine **states** each side rather than implying it: the wire
+carries `upsert | delete`, so a row leaving your shape arrives as an explicit `delete` envelope. This holds
+**live and across an offline gap** — a client disconnected when the membership changed converges on
+reconnect (it resumes from its per-stream offset and replays what it missed), so a revoked member's read
+access never lingers offline. Observe it on the live subscription or a normal resume, not by re-reading a
+stream from the start.
 
 ## Local PGlite schema is not full DDL parity
 
@@ -227,16 +242,18 @@ constraint that holds server-side also holds in PGlite.
 
 ## Common mistakes
 
-- Expecting an optimistic write to echo back on the write channel — it returns through Electric.
-- Forgetting the Electric subquery flag, then debugging "no rows" as a code bug.
+- Expecting an optimistic write to echo back on the write channel — it returns down the read path.
+- Configuring `controlPlaneUrl` without `streamBaseUrl` (or the reverse) — it throws; they are two
+  deployments, and the edge belongs on its own origin.
 - Omitting `conflictPolicy` (throws) or sending a managed field in a write payload (rejected).
-- Comparing an enum without `::text` in a shape filter.
+- Declaring a `rowFilter` that restricts nothing (no `customPredicate`, no `columns`) — refused at
+  definition time, because the compiled shape would carry no subject test.
 - Writing directly to Postgres tables / building per-table CRUD instead of using the one write path.
 - Reading a **readwrite** entry from its base `.table` instead of its `.view` overlay, so your own
   optimistic writes do not appear locally until they round-trip through Postgres.
 - Activating an authenticated lazy group before auth resolves — reading OR writing while claims are
-  unresolved activates the group against anonymous claims (now flagged by a console warning), leaving the
-  shape empty until a later rotation/refetch.
+  unresolved subscribes against anonymous claims (now flagged by a console warning), and the control plane
+  grants nothing, so the group stays empty until it is desynced and referenced again.
 - Assuming PGlite enforces every Postgres constraint.
 - Assuming a revoked member keeps their synced rows offline — membership changes converge both ways,
   live and on resume.
@@ -264,8 +281,8 @@ Backups, the SQL exports, and `restoreFrom` are there too.
 
 ## Where to look
 
-- Concepts: the two paths, read path, write path, Electric subqueries, local-schema DDL parity, and
-  timestamps (microsecond BIGINT, decimal strings across the boundary).
+- Concepts: the two paths, read path, write path, local-schema DDL parity, and timestamps (microsecond
+  BIGINT, decimal strings across the boundary).
 - For the Event lane in full — the Outbox, verdicts, backpressure, the delivery contract and the limits —
   read <https://pgxsinkit.github.io/concepts/event-lane/>, then load the skill for the half you are
   writing: `operating` (@pgxsinkit/client) for the Outbox surfaces and flush tuning, `deploying`

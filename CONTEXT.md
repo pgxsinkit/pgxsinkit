@@ -1,7 +1,8 @@
 # pgxsinkit
 
-An offline-first **sync toolkit** for the topology `PostgreSQL → ElectricSQL →
-PGlite` (read path) and `client → write API → PostgreSQL` (write path). The
+An offline-first **sync toolkit** for the topology `PostgreSQL → Circuits engine →
+durable-streams → PGlite` (read path) and `client → write API → PostgreSQL`
+(write path). The
 `@pgxsinkit/*` packages are the product; a demo app and an integration + perf
 harness exist to prove and harden them.
 
@@ -19,14 +20,15 @@ thing you ship), "framework".
 
 **Demo app**:
 The reference application (`apps/board`, a Linear-style board + chat) that drives
-the toolkit end-to-end against a self-hosted Supabase + Electric stack for a human
+the toolkit end-to-end against a self-hosted Supabase + Circuits stack for a human
 to see. It is an exerciser, not the product. (`apps/write-api` is the minimal
 server-only reference.)
 _Avoid_: calling it "pgxsinkit" — it is one consumer of pgxsinkit.
 
 **Harness**:
 The integration and performance suites (`tests/integration`, `apps/perf-lab`)
-that prove the toolkit against real PostgreSQL/Electric/PGlite. It hardens the
+that prove the toolkit against real PostgreSQL, durable-streams, the Circuits
+engine, and PGlite. It hardens the
 product; it is not the product.
 _Avoid_: "the demo" (the harness is not the demo app).
 
@@ -58,22 +60,33 @@ cannot, and code that relies on the set-based apply depends on this holding.
 ## Language — the read path
 
 **Read path**:
-The one way server state reaches the client: the client subscribes to ElectricSQL
-shape streams, buffers each shape's changes ordered by LSN, and applies them to the
-local read cache in LSN order inside transactions. There is exactly one read path —
-Electric shapes in, local synced tables out. The toolkit owns the ingest glue; Electric
-owns the replication protocol.
+The one way server state reaches the client: the client subscribes through the read
+path's **control plane**, reads each shape's durable-streams log through the
+token-gated **stream edge**, buffers deliveries by their per-stream **offset** (not
+LSN), and commits a Consistency group's held deliveries once every one of its shapes
+reports up to date — plus, at the one-time boot alignment, the Circuits engine's
+convergence barrier being satisfied (ADR-0056 decisions 1–3). There is exactly one
+read path — stream deliveries in, local synced tables out. The toolkit owns the
+subscription and the applier; the Circuits engine owns replication ingest and shape
+maintenance, and durable-streams owns the log.
 _Avoid_: "pglite-sync", "the vendored sync", "the Electric adapter" — the ingest is
-internal to the client, no longer a separate or vendored package.
+internal to the client, no longer a separate or vendored package. Also avoid framing
+the frontier as an LSN: positions are per-stream offsets, comparable only within a
+stream.
 
-**Shape inbox**:
-The pure, in-memory staging buffer between a shape's Electric subscription and the Sync
-applier. It receives the shape's raw change/control messages, holds them ordered by LSN, and
-— before the applier writes anything — folds each primary key's operations across the drained
-batch down to **one net operation** (insert / update / delete, the ADR-0014 fold), so no two
-source rows ever target the same key. It performs no database I/O, which is exactly what makes
-the fold property-testable against an ordered per-row apply oracle. One inbox per shape; a
-Consistency group advances and commits its shapes' inboxes together at the shared LSN frontier.
+**Stream inbox**:
+The pure, in-memory staging buffer between a Consistency group's durable-streams
+subscriptions and the Sync applier — the offset-keyed successor to the LSN-keyed **Shape
+inbox** the records still name (ADR-0056). It receives each shape's deliveries with the
+offset that acknowledges them, holds them in stream order, and — before the applier writes
+anything — folds each primary key's operations across the drained batch down to **one net
+operation** (the ADR-0014 fold, whose buckets are `deletes` and `upserts` since ADR-0058),
+so no two source rows ever target the same key. It performs no database I/O, which is
+exactly what makes the fold property-testable against an ordered per-row apply oracle. One
+inbox per Consistency group, keyed by shape; the group commits when every shape's most
+recent response asserted up to date. It has no commit floor and makes no cross-shape
+position comparison — both were answers to Electric-shaped problems the native path does
+not have.
 The pure read-path seam an optional durable ingest log would attach to (ADR-0016, deferred).
 _Avoid_: "the buffer" / "the queue" alone (they hide that it folds, and that it is pure), and
 conflating it with the Sync applier — the inbox decides the net operation per key, the applier
@@ -160,7 +173,7 @@ mirror nor full parity).
 
 **Sync worker**:
 The worker context that runs the whole local-first engine — PGlite, the Local schema,
-the Mutation journal machinery, the Electric shape streams, and the convergence loop. Its home is
+the Mutation journal machinery, the read-path stream subscriptions, and the convergence loop. Its home is
 capability-selected (the Engine home, ADR-0049): the SharedWorker attach point itself where that
 scope grants sync-access handles, else an elected engine worker behind the same SharedWorker —
 one engine per (user, origin) either way; absent `SharedWorker`, the engine falls back to the
@@ -308,8 +321,8 @@ per-tab, or per-table toggle — it is one registry declaration binding every op
 The full-fidelity export of the whole local store (`exportStore`): everything the store holds,
 staged writes, pending Outbox events, and sync metadata included, restorable only into PGlite. The lossless option, and the
 only export an offline device with unflushed writes can take.
-_Avoid_: "snapshot" (collides with Electric's snapshot rows, ADR-0024); "database dump" (that is a
-Diagnostic dump or Data export — a backup is a store image, not SQL).
+_Avoid_: "database dump" (that is a Diagnostic dump or Data export — a backup is a
+store image, not SQL).
 
 **Diagnostic dump**:
 The everything-as-SQL export (`exportDiagnostics`): synced tables, overlays, the Mutation journal,
@@ -359,9 +372,10 @@ A named, registered category of append-only client events sharing one payload
 schema and one consumer-side handling. The unit of registration, validation,
 gating, and consumption in the event lane. Bare `stream` is acceptable as a
 field/parameter name inside event-lane API surfaces only.
-_Avoid_: bare "stream" in prose (ambiguous against the read path's Electric shape
-streams), "topic"/"channel" (pub/sub connotations the event lane disclaims;
-"channel" collides with the Board demo's chat Channels).
+_Avoid_: bare "stream" in prose — it is now doubly ambiguous, against both the read
+path's durable-streams subscriptions and durable-streams the service; say "Event
+stream" in full. Also avoid "topic"/"channel" (pub/sub connotations the event lane
+disclaims; "channel" collides with the Board demo's chat Channels).
 
 **Outbox**:
 The local-only, append-only durable table where client events are staged until a

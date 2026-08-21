@@ -1,11 +1,13 @@
 // Board client configuration. Defaults target the local matched self-hosted stack (`bun run
-// infra:up`): the caddy HTTP/2 + HTTP/3 front (board-compose.yml) over GoTrue + the two edge functions.
-// The browser holds one Electric long-poll PER synced shape (6 for the board); over plain HTTP/1.1 the
-// ~6-connections-per-origin cap is consumed by those long-polls and writes starve, so the demo's
-// browser origin is the multiplexed h2/h3 front, not the gateway's HTTP/1.1 port (54331, which tests +
-// seed scripts still use directly). Override the `VITE_BOARD_*` vars (read from the workspace-root
-// .env, see vite.config) to point the same client at a cloud Supabase project + Electric Cloud — which
-// already serve h2 over TLS — instead; the board code does not change.
+// infra:up`): the caddy HTTP/2 + HTTP/3 front (board-compose.yml) over GoTrue + the three edge
+// functions. The browser holds one durable-streams long-poll PER subscribed stream (6 for the board);
+// over plain HTTP/1.1 the ~6-connections-per-origin cap is consumed by those long-polls and writes
+// starve, so the demo's browser origin is the multiplexed h2/h3 front, not the gateway's HTTP/1.1 port
+// (54331, which tests + seed scripts still use directly). Override the `VITE_BOARD_*` vars (read from
+// the workspace-root .env, see vite.config) to point the same client at another deployment — a cloud
+// Supabase project already serves h2 over TLS — instead; the board code does not change. Note the read
+// path needs a hosted Circuits engine + durable-streams behind those URLs, which no managed BaaS
+// provides (docs/runbooks/board-on-cloud.md).
 
 const supabaseUrl = import.meta.env["VITE_BOARD_SUPABASE_URL"] ?? "https://localhost:54343";
 

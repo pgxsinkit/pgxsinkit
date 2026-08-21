@@ -24,8 +24,9 @@ export const issueStatusEnum = pgEnum("issue_status", ["backlog", "todo", "in_pr
 export const issuePriorityEnum = pgEnum("issue_priority", ["none", "urgent", "high", "medium", "low"]);
 export const channelKindEnum = pgEnum("channel_kind", ["global", "team"]);
 
-// Tables grouped here commit atomically at a shared LSN frontier (board ADR-0004), so a member who is
-// added to a Team sees the Team, its Channel, and its Issues appear in one frame — no broken-join flicker.
+// The streams of this group commit together — held until every one of them reports up-to-date, then
+// applied in one transaction (pgxsinkit ADR-0056; board ADR-0004) — so a member who is added to a Team
+// sees the Team, its Channel, and its Issues appear in one frame, with no broken-join flicker.
 const TEAM_SCOPE = "team-scope";
 
 // Row classification (pgxsinkit ADR-0052). The board's vocabulary is declared on the registry

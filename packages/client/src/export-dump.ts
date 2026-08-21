@@ -143,8 +143,9 @@ export async function runThrowawayCloneDump(
 
   // Step 2 — boot the throwaway. Memory-backed via the resolution module's SCHEME selection (ADR-0036
   // decision 5: NEVER PGlite's explicit `fs: new MemoryFS()` — on 0.5.4 a `dumpDataDir` from an explicit-fs
-  // instance silently omits post-initdb relation files). No extensions, no `electric` engine, no `live`:
-  // the clone exists only to be read out by `pg_dump`, and `DEALLOCATE ALL` has nothing here to corrupt.
+  // instance silently omits post-initdb relation files). No extensions at all — not even `live` — and no
+  // sync runtime: the clone exists only to be read out by `pg_dump`, and `DEALLOCATE ALL` has nothing
+  // here to corrupt.
   const cloneDataDir = resolveStoreDataDir(nextCloneStorePath(), "memory");
   const cloneBootStartedAtMs = nowMs() - startPerf;
   const cloneBootStartPerf = nowMs();

@@ -385,10 +385,10 @@ export class ClientDisposedError extends Error {
   }
 }
 
-// The store carries PGlite's own `live` extension (a genuine create-time extension) plus the pgxsinkit
-// sync engine's namespace, attached post-create by `createSyncClient` as the `electric` property (ADR-0032
-// S1) — no longer a create-time extension. The `electric` part is derived from `createSyncEngine`'s real
-// return so the type follows the attached object.
+// The store carries PGlite's own `live` extension and nothing else. The pgxsinkit sync runtime is not an
+// extension at all (ADR-0032 S1): `createSyncClient` starts it BESIDE the store (`startCircuitsSync`)
+// rather than attaching a namespace to the instance, so a store's type is exactly PGlite + `live`
+// whether or not sync ever runs on it.
 export type ClientPGlite = PGliteWithLive;
 
 /**
@@ -477,14 +477,10 @@ const OPFS_OPEN_BACKOFF_MS = 100;
 /** The opfs-repacked store extent size (ADR-0049 step 10a). */
 const OPFS_STORE_EXTENT_SIZE = 65536;
 /**
- * `status.lastError` for a read stream that cannot reach the server at all (board ADR-0010). Unlike every
- * other `degraded` cause there is no Error to describe: Electric's `onFailedAttempt` carries no argument,
- * because the failure never escaped its retry wrapper. The string says what is knowable and no more.
- */
-/**
- * Default {@link CreateSyncClientOptions.readSilenceMs}. A healthy Electric read path is never silent —
- * the live long-poll cycles roughly every 20-25s with at least a bare up-to-date, and every cycle fires
- * `onSyncActivity` — so two full cycles of nothing while claiming `ready` is evidence, not caution.
+ * Default {@link CreateSyncClientOptions.readSilenceMs}. A healthy read path is never silent — the live
+ * long-poll returns on every hold, `204` with `stream-up-to-date` when nothing arrived, and every
+ * response fires `onSyncActivity` — so two full cycles of nothing while claiming `ready` is evidence,
+ * not caution.
  */
 const READ_SILENCE_MS = 45_000;
 /** `status.lastError` for the read-silence watchdog: nothing failed — that is exactly the problem. */
@@ -533,7 +529,7 @@ async function openWithBoundedRetries<T>(open: () => Promise<T>, backoffMs: numb
 
 /**
  * Create the raw local PGlite store the sync client runs on — the SAME `PGlite.create` call
- * {@link createSyncClient} makes internally (the `electric` + `live` extensions, pre-warmed boot-asset
+ * {@link createSyncClient} makes internally (the `live` extension, pre-warmed boot-asset
  * consumption, and the `boot pglite.create` rail stamp), extracted so exactly one implementation exists
  * and a host can create the store EAGERLY on an earlier screen. Hand the returned (still-pending)
  * instance to {@link CreateSyncClientOptions.precreatedPglite}: the client then owns schema exec, prepare
@@ -658,11 +654,11 @@ export async function createClientPGlite(
         // the whole synced cache, Overlay, and Mutation journal that travelled inside it. Absent on a normal
         // create (the store initdbs empty).
         ...(options?.restoreFrom ? { loadDataDir: options.restoreFrom } : {}),
-        // Only PGlite's own `live` extension is a create-time extension; the pgxsinkit sync engine is NOT
-        // (ADR-0032 S1) — it is a plain module `createSyncClient` attaches post-create as `pg.electric`. So
-        // a store minted here is deliberately ENGINE-LESS by construction: a spare/pre-warmed store (e.g.
-        // the board's login-screen mint) carries no engine, no shape streams, and no Electric connections
-        // until it is claimed and handed to `createSyncClient`.
+        // Only PGlite's own `live` extension is a create-time extension; the pgxsinkit sync runtime is NOT
+        // (ADR-0032 S1) — `createSyncClient` starts it beside the store, never on it. So a store minted here
+        // is deliberately SYNC-LESS by construction: a spare/pre-warmed store (e.g. the board's login-screen
+        // mint) carries no subscription session, no shape streams, and no open stream connections until it
+        // is claimed and handed to `createSyncClient`.
         extensions: {
           live,
         },
@@ -673,8 +669,8 @@ export async function createClientPGlite(
     // Stamp the resolved durability mode + store scheme so every boot-rail capture shows the mode and lane the
     // store was created under (ADR-0047 diagnosability).
     { ...(dataDirScheme ? { dataDir: dataDirScheme } : {}), relaxedDurability },
-    // `as unknown as` because the raw store is deliberately engine-less here (only `live` is a create-time
-    // extension); `createSyncClient` provisions the `electric` namespace post-create (ADR-0032 S1).
+    // `as unknown as` because the raw store is deliberately sync-less here (only `live` is a create-time
+    // extension); the sync runtime never lands on the instance at all (ADR-0032 S1).
   )) as unknown as ClientPGlite;
   return pglite;
 }
@@ -976,22 +972,23 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   requestHeaders?: Record<string, string>;
   /**
    * Extra static headers sent on the **write** path only (the mutation-flush POST), merged over
-   * {@link requestHeaders} (`{...requestHeaders, ...writeRequestHeaders}`). Read/shape requests never
-   * see these. The seam exists because the two ingress points have opposite geometry: the write
-   * function is DB-bound, so pinning it to the database's region (e.g. an `x-region` header) keeps its
-   * chatty function→DB protocol on a ~1ms loop; the read proxy's upstream is a globally-distributed
-   * CDN (Electric Cloud), so pinning reads away from the caller pays intercontinental round trips per
-   * catch-up hop. Put region/DB-affinity headers here; keep gateway credentials the reads also need
-   * (e.g. `apikey`) in the shared {@link requestHeaders}.
+   * {@link requestHeaders} (`{...requestHeaders, ...writeRequestHeaders}`). Control-plane and stream
+   * requests never see these. The seam exists because the two ingress points have opposite geometry:
+   * the write function is DB-bound, so pinning it to the database's region (e.g. an `x-region` header)
+   * keeps its chatty function→DB protocol on a ~1ms loop; the read path terminates on the stream edge
+   * in front of durable-streams, so pinning reads to the database's region rather than the caller's
+   * pays an intercontinental round trip on every catch-up hop and every long-poll cycle. Put
+   * region/DB-affinity headers here; keep gateway credentials the reads also need (e.g. `apikey`) in
+   * the shared {@link requestHeaders}.
    */
   writeRequestHeaders?: Record<string, string>;
   syncEnabled?: boolean;
   /**
    * The read-silence window (ms) after which a runtime claiming `ready` drops to `degraded` (reason
-   * "stream"). A pulled cable HANGS the live long-poll — nothing fails (the stall probe hears only settled
-   * attempts), nothing delivers — so without this a session that once reached `ready` would report
-   * "up to date" for as long as the outage lasts. A healthy stream is never silent (the long-poll cycles
-   * ~every 20-25s), so the default of 45s spans two full cycles. Self-recovering: the next delivered batch
+   * "stream"). A pulled cable HANGS the live long-poll — nothing fails, nothing delivers — so without this
+   * a session that once reached `ready` would report "up to date" for as long as the outage lasts. A
+   * healthy stream is never silent: durable-streams answers every long-poll hold that times out with a
+   * bare up-to-date response, so the default of 45s spans several cycles. Self-recovering: the next delivered batch
    * returns `ready`. Status honesty only — nothing is retired or torn down.
    */
   readSilenceMs?: number;
@@ -1830,12 +1827,13 @@ export function replAdapter(
 }
 
 /**
- * The read transport this boot runs on: the Electric proxy, or the Circuits-native control plane.
+ * The read transport this boot runs on: the control plane that grants subscriptions, and the edge that
+ * serves the streams it names.
  *
- * Exactly one, resolved once at boot. Both configured is a contradiction and neither is an omission,
- * and either way the only safe answer is to refuse — a client that picked a winner would sync against
- * an ingress its caller never named, which is precisely the class of mistake the native path's
- * ask-don't-construct inversion exists to remove.
+ * Both, resolved once at boot. They are separate deployments (ADR-0055 decision 8) and neither is
+ * usable without the other, so a missing one is refused rather than defaulted — a client that derived
+ * the other would sync against an ingress its caller never named, which is precisely the class of
+ * mistake the native path's ask-don't-construct inversion exists to remove.
  */
 interface ReadTransport {
   controlPlaneUrl: string;
@@ -2263,10 +2261,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   /**
    * The native path's auth adapter.
    *
-   * The SAME token lifecycle the write path and the Electric read path use (ADR-0003/ADR-0013),
-   * resolved per request rather than captured — a subscription outlives its token by design. The
-   * static `requestHeaders` ride along for the deployment gateway; a resolved `Authorization` wins
-   * over anything they carry, which is the same precedence `buildShapeHeaders` gives them.
+   * The SAME token lifecycle the write path uses (ADR-0003/ADR-0013), resolved per request rather
+   * than captured — a subscription outlives its token by design. The static `requestHeaders` ride
+   * along for the deployment gateway; a resolved `Authorization` wins over anything they carry, so a
+   * gateway credential can never shadow the subject's own.
    */
   const nativeAuthHeaders = async (): Promise<Record<string, string>> => {
     const headers: Record<string, string> = { ...(options.requestHeaders ?? {}) };
@@ -2634,8 +2632,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     if (disposed) return;
     status.isRunning = true;
 
-    // Provision the subscription metadata store BEFORE anything reads it. The Electric engine did this
-    // in `createSyncEngine`; the native path has no engine object, so it belongs here.
+    // Provision the subscription metadata store BEFORE anything reads it. The removed ingest engine did
+    // this inside its own construction; the native path has no engine object, so it belongs here.
     //
     // Unconditional, outside the `syncEnabled` branch, for two reasons. Every sync-enabled boot reads a
     // cursor whether or not a reset was asked for — and `desync`/`discardEphemeral` clear one on a
@@ -2950,7 +2948,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // The shared group-teardown body of {@link desync} and {@link discardEphemeral} (ADR-0021 §2/§4). Both
   // revert a lazy relation's whole consistency group to dormant: refuse if any writable member owes
   // unsettled writes, stop the group stream, clear the persisted lazy activation, delete the persisted
-  // Electric subscription (so re-activation re-streams from scratch), then clean-truncate every member's
+  // stream subscription (so re-activation re-streams from scratch), then clean-truncate every member's
   // local cluster. `label` names the calling primitive in the owed-writes refusal so each keeps its own
   // diagnostic (desync stays byte-identical). Callers apply their own lazy/retention gates BEFORE this.
   const tearDownLazyGroup = async (key: SyncTableName<TRegistry>, entry: SyncTableEntry, label: string) => {
@@ -2972,7 +2970,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     }
 
     const activeSync = sync;
-    // The group key IS the Electric subscription key (`consistencyGroup ?? shapeKey`); fall back to the
+    // The group key IS the read-path subscription key (`consistencyGroup ?? shapeKey`); fall back to the
     // registry derivation when sync is disabled.
     const groupKey = activeSync?.groupKeyForTable(key) ?? entry.consistencyGroup ?? entry.shape?.shapeKey;
     // Stop the stream BEFORE truncating so a live shape can't re-populate the rows we just cleared, and
@@ -2980,7 +2978,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // holds the relation dormant again.
     if (activeSync != null && groupKey != null) activeSync.stopGroup(groupKey);
     if (groupKey != null) await clearLazyGroupActivation(pglite, options.registry, groupKey);
-    // CRITICAL: delete the group's persisted Electric subscription so a later re-activation re-streams the
+    // CRITICAL: delete the group's persisted stream subscription so a later re-activation re-streams the
     // shape from scratch. Without this it would resume from the old cursor and never re-send the rows we
     // truncate below — leaving the relation permanently missing its pre-desync data.
     if (groupKey != null) await resetSubscriptionsIfRequested(pglite, [groupKey]);
@@ -3305,7 +3303,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
             options.registry,
             computeLocalSchemaFingerprint(options.registry),
           );
-          // Reset the Electric subscriptions so the rebuilt synced tables re-stream from scratch
+          // Reset the read-path subscriptions so the rebuilt synced tables re-stream from scratch
           // rather than the bookkeeping believing they are already caught up (ADR-0006).
           await resetSubscriptionsIfRequested(pglite, allGroupSubscriptionKeys(options.registry));
         })

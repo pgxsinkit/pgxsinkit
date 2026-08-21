@@ -65,7 +65,7 @@ export interface SubscribeOptions {
   key: CryptoKey;
   /** Per-deployment override of ADR-0055's 5-minute default. */
   ttlSeconds?: number;
-  /** Deployment-supplied runtime params, as the Electric proxy's `extraParams`. */
+  /** Deployment-supplied runtime params, handed to `rowFilter.customPredicate` as its second argument. */
   params?: Record<string, unknown>;
 }
 
