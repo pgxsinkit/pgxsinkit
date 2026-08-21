@@ -124,11 +124,24 @@ export interface CircuitsTableSyncResult {
 export interface CircuitsGroupSyncResult {
   unsubscribe: () => void;
   tables: Record<string, CircuitsTableSyncResult>;
-  /** Start a held lazy group. Idempotent and single-flight; resolves once it has caught up. */
+  /**
+   * Start a held lazy group. Idempotent and single-flight; resolves once it has caught up — EXCEPT
+   * for an already-promoted group, which resolves at once because it is durable and boot-started
+   * (ADR-0021 §2), so its catch-up must not gate a read.
+   */
   ensureGroupStarted: (groupKey: string) => Promise<void>;
-  /** Tear a group's streams down and return it to dormant, so a later start re-subscribes. */
+  /**
+   * Tear a group's streams down and return it to dormant, so a later start re-subscribes. Also drops
+   * the group's promotion for this session — a desync truncates the local copy, so the group is held
+   * again and re-activates (and re-persists its flag) on its next reference.
+   */
   stopGroup: (groupKey: string) => void;
   groupKeyForTable: (tableKey: string) => string | undefined;
+  /**
+   * Whether the table's group is STARTED — a durable subscription for it exists, so reads of it are
+   * meaningful. NOT the same question as caught up, which is {@link CircuitsGroupSyncResult.isGroupReady}:
+   * a promoted group is started from boot even while its first subscribe is still retrying.
+   */
   isTableStarted: (tableKey: string) => boolean;
   groupReady: (groupKey: string) => Promise<void>;
   isGroupReady: (groupKey: string) => boolean;
@@ -274,7 +287,9 @@ export async function startCircuitsSync(
   options: CircuitsGroupSyncOptions,
 ): Promise<CircuitsGroupSyncResult> {
   const specs = deriveSpecs(options.registry);
-  const promoted = options.promotedGroups ?? new Set<string>();
+  // A LOCAL, MUTABLE copy: promotion is durable state the caller persisted, but this runtime can drop
+  // a group out of it — `stopGroup` returns a promoted group to held for the rest of this session.
+  const promoted = new Set(options.promotedGroups ?? []);
 
   const groups = new Map<string, GroupRuntime>();
   const groupKeyByTable = new Map<string, string>();
@@ -338,6 +353,9 @@ export async function startCircuitsSync(
     signalTorn = resolve;
   });
 
+  // The BOOT set, snapshotted here: every eager group plus every group a previous boot promoted. A
+  // later `stopGroup` un-promotes its group in `promoted` but must not rewrite what boot started, so
+  // this stays a plain array captured before the boot loop — it also fixes what initial-sync waits on.
   const eagerKeys = [...groups.values()]
     .filter((group) => group.subscription === "eager" || promoted.has(group.groupKey))
     .map((group) => group.groupKey);
@@ -503,6 +521,25 @@ export async function startCircuitsSync(
   async function ensureGroupStarted(groupKey: string): Promise<void> {
     const group = groups.get(groupKey);
     if (group === undefined) return;
+
+    /**
+     * A PROMOTED group is already durable and already boot-started, so a reference to it must not
+     * wait for anything.
+     *
+     * ADR-0021 §2: activation is permanent — a `lazy + persistent` group that was activated once
+     * "joins the normal eager-persistent set", and subsequent boots subscribe it eagerly and resume
+     * it like any other durable table. Boot did exactly that (`startGroupForBoot`), but that start
+     * only resolves once a subscribe SUCCEEDS. Awaiting it here would make a read of a promoted
+     * relation block on the network — and an offline reopen, the very state promotion exists to
+     * serve, would never get past it even though every row is on disk and readable NOW.
+     *
+     * This is the same deal eager relations already get: their reads never pass through this
+     * activation choke point at all, and their catch-up is a background concern. Nothing is hidden
+     * by returning early — catch-up stays separately visible through `isGroupReady`/`groupReady`
+     * (what the React hooks' `hydrating` reports), and the retry loop is still running.
+     */
+    if (promoted.has(groupKey) && group.startPromise != null) return;
+
     if (group.startPromise) return group.startPromise;
 
     const wasHeld = group.subscription === "lazy" && !promoted.has(groupKey);
@@ -527,6 +564,11 @@ export async function startCircuitsSync(
     group.startPromise = null;
     group.ready = false;
     group.refused = [];
+    // Stopping a group also revokes its PROMOTION for the rest of this session (ADR-0021 §2): a
+    // desync truncates the local copy, so the durable-and-readable premise the promotion fast path
+    // rests on no longer holds. The group is HELD again — its next reference goes through the normal
+    // activation path, where `wasHeld` is true once more and `onLazyActivated` re-persists the flag.
+    promoted.delete(groupKey);
     // A stopped group must be able to become pending again, or a later activation would resolve its
     // readiness instantly against the previous run's settled promise.
     group.readyPromise = new Promise<void>((resolve) => {
@@ -613,7 +655,14 @@ export async function startCircuitsSync(
     groupKeyForTable: (tableKey) => groupKeyByTable.get(tableKey),
     isTableStarted: (tableKey) => {
       const groupKey = groupKeyByTable.get(tableKey);
-      return groupKey !== undefined && groups.get(groupKey)?.ready === true;
+      if (groupKey === undefined) return false;
+      const group = groups.get(groupKey);
+      if (group === undefined) return false;
+      // A promoted group counts as started from the moment boot kicked its start off, without waiting
+      // for the subscribe to land: its table is durable and populated, which is what "started" asks.
+      // Catching up is `ready`/`isGroupReady`'s question, and it is deliberately not asked here.
+      if (promoted.has(groupKey) && group.startPromise != null) return true;
+      return group.ready;
     },
     groupReady: async (groupKey) => {
       await (groups.get(groupKey)?.readyPromise ?? Promise.resolve());

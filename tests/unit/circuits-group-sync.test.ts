@@ -45,6 +45,25 @@ const contentEntry = defineSyncTable({
 const registry = defineSyncRegistry({ tables: { content: contentEntry } });
 const content = contentEntry.localTable;
 
+// ADR-0021 §2's promotion subject: a `lazy + persistent` table, which once activated joins the eager
+// set permanently. Its own registry, so the fan-out tests above keep their single-group shape.
+const noteEntry = defineSyncTable({
+  tableName: "offering_note",
+  makeColumns: () => ({
+    id: uuid("id").primaryKey(),
+    body: text("body").notNull(),
+  }),
+  primaryKey: ["id"],
+  mode: "readonly",
+  subscription: "lazy",
+  retention: "persistent",
+});
+
+const lazyRegistry = defineSyncRegistry({ tables: { note: noteEntry } });
+const note = noteEntry.localTable;
+/** The lazy table has no explicit consistency group, so its group key is its own shape key. */
+const NOTE_GROUP = "offering_note";
+
 const OFF_A = "11111111-1111-4111-8111-111111111111";
 const OFF_B = "22222222-2222-4222-8222-222222222222";
 const ROW_A1 = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
@@ -160,12 +179,39 @@ async function settle(): Promise<void> {
   await Bun.sleep(150);
 }
 
+/**
+ * A control plane that cannot be reached at all — every request fails at the socket. That is what an
+ * offline reopen looks like from inside `subscribeWithRetry`: it never throws to its caller, it just
+ * keeps retrying, so any start awaiting it stays pending for as long as the network is down.
+ */
+const unreachable = (() => Promise.reject(new TypeError("Failed to fetch"))) as unknown as typeof fetch;
+
+/**
+ * What `promise` did within `ms` — `"pending"` when it did nothing, which is the only honest way to
+ * assert that something must NOT resolve. The timer is always cleared, so a passing test leaves none.
+ */
+async function outcomeWithin(promise: Promise<unknown>, ms: number): Promise<"settled" | "rejected" | "pending"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<"pending">((resolve) => {
+    timer = setTimeout(() => resolve("pending"), ms);
+  });
+  const outcome = await Promise.race([
+    promise.then(
+      () => "settled" as const,
+      () => "rejected" as const,
+    ),
+    expiry,
+  ]);
+  clearTimeout(timer);
+  return outcome;
+}
+
 describe("circuits group sync", () => {
   let pg: PGlite;
 
   beforeAll(async () => {
     pg = await createFreshTestPGlite();
-    await createTablesFromSchema(pg, { content });
+    await createTablesFromSchema(pg, { content, note });
     await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
   });
 
@@ -246,5 +292,63 @@ describe("circuits group sync", () => {
     await sync.groupReady("offering_content");
 
     sync.unsubscribe();
+  });
+
+  /**
+   * Boot the lazy registry with its group already PROMOTED, against a control plane that cannot be
+   * reached — an offline reopen after a previous session activated the group. Boot starts the group
+   * (ADR-0021 §2) and is released by its first failed subscribe attempt, leaving the retry loop
+   * running and nothing ever ready.
+   */
+  async function startOfflinePromoted(): Promise<Awaited<ReturnType<typeof startCircuitsSync>>> {
+    const subscribeErrors: Error[] = [];
+    const sync = await startCircuitsSync(pg, {
+      ...base,
+      registry: lazyRegistry,
+      promotedGroups: new Set([NOTE_GROUP]),
+      onSubscribeError: (error) => subscribeErrors.push(error),
+      fetch: unreachable,
+    });
+    // The precondition for everything below: boot came back with NO subscription, still retrying.
+    expect(subscribeErrors.length).toBeGreaterThan(0);
+    expect(sync.isGroupReady(NOTE_GROUP)).toBe(false);
+    return sync;
+  }
+
+  // A promoted group's rows are durable and local, so a reference to one must be answerable NOW — the
+  // offline reopen is the exact state promotion exists to serve (ADR-0021 §2). Awaiting the boot start
+  // would instead park the read on a subscribe that only resolves when the network returns.
+  it("a promoted group is readable while its boot subscribe is still retrying", async () => {
+    const sync = await startOfflinePromoted();
+
+    expect(await outcomeWithin(sync.ensureGroupStarted(NOTE_GROUP), 100)).toBe("settled");
+    // "Started" = a durable subscription for it exists, which is what a read needs to know.
+    expect(sync.isTableStarted("note")).toBe(true);
+    // Started is NOT caught up, and the two must stay separable: `hydrating` reads THIS one.
+    expect(sync.isGroupReady(NOTE_GROUP)).toBe(false);
+
+    sync.unsubscribe();
+  });
+
+  // A desync truncates the local copy, so the premise the promotion fast path rests on is gone with
+  // it: the group is HELD again. Its next reference must go through the real activation path — which
+  // offline cannot complete — instead of resolving instantly against a subscription that no longer
+  // exists, and it must not claim to be started meanwhile.
+  it("stopGroup returns a promoted group to held", async () => {
+    const sync = await startOfflinePromoted();
+    expect(sync.isTableStarted("note")).toBe(true);
+
+    sync.stopGroup(NOTE_GROUP);
+    expect(sync.isTableStarted("note")).toBe(false);
+
+    const activation = sync.ensureGroupStarted(NOTE_GROUP);
+    expect(await outcomeWithin(activation, 300)).toBe("pending");
+    // Still held: a re-activation in flight over a truncated table is not a readable table.
+    expect(sync.isTableStarted("note")).toBe(false);
+
+    sync.unsubscribe();
+    // Teardown abandons the activation mid-retry, so it never settles. Detached here so a future
+    // change that makes it reject cannot surface as an unhandled rejection in an unrelated test.
+    void activation.catch(() => {});
   });
 });
