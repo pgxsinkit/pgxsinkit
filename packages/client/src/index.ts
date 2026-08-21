@@ -35,6 +35,7 @@ import {
 import type { CreateOpfsRepackedPGliteOptions, OpfsRepackedPGlite } from "@pgxsinkit/pglite-opfs-repacked";
 
 import { type BootReport, type BootReportBuilder, createBootReportBuilder } from "./boot-report";
+import { startCircuitsSync } from "./circuits/group-sync";
 import { type ConvergenceDriver, type ConvergenceTrigger, createConvergenceDriver } from "./convergence";
 import { syncDebug, timeAsync } from "./debug";
 import { describeErrorChain } from "./error-chain";
@@ -119,6 +120,7 @@ import {
 } from "./store-path";
 import { createSyncEngine, type SyncEngine } from "./sync";
 import { buildShapeHeaders } from "./sync-auth";
+import { DEFAULT_METADATA_SCHEMA } from "./sync/metadata-tables";
 import { LiveRowsMaterializer } from "./worker/live-diff";
 import {
   createLiveQueryManager,
@@ -949,7 +951,32 @@ export async function fallbackVirginCandidateToIdb(
 
 export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   registry: TRegistry;
-  electricUrl: string;
+  /**
+   * The Electric read path's ingress. Mutually exclusive with {@link controlPlaneUrl} — exactly one
+   * read transport must be configured, and a boot naming both or neither is refused rather than
+   * guessed at.
+   *
+   * Optional only because the native path is the alternative, NOT because it may be omitted. It stays
+   * un-deprecated until the native path can actually replace it: a deprecation marker with no working
+   * replacement in this repo would be noise at every call site and would say something untrue.
+   */
+  electricUrl?: string;
+  /**
+   * NATIVE READ PATH (ADR-0055) — the pgxsinkit control plane, where subscribe, token re-mint and the
+   * engine convergence barrier live. Requires {@link streamBaseUrl}.
+   *
+   * Naming this instead of {@link electricUrl} inverts how the client finds a stream: it no longer
+   * CONSTRUCTS shape URLs from a base, it asks and is told. Which shapes a subject may read — and,
+   * on the shared tier, which scopes each expands to — stops being anything the client can express.
+   */
+  controlPlaneUrl?: string;
+  /**
+   * NATIVE READ PATH — the edge that serves durable-streams reads. Granted stream paths are appended
+   * to it. Separate from {@link controlPlaneUrl} because they are different deployments: the control
+   * plane is a small authenticated origin, and this one is the CDN-frontable read surface the shared
+   * tier exists to make cacheable.
+   */
+  streamBaseUrl?: string;
   batchWriteUrl: string;
   getAuthToken?: () => Promise<string | undefined>;
   /**
@@ -1814,6 +1841,60 @@ export function replAdapter(
   };
 }
 
+/**
+ * The read transport this boot runs on: the Electric proxy, or the Circuits-native control plane.
+ *
+ * Exactly one, resolved once at boot. Both configured is a contradiction and neither is an omission,
+ * and either way the only safe answer is to refuse — a client that picked a winner would sync against
+ * an ingress its caller never named, which is precisely the class of mistake the native path's
+ * ask-don't-construct inversion exists to remove.
+ */
+type ReadTransport =
+  | { kind: "electric"; electricUrl: string }
+  | { kind: "circuits"; controlPlaneUrl: string; streamBaseUrl: string };
+
+function resolveReadTransport(options: {
+  electricUrl?: string;
+  controlPlaneUrl?: string;
+  streamBaseUrl?: string;
+}): ReadTransport {
+  const hasElectric = options.electricUrl != null && options.electricUrl !== "";
+  const hasNative = options.controlPlaneUrl != null && options.controlPlaneUrl !== "";
+
+  if (hasElectric && hasNative) {
+    throw new Error(
+      "[pgxsinkit] createSyncClient was given both `electricUrl` and `controlPlaneUrl`. They are two " +
+        "different read paths, not a fallback pair — name exactly one.",
+    );
+  }
+  if (hasNative) {
+    if (options.streamBaseUrl == null || options.streamBaseUrl === "") {
+      throw new Error(
+        "[pgxsinkit] `controlPlaneUrl` needs `streamBaseUrl` beside it: the control plane grants stream " +
+          "paths and the edge serves them, and they are separate deployments.",
+      );
+    }
+    return { kind: "circuits", controlPlaneUrl: options.controlPlaneUrl!, streamBaseUrl: options.streamBaseUrl };
+  }
+  if (hasElectric) return { kind: "electric", electricUrl: options.electricUrl! };
+
+  throw new Error(
+    "[pgxsinkit] createSyncClient needs a read path: either `electricUrl`, or `controlPlaneUrl` + " +
+      "`streamBaseUrl` for the Circuits-native path.",
+  );
+}
+
+/**
+ * What a started sync exposes to the client, whichever transport started it.
+ *
+ * The two runtimes agree on every member the client actually calls; they differ only in what a
+ * per-table entry carries, so that is the one place this widens. When the Electric path is retired
+ * this collapses to the native result type and nothing else moves.
+ */
+type SyncGroupsRuntime = Omit<Awaited<ReturnType<typeof startConfiguredSync>>, "tables"> & {
+  tables: Record<string, { readonly isUpToDate: boolean }>;
+};
+
 export async function createSyncClient<const TRegistry extends SyncTableRegistry>(
   options: CreateSyncClientOptions<TRegistry>,
 ): Promise<SyncClient<TRegistry>> {
@@ -1882,10 +1963,19 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // ledger. The decision is taken in the restore recovery block below (it needs the quarantine count) and
   // honours an explicit `syncEnabled: false`. A normal boot resolves its final value here, up front.
   let syncEnabled = restoreBoot ? false : (options.syncEnabled ?? true);
+  // Which read transport this boot uses. Resolved once, up front, and REFUSED when the answer is
+  // ambiguous: two transports configured is a contradiction and none is an omission, and picking a
+  // winner for either would silently sync against something the caller did not name.
+  const readTransport = resolveReadTransport(options);
   // ADR-0032 S4 overlap flag. A restore starts `syncEnabled: false` here, so it never takes the overlap
   // prefetch path (a restore also never presents a fresh spare store); the flag stays `false` for the whole
   // boot even when the restore later comes online (which uses the sequential sync-start path, not overlap).
-  const overlapPrefetch = syncEnabled && options.freshStore === true && !options.pgliteInstance;
+  //
+  // The native path never overlaps either, and that is a real gap rather than a policy: overlap works by
+  // holding commits on a `dbReady` gate while the streams prefetch, and the native engine has no such gate
+  // yet. Booting native is therefore strictly sequential until it grows one.
+  const overlapPrefetch =
+    syncEnabled && readTransport.kind === "electric" && options.freshStore === true && !options.pgliteInstance;
   // How the store presents at boot (ADR-0034 `storeKind`): a restore boot seeds a brand-new store from a
   // backup; otherwise the caller's fresh-store hint (the same signal as `freshStore`) marks a fresh spare;
   // everything else is a warm (existing persisted) store. Restore wins — a restore boot is never "fresh".
@@ -2237,7 +2327,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // The sync-start options, built once and used by BOTH the overlap early-start and the sequential start —
   // the only per-call difference is the promoted-lazy set (empty on a fresh store) and the overlap gate.
   const buildStartOptions = (promotedGroups: ReadonlySet<string>): Parameters<typeof startConfiguredSync>[1] => ({
-    syncConfig: buildSyncConfigFromRegistry(options.registry, options.electricUrl),
+    syncConfig: buildSyncConfigFromRegistry(
+      options.registry,
+      readTransport.kind === "electric" ? readTransport.electricUrl : "",
+    ),
     registry: options.registry,
     promotedGroups,
     ...(dbReady ? { dbReady } : {}),
@@ -2355,20 +2448,81 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       : {}),
   });
 
+  /**
+   * The native path's auth adapter.
+   *
+   * The SAME token lifecycle the write path and the Electric read path use (ADR-0003/ADR-0013),
+   * resolved per request rather than captured — a subscription outlives its token by design. The
+   * static `requestHeaders` ride along for the deployment gateway; a resolved `Authorization` wins
+   * over anything they carry, which is the same precedence `buildShapeHeaders` gives them.
+   */
+  const nativeAuthHeaders = async (): Promise<Record<string, string>> => {
+    const headers: Record<string, string> = { ...(options.requestHeaders ?? {}) };
+    const token = await options.getAuthToken?.();
+    if (token != null && token !== "") headers["Authorization"] = `Bearer ${token}`;
+    return headers;
+  };
+
+  /**
+   * Start sync on whichever read transport this boot resolved.
+   *
+   * The one seam the two paths share. Everything above it — status, readiness, the boot report, the
+   * activation replay — is written against {@link SyncGroupsRuntime} and does not know which ran.
+   */
+  const startSyncRuntime = (promotedGroups: ReadonlySet<string>): Promise<SyncGroupsRuntime> => {
+    if (readTransport.kind === "circuits") {
+      return startCircuitsSync(pglite, {
+        registry: options.registry,
+        controlPlaneUrl: readTransport.controlPlaneUrl,
+        streamBaseUrl: readTransport.streamBaseUrl,
+        metadataSchema: DEFAULT_METADATA_SCHEMA,
+        promotedGroups,
+        ...(options.getAuthToken || options.requestHeaders ? { authHeaders: nativeAuthHeaders } : {}),
+        onInitialSync: () => {
+          initialSyncCompleted = true;
+          status.phase = "ready";
+          options.onStatusChange?.(status);
+          syncDebug("boot client ready");
+          finalizeBootReport();
+          resolveReady();
+          armReadSilenceWatchdog();
+        },
+        onGroupReady: (groupKey: string) => {
+          status.groups = { ...(status.groups ?? {}), [groupKey]: true };
+          options.onStatusChange?.(status);
+        },
+        onSyncError: (error: Error) => {
+          status.phase = "degraded";
+          degradedReason = "commit";
+          status.lastError = describeErrorChain(error);
+          options.onStatusChange?.(status);
+          options.onSyncError?.(error);
+        },
+        onSyncActivity: () => {
+          armReadSilenceWatchdog();
+        },
+        onLazyActivated: (groupKey: string) => {
+          void writeLazyGroupActivation(pglite, options.registry, groupKey);
+        },
+      });
+    }
+    return startConfiguredSync(
+      pglite as unknown as Parameters<typeof startConfiguredSync>[0],
+      buildStartOptions(promotedGroups),
+    );
+  };
+
   // Overlap: kick the shape streams off BEFORE schema exec (they buffer catch-up into the memory inbox,
   // commits gated on `dbReady`). A fresh store has no persisted lazy activations and no subscriptions to
   // reset, so both DB reads the sequential path makes first are skipped here.
-  let earlySync: ReturnType<typeof startConfiguredSync> | null = null;
+  let earlySync: Promise<SyncGroupsRuntime> | null = null;
   let earlySyncStartedAt = 0;
   if (overlapPrefetch) {
     status.isRunning = true;
     status.phase = "syncing";
     options.onStatusChange?.(status);
     earlySyncStartedAt = performance.now();
-    earlySync = startConfiguredSync(
-      pglite as unknown as Parameters<typeof startConfiguredSync>[0],
-      buildStartOptions(new Set()),
-    );
+    earlySync = startSyncRuntime(new Set());
   }
 
   if (!options.pgliteInstance) {
@@ -2542,7 +2696,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // Static index of the registry's lazy relations (ADR-0021), driving the read-path safety net.
   const lazyGuardIndex = buildLazyGuardIndex(options.registry);
 
-  let sync: Awaited<ReturnType<typeof startConfiguredSync>> | null = null;
+  let sync: SyncGroupsRuntime | null = null;
   let convergenceDriver: ConvergenceDriver | null = null;
   let eventFlushDriver: EventFlushDriver | null = null;
 
@@ -2667,12 +2821,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         const promotedGroups = await readActivatedLazyGroups(pglite, options.registry);
         if (disposed) return;
 
-        sync = await bootReportBuilder.phase("syncStart", "boot sync start", () =>
-          startConfiguredSync(
-            pglite as unknown as Parameters<typeof startConfiguredSync>[0],
-            buildStartOptions(promotedGroups),
-          ),
-        );
+        sync = await bootReportBuilder.phase("syncStart", "boot sync start", () => startSyncRuntime(promotedGroups));
         bootReportBuilder.markSyncStartDone();
       }
       // If a stop landed DURING the sync-start await, unsubscribe the just-started streams here rather than
