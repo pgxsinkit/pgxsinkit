@@ -37,21 +37,24 @@ function useOnline(offline: OfflineControl | null): boolean {
   );
 }
 
+// The closed-drawer journal: a module-level constant, so an unsubscribed inspector hands back the same
+// array every render instead of a fresh one.
+const EMPTY_JOURNAL: MutationDetail[] = [];
+
 /**
  * Subscribe to the registry-wide mutation journal while the inspector is open (pgxsinkit slice 4). This
  * replaced an 800 ms `readMutationDetails` poll: `client.mutations.subscribe` is a LIVE query over the
  * cross-journal `pgxsinkit_all_mutations` view, so a diff surfaces every pending → sending → acked → cleared
  * transition the instant it lands — catching the brief acked-flash on its way out that a poll could miss
- * between frames. One subscription across every writable table; idle (unsubscribed) when the drawer is closed.
+ * between frames. One subscription across every writable table; idle (unsubscribed) when the drawer is
+ * closed, where the journal simply reads as {@link EMPTY_JOURNAL} — reopening resubscribes and the
+ * subscription's `initial` snapshot replaces the rows the previous open left behind.
  */
 function useJournal(enabled: boolean): MutationDetail[] {
   const client = useSyncClient();
   const [rows, setRows] = useState<MutationDetail[]>([]);
   useEffect(() => {
-    if (!enabled) {
-      setRows([]);
-      return;
-    }
+    if (!enabled) return;
     let active = true;
     let subscription: { unsubscribe: () => void } | undefined;
     void client.mutations
@@ -74,7 +77,7 @@ function useJournal(enabled: boolean): MutationDetail[] {
       subscription?.unsubscribe();
     };
   }, [enabled, client]);
-  return rows;
+  return enabled ? rows : EMPTY_JOURNAL;
 }
 
 /**

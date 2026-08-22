@@ -184,35 +184,31 @@ function IssueMenu({
  * not rebuilt: drag's only capability is changing Status, which this sheet does in a single tap.
  *
  * `issue` is looked up from the live rows by the caller on every render (never copied into state), so an
- * edit made here — or a remote change arriving while the sheet is open — is reflected immediately.
+ * edit made here — or a remote change arriving while the sheet is open — is reflected immediately. The
+ * caller owns `opened` too: closing flips it to false while KEEPING the selected id, so the tapped Issue
+ * keeps rendering through the Drawer's slide-out instead of collapsing into an empty sheet mid-animation.
  */
 function IssueSheet({
   issue,
+  opened,
   assignable,
   moveTeams,
   actions,
   onClose,
 }: {
   issue: IssueRow | null;
+  /** Owned by the caller: false (with `issue` still set) is the close animation. */
+  opened: boolean;
   assignable: readonly ProfileRow[];
   moveTeams: readonly TeamOption[];
   actions: IssueActions;
   onClose: () => void;
 }) {
-  // The selection clears the instant a row is tapped, but the Drawer keeps sliding out for another frame
-  // or two — so the body renders the last open selection through the close transition instead of
-  // collapsing into an empty sheet mid-animation. While the sheet is OPEN, `shown` is always the live row.
-  const lastOpen = useRef<{
-    issue: IssueRow;
-    assignable: readonly ProfileRow[];
-    moveTeams: readonly TeamOption[];
-  } | null>(null);
-  if (issue != null) lastOpen.current = { issue, assignable, moveTeams };
-  const shown = issue != null ? { issue, assignable, moveTeams } : lastOpen.current;
+  const shown = issue == null ? null : { issue, assignable, moveTeams };
 
   return (
     <Drawer
-      opened={issue != null}
+      opened={opened}
       onClose={onClose}
       position="bottom"
       title={shown?.issue.title}
@@ -547,12 +543,14 @@ export function BoardColumns({
   const dragged = useRef<IssueRow | null>(null);
   const [overStatus, setOverStatus] = useState<IssueStatus | null>(null);
 
-  // Touch (docs/mobile.md): no drag, no kebab — a tap opens one shared bottom sheet. Only the id is held
-  // in state; the row itself is re-read from `issues` every render so the open sheet tracks live updates
-  // (its own writes and remote ones alike) and closes itself if the Issue leaves the view.
+  // Touch (docs/mobile.md): no drag, no kebab — a tap opens one shared bottom sheet. Only the id (plus
+  // whether the sheet is open) is held in state; the row itself is re-read from `issues` every render so
+  // the open sheet tracks live updates (its own writes and remote ones alike) and closes itself if the
+  // Issue leaves the view. Closing keeps the id and only flips `open`, so the tapped Issue stays on screen
+  // while the Drawer slides out.
   const isTouch = useIsTouch();
-  const [sheetIssueId, setSheetIssueId] = useState<string | null>(null);
-  const sheetIssue = sheetIssueId == null ? null : (issues.find((issue) => issue.id === sheetIssueId) ?? null);
+  const [sheet, setSheet] = useState<{ issueId: string; open: boolean } | null>(null);
+  const sheetIssue = sheet == null ? null : (issues.find((issue) => issue.id === sheet.issueId) ?? null);
 
   const handleDrop = (status: IssueStatus) => {
     const issue = dragged.current;
@@ -629,7 +627,7 @@ export function BoardColumns({
                       {...(isTouch
                         ? {
                             onSelect: () => {
-                              setSheetIssueId(issue.id);
+                              setSheet({ issueId: issue.id, open: true });
                               onIssueOpened?.(issue.id);
                             },
                           }
@@ -651,10 +649,11 @@ export function BoardColumns({
       {isTouch && (
         <IssueSheet
           issue={sheetIssue}
+          opened={sheet?.open === true && sheetIssue != null}
           assignable={sheetIssue != null ? (assignableByTeam.get(sheetIssue.teamId) ?? []) : []}
           moveTeams={sheetIssue != null ? moveTeams.filter((team) => team.id !== sheetIssue.teamId) : []}
           actions={actions}
-          onClose={() => setSheetIssueId(null)}
+          onClose={() => setSheet((prev) => (prev == null ? null : { ...prev, open: false }))}
         />
       )}
     </>
