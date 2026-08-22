@@ -427,6 +427,55 @@ describe("defineReadProjection fail-closed posture guard (owner redacts on egres
   });
 });
 
+// ADR-0055 decision 5. An egress transform is rewritten at the STREAM EDGE, per request, with the
+// reader's subject — so the bytes are subject-dependent and the shape is private-tier by construction.
+// Serving it from a scope-keyed shared stream would cache one subject's rewrite under a key every
+// member of the scope reads, which is the same disclosure `readShapeTier` refuses for scope + rowFilter.
+describe("egress transform is private-tier by construction (scope + rowTransform)", () => {
+  const scopedColumns = () => ({
+    id: uuid("id").primaryKey(),
+    offeringId: uuid("offering_id").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>(),
+  });
+
+  // Refused at DEFINITION, which for a `defineSyncTable` entry means the constructor call itself — the
+  // entry never exists to be registered.
+  it("refuses an entry declaring both scope and a serverProjection.rowTransform", () => {
+    expect(() =>
+      defineSyncTable({
+        tableName: "scoped_item",
+        makeColumns: scopedColumns,
+        primaryKey: ["id"],
+        mode: "readonly",
+        shape: { scope: (c) => [c.offeringId] },
+        serverProjection: { rowTransform: stripKeys },
+      }),
+    ).toThrow(/declares both scope and a serverProjection\.rowTransform/);
+  });
+
+  it("accepts scope alone", () => {
+    const entry = defineSyncTable({
+      tableName: "scoped_item",
+      makeColumns: scopedColumns,
+      primaryKey: ["id"],
+      mode: "readonly",
+      shape: { scope: (c) => [c.offeringId] },
+    });
+    expect(() => defineSyncRegistry({ scoped_item: entry })).not.toThrow();
+  });
+
+  it("accepts a rowTransform alone", () => {
+    const entry = defineSyncTable({
+      tableName: "scoped_item",
+      makeColumns: scopedColumns,
+      primaryKey: ["id"],
+      mode: "readonly",
+      serverProjection: { rowTransform: stripKeys },
+    });
+    expect(() => defineSyncRegistry({ scoped_item: entry })).not.toThrow();
+  });
+});
+
 describe("read-contract fingerprint", () => {
   it("is identical for a writable entry and its readonly projection", () => {
     const rw = writableRestriction();

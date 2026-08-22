@@ -84,6 +84,7 @@ describe("asymmetric read (role-conditional visibility) integration", () => {
     // adapter with the write route (ADR-0003) — no framework wrapper needed.
     stack = await startNativeSyncStack({
       env,
+      registry: membershipFanoutSyncRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: membershipFanoutSyncRegistry,

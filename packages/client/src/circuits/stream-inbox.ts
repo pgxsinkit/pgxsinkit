@@ -23,8 +23,10 @@ export interface BufferedBatch {
  * **No cross-shape position comparison.** Offsets are per-stream and, per the protocol, comparable
  * only within a stream. So the commit gate is not a `min` over positions but a predicate over
  * reports: commit when **every** shape's most recent response asserted up-to-date. That is the same
- * happens-before argument ADR-0056 makes for alignment, applied per commit — every stream has
- * drained everything the server held, so no cross-shape transaction can be half-applied.
+ * happens-before argument ADR-0056 makes for alignment, applied per commit — with the caveat
+ * {@link StreamInbox.isGroupUpToDate} states: it is a complete argument at alignment, and in the live
+ * steady state it bounds cross-shape tearing to two responses' inter-arrival rather than excluding
+ * it (`docs/backlog/0014-cross-stream-commit-fence.md`).
  *
  * **No snapshot-acceptance flag.** It existed because a re-snapshot's rows floored to LSN 0 while
  * the frontier might already sit high. A reset here rewinds the applied offset to nothing, and the
@@ -83,8 +85,16 @@ export class StreamInbox {
   /**
    * The commit gate: every shape's most recent response asserted up-to-date.
    *
-   * This is the whole steady-state condition. It is stronger than it looks — a shape mid-catch-up
-   * reports `false`, so a group never commits while any member is still draining backfill.
+   * This is the whole steady-state condition, and it is stronger than it looks in one direction and
+   * weaker in another. Stronger: a shape mid-catch-up reports `false`, so a group never commits while
+   * any member is still draining backfill, and at alignment the whole held batch commits together.
+   * Weaker: once caught up, every shape's flag is LATCHED from its last completed response while its
+   * next long poll sits parked — a `204` timeout carries up-to-date too — so this predicate is
+   * effectively always true and each delivery commits at once. Two streams carrying halves of one
+   * server transaction are answered by two separate polls, so the client can apply one half before
+   * the other arrives; the window is their inter-arrival. Nothing here can close that — the engine's
+   * per-stream appends carry no cross-stream fence — so it is recorded rather than papered over
+   * (`docs/backlog/0014-cross-stream-commit-fence.md`).
    */
   isGroupUpToDate(): boolean {
     for (const upToDate of this.currentlyUpToDate.values()) {

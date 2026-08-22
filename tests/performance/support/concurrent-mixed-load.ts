@@ -420,7 +420,7 @@ async function runConcurrentMixedLoadScenarioSingleProcess(
       await provisioningServer.stop();
     }
 
-    readPath = await startNativeReadPath({ env });
+    readPath = await startNativeReadPath({ env, registry });
     server = createSyncServer({
       registry,
       db: serverDb.db,
@@ -570,7 +570,7 @@ async function runConcurrentMixedLoadScenarioMultiProcess(
       await provisioningServer.stop();
     }
 
-    readPath = await startNativeReadPath({ env });
+    readPath = await startNativeReadPath({ env, registry });
     server = createSyncServer({
       registry,
       db: serverDb.db,

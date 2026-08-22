@@ -73,12 +73,15 @@ yields no `sub` — because a stream token with no subject would name a bearer t
 - **write** — `createSyncServer({ registry, db, resolveAuthClaims })` **without** `readPath` registers
   only the mutation route; wrap with the path rewrite above.
 - **control plane** (`sync`) — `createSyncServer({ registry, resolveAuthClaims, readPath: { engine, key } })`
-  serves `/sync/v1/subscribe`, `/sync/v1/refresh`, and `/sync/v1/barrier`. It answers per-subject
+  serves `/sync/v1/subscribe`, `/sync/v1/refresh`, `/sync/v1/release` (a closing subscription hands its
+  engine shape claims back), and `/sync/v1/barrier`. It answers per-subject
   questions and mints stream tokens, so it is **never cacheable**: force `cache-control: no-store`. Its
   upstream is the Circuits engine's control API, which must not be client-reachable.
-- **edge** (`stream`) — `createStreamGate({ key, durableStreamsUrl })` mounted at `/v1/stream`. It needs
-  **no claims resolver and no database**: the stream token IS the authorization, which is what lets this
-  half scale and cache independently.
+- **edge** (`stream`) — `createStreamGate({ key, registry, durableStreamsUrl })` mounted at `/v1/stream`.
+  It needs **no claims resolver and no database**: the stream token IS the authorization, which is what
+  lets this half scale and cache independently. It does need the same `registry` the control plane uses —
+  that is how it knows which shapes declare a `serverProjection.rowTransform` and must be rewritten per
+  read (answered `private, no-store`, JSON long-poll only); every other shape is proxied untouched.
 
 **Put the edge on its own origin.** The cache key is the URL, so the surface a CDN may share between
 subscribers has to be addressable apart from the one that answers per-subject questions. Same-origin
@@ -92,8 +95,8 @@ a cross-origin browser gets a response whose stream headers are simply _not ther
 its whole read loop off them (`Stream-Next-Offset`, `Stream-Cursor`, `Stream-Closed`,
 `Stream-Up-To-Date`), so stripped of them it never learns an offset, never switches to a live long poll,
 and re-requests `offset=-1` in a hot loop — hundreds of requests per second per shape, with no error
-raised on either side. `createStreamGate` cannot do this for you: it returns the upstream response
-unchanged, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision that only
+raised on either side. `createStreamGate` cannot do this for you: it forwards the upstream response's
+headers, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision that only
 the mount makes. **Do not rely on the gateway.** A permissive `expose_headers: "*"` at istio/envoy makes
 the mount look correct behind that one deployment and hot-loop everywhere else.
 

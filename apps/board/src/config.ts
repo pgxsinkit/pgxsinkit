@@ -33,7 +33,7 @@ export const boardConfig = {
   publishableKey,
   functionsRegion,
   // The three deployed surfaces, all behind the gateway:
-  //   board-sync   — the native CONTROL PLANE (`/sync/v1/subscribe`, `/refresh`, `/barrier`)
+  //   board-sync   — the native CONTROL PLANE (`/sync/v1/subscribe`, `/refresh`, `/release`, `/barrier`)
   //   board-stream — the EDGE, which gates a stream token and proxies durable-streams bytes
   //   board-write  — mutation ingress
   //

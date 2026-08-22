@@ -73,13 +73,20 @@ function resolveShapeTarget(shape: ShapeSpec): { table: string } | { refusal: st
 }
 
 /**
- * The columns a shape EMITS, or undefined for the whole row.
+ * The columns the ENGINE emits onto the stream, or undefined for the whole row.
  *
- * Read off `localTable` — the projected client-side table — rather than recomputed from
- * `omitColumns`, so the wire projection is by construction the same set the local schema declares.
- * A column the predicate matches on but the client never receives simply is not in it, which is what
- * makes `serverOnlyColumns` free here: the native API separates matching from emission, so the
- * ordering hazard the proxy had between egress rewriting and column omission has nothing to order.
+ * Not the same set as the columns the CLIENT receives, and the difference is load-bearing. Read off
+ * `shape.rowFilter.columns` when the registry declares one — which for a read projection is the
+ * client keep-set PLUS its `serverOnlyColumns` — otherwise off `localTable`, so a shape with no
+ * allow-list emits exactly what the local schema declares.
+ *
+ * `serverOnlyColumns` therefore ARE emitted by the engine, deliberately: an egress
+ * `serverProjection.rowTransform` has to READ them, and the engine is the only thing that can fetch
+ * them. They come off the wire at the stream edge, which strips every rewritten row back to the local
+ * table's columns AFTER the transform has run (`createStreamGate`, ADR-0055 decision 5). So the
+ * ordering hazard between rewriting and omission is ANSWERED — transform first, strip second, in one
+ * place — rather than dissolved: this function must not "helpfully" narrow the allow-list to the
+ * client keep-set, because that would starve the transform of its inputs and fail it open.
  */
 function emittedColumns(entry: SyncTableEntry): string[] | undefined {
   const explicit = entry.shape?.rowFilter?.columns;
@@ -241,4 +248,54 @@ function privatePredicate(
     return { refusal: `shape "${shape.shapeKey}" denies this caller` };
   }
   return { predicate: resolved ?? undefined };
+}
+
+/**
+ * Canonical JSON: object keys sorted, `undefined` members dropped, array order preserved.
+ *
+ * Emitted as a string directly rather than by rebuilding an object and handing it to
+ * `JSON.stringify`, because a rebuilt object's key order is not entirely ours to choose — a JS engine
+ * enumerates integer-like keys numerically ahead of insertion order, so a sorted rebuild is only
+ * *usually* serialized in the order it was sorted into. Writing the bytes here removes the
+ * "usually".
+ *
+ * Array order IS significant and is kept: `columns` is a projection whose order the engine sees, and
+ * an `and`/`or` chain's operand order is part of the predicate as sent.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value ?? null);
+  if (Array.isArray(value)) return `[${value.map((member) => canonicalJson(member ?? null)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, member]) => member !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : 1));
+  return `{${entries.map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`).join(",")}}`;
+}
+
+/**
+ * A content fingerprint of a compiled shape request — SHA-256 over its canonical JSON, lowercase hex.
+ *
+ * CANONICAL because the input is not a literal an author wrote: a predicate reaches here through
+ * `rowFilter.customPredicate`, whose closure may assemble `{ col, op, value }` in whatever order its
+ * branches happen to take, and `p.and(a, b)` on one path may nest where another flattens. Two
+ * compiles that MEAN the same thing must fingerprint the same, or the equality below degrades into a
+ * test of how the author's code was written on the day.
+ *
+ * This is an AUTHORIZATION equality check, not a cache key. Two requests fingerprinting the same are
+ * the same shape to the engine — same table, same predicate, same projection — so a subject whose
+ * recompiled shape still fingerprints as the one their grant names is still authorized for exactly
+ * the stream that grant points at. A collision is therefore not a performance regression, it is an
+ * authorization one, which is why this is a cryptographic digest and not a cheap hash.
+ *
+ * Used by the re-mint path (ADR-0055 decision 6) to re-authorize a private-tier grant against the
+ * subject's current claims. Never sent to the engine, which knows nothing about it.
+ */
+export async function fingerprintShapeRequest(request: CreateShapeRequest): Promise<string> {
+  const canonical = canonicalJson({
+    table: request.table,
+    where: request.where,
+    columns: request.columns,
+    changesOnly: request.changesOnly,
+  });
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

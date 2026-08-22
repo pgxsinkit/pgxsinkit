@@ -148,6 +148,7 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
     }
     stack = await startNativeSyncStack({
       env,
+      registry: demoSyncRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: demoSyncRegistry,

@@ -15,8 +15,10 @@ import { defineSyncRegistry, defineSyncTable, type StreamEnvelope } from "@pgxsi
 import {
   barrierPath,
   createBarrierHandler,
+  createReleaseHandler,
   createSubscribeHandler,
   importStreamTokenKey,
+  releasePath,
   subscribePath,
   type CircuitsEngineClient,
 } from "@pgxsinkit/server";
@@ -40,12 +42,15 @@ const engine: CircuitsEngineClient = {
     streamUrl: "http://ds/shape/s1",
   }),
   releaseShape: async () => {},
-  replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
+  replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
 } as CircuitsEngineClient;
 
 const resolveAuthClaims = () => ({ sub: "boot-report-subject" });
 const subscribe = createSubscribeHandler({ registry, engine, key, resolveAuthClaims });
 const barrier = createBarrierHandler({ engine, resolveAuthClaims });
+// Mounted for the restart test only: a group that re-subscribes closes its old session first, and an
+// unrouted release would otherwise fall through to the edge branch below.
+const release = createReleaseHandler({ engine, key, resolveAuthClaims });
 
 /**
  * The catch-up the boot is waiting on, held until a test releases it.
@@ -63,6 +68,12 @@ function newCatchUpGate() {
   catchUpGate = { promise, release };
 }
 newCatchUpGate();
+
+/**
+ * Arms ONE edge read to answer `404` — an evicted stream under the opening request, which rejects
+ * `group.start()` and sends the group down the restart ladder before it has ever been ready.
+ */
+let failNextEdgeRead = false;
 
 const snapshotEnvelope: StreamEnvelope = {
   type: "widget",
@@ -85,11 +96,16 @@ const server = Bun.serve({
     const { pathname } = new URL(request.url);
     if (pathname === subscribePath) return subscribe(request);
     if (pathname === barrierPath) return barrier(request);
+    if (pathname === releasePath) return release(request);
 
     // Anything else is the edge. Hold the first delivery until the test opens the gate, then answer
     // with the one snapshot row and a tail offset — a complete catch-up in a single request, which is
     // what makes `requests: 1` / `rows: 1` deterministic.
     await catchUpGate.promise;
+    if (failNextEdgeRead) {
+      failNextEdgeRead = false;
+      return new Response("stream gone", { status: 404 });
+    }
     return new Response(JSON.stringify([snapshotEnvelope]), {
       status: 200,
       headers: {
@@ -224,6 +240,22 @@ describe("BootReport — in-process boot (ADR-0034)", () => {
     const r = (await client.bootReport())!;
     expect(r.storeKind).toBe("fresh");
     expect(r.freshStore).toBe(true);
+  });
+
+  // The boot stamp lives on the GROUP runtime, not only on `startGroupForBoot`'s call stack, because a
+  // restart that lands before the group is ready re-opens it — and an open with no stamp would leave
+  // this group's row with no delivery and no ready edge, as if the boot it belongs to never happened.
+  it("keeps a group's boot stamp across a restart that precedes its ready edge", async () => {
+    failNextEdgeRead = true;
+    const client = await bootClient();
+    await driveInitialSync(client);
+
+    const group = (await client.bootReport())!.groups[0]!;
+    // Without the stamp riding the re-open these are 0/0: the delivery that actually caused the ready
+    // edge arrives on the second, restarted open.
+    expect(group.rows).toBe(1);
+    expect(group.requests).toBeGreaterThanOrEqual(1);
+    expect(group.readyAtMs).toBeGreaterThanOrEqual(group.startedAtMs);
   });
 
   it("bootReport() is null before initial sync completes, and the report thereafter", async () => {

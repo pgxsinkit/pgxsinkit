@@ -95,6 +95,7 @@ describe("circuits -> pglite sync integration", () => {
 
     stack = await startNativeSyncStack({
       env,
+      registry: demoSyncRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: demoSyncRegistry,

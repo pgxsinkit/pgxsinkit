@@ -45,6 +45,7 @@ describe("client facade contract", () => {
     // the CDN-frontable surface and the control plane is not.
     stack = await startNativeSyncStack({
       env,
+      registry: projectsSyncRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: projectsSyncRegistry,

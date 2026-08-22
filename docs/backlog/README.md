@@ -27,5 +27,8 @@ Rules:
 - [0007 — OPFS storage model (two-tier VFS, Safari open-file ceiling)](0007-opfs-storage-model.md) — candidate
 - [0008 — Lazy ephemeral schema at activation (split the all-mutations view first)](0008-lazy-ephemeral-schema-at-activation.md) — candidate
 - [0009 — Circuits keys tables by bare name (schema-bound registries)](0009-circuits-schema-qualified-tables.md) — candidate
-- [0010 — Mid-session shape reset (stream gone under a live read)](0010-mid-session-shape-reset.md) — candidate
+- [0010 — Mid-session shape reset (stream gone under a live read)](0010-mid-session-shape-reset.md) — done (2026-08-22)
 - [0011 — A lost flip batch drains the convergence barrier](0011-lost-flip-batches-drain-the-barrier.md) — promoted → adr/0056
+- [0012 — durable-streams needs a persistent volume before staging](0012-durable-streams-staging-persistence.md) — candidate
+- [0013 — Engine-side claim leases (retry-safe shape release)](0013-engine-claim-leases.md) — candidate
+- [0014 — A cross-stream commit fence (live cross-shape atomicity)](0014-cross-stream-commit-fence.md) — candidate

@@ -1,5 +1,8 @@
-import type { PredicateValue } from "@pgxsinkit/contracts";
+import { getTableConfig } from "drizzle-orm/pg-core";
 
+import type { PredicateValue, RowTransform, RowTransformContext, SyncTableRegistry } from "@pgxsinkit/contracts";
+
+import { resolveEntryByShapeKey } from "./compile";
 import { findGrant, verifyStreamToken, type StreamGrant } from "./stream-token";
 
 /**
@@ -36,9 +39,43 @@ export interface EntitlementSet {
   scopesFor(subject: string, shapeKey: string): readonly (readonly PredicateValue[])[];
 }
 
+/**
+ * The entitlement set cannot be consulted right now — it is catching up, degraded, or stale.
+ *
+ * An OUTAGE, and thrown rather than reported per subscription for exactly the reason an engine fault
+ * is: a client told "not entitled" clears that scope and unsubscribes (ADR-0055 decision 6), so
+ * relaying an unavailable set as a denial would turn a transient control-plane condition into
+ * client-side data loss. The routes map it to 503, which is a status a client retries through.
+ *
+ * The EDGE does not throw this. A read arriving while the set is unavailable is denied (see
+ * {@link EntitlementSet.ready}) and a denied read is not a revocation — it is a request the client
+ * makes again.
+ */
+export class EntitlementsUnavailableError extends Error {
+  constructor() {
+    super(
+      "[pgxsinkit] the entitlement set is unavailable — it is catching up, degraded or stale; " +
+        "shared-tier subscriptions cannot be decided right now",
+    );
+    this.name = "EntitlementsUnavailableError";
+  }
+}
+
 export interface StreamGateOptions {
   /** Verifies the stream token. Minted by the control plane in the same process. */
   key: CryptoKey;
+  /**
+   * The registry the granted shapes are declared in — REQUIRED, unlike every other option here.
+   *
+   * The gate needs it to answer one question per read: does this shape declare a
+   * `serverProjection.rowTransform`, and must its bytes therefore be rewritten before they reach the
+   * client (ADR-0055 decision 5)? A gate that cannot see the registry cannot know, so it would proxy
+   * a transform shape's raw rows — including the `serverOnlyColumns` fetched solely for the transform
+   * — with nothing anywhere reporting a discrepancy. Making it required is what makes that mount
+   * impossible to write, which is why it is not optional "for deployments with no transform shape":
+   * the leak arrives on the day someone adds the first one, in a file nobody was editing.
+   */
+  registry: SyncTableRegistry;
   /**
    * The live entitlement set backing the shared tier. Optional for the same reason it is optional on
    * the control plane: a deployment whose registry declares no shared shape has nothing to ask it.
@@ -51,11 +88,42 @@ export interface StreamGateOptions {
    * same value the engine is given as `ELECTRIC_CIRCUITS_DS_URL`, since both address the same paths.
    */
   durableStreamsUrl: string;
+  /**
+   * Deployment-supplied runtime params, handed to an egress `rowTransform` as its context's `params`
+   * — the same values `SubscribeOptions.params` hands to `rowFilter.customPredicate`. A deployment
+   * that configures them on one side and not the other gives its registry two different runtime
+   * environments for one shape, so mount both from the same source.
+   */
+  params?: Record<string, unknown>;
   /** Injected for tests; defaults to the ambient `fetch`. */
   fetch?: typeof fetch;
 }
 
-export type GateDecision = { allow: true; grant: StreamGrant } | { allow: false; reason: string };
+/**
+ * What DECIDING one read needs: the signing key, plus the entitlement set the shared tier is checked
+ * against.
+ *
+ * Spelled as the gate's options with everything else relaxed to optional, rather than as
+ * {@link StreamGateOptions} itself, because a caller that wants only the decision — a mount that
+ * proxies for itself, a test pinning the authorization rules — has no gate to configure, and
+ * requiring it to invent a `registry` and a `durableStreamsUrl` would demand values the answer
+ * provably does not depend on.
+ */
+export type StreamAuthorizationOptions = Pick<StreamGateOptions, "key" | "entitlements"> &
+  Partial<Omit<StreamGateOptions, "key" | "entitlements">>;
+
+export type GateDecision =
+  | {
+      allow: true;
+      grant: StreamGrant;
+      /**
+       * The token's subject. Carried on the decision because the egress transform stage needs it and
+       * re-verifying the token to recover it would pay for a second HMAC on every rewritten read —
+       * the verification that established it already happened here.
+       */
+      subject: string;
+    }
+  | { allow: false; reason: string };
 
 /**
  * Authorize one read of one stream path.
@@ -70,7 +138,7 @@ export type GateDecision = { allow: true; grant: StreamGrant } | { allow: false;
  * stating rather than leaving to be inferred.
  */
 export async function authorizeStreamRead(
-  options: StreamGateOptions,
+  options: StreamAuthorizationOptions,
   token: string | null,
   path: string,
   now: number,
@@ -83,17 +151,18 @@ export async function authorizeStreamRead(
   const grant = findGrant(verified.claims, path);
   if (grant == null) return { allow: false, reason: "token grants no such stream" };
 
-  if (grant.scope === undefined) return { allow: true, grant };
+  const subject = verified.claims.sub;
+  if (grant.scope === undefined) return { allow: true, grant, subject };
 
   const entitlements = options.entitlements;
   if (entitlements === undefined) {
     return { allow: false, reason: "shared-tier grant, but this deployment configured no entitlement set" };
   }
   if (!entitlements.ready) return { allow: false, reason: "entitlements unavailable" };
-  if (!entitlements.permits(verified.claims.sub, grant.shapeKey, grant.scope)) {
+  if (!entitlements.permits(subject, grant.shapeKey, grant.scope)) {
     return { allow: false, reason: "not entitled to this scope" };
   }
-  return { allow: true, grant };
+  return { allow: true, grant, subject };
 }
 
 /**
@@ -136,9 +205,10 @@ export function readStreamToken(request: Request): string | null {
  * through this gate.
  *
  * EVERY mount of `createStreamGate` must put these on `Access-Control-Expose-Headers` of the ACTUAL
- * (non-preflight) response. The gate cannot do it itself — it hands back the upstream response
- * unchanged, and an exposure list is meaningless without the `Access-Control-Allow-Origin` decision
- * that only the mount owns.
+ * (non-preflight) response. The gate cannot do it itself — it forwards the upstream response's
+ * headers (verbatim for an ordinary shape, minus the caching ones for a rewritten one), and an
+ * exposure list is meaningless without the `Access-Control-Allow-Origin` decision that only the mount
+ * owns.
  */
 export const STREAM_READ_EXPOSED_HEADERS: readonly string[] = [
   "stream-next-offset",
@@ -153,12 +223,71 @@ export const STREAM_READ_EXPOSED_HEADERS: readonly string[] = [
 ];
 
 /**
- * The edge: gate, then proxy bytes.
+ * A durable-streams long-poll body as the transform stage handles it.
  *
- * There is no per-read filtering and no per-read rewriting here, and that absence is the design.
- * Predicates were resolved at shape creation and redaction was pre-computed in Postgres, so what
- * remains is a decision and a copy — which is why this can sit in the TypeScript control-plane
- * process without CPU being the axis that decides where it belongs.
+ * Deliberately NOT `StreamEnvelope`: the gate is a proxy, and typing the body as the contract would
+ * assert that the edge validates a wire form it only ever forwards. All it needs to know is that an
+ * envelope may carry a `value` object — a delete envelope is key-only, so it has nothing to rewrite
+ * and nothing to disclose.
+ */
+interface ProxiedEnvelope {
+  value?: unknown;
+  [key: string]: unknown;
+}
+
+/**
+ * The response headers a rewritten body may be answered with.
+ *
+ * `cache-control: private, no-store` is the governing invariant, not a precaution: a transform makes
+ * the bytes a function of the SUBJECT, so nothing between this edge and the browser that requested
+ * them may share or store them. `etag` goes for the same reason — an upstream validator describes the
+ * bytes durable-streams holds, not the ones we just produced, and honouring it would let a
+ * revalidation return another subject's rewrite. `content-length` and `content-encoding` describe a
+ * body that no longer exists: the length changed under the rewrite, and `fetch` already decoded what
+ * it handed us.
+ *
+ * Everything else is kept VERBATIM — every `stream-*` header and the content type. The client's whole
+ * read loop drives off them (see {@link STREAM_READ_EXPOSED_HEADERS}); an edge that dropped
+ * `stream-next-offset` while rewriting would present as a hot loop, not as a redaction bug.
+ */
+function rewrittenEgressHeaders(upstream: Headers): Headers {
+  const headers = new Headers(upstream);
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  headers.delete("etag");
+  headers.set("cache-control", "private, no-store");
+  return headers;
+}
+
+/** Whether this read asks for SSE framing, by either of the two ways the ds protocol expresses it. */
+function asksForSse(request: Request): boolean {
+  return (
+    new URL(request.url).searchParams.get("live") === "sse" ||
+    (request.headers.get("accept") ?? "").includes("text/event-stream")
+  );
+}
+
+/**
+ * The edge: gate, then proxy bytes — rewriting them only for the shapes that declare a rewrite.
+ *
+ * There is no per-read FILTERING here at all, and no per-read rewriting for shapes that declare none.
+ * Predicates were resolved at shape creation, so what remains for almost every read is a decision and
+ * a copy — which is why this can sit in the TypeScript control-plane process without CPU being the
+ * axis that decides where it belongs.
+ *
+ * A shape that declares `serverProjection.rowTransform` is the one exception: it is rewritten HERE,
+ * per request, with the subject taken from the stream token, and answered `private, no-store`. This
+ * is the rewriting origin ADR-0055 decision 5 names, confined to the shapes that incur it — a
+ * transform shape gives up CDN shareability and SSE framing, and every other shape gives up nothing.
+ * The transform's `serverOnlyColumns` are fetched by the engine so the transform can read them and
+ * are stripped here, after it runs, to the columns the client's local table declares.
+ *
+ * The claims a transform sees at the edge are `{ sub }` and nothing else: a stream token carries the
+ * subject, not the JWT it was minted from, and re-deriving richer claims per read would put an auth
+ * provider call on the read path this whole topology exists to keep off it. A transform that needs
+ * more than the subject is therefore NOT expressible at egress — put the subject-dependent part in
+ * the shape's private `rowFilter.customPredicate`, which is compiled at subscribe time from the full
+ * verified claims.
  */
 export function createStreamGate(options: StreamGateOptions) {
   const doFetch = options.fetch ?? fetch;
@@ -173,21 +302,85 @@ export function createStreamGate(options: StreamGateOptions) {
       });
     }
 
+    // Resolved by shapeKey, exactly as the control plane resolved it to create the shape, so the edge
+    // and the control plane cannot disagree about which declaration governs this stream.
+    const entry = resolveEntryByShapeKey(options.registry, decision.grant.shapeKey);
+    const transform: RowTransform | undefined = entry?.serverProjection?.rowTransform;
+
+    // Refused BEFORE the upstream fetch: the rewrite needs a whole JSON body per response, and SSE
+    // delivers a frame stream instead. Parsing that would mean a second body parser for a mode no
+    // pgxsinkit client uses, so the mode is declined rather than half-supported.
+    if (transform != null && asksForSse(request)) {
+      return new Response(
+        JSON.stringify({ error: "this shape is rewritten at egress and is served as JSON long-poll only" }),
+        { status: 406, headers: { "content-type": "application/json" } },
+      );
+    }
+
     // Forward the ds protocol's own query string untouched — offsets and the live flag are the
     // protocol's, not ours, and rewriting them is how a proxy ends up owning a contract it does not
     // define. The token does NOT travel on: durable-streams has no read authorization in any
     // implementation, so it would only be an unread secret sitting in another service's logs.
-    const upstream = new URL(`${base}/${path}`);
-    upstream.search = new URL(request.url).search;
+    const upstreamUrl = new URL(`${base}/${path}`);
+    upstreamUrl.search = new URL(request.url).search;
 
     const forwarded = new Headers(request.headers);
     forwarded.delete("authorization");
     forwarded.delete("host");
 
-    return doFetch(upstream, {
-      method: request.method,
-      headers: forwarded,
-      signal: request.signal,
+    const init: RequestInit = { method: request.method, headers: forwarded, signal: request.signal };
+
+    // The pass-through path hands back the upstream Response OBJECT, untouched. Not "an equivalent
+    // response" — the same one, so a shape that declares no transform pays nothing for the existence
+    // of this stage and keeps whatever caching headers durable-streams answered with.
+    if (transform == null || entry == null) return doFetch(upstreamUrl, init);
+
+    const upstream = await doFetch(upstreamUrl, init);
+    const headers = rewrittenEgressHeaders(upstream.headers);
+
+    // 204 long-poll timeouts, 304s, upstream errors, and HEAD probes: nothing to rewrite, but they
+    // are still answers about a subject-dependent stream, so they leave with the same no-store,
+    // no-etag posture. HEAD belongs here because it answers `application/json` with NO body — parsing
+    // it would throw on a request that is only asking for the headers.
+    if (
+      request.method === "HEAD" ||
+      upstream.status !== 200 ||
+      !(upstream.headers.get("content-type") ?? "").includes("application/json")
+    ) {
+      return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
+    }
+
+    const parsed = (await upstream.json()) as unknown;
+    const isBatch = Array.isArray(parsed);
+    const envelopes = (isBatch ? parsed : [parsed]) as ProxiedEnvelope[];
+
+    // The client keep-set: the columns the LOCAL table declares, computed once per request. Stripping
+    // to it after the transform runs is what keeps `serverOnlyColumns` — fetched by the engine solely
+    // so the transform could read them — off the client wire, and it also drops any key a transform
+    // invented, so an egress rewrite can never widen the shape the client's schema was built for.
+    const keep = new Set(getTableConfig(entry.localTable).columns.map((column) => column.name));
+    const context: RowTransformContext = {
+      claims: { sub: decision.subject },
+      ...(options.params ? { params: options.params } : {}),
+    };
+
+    const rewritten = envelopes.map((envelope) => {
+      const value = envelope?.value;
+      if (value == null || typeof value !== "object") return envelope;
+      const transformed = transform(value as Record<string, unknown>, context);
+      const stripped: Record<string, unknown> = {};
+      for (const [column, cell] of Object.entries(transformed)) {
+        if (keep.has(column)) stripped[column] = cell;
+      }
+      return { ...envelope, value: stripped };
+    });
+
+    // Answered in the shape it arrived in. A ds long-poll body is an array, and the single-object case
+    // is only defensive — re-emitting it as an array would corrupt a body the client can parse today.
+    return new Response(JSON.stringify(isBatch ? rewritten : rewritten[0]), {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers,
     });
   };
 }

@@ -6,8 +6,8 @@ import {
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
-import { compileShapeRequest, resolveEntryByShapeKey } from "./compile";
-import type { EntitlementSet } from "./edge";
+import { compileShapeRequest, fingerprintShapeRequest, resolveEntryByShapeKey } from "./compile";
+import { EntitlementsUnavailableError, type EntitlementSet } from "./edge";
 import { CircuitsEngineError, type CircuitsEngineClient } from "./engine-client";
 import { DEFAULT_STREAM_TOKEN_TTL_SECONDS, mintStreamToken, verifyStreamToken, type StreamGrant } from "./stream-token";
 
@@ -79,6 +79,9 @@ export interface SubscribeOptions {
  *
  * An unknown shapeKey deliberately expands to `[undefined]` and is refused downstream by
  * `compileShapeRequest`, so the message for "no such shape" has exactly one author.
+ *
+ * Throws {@link EntitlementsUnavailableError} when the set exists but cannot be trusted yet — an
+ * outage, not a refusal, and the route turns it into a 503.
  */
 function expandToScopes(
   options: Pick<SubscribeOptions, "registry" | "entitlements">,
@@ -93,7 +96,11 @@ function expandToScopes(
   if (options.entitlements === undefined) {
     return { refusal: "shared-tier shape, but this deployment configured no entitlement set" };
   }
-  if (!options.entitlements.ready) return { refusal: "entitlements unavailable" };
+  // A refusal above, a THROW here, and the difference is permanence. "No entitlement set configured"
+  // is a statement about this deployment that will read the same on every future request. "Not ready"
+  // is a statement about this instant, and answering it with a denial would tell the client it lost
+  // the scope — which makes it clear those rows. See {@link EntitlementsUnavailableError}.
+  if (!options.entitlements.ready) throw new EntitlementsUnavailableError();
   const held = options.entitlements.scopesFor(subject, shapeKey);
   if (held.length === 0) return { refusal: "no entitled scopes" };
   return { scopes: held };
@@ -115,6 +122,11 @@ function expandToScopes(
  * is not a denial and must never be reported as one: a client told "not entitled" truncates that
  * scope and unsubscribes, so reporting an outage that way would turn a transient engine fault into
  * client-side data loss. Engine failures propagate, and the route answers 503.
+ *
+ * An entitlement set that is not `ready` joins it. It is the same shape of failure — a dependency
+ * that cannot answer right now — and the client's response to a denial is the same clear, so it
+ * propagates as {@link EntitlementsUnavailableError} and the route answers 503 too. What stays a
+ * denial is the set being absent altogether: that is a deployment's permanent configuration.
  *
  * Entitlement is checked HERE as well as at the edge, and the duplication is deliberate: this is
  * what stops a shape being created and a capability minted for a scope the subject never held. The
@@ -171,10 +183,27 @@ export async function subscribeToShapes(
         continue;
       }
 
+      // The private tier's grant records WHAT was authorized, not merely that something was. Its
+      // predicate is a function of this subject's claims, and those change under the client's feet —
+      // a role removed mid-session — so the re-mint has to be able to ask whether the shape this
+      // grant points at is still the shape these claims compile to. The fingerprint is how it asks
+      // without storing anything (ADR-0055 decision 6). The shared tier needs none: its predicate is
+      // generated from the scope values, which the entitlement re-check already covers.
+      const fp = compiled.tier === "private" ? { fp: await fingerprintShapeRequest(compiled.request) } : {};
+
       // Deliberately unguarded: see the note above on why an engine fault is not a denial.
       const handle = await options.engine.createShape(compiled.request);
       granted.push({ shapeKey: request.shapeKey, ...scoped, shapeId: handle.shapeId, streamPath: handle.streamPath });
-      grants.push({ path: handle.streamPath, shapeKey: request.shapeKey, ...scoped });
+      // The grant carries the shapeId this `createShape` returned, and that is what makes the release
+      // route possible at all: this join is a refcount the engine will hold forever unless the session
+      // that took it gives it back (see {@link releaseStreamGrants}).
+      grants.push({
+        path: handle.streamPath,
+        shapeKey: request.shapeKey,
+        shapeId: handle.shapeId,
+        ...scoped,
+        ...fp,
+      });
     }
   }
 
@@ -234,6 +263,9 @@ export function createSubscribeHandler(
       if (error instanceof CircuitsEngineError) {
         return Response.json({ error: "sync engine unavailable" }, { status: 503 });
       }
+      if (error instanceof EntitlementsUnavailableError) {
+        return Response.json({ error: "entitlements unavailable" }, { status: 503 });
+      }
       throw error;
     }
 
@@ -247,9 +279,13 @@ export function createSubscribeHandler(
 export interface RefreshResult {
   token?: string;
   expiresAt?: number;
-  /** Grants that survived the live entitlement re-check. */
+  /** Grants that survived re-authorization — see {@link refreshStreamToken} for what that is per tier. */
   granted: StreamGrant[];
-  /** Grants the subject no longer holds. The client truncates each scope and unsubscribes. */
+  /**
+   * Grants the subject may no longer read as granted: a shared scope they have lost, or a private
+   * shape their current claims no longer compile to. The client truncates each and unsubscribes,
+   * then re-subscribes for whatever it is entitled to now.
+   */
   revoked: DeniedSubscription[];
 }
 
@@ -259,16 +295,39 @@ export interface RefreshResult {
  * The expiring token IS the request: its signature proves this control plane issued those grants, so
  * nothing has to be stored server-side to know what the subject held, and the edge stays stateless on
  * both halves. Expiry is deliberately not enforced here — a token is presented for re-mint precisely
- * because it is at or past its TTL — but the signature is, and **entitlement is re-checked live for
- * every grant**. That re-check is what makes the TTL a revocation bound rather than a formality: a
- * subject who lost a scope gets a token without it, and the edge stops serving that stream as soon as
- * the old one lapses.
+ * because it is at or past its TTL — but the signature is, and **every grant is re-authorized**.
+ * That re-check is what makes the TTL a revocation bound rather than a formality.
  *
- * No engine call. The shapes already exist and the client already holds their paths; re-creating them
- * would bump a refcount nothing ever releases.
+ * BOTH TIERS are re-authorized, by the question each tier's authorization actually turns on.
+ *
+ * - Shared: the live entitlement set. Its predicate is generated from the scope values, so it cannot
+ *   drift with the subject; what can change is whether the subject still holds the scope.
+ * - Private: **recompile the shape with the subject's CURRENT claims** and compare the fingerprint
+ *   the grant carries. A private predicate may read ANY verified claim, not only `sub`, so a subject
+ *   demoted mid-session — a role dropped, a tenant changed — is still the same authenticated subject
+ *   and would sail through a check that only re-verified the JWT. Re-verifying the JWT proves the
+ *   bearer is still who they were; it says nothing about whether the shape they hold is still the
+ *   shape their claims compile to, and only recompiling answers that.
+ *
+ * A fingerprint mismatch is a REVOCATION by design, including when the recompiled predicate would
+ * still permit the subject something. The grant names one stream, that stream serves the old
+ * predicate, and this route may not hand out a new one — creating the new shape here would bump an
+ * engine refcount that is only released when the session closes, and this route is not the session's
+ * close. So the grant is revoked, the client re-subscribes, the
+ * control plane creates the shape its current claims compile to, and because the handle differs the
+ * client re-snapshots through ADR-0056 decision 7's must-refetch. No engine call happens here at all.
+ *
+ * `registry` is therefore REQUIRED rather than optional: a refresh route that cannot recompile cannot
+ * re-authorize the private tier, and the only honest alternatives are revoking every private grant or
+ * waving them all through. Both are wrong, so the pairing is a type error instead.
+ *
+ * Throws {@link EntitlementsUnavailableError} rather than revoking when the set cannot be consulted —
+ * the same outage-is-not-a-denial rule {@link subscribeToShapes} follows, and it matters more here:
+ * `revoked` is the wire's clear-this-scope instruction, and this route runs every few minutes for
+ * the life of every subscription.
  */
 export async function refreshStreamToken(
-  options: Pick<SubscribeOptions, "entitlements" | "key" | "ttlSeconds">,
+  options: Pick<SubscribeOptions, "registry" | "entitlements" | "key" | "ttlSeconds" | "params">,
   claims: JwtClaims | null,
   expiringToken: string,
   now: number,
@@ -286,15 +345,53 @@ export async function refreshStreamToken(
   for (const grant of verified.claims.grants) {
     const scoped = grant.scope !== undefined ? { scope: grant.scope } : {};
     if (grant.scope === undefined) {
-      // Private tier: the shape's predicate already fused this subject in, so holding a signed grant
-      // for it IS the entitlement. Nothing further to check.
+      // Private tier: re-authorize by recompiling. See the note above on why the signed grant alone
+      // is not the entitlement — the predicate is a function of claims that may have changed since
+      // it was issued.
+      const compiled = compileShapeRequest(options.registry, {
+        shapeKey: grant.shapeKey,
+        claims,
+        ...(options.params ? { params: options.params } : {}),
+      });
+      if (compiled.outcome === "deny") {
+        revoked.push({ shapeKey: grant.shapeKey, reason: compiled.reason });
+        continue;
+      }
+      if (grant.fp === undefined) {
+        // Nothing to compare against, so nothing that could establish this grant is still the right
+        // one. Fail closed rather than trust it: the recovery is a re-subscribe, which costs the
+        // client a re-snapshot and costs the subject nothing they are still entitled to.
+        revoked.push({
+          shapeKey: grant.shapeKey,
+          reason: "private grant carries no fingerprint and cannot be re-authorized",
+        });
+        continue;
+      }
+      if ((await fingerprintShapeRequest(compiled.request)) !== grant.fp) {
+        revoked.push({ shapeKey: grant.shapeKey, reason: "shape predicate changed for this subject" });
+        continue;
+      }
       granted.push(grant);
       continue;
     }
-    if (options.entitlements === undefined || !options.entitlements.ready) {
-      revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: "entitlements unavailable" });
+    if (options.entitlements === undefined) {
+      // Permanent, and therefore a real revocation: this deployment has no entitlement set, so a
+      // shared grant can never be re-minted and the scope is not coming back.
+      //
+      // Worded as the EDGE words the same condition, and deliberately not as "entitlements
+      // unavailable" — that string is now the 503 outage body, which means the exact opposite here:
+      // an outage says nothing about this subject's scopes and must never clear a row.
+      revoked.push({
+        shapeKey: grant.shapeKey,
+        ...scoped,
+        reason: "shared-tier grant, but this deployment configured no entitlement set",
+      });
       continue;
     }
+    // Transient, and therefore NOT a revocation. `revoked` is an instruction to clear the scope, and
+    // a re-mint is the most routine request on this route — an entitlement subscription that is a few
+    // seconds behind would otherwise empty a subject's store every time it reconnected.
+    if (!options.entitlements.ready) throw new EntitlementsUnavailableError();
     if (!options.entitlements.permits(subject, grant.shapeKey, grant.scope)) {
       revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: "not entitled to this scope" });
       continue;
@@ -310,14 +407,17 @@ export async function refreshStreamToken(
 }
 
 /**
- * The re-mint route. Takes the expiring token, answers with a fresh one and the list of scopes that
- * did not survive the entitlement re-check.
+ * The re-mint route. Takes the expiring token, answers with a fresh one and the list of grants that
+ * did not survive re-authorization — the shared tier's against the live entitlement set, the private
+ * tier's against a recompile with the subject's current claims.
+ *
+ * `registry` for that recompile, and required for the reason {@link refreshStreamToken} gives.
  *
  * 200 even when everything was revoked, for the same reason subscribe answers 200 on a full denial:
  * the per-grant reasons ARE the response, and a client that lost one scope of K needs to know which.
  */
 export function createRefreshHandler(
-  options: Pick<SubscribeOptions, "entitlements" | "key" | "ttlSeconds"> & {
+  options: Pick<SubscribeOptions, "registry" | "entitlements" | "key" | "ttlSeconds" | "params"> & {
     resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
   },
 ) {
@@ -340,7 +440,123 @@ export function createRefreshHandler(
       return Response.json({ error: "unauthenticated" }, { status: 401 });
     }
 
-    const result = await refreshStreamToken(options, claims, body.token, Math.floor(Date.now() / 1000));
+    let result: RefreshResult;
+    try {
+      result = await refreshStreamToken(options, claims, body.token, Math.floor(Date.now() / 1000));
+    } catch (error) {
+      // 503, never a `revoked` list: an entitlement set that cannot answer has said nothing about
+      // this subject's scopes, and a client that read it as a revocation would clear rows it still
+      // holds. The client retries with the token it already has, which the edge keeps honouring
+      // until its TTL lapses.
+      if (error instanceof EntitlementsUnavailableError) {
+        return Response.json({ error: "entitlements unavailable" }, { status: 503 });
+      }
+      throw error;
+    }
+    return Response.json(result);
+  };
+}
+
+/**
+ * Give back the engine claims a token's grants acquired — the close half of subscribe.
+ *
+ * **Why this route exists.** A native `POST /shapes` with a definition the engine already holds does
+ * not create a second shape: it JOINS the existing one and increments its refcount. That refcount is
+ * load-bearing rather than bookkeeping — `refcount > 0` blocks both dormancy and eviction, precisely
+ * because native durable-streams reads bypass the engine entirely, so the refcount is the only thing
+ * that tells it a reader it cannot see still exists. Without a release, every shape any subject ever
+ * subscribed to stays active and tailer-maintained forever, across restarts, and `max_shapes` has
+ * nothing dormant left to evict.
+ *
+ * **The token IS the request**, exactly as on the re-mint path: its signature proves this control
+ * plane minted these grants, so nothing has to be stored server-side to know what was acquired.
+ * Verified with `allowExpired`, and that is not a weakening — a session releases at CLOSE, which is
+ * routinely past a 5-minute TTL, and expiry bounds how long a grant keeps *working*, not what it
+ * proves was issued. A release grants its bearer nothing; the only thing it can do is give away
+ * claims that this token's own subject holds.
+ *
+ * **ONE release per GRANT, deliberately not deduplicated by `shapeId`.** Two grants naming one shape
+ * are two joins — the engine deduplicated identical definitions and counted both (ADR-0055 decision
+ * 6) — so collapsing them here would return one of two claims and leak the other permanently.
+ *
+ * **The client's obligation is AT MOST ONCE, and it must never retry.** The engine's
+ * `DELETE /shapes/{id}` carries no claim identity: it decrements the shared refcount and cannot tell
+ * whose claim it just dropped. So the two failure modes are wildly asymmetric. A LOST release leaves
+ * one claim too many — the status quo before this route existed, bounded to sessions that crashed or
+ * were unloaded, and self-correcting only when the process is restarted. A DOUBLE release *steals
+ * another subscriber's claim*, which can park a shape dormant underneath a live reader that is still
+ * following its stream. Best-effort and silent beats retried and correct-looking; the robust form —
+ * engine-side claim leases, where release is by claim id and therefore idempotent — is backlog 0012.
+ *
+ * Refusals are refusals, not no-ops: a bad signature or a mismatched subject answers an error rather
+ * than `{ released: 0 }`, because a token presented by anyone but its own subject is not a release,
+ * it is an attempt to drop the victim's claims.
+ */
+export async function releaseStreamGrants(
+  options: { engine: CircuitsEngineClient; key: CryptoKey },
+  claims: JwtClaims | null,
+  token: string,
+  now: number,
+): Promise<{ released: number } | { refused: string }> {
+  const subject = typeof claims?.sub === "string" && claims.sub !== "" ? claims.sub : null;
+  if (subject === null) return { refused: "unauthenticated" };
+
+  const verified = await verifyStreamToken(options.key, token, now, { allowExpired: true });
+  if (!verified.ok) return { refused: verified.reason };
+  if (verified.claims.sub !== subject) return { refused: "token subject does not match the caller" };
+
+  for (const grant of verified.claims.grants) {
+    await options.engine.releaseShape(grant.shapeId);
+  }
+  return { released: verified.claims.grants.length };
+}
+
+/**
+ * The release route: the token a session was given, back at its close.
+ *
+ * 403 rather than 200 on a refusal — see {@link releaseStreamGrants} for why a refused release must
+ * be visible. 401 when the caller has no subject, the same rule subscribe and re-mint follow: an
+ * unauthenticated call is a credential problem, and it is the one thing here a client could fix.
+ */
+export function createReleaseHandler(
+  options: {
+    engine: CircuitsEngineClient;
+    key: CryptoKey;
+  } & {
+    resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
+  },
+) {
+  return async function handleRelease(request: Request): Promise<Response> {
+    let body: { token?: string };
+    try {
+      body = (await request.json()) as { token?: string };
+    } catch {
+      return Response.json({ error: "malformed body" }, { status: 400 });
+    }
+    if (typeof body.token !== "string") {
+      return Response.json({ error: "token must be a string" }, { status: 400 });
+    }
+
+    const claims = options.resolveAuthClaims ? await options.resolveAuthClaims(request) : null;
+    if (typeof claims?.sub !== "string" || claims.sub === "") {
+      return Response.json({ error: "unauthenticated" }, { status: 401 });
+    }
+
+    let result: { released: number } | { refused: string };
+    try {
+      result = await releaseStreamGrants(options, claims, body.token, Math.floor(Date.now() / 1000));
+    } catch (error) {
+      // An engine that could not answer has not dropped the claims, and the client must NOT come back
+      // to try again — a release it believes was lost may in fact have landed, and the retry is the
+      // double release. 503 says "this deployment, not you"; the claims leak until the engine grows
+      // leases (backlog 0012).
+      if (error instanceof CircuitsEngineError) {
+        return Response.json({ error: "sync engine unavailable" }, { status: 503 });
+      }
+      throw error;
+    }
+
+    if ("refused" in result) return Response.json({ error: result.refused }, { status: 403 });
     return Response.json(result);
   };
 }
@@ -348,6 +564,7 @@ export function createRefreshHandler(
 /** The control-plane paths the native read path mounts. */
 export const subscribePath = "/sync/v1/subscribe";
 export const refreshPath = "/sync/v1/refresh";
+export const releasePath = "/sync/v1/release";
 
 /**
  * The convergence-barrier route (ADR-0056 decision 4).
@@ -356,10 +573,10 @@ export const refreshPath = "/sync/v1/refresh";
  * client-reachable, so surfacing the barrier on our own authenticated endpoint costs nothing and
  * keeps the trust boundary intact.
  *
- * `maxAgeSeconds` may cache the answer briefly, but only a HEALTHY one. For the `sync` and
- * `pendingFlips` terms staleness is safe in exactly one direction — it moves the barrier backwards,
- * so a stale reading can only DELAY an alignment, never satisfy one falsely. `flipFailures` inverts
- * that: a cached pre-degradation zero would let a group align against an engine that has already
+ * `maxAgeSeconds` may cache the answer briefly, but only a HEALTHY one. For the `pendingFlips` term
+ * staleness is safe in exactly one direction — it moves the barrier backwards, so a stale reading can
+ * only DELAY an alignment, never satisfy one falsely. `flipFailures` inverts that: a cached
+ * pre-degradation zero would let a group align against an engine that has already
  * lost membership effects, which is precisely the alignment the term exists to refuse. So a degraded
  * reading is never cached and never served from cache, and the cache window is exactly the bound on
  * how long a client may align against a freshly-degraded engine — which is why the default is 0.
@@ -384,7 +601,7 @@ export function createBarrierHandler(options: {
     if (cached && now - cached.at < maxAge) return Response.json(cached.body);
 
     const state = await options.engine.replicationState();
-    const body = { sync: state.sync, pendingFlips: state.pendingFlips, flipFailures: state.flipFailures };
+    const body = { pendingFlips: state.pendingFlips, flipFailures: state.flipFailures };
     cached = body.flipFailures > 0 ? null : { at: now, body };
     return Response.json(body);
   };
@@ -394,7 +611,6 @@ export const barrierPath = "/sync/v1/barrier";
 
 /** The barrier as the client reads it — the engine's LSN is operator detail and stays server-side. */
 interface BarrierBody {
-  sync: boolean;
   pendingFlips: number;
   /** Abandoned flip batches. Non-zero is terminal for a group reading it, and is never cached. */
   flipFailures: number;

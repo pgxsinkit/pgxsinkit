@@ -93,6 +93,18 @@ export interface ShapeStreamSubscription {
  * than silently on a background loop) and hands back a subscription that keeps delivering until
  * closed.
  *
+ * `onEnd` is not optional decoration — without it every mid-session stream death is SILENT.
+ * `stream()`'s own `onError` option wraps only the OPENING request; every later long-poll goes
+ * through the response's internal `fetchNext`, where a non-2xx throws into the body stream's pull,
+ * is marked on the response and ends the `subscribeJson` loop. Nothing calls the batch subscriber
+ * again and nothing throws at the caller: the stream simply stops, the rows stay, and nobody
+ * re-subscribes. The one place that condition is observable is the response's `closed` promise —
+ * it REJECTS on a terminal read error (a `403` past a re-mint, a `404`/`410` on an evicted stream,
+ * a lost connection) and RESOLVES on a normal end (`live: false` reaching up-to-date,
+ * `Stream-Closed`, or our own {@link ShapeStreamSubscription.close}). So `onEnd(null)` means "this
+ * read is over and nothing failed"; `onEnd(error)` is the mid-session reset (ADR-0056 decision 7)
+ * that a caller must answer with a re-subscribe.
+ *
  * The transport only. Everything above it — the fold, apply modes, the boot gate — stays
  * pgxsinkit's, which is ADR-0009's precedent applied to a new substrate: keep the transport,
  * internalize the semantics.
@@ -100,6 +112,7 @@ export interface ShapeStreamSubscription {
 export async function readShapeStream(
   options: StreamSourceOptions,
   onBatch: (batch: StreamBatch) => void | Promise<void>,
+  onEnd?: (error: Error | null) => void,
 ): Promise<ShapeStreamSubscription> {
   const response = await stream<StreamEnvelope>({
     url: options.url,
@@ -129,5 +142,24 @@ export async function readShapeStream(
     });
   });
 
-  return { close: unsubscribe };
+  // Our OWN close is not an end worth reporting: the caller asked for it, and a group tearing its
+  // streams down would otherwise hear K "the stream ended" reports and try to recover from a stop it
+  // ordered. `cancel()` resolves `closed` rather than rejecting it, so this suppresses a normal end;
+  // the flag also covers the race where a close lands while a read error is already in flight.
+  let closedByCaller = false;
+  void response.closed.then(
+    () => {
+      if (!closedByCaller) onEnd?.(null);
+    },
+    (error: unknown) => {
+      if (!closedByCaller) onEnd?.(error instanceof Error ? error : new Error(String(error)));
+    },
+  );
+
+  return {
+    close: () => {
+      closedByCaller = true;
+      unsubscribe();
+    },
+  };
 }

@@ -108,11 +108,14 @@ requirement** for the third:
   `/sync/v1/subscribe`, `/sync/v1/refresh` and `/sync/v1/barrier`. It answers per-subject questions and
   mints stream tokens, so it is **never cacheable**: force `cache-control: no-store`. Its upstream is
   the Circuits engine's control API, which must not be client-reachable.
-- **edge** (`stream`) — `createStreamGate({ key, durableStreamsUrl })` mounted at `/v1/stream`. It
-  needs **no claims resolver and no database**: the stream token _is_ the authorization, which is what
-  lets this half scale and cache independently of the one that answers per-subject questions. Set its
-  idle/wall-clock timeout **above** the durable-streams long-poll hold so a live subscription is not
-  recycled mid-cycle.
+- **edge** (`stream`) — `createStreamGate({ key, registry, durableStreamsUrl })` mounted at
+  `/v1/stream`. It needs **no claims resolver and no database**: the stream token _is_ the
+  authorization, which is what lets this half scale and cache independently of the one that answers
+  per-subject questions. It does need the same `registry` the control plane compiles shapes from, so it
+  can tell which shapes declare a `serverProjection.rowTransform` and must be rewritten per read (those
+  are answered `private, no-store`; every other shape is proxied untouched). Set its idle/wall-clock
+  timeout **above** the durable-streams long-poll hold so a live subscription is not recycled
+  mid-cycle.
 
 **Put the edge on its own origin.** The cache key is the URL, so the surface a CDN may share between
 subscribers has to be addressable apart from the one that answers per-subject questions. Mounting them
@@ -126,8 +129,8 @@ private one.
   headers are simply *not there*. `@durable-streams/client` steers its whole read loop off them (`Stream-Next-Offset`,
   `Stream-Cursor`, `Stream-Closed`, `Stream-Up-To-Date`), so stripped of them it never learns an offset, never switches
   to a live long poll, and re-requests from the start of the stream in a hot loop — hundreds of requests per second per
-  shape, with no error raised on either side. `createStreamGate` cannot do this for you: it returns the upstream
-  response unchanged, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision only the
+  shape, with no error raised on either side. `createStreamGate` cannot do this for you: it forwards the upstream
+  response's headers, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision only the
   mount makes. **Do not rely on the gateway** — a permissive `expose_headers: "*"` at istio/Envoy makes the mount look
   correct behind that one deployment and hot-loop everywhere else.
 </Aside>

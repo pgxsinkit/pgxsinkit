@@ -82,6 +82,7 @@ describe("demo membership sync (readonly workspaces + members + work_items) inte
     // adapter with the write route (ADR-0003) — no framework wrapper needed.
     stack = await startNativeSyncStack({
       env,
+      registry: membershipFanoutSyncRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: membershipFanoutSyncRegistry,

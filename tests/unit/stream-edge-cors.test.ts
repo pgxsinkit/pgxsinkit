@@ -53,7 +53,7 @@ describe("stream edge CORS exposure", () => {
     const now = Math.floor(Date.now() / 1000);
     const token = await mintStreamToken(await importStreamTokenKey(secret), {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeKey: "issues" }],
+      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "issues" }],
       now,
     });
 

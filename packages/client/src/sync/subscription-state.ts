@@ -3,7 +3,7 @@
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 
-import { quoteIdentifier } from "@pgxsinkit/contracts";
+import { quoteIdentifier, type PredicateValue } from "@pgxsinkit/contracts";
 
 import { renderCreateTableSql } from "../schema";
 import { drizzleOverPg } from "./drizzle-executor";
@@ -20,6 +20,24 @@ export interface ShapeSubscriptionState {
   handle: string;
   /** Opaque, per-stream, lexicographically ordered. Never compared across streams. */
   offset: string;
+  /**
+   * The registry shape this entry is a reader of.
+   *
+   * Persisted so a later subscribe can say what a stored entry WAS, not merely that it exists. The
+   * map key is a logical shape name the client mints (shape key plus scope), which is enough to match
+   * an entry against a fresh grant but carries no way back to the registry — and the reconcile at
+   * subscribe (ADR-0055 decision 6) needs exactly that: a scope the control plane no longer grants has
+   * to be resolved to its spec before its rows can be cleared.
+   */
+  shapeKey: string;
+  /**
+   * Shared tier only: the scope values this reader's grant named, in the shape's declared column
+   * order. Absent for the private tier, whose subject arrives in the claims instead.
+   *
+   * `readonly` because a persisted tuple is a record of what was granted, never something to edit —
+   * which also lets a grant's own `readonly PredicateValue[]` be stored without a defensive copy.
+   */
+  scope?: readonly PredicateValue[];
 }
 
 export interface GetSubscriptionStateOptions {

@@ -107,8 +107,15 @@ Clients address neither the engine nor durable-streams directly in a deployed sy
 authorization is split across the two surfaces above: the control plane decides **what a subject may
 subscribe to** and mints a capability saying so, and the edge decides **whether that capability still
 grants this stream** on every read. Predicates were resolved at shape creation, so there is no
-per-read filtering and no per-read rewriting at the edge — it is a gate, not a pipeline — and an
-entitlement set that is catching up, stale or unavailable **denies**.
+per-read filtering at the edge and — for every shape that declares no egress transform — no per-read
+rewriting either: it is a gate, not a pipeline. An entitlement set that is catching up, stale or
+unavailable **denies**.
+
+The one exception is a shape declaring
+[`serverProjection.rowTransform`](/concepts/registry-entry-options/#serverprojection). The edge rewrites
+those rows per request with the reader's subject and answers `cache-control: private, no-store`, so such
+a shape is never CDN-shareable and is served as JSON long-poll only. That cost is confined to the shapes
+that declare one.
 
 Losing entitlement means losing the _subscription_, not losing rows: the client takes `403` on its
 next poll, truncates that scope, and unsubscribes.

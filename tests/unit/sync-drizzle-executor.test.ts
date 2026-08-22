@@ -103,11 +103,11 @@ describe("metadata provisioning round-trip (ADR-0029)", () => {
     // subscriptions_metadata round-trip (key TEXT PK, shape_metadata JSONB NOT NULL, last_lsn TEXT NOT NULL).
     await db.insert(subscriptionsMetadata).values({
       key: "k1",
-      shape_metadata: { shapeA: { handle: "h1", offset: "0_0" } },
+      shape_metadata: { shapeA: { handle: "h1", offset: "0_0", shapeKey: "a" } },
       last_lsn: "42",
     });
     const subs = await db.select().from(subscriptionsMetadata).where(eq(subscriptionsMetadata.key, "k1"));
-    expect(subs[0]?.shape_metadata).toEqual({ shapeA: { handle: "h1", offset: "0_0" } });
+    expect(subs[0]?.shape_metadata).toEqual({ shapeA: { handle: "h1", offset: "0_0", shapeKey: "a" } });
     expect(subs[0]?.last_lsn).toBe("42");
 
     // shape_row_tags round-trip (composite PK, so ON CONFLICT DO NOTHING is a no-op on a dup).
@@ -136,13 +136,13 @@ describe("metadata provisioning round-trip (ADR-0029)", () => {
       pg,
       metadataSchema: META,
       subscriptionKey: "sub1",
-      shapeMetadata: { s: { handle: "h", offset: "1_2" } },
+      shapeMetadata: { s: { handle: "h", offset: "1_2", shapeKey: "s" } },
       lastLsn: 7n,
     });
     const state = await getSubscriptionState({ pg, metadataSchema: META, subscriptionKey: "sub1" });
     expect(state).toEqual({
       key: "sub1",
-      shape_metadata: { s: { handle: "h", offset: "1_2" } },
+      shape_metadata: { s: { handle: "h", offset: "1_2", shapeKey: "s" } },
       last_lsn: 7n,
     });
 
@@ -151,12 +151,12 @@ describe("metadata provisioning round-trip (ADR-0029)", () => {
       pg,
       metadataSchema: META,
       subscriptionKey: "sub1",
-      shapeMetadata: { s: { handle: "h2", offset: "3_4" } },
+      shapeMetadata: { s: { handle: "h2", offset: "3_4", shapeKey: "s" } },
       lastLsn: 9n,
     });
     const updated = await getSubscriptionState({ pg, metadataSchema: META, subscriptionKey: "sub1" });
     expect(updated?.last_lsn).toBe(9n);
-    expect(updated?.shape_metadata).toEqual({ s: { handle: "h2", offset: "3_4" } });
+    expect(updated?.shape_metadata).toEqual({ s: { handle: "h2", offset: "3_4", shapeKey: "s" } });
 
     await pg.close();
   });

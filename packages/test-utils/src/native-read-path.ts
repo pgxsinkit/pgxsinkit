@@ -1,3 +1,4 @@
+import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 import {
   createCircuitsEngineClient,
   createStreamGate,
@@ -22,6 +23,14 @@ import type { IntegrationEnv } from "./env";
  */
 export interface NativeReadPathOptions {
   env: Pick<IntegrationEnv, "circuitsEngineUrl" | "durableStreamsUrl">;
+  /**
+   * The registry whose shapes this lane serves — required, exactly as it is on `createStreamGate`.
+   *
+   * The edge resolves each granted shape by key to learn whether it declares an egress
+   * `serverProjection.rowTransform`, so a lane that withheld the registry would test a read path that
+   * cannot rewrite — and would pass while production leaked (ADR-0055 decision 5).
+   */
+  registry: SyncTableRegistry;
   /**
    * The shared tier's entitlement set. Omit for a registry of private-tier shapes only — subscribe
    * and the edge then both refuse a shared grant instead of inventing an answer.
@@ -60,6 +69,7 @@ export async function startNativeReadPath(options: NativeReadPathOptions): Promi
 
   const handleStreamRead = createStreamGate({
     key,
+    registry: options.registry,
     ...(options.entitlements ? { entitlements: options.entitlements } : {}),
     durableStreamsUrl: options.env.durableStreamsUrl,
   });

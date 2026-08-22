@@ -98,10 +98,37 @@ export interface SubscriptionSession {
    *
    * Hand this straight to the sync engine: it is called per request, so a token that expires mid-poll
    * is replaced without the subscription noticing.
+   *
+   * It rejects for exactly one reason — every grant was revoked, so there is no bearer left to send.
+   * A control plane that could not be reached is NOT that reason: see {@link SubscriptionSession.refresh}.
    */
   token: () => Promise<string>;
-  /** Force a re-mint now — what a 403 from the edge should trigger. Null when nothing survived. */
+  /**
+   * Force a re-mint now — what a 403 from the edge should trigger. Null when nothing survived.
+   *
+   * A re-mint that FAILS (the control plane is down, unreachable, or answering 5xx) resolves with the
+   * token already held rather than rejecting. This is the ADR-0013 "the deployment being down is not
+   * the subject's problem" rule applied at the one place it is easy to get wrong: this promise is
+   * awaited inside `@durable-streams/client`'s header thunk, and a rejection there kills the read
+   * with no path back — the very silence backlog 0010 is about. The held token is still good for up
+   * to `refreshSkewSeconds`, and when it truly lapses the edge answers 403, the stream ends, and the
+   * group re-subscribes (`startCircuitsSync`'s `scheduleRestart`) — which is where a 401 surfaces as
+   * `onAuthError` and a 503 as a retried subscribe, both of them recoverable and both of them
+   * visible.
+   */
   refresh: () => Promise<string | null>;
+  /**
+   * Close the session and hand its engine shape claims back — **best-effort, at most once**.
+   *
+   * Synchronous and fire-and-forget by design. Every grant this session was given is a refcount the
+   * engine holds (a `POST /shapes` join), and `refcount > 0` blocks both dormancy and eviction, so a
+   * session that never released leaves its shapes active and tailer-maintained forever. But the
+   * engine's `DELETE /shapes/{id}` carries no claim identity — it decrements a shared counter — so a
+   * release sent TWICE takes a claim that belongs to somebody else, and can park a shape underneath a
+   * live reader. That asymmetry is why this fires exactly one request, never retries it, and never
+   * reports whether it landed: a lost release costs one leaked claim, a duplicated one costs another
+   * subscriber's stream.
+   */
   close: () => void;
 }
 
@@ -128,6 +155,18 @@ export async function openSubscriptionSession(
   let expiresAt = 0;
   let inFlight: Promise<string | null> | null = null;
   let closed = false;
+  /**
+   * The token the SUBSCRIBE answered with, kept for the whole life of the session.
+   *
+   * Deliberately not `currentToken`. A re-mint only ever DROPS grants — it re-authorizes each one and
+   * omits the ones that no longer pass — so the first token is a superset of every later one, and it
+   * is the only record of the full set of engine claims this session acquired. Releasing with the
+   * live token after a revocation narrowed it would leak exactly the claims that were revoked, which
+   * are the ones nothing else will ever come back for. The release route verifies with `allowExpired`
+   * precisely so this stays usable at close, long past its TTL.
+   */
+  let initialToken: string | null = null;
+  let releaseSent = false;
 
   async function post(path: string, body: unknown): Promise<Record<string, unknown>> {
     const headers = new Headers(await (options.authHeaders?.() ?? {}));
@@ -149,6 +188,7 @@ export async function openSubscriptionSession(
   const refused = (result["denied"] ?? []) as RefusedStream[];
 
   currentToken = (result["token"] as string | undefined) ?? null;
+  initialToken = currentToken;
   expiresAt = (result["expiresAt"] as number | undefined) ?? 0;
 
   const granted: GrantedStream[] = grantedRaw.map((entry) => ({
@@ -164,6 +204,18 @@ export async function openSubscriptionSession(
    *
    * K subscriptions share one token, so K concurrent polls hitting expiry at once would otherwise
    * fire K refreshes for the same window — the exact fan-out ADR-0055 batches the token to avoid.
+   *
+   * A FAILED re-mint keeps the current token and its expiry, and resolves with it. Not leniency:
+   * this runs inside the read's header thunk, so rejecting would take the stream down silently and
+   * permanently, and it would do so for a condition that is routinely transient — a control plane
+   * restarting, a 503 while the entitlement set catches up (which that route answers precisely so a
+   * client does NOT clear anything), a laptop between networks. The held token stays valid for up to
+   * the refresh skew; past that the edge refuses it, the read ends, and the group's restart path
+   * re-subscribes — the loud, recoverable version of the same failure.
+   *
+   * The expiry is not moved either, so the next {@link token} call asks again: a failing control
+   * plane is re-tried once per poll cycle, and the first answer that lands restores the lifecycle
+   * without anything having noticed.
    */
   async function refresh(): Promise<string | null> {
     if (closed || currentToken === null) return null;
@@ -177,6 +229,10 @@ export async function openSubscriptionSession(
 
         currentToken = (refreshed["token"] as string | undefined) ?? null;
         expiresAt = (refreshed["expiresAt"] as number | undefined) ?? 0;
+        return currentToken;
+      } catch {
+        // `currentToken`/`expiresAt` deliberately untouched: the answer that would have replaced them
+        // never arrived, and the one thing worse than a stale token here is no token at all.
         return currentToken;
       } finally {
         inFlight = null;
@@ -193,7 +249,44 @@ export async function openSubscriptionSession(
       const refreshed = await refresh();
       if (refreshed !== null) return refreshed;
     }
+    // A refresh that revoked every grant leaves `currentToken` null: the stream-source header thunk
+    // needs a usable bearer, and `Bearer null` is not a state — fail here rather than on the wire.
+    if (currentToken === null) throw new Error("[pgxsinkit] no stream token — every grant was revoked on refresh");
     return currentToken;
+  }
+
+  /**
+   * The one release request, built by hand rather than through {@link post}, for two reasons that are
+   * both about it actually leaving the process.
+   *
+   * NO `options.signal`. Group teardown aborts that controller BEFORE it closes its sessions, so a
+   * release riding it would be cancelled in the same tick it was created — the teardown path is
+   * exactly the one that most needs the claims back.
+   *
+   * `keepalive`, so a page unload does not cancel it either: closing a tab is the single most common
+   * way a session ends, and a release that dies with the document is the leak this route exists to
+   * stop.
+   *
+   * Errors are SWALLOWED and nothing is retried. That is the at-most-once rule, not laziness — the
+   * engine's `DELETE /shapes/{id}` is not idempotent (no claim identity, a bare refcount decrement),
+   * so a retry that races a first attempt which actually landed would steal another subscriber's
+   * claim. One lost claim is the tolerable failure; two claims dropped for one join is not.
+   */
+  function sendRelease(releaseToken: string): void {
+    void (async () => {
+      try {
+        const headers = new Headers(await (options.authHeaders?.() ?? {}));
+        headers.set("content-type", "application/json");
+        await doFetch(`${controlPlane}/sync/v1/release`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ token: releaseToken }),
+          keepalive: true,
+        });
+      } catch {
+        // Deliberately silent: see above.
+      }
+    })();
   }
 
   return {
@@ -203,6 +296,12 @@ export async function openSubscriptionSession(
     refresh,
     close: () => {
       closed = true;
+      // A session that was granted nothing holds no claim and has nothing to give back. The
+      // `releaseSent` latch is what makes a second `close()` — a stop racing a teardown, say — a no-op
+      // rather than a double release.
+      if (initialToken === null || releaseSent) return;
+      releaseSent = true;
+      sendRelease(initialToken);
     },
   };
 }
@@ -243,6 +342,6 @@ export function createBarrierReader(
           `plane that cannot report lost membership effects is not one this client can align against.`,
       );
     }
-    return { sync: body.sync === true, pendingFlips: body.pendingFlips, flipFailures: body.flipFailures };
+    return { pendingFlips: body.pendingFlips, flipFailures: body.flipFailures };
   };
 }

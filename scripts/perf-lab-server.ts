@@ -35,10 +35,12 @@ import {
   createBarrierHandler,
   createCircuitsEngineClient,
   createRefreshHandler,
+  createReleaseHandler,
   createStreamGate,
   createSubscribeHandler,
   importStreamTokenKey,
   refreshPath,
+  releasePath,
   STREAM_READ_EXPOSED_HEADERS,
   subscribePath,
 } from "../packages/server/src/circuits/index";
@@ -332,8 +334,6 @@ const engine = createCircuitsEngineClient({ baseUrl: circuitsEngineUrl });
 const streamTokenKey = await importStreamTokenKey("perf-lab-stream-token-secret");
 const resolveAuthClaims = (request: Request) => parseDemoAuthClaimsFromRequest(request);
 
-const handleStreamRead = createStreamGate({ key: streamTokenKey, durableStreamsUrl });
-
 function requireActiveRegistry(): PreparedPerfRegistry | null {
   return activeRegistry;
 }
@@ -346,13 +346,33 @@ app.post(subscribePath, async (context) => {
   );
 });
 
-app.post(refreshPath, (context) => createRefreshHandler({ key: streamTokenKey, resolveAuthClaims })(context.req.raw));
+// Built per request over the active registry for the same reason subscribe is, and now for a second:
+// the re-mint recompiles every private-tier grant to re-authorize it, so it needs the registry the
+// grant was compiled from.
+app.post(refreshPath, async (context) => {
+  const registry = requireActiveRegistry();
+  if (!registry) return context.json({ message: "Perf-lab registry is not ready yet." }, 503);
+  return createRefreshHandler({ registry: registry.registry, key: streamTokenKey, resolveAuthClaims })(context.req.raw);
+});
+
+// The close half of subscribe: every grant is an engine refcount, and `refcount > 0` blocks dormancy
+// and eviction, so a lab that only ever subscribed would grow its shape set for the life of the
+// process. No registry needed — the token carries the claims to give back.
+app.post(releasePath, (context) =>
+  createReleaseHandler({ engine, key: streamTokenKey, resolveAuthClaims })(context.req.raw),
+);
 
 app.get(barrierPath, (context) => createBarrierHandler({ engine, resolveAuthClaims })(context.req.raw));
 
-app.get(`${PERF_LAB_STREAM_MOUNT_PATH}/*`, (context) => {
+// Built per request over the active registry for the same reason subscribe and re-mint are: the edge
+// resolves each granted shapeKey in the registry to learn whether it must rewrite the stream's bytes
+// (ADR-0055 decision 5), so a gate captured before provisioning would be reading a registry that does
+// not yet describe the shapes it is serving. 503 before provisioning, mirroring the other two routes.
+app.get(`${PERF_LAB_STREAM_MOUNT_PATH}/*`, async (context) => {
+  const registry = requireActiveRegistry();
+  if (!registry) return context.json({ message: "Perf-lab registry is not ready yet." }, 503);
   const { pathname } = new URL(context.req.url);
-  return handleStreamRead(
+  return createStreamGate({ key: streamTokenKey, registry: registry.registry, durableStreamsUrl })(
     context.req.raw,
     pathname.slice(PERF_LAB_STREAM_MOUNT_PATH.length + 1),
     Math.floor(Date.now() / 1000),

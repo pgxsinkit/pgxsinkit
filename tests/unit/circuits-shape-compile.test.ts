@@ -196,7 +196,7 @@ it("refuses a replication state missing a barrier term", async () => {
   const client = createCircuitsEngineClient({
     baseUrl: "http://engine:4000",
     fetch: (async () =>
-      new Response(JSON.stringify({ lsn: "0/0", sync: true, pendingFlips: 0 }), {
+      new Response(JSON.stringify({ lsn: "0/0", pendingFlips: 0 }), {
         status: 200,
       })) as unknown as typeof fetch,
   });

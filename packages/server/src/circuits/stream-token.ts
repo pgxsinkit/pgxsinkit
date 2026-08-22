@@ -15,10 +15,35 @@ export interface StreamGrant {
   /** The shape this path serves — the entitlement rule's binding key. */
   shapeKey: string;
   /**
+   * The engine claim this grant acquired — one `POST /shapes` join — so the session that holds it can
+   * release exactly what it acquired.
+   *
+   * Carried rather than looked up, for the same reason the path and scope are: the release route is
+   * stateless, and the signed token is the only proof of what the control plane handed out. It is not
+   * the same thing as {@link StreamGrant.path}: the engine's own id is what `DELETE /shapes/{id}`
+   * takes, and two grants can legitimately name ONE shapeId when the engine deduplicated two
+   * identical definitions (ADR-0055 decision 6) — which is precisely why release counts grants, not
+   * distinct ids.
+   */
+  shapeId: string;
+  /**
    * Scope values, positionally matching the shape's declared scope columns. Shared tier only; a
    * private-tier grant has none, and its authorization is the token itself.
    */
   scope?: readonly PredicateValue[];
+  /**
+   * PRIVATE TIER ONLY: the fingerprint of the compiled shape request this grant authorized.
+   *
+   * A re-mint recompiles the shape with the subject's CURRENT claims and admits the grant only if the
+   * result fingerprints the same; a grant without one cannot be re-authorized and is revoked. That is
+   * what keeps the re-mint stateless — the token carries the thing that was authorized, so nothing
+   * server-side has to remember it.
+   *
+   * Shared-tier grants carry none, and deliberately: their predicate is generated from the scope
+   * values alone, so it cannot drift with the subject's claims and the live entitlement re-check is
+   * the whole question.
+   */
+  fp?: string;
 }
 
 /** The verified body of a stream token. */
@@ -96,7 +121,9 @@ export async function mintStreamToken(key: CryptoKey, options: MintStreamTokenOp
     grants: options.grants.map((grant) => ({
       path: grant.path,
       shapeKey: grant.shapeKey,
+      shapeId: grant.shapeId,
       ...(grant.scope !== undefined ? { scope: [...grant.scope] } : {}),
+      ...(grant.fp !== undefined ? { fp: grant.fp } : {}),
     })),
     iat: options.now,
     exp: options.now + ttl,
@@ -124,8 +151,9 @@ export interface VerifyStreamTokenOptions {
    *
    * The signature is still verified, so the grants are still ones this control plane issued — that is
    * the whole claim being relied on. Expiry bounds how long a grant keeps *working*, and the re-mint
-   * re-checks entitlement live before re-signing, so an expired token buys its bearer nothing on its
-   * own. Never set this on a read.
+   * re-authorizes every grant before re-signing — the shared tier against the live entitlement set,
+   * the private tier by recompiling its shape against the subject's current claims — so an expired
+   * token buys its bearer nothing on its own. Never set this on a read.
    */
   allowExpired?: boolean;
 }

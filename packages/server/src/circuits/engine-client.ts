@@ -72,9 +72,14 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
     },
 
     /**
-     * The engine's convergence barrier (ADR-0056): where replication is, whether the tailer has
-     * caught up, how many computed-but-undelivered subquery flips remain, and how many flip batches
-     * the engine gave up on.
+     * The engine's convergence barrier (ADR-0056): where replication is, how many
+     * computed-but-undelivered subquery flips remain, and how many flip batches the engine gave up
+     * on.
+     *
+     * The engine answers a `sync` field beside these and it is deliberately NOT read: it is the
+     * `__el_sync` sentinel watermark — an i64 the engine's conformance harness bumps and waits on as
+     * a global quiescence fence — which no pgxsinkit database ever writes, so it is 0 everywhere and
+     * says nothing about convergence.
      *
      * `pendingFlips > 0` means a revocation has been computed and not yet written to any stream,
      * which no wire-format watermark can see. That is the term the Electric wire could not express
@@ -96,12 +101,7 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
       if (body.lsn !== null && typeof body.lsn !== "string") throw unusableBarrier("lsn", body.lsn);
       if (typeof body.pendingFlips !== "number") throw unusableBarrier("pendingFlips", body.pendingFlips);
       if (typeof body.flipFailures !== "number") throw unusableBarrier("flipFailures", body.flipFailures);
-      return {
-        lsn: body.lsn,
-        sync: body.sync === true,
-        pendingFlips: body.pendingFlips,
-        flipFailures: body.flipFailures,
-      };
+      return { lsn: body.lsn, pendingFlips: body.pendingFlips, flipFailures: body.flipFailures };
     },
   };
 }
@@ -114,18 +114,17 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
 function unusableBarrier(field: string, value: unknown): Error {
   return new Error(
     `[pgxsinkit] the engine's GET /replication/lsn answered with an unusable \`${field}\` (${JSON.stringify(value)}). ` +
-      `This client requires an engine reporting the whole convergence barrier — \`lsn\`, \`sync\`, \`pendingFlips\` and ` +
+      `This client requires an engine reporting the whole convergence barrier — \`lsn\`, \`pendingFlips\` and ` +
       `\`flipFailures\` (ADR-0056 decision 3); the engine at this URL is not the one this client targets.`,
   );
 }
 
 export type CircuitsEngineClient = ReturnType<typeof createCircuitsEngineClient>;
 
-/** What `GET /replication/lsn` answers — these fields exactly, no more. */
+/** What `GET /replication/lsn` answers that this client reads — these fields exactly, no more. */
 export interface CircuitsReplicationState {
   /** The ingest head — where the replication tailer has read to. */
   lsn: string | null;
-  sync: boolean;
   pendingFlips: number;
   /**
    * Flip batches the engine abandoned after exhausting their retries. Non-zero means membership

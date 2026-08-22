@@ -4,14 +4,23 @@ import type { PGlite } from "@electric-sql/pglite";
 import { boolean, text, uuid } from "drizzle-orm/pg-core";
 
 import { startCircuitsSync } from "@pgxsinkit/client";
-import { defineSyncRegistry, defineSyncTable, p, type StreamEnvelope } from "@pgxsinkit/contracts";
+import {
+  DENY_ALL_PREDICATE,
+  defineSyncRegistry,
+  defineSyncTable,
+  p,
+  type StreamEnvelope,
+  type SyncTableRegistry,
+} from "@pgxsinkit/contracts";
 import {
   barrierPath,
   createBarrierHandler,
   createRefreshHandler,
+  createReleaseHandler,
   createSubscribeHandler,
   importStreamTokenKey,
   refreshPath,
+  releasePath,
   subscribePath,
   type CircuitsEngineClient,
   type EntitlementSet,
@@ -64,6 +73,36 @@ const note = noteEntry.localTable;
 /** The lazy table has no explicit consistency group, so its group key is its own shape key. */
 const NOTE_GROUP = "offering_note";
 
+/**
+ * A PRIVATE-tier table, for the revocation the shared tier cannot express: a shape whose row filter
+ * stops naming this subject at all. `denied` arrives as a deployment param rather than as mutable
+ * module state, so a boot's answer is a property of the control plane it was handed.
+ */
+const draftEntry = defineSyncTable({
+  tableName: "offering_draft",
+  makeColumns: () => ({
+    id: uuid("id").primaryKey(),
+    ownerId: text("owner_id").notNull(),
+    body: text("body").notNull(),
+  }),
+  primaryKey: ["id"],
+  mode: "readonly",
+  shape: {
+    rowFilter: (c) => ({
+      customPredicate: (claims, params) =>
+        (params as { denied?: boolean } | undefined)?.denied === true
+          ? DENY_ALL_PREDICATE
+          : p.eq(c.ownerId, String(claims.sub)),
+    }),
+  },
+});
+
+const privateRegistry = defineSyncRegistry({ tables: { draft: draftEntry } });
+const draft = draftEntry.localTable;
+/** No explicit consistency group, so the group key is the shape key. */
+const DRAFT_GROUP = "offering_draft";
+const DRAFT_ROW = "dddddddd-1111-4111-8111-dddddddddddd";
+
 const OFF_A = "11111111-1111-4111-8111-111111111111";
 const OFF_B = "22222222-2222-4222-8222-222222222222";
 const ROW_A1 = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
@@ -95,8 +134,13 @@ function entitlements(held: readonly string[]): EntitlementSet {
  * That prefix is what makes a second boot a genuine re-subscribe: the control plane hands back a
  * DIFFERENT path for the same shape, which is exactly the native must-refetch trigger (ADR-0056
  * decision 7). A counter that restarted at 1 would hand back the same paths and test nothing.
+ *
+ * It also records what was RELEASED. Every grant is a refcount join, and `refcount > 0` blocks
+ * dormancy and eviction, so a group that closes its session without giving its claims back pins its
+ * shapes active forever.
  */
-function stubEngine(generation: string): CircuitsEngineClient {
+function stubEngine(generation: string): CircuitsEngineClient & { released: string[] } {
+  const released: string[] = [];
   let next = 0;
   const scopeOf = (request: { where?: unknown }) => JSON.stringify(request.where ?? {});
   const assigned = new Map<string, string>();
@@ -111,9 +155,12 @@ function stubEngine(generation: string): CircuitsEngineClient {
       }
       return { shapeId: path, table: request.table, streamPath: path, streamUrl: `http://ds/${path}` };
     },
-    releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
-  } as CircuitsEngineClient;
+    releaseShape: async (shapeId: string) => {
+      released.push(shapeId);
+    },
+    replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
+    released,
+  } as CircuitsEngineClient & { released: string[] };
 }
 
 /**
@@ -125,10 +172,27 @@ function router(options: {
   engine: CircuitsEngineClient;
   held: readonly string[];
   byOffering: Record<string, StreamEnvelope[]>;
+  /** The registry this control plane serves. Defaults to the shared-tier fan-out one. */
+  registry?: SyncTableRegistry;
+  /** Runtime params handed to a private shape's `customPredicate` — how a boot withdraws its grant. */
+  params?: Record<string, unknown>;
+  /** What a SCOPELESS (private-tier) stream carries; the shared tier is keyed by offering instead. */
+  unscoped?: StreamEnvelope[];
 }): typeof fetch {
-  const shared = { registry, engine: options.engine, entitlements: entitlements(options.held), key };
+  const shared = {
+    registry: options.registry ?? registry,
+    engine: options.engine,
+    entitlements: entitlements(options.held),
+    key,
+    ...(options.params ? { params: options.params } : {}),
+  };
   const subscribe = createSubscribeHandler({ ...shared, resolveAuthClaims: () => ({ sub: "person-a" }) });
   const refresh = createRefreshHandler({ ...shared, resolveAuthClaims: () => ({ sub: "person-a" }) });
+  const release = createReleaseHandler({
+    engine: options.engine,
+    key,
+    resolveAuthClaims: () => ({ sub: "person-a" }),
+  });
   const barrier = createBarrierHandler({ engine: options.engine, resolveAuthClaims: () => ({ sub: "person-a" }) });
 
   // streamPath -> offering, learned from the grants the control plane just issued.
@@ -151,11 +215,12 @@ function router(options: {
       return new Response(text, { status: response.status, headers: response.headers });
     }
     if (path === refreshPath) return refresh(request);
+    if (path === releasePath) return release(request);
     if (path === barrierPath) return barrier(request);
 
     const streamPath = path.replace(/^\/+/, "");
     const offering = offeringByPath.get(streamPath);
-    const envelopes = offering != null ? (options.byOffering[offering] ?? []) : [];
+    const envelopes = offering != null ? (options.byOffering[offering] ?? []) : (options.unscoped ?? []);
     return new Response(JSON.stringify(envelopes), {
       status: 200,
       headers: {
@@ -211,7 +276,7 @@ describe("circuits group sync", () => {
 
   beforeAll(async () => {
     pg = await createFreshTestPGlite();
-    await createTablesFromSchema(pg, { content, note });
+    await createTablesFromSchema(pg, { content, note, draft });
     await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
   });
 
@@ -236,6 +301,40 @@ describe("circuits group sync", () => {
     expect(sync.isTableStarted("content")).toBe(true);
 
     sync.unsubscribe();
+    await drizzleOver(pg).delete(content);
+  });
+
+  // A group's lifecycle and its session's are the same object, and that has a second half: stopping a
+  // group must give its ENGINE claims back, not merely drop its streams. Every grant is a `POST
+  // /shapes` join, and `refcount > 0` blocks both dormancy and eviction — precisely because native
+  // reads terminate on durable-streams and the engine cannot see them — so a stop that released
+  // nothing would pin these shapes active and tailer-maintained for the life of the deployment.
+  it("releases the engine claims a stopped group acquired", async () => {
+    const engine = stubEngine("g");
+    const sync = await startCircuitsSync(pg, {
+      ...base,
+      fetch: router({
+        engine,
+        held: [OFF_A, OFF_B],
+        byOffering: { [OFF_A]: [envelope(ROW_A1, OFF_A)], [OFF_B]: [envelope(ROW_B1, OFF_B)] },
+      }),
+    });
+    await settle();
+    // Nothing yet: a running group is holding exactly the claims it should be.
+    expect(engine.released).toEqual([]);
+
+    sync.stopGroup("offering_content");
+    await settle();
+
+    // One release per GRANT. The fan-out took two joins, so it gives two back.
+    expect([...engine.released].sort()).toEqual(["shape/g1", "shape/g2"]);
+
+    // And the teardown behind it does not release a second time — a double release would decrement a
+    // refcount this session no longer owns, which is another subscriber's claim.
+    sync.unsubscribe();
+    await settle();
+    expect(engine.released).toHaveLength(2);
+
     await drizzleOver(pg).delete(content);
   });
 
@@ -279,6 +378,13 @@ describe("circuits group sync", () => {
   });
 
   // A boot must not hang on an entitlement the subject simply does not hold.
+  //
+  // It also reports both KINDS of loss, which is why `refused` has three entries and not one. The
+  // control plane refuses the shape once ("no entitled scopes" — an answer about the request), and
+  // the reconcile separately clears the two scopes the previous boots persisted and names each of
+  // them (an answer about the store). Only the second kind tells an app WHICH offering's rows just
+  // disappeared, so a caller that reacts per scope needs it; a cleared reader the control plane
+  // already named by scope would be reported once, not twice.
   it("reports ready when the subject is granted nothing", async () => {
     const refused: string[] = [];
     const sync = await startCircuitsSync(pg, {
@@ -287,7 +393,7 @@ describe("circuits group sync", () => {
       fetch: router({ engine: stubEngine("c"), held: [], byOffering: {} }),
     });
 
-    expect(refused).toEqual(["no entitled scopes"]);
+    expect(refused).toEqual(["no entitled scopes", "no longer granted at subscribe", "no longer granted at subscribe"]);
     expect(sync.isGroupReady("offering_content")).toBe(true);
     await sync.groupReady("offering_content");
 
@@ -350,5 +456,136 @@ describe("circuits group sync", () => {
     // Teardown abandons the activation mid-retry, so it never settles. Detached here so a future
     // change that makes it reject cannot surface as an unhandled rejection in an unrelated test.
     void activation.catch(() => {});
+  });
+
+  // ── Revocation discovered at subscribe (ADR-0055 decision 6) ────────────────────────────────────
+  // Losing entitlement means losing the subscription, and a revocation that lands while the client is
+  // OFFLINE has no 403 to deliver it: the next boot simply subscribes and is granted less. Nothing in
+  // the start path noticed — the grants only ever describe what SURVIVED — so the previous session's
+  // rows stayed readable forever. The persisted cursor is the only thing that still remembers them.
+
+  // The scope keeps its rows only for as long as it keeps its grant, and the clear has to land before
+  // anything reports ready: a group that announced readiness first would hand the app one render of a
+  // store showing rows the subject may no longer read.
+  it("clears a scope that is no longer granted before the group reports ready", async () => {
+    await drizzleOver(pg).delete(content);
+    // ONE engine across both boots, so a still-granted scope is handed back the SAME stream path and
+    // resumes rather than re-snapshotting — otherwise a must-refetch would be doing this test's work.
+    const engine = stubEngine("d");
+    const createdPaths: string[] = [];
+    const recording = {
+      ...engine,
+      createShape: async (request: Parameters<CircuitsEngineClient["createShape"]>[0]) => {
+        const handle = await engine.createShape(request);
+        createdPaths.push(handle.streamPath);
+        return handle;
+      },
+    } as CircuitsEngineClient;
+
+    const first = await startCircuitsSync(pg, {
+      ...base,
+      fetch: router({
+        engine: recording,
+        held: [OFF_A, OFF_B],
+        byOffering: { [OFF_A]: [envelope(ROW_A1, OFF_A)], [OFF_B]: [envelope(ROW_B1, OFF_B)] },
+      }),
+    });
+    await settle();
+    expect((await drizzleOver(pg).select({ id: content.id }).from(content)).map((r) => r.id).sort()).toEqual(
+      [ROW_A1, ROW_B1].sort(),
+    );
+    first.unsubscribe();
+
+    // ENQUEUED from inside the ready callback, and that is what makes it an ordering assertion rather
+    // than a re-read: PGlite runs one connection FIFO, so this select sees everything committed before
+    // ready was announced and nothing committed after it.
+    const idsAtReady: Promise<string[]>[] = [];
+    const second = await startCircuitsSync(pg, {
+      ...base,
+      onGroupReady: () => {
+        idsAtReady.push(
+          drizzleOver(pg)
+            .select({ id: content.id })
+            .from(content)
+            .then((rows) => rows.map((r) => r.id).sort()),
+        );
+      },
+      fetch: router({
+        engine: recording,
+        held: [OFF_A],
+        byOffering: { [OFF_A]: [envelope(ROW_A1, OFF_A)] },
+      }),
+    });
+    await settle();
+
+    // B is gone, A is untouched — the clear was scoped, exactly as a must-refetch's would be.
+    expect((await drizzleOver(pg).select({ id: content.id }).from(content)).map((r) => r.id)).toEqual([ROW_A1]);
+    expect(await Promise.all(idsAtReady)).toEqual([[ROW_A1]]);
+    // A RESUMED: the second boot was handed the same stream it persisted, so nothing re-snapshotted.
+    expect(createdPaths).toEqual(["shape/d1", "shape/d2", "shape/d1"]);
+
+    second.unsubscribe();
+    await drizzleOver(pg).delete(content);
+  });
+
+  // The private tier's form of the same loss. There is no scope to subtract here — a scope-less shape
+  // is its table's sole occupant — so the clear is the whole table, and the group still has to report
+  // ready over it rather than hanging on a shape it was refused.
+  it("truncates a private shape denied at the next boot, and still reports ready", async () => {
+    const draftRow: StreamEnvelope = {
+      type: "offering_draft",
+      key: DRAFT_ROW,
+      value: { id: DRAFT_ROW, owner_id: "person-a", body: "draft body" },
+      headers: { operation: "upsert" },
+    };
+    const privateBase = { ...base, registry: privateRegistry };
+
+    const first = await startCircuitsSync(pg, {
+      ...privateBase,
+      fetch: router({
+        engine: stubEngine("e"),
+        held: [],
+        byOffering: {},
+        registry: privateRegistry,
+        unscoped: [draftRow],
+      }),
+    });
+    await first.groupReady(DRAFT_GROUP);
+    expect(await drizzleOver(pg).select({ id: draft.id }).from(draft)).toHaveLength(1);
+    first.unsubscribe();
+
+    // Enqueued from inside the callback, same FIFO ordering argument as above: `onRefused` is the app's
+    // cue to react, so the rows must already be gone by the time it fires (see
+    // `CircuitsGroupSyncOptions.onRefused`).
+    const refusedWith: Promise<{ reason: string; rows: number }[]>[] = [];
+    const second = await startCircuitsSync(pg, {
+      ...privateBase,
+      onRefused: (entries) => {
+        refusedWith.push(
+          drizzleOver(pg)
+            .select({ id: draft.id })
+            .from(draft)
+            .then((rows) => entries.map((entry) => ({ reason: entry.reason, rows: rows.length }))),
+        );
+      },
+      fetch: router({
+        engine: stubEngine("f"),
+        held: [],
+        byOffering: {},
+        registry: privateRegistry,
+        params: { denied: true },
+      }),
+    });
+    await second.groupReady(DRAFT_GROUP);
+    await settle();
+
+    expect(await drizzleOver(pg).select({ id: draft.id }).from(draft)).toEqual([]);
+    expect(second.isGroupReady(DRAFT_GROUP)).toBe(true);
+    expect(await Promise.all(refusedWith)).toEqual([
+      [{ reason: 'shape "offering_draft" denies this caller', rows: 0 }],
+    ]);
+
+    second.unsubscribe();
+    await drizzleOver(pg).delete(draft);
   });
 });

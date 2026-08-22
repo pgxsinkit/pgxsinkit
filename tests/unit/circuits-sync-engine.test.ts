@@ -65,6 +65,15 @@ const ROW_1 = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const ROW_2 = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
 const ROW_3 = "cccccccc-3333-4333-8333-cccccccccccc";
 
+/**
+ * The identity a shape is persisted under. Required on every spec: the map key is a name the caller
+ * mints, so the cursor carries the registry shape (and, for the shared tier, the scope) that a later
+ * subscribe resolves a stored entry back to.
+ */
+const SOLE = { shapeKey: "offering_content" } as const;
+const SCOPE_A = { shapeKey: "offering_content", scope: [OFF_A] } as const;
+const SCOPE_B = { shapeKey: "offering_content", scope: [OFF_B] } as const;
+
 function stubEdge(bodies: Record<string, StreamEnvelope[]>): typeof fetch {
   return (async (input: URL | string) => {
     const path = new URL(String(input)).pathname;
@@ -104,7 +113,7 @@ describe("circuits sync engine", () => {
 
   // The shared tier's whole point: one local table fed by several scope-keyed streams.
   it("applies two scope shapes into one local table", async () => {
-    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0, flipFailures: 0 };
+    const barrier: ConvergenceBarrier = { pendingFlips: 0, flipFailures: 0 };
     const handle = await syncCircuitsShapes({
       pg,
       registry,
@@ -121,11 +130,13 @@ describe("circuits sync engine", () => {
         scopeA: {
           streamUrl: "http://edge/shape/s1",
           tableKey: "content",
+          identity: { shapeKey: "offering_content", scope: [OFF_A] },
           onMustRefetch: async () => {},
         },
         scopeB: {
           streamUrl: "http://edge/shape/s2",
           tableKey: "content",
+          identity: { shapeKey: "offering_content", scope: [OFF_B] },
           onMustRefetch: async () => {},
         },
       },
@@ -152,10 +163,10 @@ describe("circuits sync engine", () => {
       registry,
       key: null,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 2, flipFailures: 0 }),
+      readBarrier: async () => ({ pendingFlips: 2, flipFailures: 0 }),
       token: () => "t",
       fetch: parkAfter([dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true)]),
-      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", identity: SOLE } },
     });
 
     await settle();
@@ -175,13 +186,13 @@ describe("circuits sync engine", () => {
       key: null,
       metadataSchema: METADATA_SCHEMA,
       // Unsatisfied on the first read, converged on every one after it.
-      readBarrier: async () => ({ sync: true, pendingFlips: ++reads === 1 ? 2 : 0, flipFailures: 0 }),
+      readBarrier: async () => ({ pendingFlips: ++reads === 1 ? 2 : 0, flipFailures: 0 }),
       token: () => "t",
       fetch: parkAfter([
         dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true),
         dsResponse([envelope(ROW_2, OFF_A)], "0000000000000002", true),
       ]),
-      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", identity: SOLE } },
     });
 
     await settle();
@@ -212,14 +223,14 @@ describe("circuits sync engine", () => {
       registry,
       key: null,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 3, flipFailures: 1 }),
+      readBarrier: async () => ({ pendingFlips: 3, flipFailures: 1 }),
       token: () => "t",
       onSyncError: (error) => errors.push(error),
       fetch: parkAfter([
         dsResponse([envelope(ROW_1, OFF_A)], "0000000000000001", true),
         dsResponse([envelope(ROW_2, OFF_A)], "0000000000000002", true),
       ]),
-      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", identity: SOLE } },
     });
 
     await settle();
@@ -245,7 +256,7 @@ describe("circuits sync engine", () => {
   // Delete the handle comparison and this fails twice over: the stale row survives, and the offset
   // from a foreign stream is replayed against the new one.
   it("re-snapshots when the granted handle differs from the persisted one", async () => {
-    const barrier: ConvergenceBarrier = { sync: true, pendingFlips: 0, flipFailures: 0 };
+    const barrier: ConvergenceBarrier = { pendingFlips: 0, flipFailures: 0 };
     const common = {
       pg,
       registry,
@@ -259,7 +270,7 @@ describe("circuits sync engine", () => {
     const first = await syncCircuitsShapes({
       ...common,
       fetch: stubEdge({ "/shape/s1": [envelope(ROW_1, OFF_A)] }),
-      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" } },
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", identity: SOLE } },
     });
     await settle();
     expect((await drizzleOver(pg).select({ id: content.id }).from(content)).map((r) => r.id)).toEqual([ROW_1]);
@@ -273,7 +284,7 @@ describe("circuits sync engine", () => {
         offsets.push(new URL(String(input)).searchParams.get("offset"));
         return dsResponse([envelope(ROW_2, OFF_B)], "0000000000000009");
       }) as unknown as typeof fetch,
-      shapes: { scopeA: { streamUrl: "http://edge/shape/s2", tableKey: "content" } },
+      shapes: { scopeA: { streamUrl: "http://edge/shape/s2", tableKey: "content", identity: SOLE } },
     });
     await settle();
 
@@ -307,7 +318,7 @@ describe("circuits sync engine", () => {
         key: null,
         metadataSchema: METADATA_SCHEMA,
         maxCommitRetries: 1,
-        readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 0 }),
+        readBarrier: async () => ({ pendingFlips: 0, flipFailures: 0 }),
         token: () => "t",
         onSyncError: (error) => errors.push(error),
         fetch: parkAfter([
@@ -323,7 +334,9 @@ describe("circuits sync engine", () => {
             true,
           ),
         ]),
-        shapes: { scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", initialInsertMethod } },
+        shapes: {
+          scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", identity: SOLE, initialInsertMethod },
+        },
       });
 
       await settle();
@@ -356,12 +369,12 @@ describe("circuits sync engine", () => {
       key: null,
       live: false,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 0 }),
+      readBarrier: async () => ({ pendingFlips: 0, flipFailures: 0 }),
       token: () => "t",
       fetch: stubEdge({}),
       shapes: {
-        scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content" },
-        scopeB: { streamUrl: "http://edge/shape/s2", tableKey: "content" },
+        scopeA: { streamUrl: "http://edge/shape/s1", tableKey: "content", identity: SOLE },
+        scopeB: { streamUrl: "http://edge/shape/s2", tableKey: "content", identity: SOLE },
       },
     });
 
@@ -381,7 +394,7 @@ describe("circuits sync engine", () => {
       registry,
       live: false as const,
       metadataSchema: METADATA_SCHEMA,
-      readBarrier: async () => ({ sync: true, pendingFlips: 0, flipFailures: 0 }),
+      readBarrier: async () => ({ pendingFlips: 0, flipFailures: 0 }),
       token: () => "t",
       maxCommitRetries: 1,
     });
@@ -395,7 +408,7 @@ describe("circuits sync engine", () => {
         ...common(),
         key,
         fetch: stubEdge({ "/shape/s1": [envelope(ROW_1, OFF_A)] }),
-        shapes: { solo: { streamUrl: "http://edge/shape/s1", tableKey: "content", onMustRefetch } },
+        shapes: { solo: { streamUrl: "http://edge/shape/s1", tableKey: "content", identity: SOLE, onMustRefetch } },
       });
       await settle();
       first.unsubscribe();
@@ -408,7 +421,7 @@ describe("circuits sync engine", () => {
           failure = error;
         },
         fetch: stubEdge({ "/shape/s2": [envelope(ROW_2, OFF_B)] }),
-        shapes: { solo: { streamUrl: "http://edge/shape/s2", tableKey: "content", onMustRefetch } },
+        shapes: { solo: { streamUrl: "http://edge/shape/s2", tableKey: "content", identity: SOLE, onMustRefetch } },
       });
       await settle();
       second.unsubscribe();
@@ -454,8 +467,8 @@ describe("circuits sync engine", () => {
         key,
         fetch: stubEdge({ "/shape/a1": [envelope(ROW_1, OFF_A)], "/shape/b1": [envelope(ROW_2, OFF_B)] }),
         shapes: {
-          scopeA: { streamUrl: "http://edge/shape/a1", tableKey: "content", onMustRefetch: clearA },
-          scopeB: { streamUrl: "http://edge/shape/b1", tableKey: "content", onMustRefetch: clearB },
+          scopeA: { streamUrl: "http://edge/shape/a1", tableKey: "content", identity: SCOPE_A, onMustRefetch: clearA },
+          scopeB: { streamUrl: "http://edge/shape/b1", tableKey: "content", identity: SCOPE_B, onMustRefetch: clearB },
         },
       });
       await settle();
@@ -470,8 +483,8 @@ describe("circuits sync engine", () => {
         },
         fetch: stubEdge({ "/shape/a2": [envelope(ROW_1, OFF_A)], "/shape/b1": [] }),
         shapes: {
-          scopeA: { streamUrl: "http://edge/shape/a2", tableKey: "content", onMustRefetch: clearA },
-          scopeB: { streamUrl: "http://edge/shape/b1", tableKey: "content", onMustRefetch: clearB },
+          scopeA: { streamUrl: "http://edge/shape/a2", tableKey: "content", identity: SCOPE_A, onMustRefetch: clearA },
+          scopeB: { streamUrl: "http://edge/shape/b1", tableKey: "content", identity: SCOPE_B, onMustRefetch: clearB },
         },
       });
       await settle();

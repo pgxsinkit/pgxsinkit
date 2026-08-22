@@ -91,9 +91,9 @@ cold start. Two mitigations if you stay serverless:
 The read path splits into two ingress points with opposite caching postures, and getting them the
 wrong way round is the mistake this section exists to prevent.
 
-**The control plane is never cacheable.** `/sync/v1/subscribe`, `/sync/v1/refresh` and
-`/sync/v1/barrier` answer per-subject questions and mint stream tokens. Force `cache-control:
-no-store` on it. A cached subscribe answer is a capability served to the wrong subject; a cached
+**The control plane is never cacheable.** `/sync/v1/subscribe`, `/sync/v1/refresh`,
+`/sync/v1/release` and `/sync/v1/barrier` answer per-subject questions and mint stream tokens. Force
+`cache-control: no-store` on it. A cached subscribe answer is a capability served to the wrong subject; a cached
 barrier answer can license an alignment against an engine that has already lost membership effects
 (which is why the barrier's own cache window defaults to zero).
 
@@ -116,6 +116,24 @@ construction and no cache can share it.
 **Revocation latency is deployment-shaped, and you have to state which shape yours is.** Behind a
 third-party CDN serving hits, it is bounded by the stream token's TTL (5 minutes by default). Behind a
 cache sitting _behind_ the edge's own verifier, it is entitlement-propagation latency instead.
+Private-tier grants are re-authorized on every re-mint too — the control plane recompiles the shape
+against the subject's current claims and revokes the grant if it no longer compiles to the shape that
+was granted — so a **claims** change (a role removed, a tenant switched) is bounded by the same TTL as
+an entitlement change, without the subject having to re-authenticate for it to take effect.
+
+## Engine shape claims: a closed subscription gives them back
+
+Every grant a subscribe hands out is a claim on an engine shape, and the engine's claim count is what
+keeps that shape active — native reads terminate on durable-streams, so the count is the only thing
+telling the engine a reader exists. Closing a subscription releases those claims (`POST
+/sync/v1/release`, **best-effort and at most once**, never retried), which is what lets an idle shape
+go dormant and eventually be evicted.
+
+Claims of a client that **crashed or was unloaded** before its release left the browser are not
+reclaimed: they hold their shape active until the engine is restarted. That is the deliberate trade —
+the engine's release has no claim identity, so a retry that raced a release which actually landed
+would take a different subscriber's claim instead. If you see the active shape count or engine memory
+growing without bound, that residual leak is the thing to measure.
 
 ## The browser connection budget (serve the gateway over HTTP/2)
 
@@ -457,9 +475,15 @@ the main thread in either home.
 
 ## Initial catch-up and the convergence barrier
 
-A consistency group syncs its shapes as one atomic unit, so a transaction touching two tables never
-renders half-applied. Two mechanisms hold that together, and both are worth knowing when a boot feels
-slow or a group appears stuck.
+A consistency group syncs its shapes together, and the strength of that guarantee depends on when you
+ask. At **boot and catch-up** it is absolute: every shape drains, the engine's convergence barrier is
+read after they all report drained, and everything held lands in one transaction — a boot never
+presents a half-applied cross-table state. **Live**, each delivered response commits on arrival, so a
+server transaction that touched two of the group's tables can have one half applied while the other is
+still in flight; the window is the two streams' response inter-arrival, normally milliseconds. Closing
+it needs a cross-stream fence the engine does not emit yet, so it is recorded as a known limitation
+(ADR-0056 decision 5) rather than claimed away. Two mechanisms hold the rest together, and both are
+worth knowing when a boot feels slow or a group appears stuck.
 
 **Dedup is per stream.** Each shape's frontier is its durable-streams **offset** — the same value the
 client persists as its resume token, so the position it dedups against and the position it resumes from
@@ -467,11 +491,12 @@ cannot disagree. Offsets are meaningful only _within_ one stream, so nothing com
 shapes.
 
 **The steady-state commit gate is a predicate over reports, not a comparison of positions**: the group
-commits when **every** shape's most recent response asserted `stream-up-to-date`. Every stream has then
-drained everything the server held, so no cross-shape transaction can be half-applied. There is no
-commit floor and no stale-watermark hazard to compensate for: durable-streams carries up-to-date as a
-**response header on a live request**, and a long-poll timeout returns `204` with that header set — so a
-quiet shape re-asserts freshness every poll cycle instead of replaying a watermark captured earlier.
+commits when **every** shape's most recent response asserted `stream-up-to-date` — so a group never
+commits while any member is still draining backfill, and once caught up each delivery applies as one
+transaction. There is no commit floor and no stale-watermark hazard to compensate for: durable-streams
+carries up-to-date as a **response header on a live request**, and a long-poll timeout returns `204` with
+that header set — so a quiet shape re-asserts freshness every poll cycle instead of replaying a watermark
+captured earlier.
 
 **Boot alignment additionally consults the engine's convergence barrier, once.** When every shape in the
 group has reported up-to-date at least once, the client reads
@@ -508,7 +533,12 @@ snapshot lands in, and re-arms alignment. Every reset path — an evicted shape,
 soft-deleted (`410`) stream, a closed stream — funnels through that one check, because each ends in a
 re-subscribe and a re-subscribe is what produces a new stream. Two conditions are deliberately **not**
 resets: a `403` that survives a token re-mint is a **revocation** (truncate that scope and unsubscribe),
-and a `503` from a degraded engine is the terminal refusal above.
+and a `503` from a degraded engine is the terminal refusal above. The re-subscribe is automatic — a read
+that ends re-subscribes its whole consistency group with backoff, and the client reports a
+stream-degraded status until the next delivered batch clears it. The same subscribe comparison also
+catches a revocation that landed while the client was offline: a scope the control plane no longer
+grants is cleared — the scope's rows for the shared tier, the whole table for the private tier — before
+the group reports ready, so a boot never presents rows the subject may no longer read.
 
 See
 [ADR-0056](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0056-catchup-alignment-on-stream-offsets.md)

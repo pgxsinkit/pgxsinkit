@@ -68,6 +68,12 @@ while a computed revocation was still undelivered, which is silent staleness on 
    matters. If the barrier is unsatisfied the client does not align; it retries with backoff and
    stays on the pre-alignment gate, which is correct if slower.
 
+   *(Amended 2026-08-22.)* `sync` is dropped from this client's barrier: the engine's field is the
+   `__el_sync` sentinel watermark — an i64 its conformance harness uses as a global quiescence fence,
+   0 on every pgxsinkit database — and reading it as a convergence term would hold the gate closed
+   forever. Per-table offsets at tail are what each stream's own up-to-date report asserts. The terms
+   this client reads are `pendingFlips` (wait) and `flipFailures` (refuse).
+
    The first three terms describe work that is still *coming*, which is why waiting is the right
    response to each. Work that has been **lost** is a different condition, and the fourth term is the
    barrier expressing it — a term the engine did not report when this ADR was written, which
@@ -91,11 +97,10 @@ while a computed revocation was still undelivered, which is silent staleness on 
 
    *(Amended 2026-08-21.)* This decision originally justified the cache with "a stale barrier can
    only *delay* alignment, never falsely satisfy it, because staleness moves it backwards". That
-   holds for `sync` and `pendingFlips`, and **inverts** for `flipFailures`: a cached pre-degradation
-   zero licenses precisely the alignment the term exists to refuse. So a degraded reading is never
-   cached and never served from cache, and the cache window is restated for what it actually is —
-   the bound on how long a client may align against a freshly-degraded engine. That is why the
-   default is zero.
+   holds for `pendingFlips`, and **inverts** for `flipFailures`: a cached pre-degradation zero
+   licenses precisely the alignment the term exists to refuse. So a degraded reading is never cached
+   and never served from cache, and the cache window is restated for what it actually is — the bound
+   on how long a client may align against a freshly-degraded engine. That is why the default is zero.
 
 5. **The steady-state commit gate is "every shape currently reports up-to-date". ADR-0031's commit
    floor is deleted, not ported.**
@@ -110,6 +115,21 @@ while a computed revocation was still undelivered, which is silent staleness on 
    applied per commit rather than once — every stream has drained everything the server held, so no
    cross-shape transaction can be half-applied. It needs no comparable positions, which is what makes
    it expressible at all here.
+
+   **Limitation** *(Amended 2026-08-22)*: that happens-before is real at **alignment** and weaker in
+   the live steady state, and the ADR should say so rather than carrying the stronger claim. Once a
+   group has caught up, every stream has an outstanding long poll and every one of them last
+   *completed* asserting up-to-date — a `204` timeout carries the header — so the predicate is
+   effectively always true and each delivery commits on arrival. Two streams carrying halves of one
+   server transaction are answered by two separate long polls, so the client can commit one half
+   before the other arrives. Cross-shape atomicity therefore holds at boot and catch-up (the barrier
+   plus every-shape-drained argument above) and whenever both halves land before the gate evaluates;
+   it is **not** guaranteed live, and the exposure is the two responses' inter-arrival gap — normally
+   milliseconds. No client-side closure is airtight: waiting for each sibling's next report costs up
+   to a long-poll timeout per single-table change, and re-polling the siblings narrows the window but
+   cannot close it, because the engine's per-stream appends carry no cross-stream fence. The fence
+   belongs in the emission path — this ADR's first alternative, recorded as
+   [backlog 0014](../backlog/0014-cross-stream-commit-fence.md).
 
    The floor then has no job left. It existed for one reason: Electric's catch-up responses are
    CDN-cacheable and the `up-to-date` control message rides **inside the cached body**, so a quiet
@@ -153,6 +173,11 @@ while a computed revocation was still undelivered, which is silent staleness on 
    the scope is truncated and unsubscribed (ADR-0055 decision 6), not re-snapshotted. A `503` from a
    degraded engine is decision 3's terminal refusal.
 
+   *(Amended 2026-08-22.)* The re-subscribe is automatic: a stream that ends under a live read
+   restarts its group with backoff and the comparison runs on the fresh subscribe; a `403` that
+   survives a re-mint takes the same path, and the scope it revoked is cleared at that subscribe
+   (ADR-0055 d6).
+
 ## Consequences
 
 - **The frontier and the resume token unify.** One persisted value per shape instead of an LSN
@@ -176,6 +201,11 @@ while a computed revocation was still undelivered, which is silent staleness on 
   Each existed to compensate for something Electric-shaped — a stale cached watermark, a parked poll
   that would not refresh one, and LSN-0 snapshot rows racing an advanced frontier. None has a native
   counterpart, so all three are deletions rather than ports.
+- **Cross-shape atomicity is an alignment guarantee, not a live one.** Boot and catch-up commit a
+  group's shapes as one unit; live deliveries commit per response, with a tearing window bounded by
+  the streams' response inter-arrival. Decision 5's limitation states the mechanism, and
+  [backlog 0014](../backlog/0014-cross-stream-commit-fence.md) records the engine-side fence that
+  would close it.
 - **Alignment can now fail closed on a real condition.** `pendingFlips > 0` is a genuine
   not-yet-converged signal that Electric's wire format could not express at all, so this design can
   detect a case its predecessor silently mis-committed.
@@ -185,8 +215,10 @@ while a computed revocation was still undelivered, which is silent staleness on 
   a group in this state never becomes up-to-date and never will without an engine restart.
 - **`must-refetch` stops being a wire concern.** No reset opcode, no control message, no handling for
   one arriving against a superseded generation. The cost is that a reset is only ever *noticed* at
-  subscribe: a shape whose stream is deleted mid-session detects it on the read failure and must
-  re-subscribe to learn its new handle, rather than being told inline.
+  subscribe: a shape whose stream is deleted mid-session learns its new handle from a re-subscribe
+  rather than being told inline. That re-subscribe is automatic (decision 7's amendment) — the group
+  restarts with backoff on the read failure — so the cost is a round trip and a backoff step, not a
+  session that has to be rebuilt from outside.
 
 ## Alternatives considered
 

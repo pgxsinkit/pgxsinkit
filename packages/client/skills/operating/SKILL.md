@@ -454,9 +454,9 @@ per-group `groups[]`. Two reading caveats: groups catch up CONCURRENTLY on one W
 
 **How a group decides to commit (ADR-0056), and the one state that is terminal.** There is **no commit floor**
 and no cross-shape position comparison — offsets are per-stream and comparable only within one — so a group
-commits when **every** one of its shapes' most recent responses asserted up-to-date. That is safe because
-durable-streams answers each long-poll timeout with `204` plus the up-to-date header, so a quiet shape
-re-asserts freshness every cycle instead of holding a busy sibling behind a stale watermark. The **first**
+commits when **every** one of its shapes' most recent responses asserted up-to-date (a quiet shape re-asserts
+freshness on every `204` long-poll timeout). Atomic at boot/catch-up alignment; LIVE deliveries commit per
+response, so two halves of one transaction can land milliseconds apart (backlog 0014). The **first**
 commit of each alignment generation (boot, and after any must-refetch) also reads the engine's convergence
 barrier through the control plane's `/sync/v1/barrier`, aligning only with `pendingFlips` at zero — no computed
 membership revocation still undelivered. A barrier the client cannot READ is a delay: the group stays on the

@@ -97,6 +97,7 @@ describe("member-style client boot over asReadonly + defineReadProjection entrie
     // (neither entry declares a customPredicate, so the subject only names the stream token's bearer).
     stack = await startNativeSyncStack({
       env,
+      registry: memberProjectionRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: memberProjectionRegistry,

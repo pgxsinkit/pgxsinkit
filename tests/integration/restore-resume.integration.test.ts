@@ -44,6 +44,7 @@ describe("restore resume (ADR-0046)", () => {
     await mkdir(STORE_ROOT, { recursive: true });
     stack = await startNativeSyncStack({
       env,
+      registry: projectsSyncRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: projectsSyncRegistry,

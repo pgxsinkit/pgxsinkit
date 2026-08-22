@@ -175,11 +175,26 @@ executes.
    private-tier shape and routes through a rewriting origin. The capability is not removed; its cost
    is made explicit and confined to the shape that incurs it.
 
+   *(Amended 2026-08-22.)* The rewriting origin is the stream gate's transform stage
+   (`packages/server/src/circuits/edge.ts`): for a shape declaring `serverProjection.rowTransform` the
+   edge parses the JSON long-poll body, runs the transform per row with the token's subject, strips
+   `serverOnlyColumns`, and answers `private, no-store`; SSE is refused for such shapes.
+   `RedactionSpec` — the declarative, pre-computed form — is not implemented; the escape hatch is the
+   only transform path.
+
 6. **The shared tier is authorized by capability, not by a per-request origin call.**
    - The control plane mints a shape handle carrying a **signed stream token** naming the scope
      values it grants. Default lifetime **5 minutes**, overridable per shape; re-minting is batched,
      so a subject with K scopes refreshes in one request per window. Validity is evaluated at
      request start.
+   - *(Amended 2026-08-22.)* A re-mint re-authorizes both tiers: the shared tier against the live
+     entitlement set, the private tier by recompiling the shape with the subject's current claims and
+     comparing the fingerprint carried in the grant — a predicate that now denies, or now compiles
+     differently, is revoked, and the client re-subscribes for the shape its claims compile to.
+   - *(Amended 2026-08-22.)* **Closing a session releases the engine claims its subscribe acquired.**
+     Each grant is one `POST /shapes` join and the engine's refcount blocks dormancy and eviction, so
+     the session hands them back on close (`/sync/v1/release`, at most once, never retried — the
+     engine's DELETE carries no claim identity, so a double release would take another subscriber's).
    - **The token must be excluded from the cache key.** Including it gives every subscriber a unique
      key and destroys the sharing this tier exists for. This is not an optimisation detail; it is a
      correctness condition for the tier.
@@ -189,6 +204,9 @@ executes.
    - Losing entitlement means losing the *subscription*, not losing rows. The client receives 403 on
      its next poll and must **truncate that scope and unsubscribe**. This is a different eviction
      path from predicate-driven move-out (ADR-0023), and the client implements both.
+     *(Amended 2026-08-22: the clear happens at subscribe — persisted scopes the control plane no
+     longer grants are cleared before the group reports ready; live revocation re-subscribes, see
+     ADR-0056 d7.)*
    - **The client names a shape; the control plane expands it to the subject's scopes.** *(Amended
      2026-08-21. Subscribe originally took `(shapeKey, scope)` per subscription, leaving the client
      to supply scope values it had no sanctioned way to learn.)* A subscription request carries a
@@ -245,7 +263,8 @@ executes.
      edge's concern and no protocol work belongs in it.
    - The edge verifies the token, checks the scope against the entitlement set, and proxies bytes.
      With redaction pre-computed and predicates resolved at shape creation, there is no per-read
-     filtering and no per-read rewriting: it is a gate, not a pipeline.
+     filtering and no per-read rewriting (except transform shapes — decision 5): it is a gate, not a
+     pipeline.
    - **It is TypeScript, in the existing `packages/server` process, alongside the control plane.**
      Because there is no per-byte work, CPU is irrelevant here — the only axis on which a native
      implementation wins is memory per held long-poll connection, and that crossover sits far above
@@ -319,10 +338,10 @@ expresses it better.
 | A2 | Registry-derived filter, client `where` discarded | Control plane builds the predicate AST at shape creation. **Strengthened** — no `where` exists on the wire to discard |
 | A3 | `shapeKey` resolution, 403 on undeclared | Control plane; unchanged in intent |
 | A4 | Query-param allowlist | Largely dissolves — the client asks for a shapeKey and scope, not URL parameters |
-| A5 | Egress `rowTransform` | Decision 5: declarative spec pre-computed in Postgres; arbitrary transforms mark the shape private-tier |
+| A5 | Egress `rowTransform` | Decision 5: arbitrary transforms mark the shape private-tier (enforced at definition) and are rewritten at the stream edge per read, `no-store` |
 | A6 | Mandatory-posture invariant | **Preserved and extended** — the disjointness check joins it |
-| A7 | `serverOnlyColumns` | Native: `ShapeDef.columns` matches on columns it does not emit |
-| A8 | `omitColumns` | Native `ShapeDef.columns`. The A5→A8 ordering hazard **dissolves** |
+| A7 | `serverOnlyColumns` | Native: emitted onto the stream so the transform can read them, stripped at the edge after it runs |
+| A8 | `omitColumns` | Native `ShapeDef.columns`. The A5→A8 ordering hazard is **answered in one place** — the edge transforms, then strips |
 | A9 | `electricTable` physical-target mapping | Preserved; maps to `ShapeDef.table` |
 | A10 | Timing / observability | Edge and control plane |
 

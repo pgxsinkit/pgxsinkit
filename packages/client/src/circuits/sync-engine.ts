@@ -1,7 +1,12 @@
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 
-import { classifyTableApplyStrategy, type ApplyStrategy, type SyncTableRegistry } from "@pgxsinkit/contracts";
+import {
+  classifyTableApplyStrategy,
+  type ApplyStrategy,
+  type PredicateValue,
+  type SyncTableRegistry,
+} from "@pgxsinkit/contracts";
 
 import { nowMs, type GroupBootStamp } from "../boot-report";
 import { resolveApplyTarget, type ApplyTarget } from "../local-tables";
@@ -36,13 +41,12 @@ import type { StreamSourceOptions } from "./stream-source";
  * terms are therefore honest but permanently unsatisfied, which is indistinguishable from a slow
  * engine; this term is how a client tells the two apart.
  *
- * These are exactly the fields `GET /replication/lsn` answers with. Nothing here is derived, and
+ * These are the fields of `GET /replication/lsn` this client aligns on. Nothing here is derived, and
  * nothing here is optional — a term the engine does not report is a term this client must not claim
- * to check.
+ * to check. The engine's `sync` field is deliberately absent: it is the `__el_sync` sentinel
+ * watermark, not a convergence term (see `replicationState` in the server's engine client).
  */
 export interface ConvergenceBarrier {
-  /** Whether the engine's replication tailer has caught up. */
-  sync: boolean;
   /** Deferred subquery flip batches not yet propagated. Read engine-global — conservative. */
   pendingFlips: number;
   /**
@@ -57,6 +61,21 @@ export interface CircuitsShapeSpec {
   streamUrl: string;
   /** The registry table key this shape applies into. Several shapes may share one (ADR-0055 d4). */
   tableKey: string;
+  /**
+   * What this reader IS, as the registry and the control plane name it — persisted alongside the
+   * offset so a later subscribe can resolve a stored entry back to its spec.
+   *
+   * Required, not derived, and the map key is why it cannot be either. That key is a name the caller
+   * mints to keep two readers apart; the engine treats it as opaque and has no way to take it apart
+   * again. Without this, a persisted entry the next subscribe does NOT find in its grants is
+   * unattributable — which is exactly the entry that has to be cleared (ADR-0055 decision 6).
+   */
+  identity: {
+    /** The registry shape key this stream carries. */
+    shapeKey: string;
+    /** Shared tier only: the scope values the grant named, in the shape's declared column order. */
+    scope?: readonly PredicateValue[];
+  };
   /**
    * Scoped cache clear for a must-refetch, replacing the default `TRUNCATE`.
    *
@@ -89,6 +108,16 @@ export interface CircuitsSyncOptions {
   onInitialSync?: () => void;
   onSyncError?: (error: Error) => void;
   onSyncActivity?: () => void;
+  /**
+   * One shape's read ended — `null` for a normal end, an error for a stream that died mid-session.
+   *
+   * Passed through from the shape group and deliberately NOT acted on here. Recovery is a
+   * re-subscribe, and this engine has no subscription: it is handed URLs and a token by the layer
+   * above (ADR-0055 decision 10), which is the only layer that can ask the control plane for a fresh
+   * grant. Ignored once `unsubscribe()` has been called — a teardown's own stream closes are not
+   * conditions.
+   */
+  onStreamEnd?: (shapeName: string, error: Error | null) => void;
   /**
    * Long-poll the tail after catching up (default). `false` reads each stream to its tail and stops
    * — a one-shot hydration rather than a live subscription.
@@ -128,10 +157,16 @@ const defaultRetryDelayMs = (attempt: number) => Math.min(1000 * 2 ** (attempt -
  * Sync K Circuits shape streams into one consistency group (ADR-0055 + ADR-0056).
  *
  * The commit gate is the whole of ADR-0056's steady state: **commit when every shape's most recent
- * response asserted up-to-date**. That is a happens-before, not a position comparison — every stream
- * has drained what the server held, so nothing cross-shape can be half-applied. Offsets are
+ * response asserted up-to-date**. That is a happens-before, not a position comparison. Offsets are
  * per-stream and the protocol only sanctions comparing them within a stream, so no `min` over
  * positions exists to take, and none is taken.
+ *
+ * The happens-before is airtight at ALIGNMENT — every stream has drained what the server held, and
+ * everything held commits together — and weaker in the live steady state, where every stream's report
+ * is latched true between parked long polls and each delivery commits on arrival. Two streams
+ * carrying halves of one server transaction are answered separately, so the window in which one half
+ * is applied and the other is not is their response inter-arrival, normally milliseconds. Closing it
+ * needs a fence the engine does not emit — see `docs/backlog/0014-cross-stream-commit-fence.md`.
  *
  * The barrier is consulted **once per alignment generation**, at boot and after any must-refetch.
  * Its job there is narrow and specific: every stream can report drained while the engine still holds
@@ -329,10 +364,21 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
             subscriptionKey: key,
             sessionScoped,
             shapeMetadata: Object.fromEntries(
-              shapeNames.map((shapeName) => [
-                shapeName,
-                { handle: shapes[shapeName]!.streamUrl, offset: (offsets.get(shapeName) ?? "-1") as never },
-              ]),
+              shapeNames.map((shapeName) => {
+                const spec = shapes[shapeName]!;
+                return [
+                  shapeName,
+                  {
+                    handle: spec.streamUrl,
+                    offset: (offsets.get(shapeName) ?? "-1") as never,
+                    // The identity rides with the cursor rather than being reconstructed later: the
+                    // next subscribe reads this row BEFORE it has any shape map to look anything up
+                    // in, and a scope it is no longer granted has nothing else left naming it.
+                    shapeKey: spec.identity.shapeKey,
+                    ...(spec.identity.scope ? { scope: spec.identity.scope } : {}),
+                  },
+                ];
+              }),
             ),
             lastLsn: BigInt(0),
             debug,
@@ -432,21 +478,8 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
         );
         return false;
       }
-      // ONLY `pendingFlips`. `sync` is reported beside it (it mirrors the engine's wire shape) but is
-      // not a condition here, and reading it as one was a bug in two ways.
-      //
-      // It is an i64 watermark — "highest `__el_sync` sentinel counter the ingestor has decoded" —
-      // so `!barrier.sync` shut this gate permanently on any database where no sentinel had ever been
-      // written, which is every pgxsinkit database: the counter is legitimately 0 and `!0` is true.
-      //
-      // The deeper error is that it answers a question this gate does not ask. The sentinel is a
-      // GLOBAL quiescence fence (bump the counter, wait for the engine to report having decoded at
-      // least that value, and every earlier commit is therefore on the stream) — the engine's own
-      // conformance harness uses it to know a test database has gone quiet. pgxsinkit never needs it,
-      // because write convergence here is PER ENTITY: the mutation ack carries `serverUpdatedAtUs` and
-      // the overlay clears when a synced row arrives bearing that version (ADR-0010/0011). What boot
-      // alignment actually needs is the thing ADR-0056 d3 names — that no computed revocation is still
-      // undelivered — and that is exactly `pendingFlips`.
+      // The alignment term is `pendingFlips` (ADR-0056 d3) — no computed revocation still undelivered.
+      // Per-table offsets at tail are what each stream's own up-to-date report already asserts.
       if (barrier.pendingFlips > 0) {
         if (debug) console.log("alignment barrier unsatisfied", barrier);
         return false;
@@ -476,6 +509,14 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
     live: options.live ?? true,
     ...(options.onTokenRejected ? { onTokenRejected: options.onTokenRejected } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.onStreamEnd
+      ? {
+          onStreamEnd: (shapeName: string, error: Error | null) => {
+            if (unsubscribed) return;
+            options.onStreamEnd?.(shapeName, error);
+          },
+        }
+      : {}),
   });
 
   group.subscribe(async (batch) => {

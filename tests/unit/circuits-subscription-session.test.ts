@@ -63,7 +63,7 @@ function stubEngine(): CircuitsEngineClient {
       };
     },
     releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
+    replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
   } as CircuitsEngineClient;
 }
 
@@ -204,7 +204,7 @@ it("reads the convergence barrier through the control plane", async () => {
     fetch: routeToHandlers(mutableEntitlements(new Set([OFF_A]))),
   });
 
-  expect(await read()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 0 });
+  expect(await read()).toEqual({ pendingFlips: 0, flipFailures: 0 });
 });
 
 // And only whole. A control plane that omits `flipFailures` cannot report lost membership effects,
@@ -214,8 +214,7 @@ it("reads the convergence barrier through the control plane", async () => {
 it("refuses a barrier body missing a term", async () => {
   const read = createBarrierReader({
     controlPlaneUrl: "http://api",
-    fetch: (async () =>
-      new Response(JSON.stringify({ sync: true, pendingFlips: 0 }), { status: 200 })) as unknown as typeof fetch,
+    fetch: (async () => new Response(JSON.stringify({ pendingFlips: 0 }), { status: 200 })) as unknown as typeof fetch,
   });
 
   // oxlint-disable-next-line typescript/await-thenable -- .rejects returns a real promise typed as void

@@ -883,11 +883,12 @@ export function defineSyncTable<
  * ### Server-side egress redaction (`serverProjection` + `serverOnlyColumns`)
  *
  * A projection may carry its own `serverProjection` (a {@link ServerProjectionSpec}, typically a
- * `rowTransform`) — resolved by the projection's `shapeKey` and run on the proxy egress path for this
- * shape only. The order on egress is **transform first, then omission**: the transform runs against the
- * fetched row, then column omission strips this projection's omitted columns (the client keep-set is
- * `columns ∪ primaryKey`) before the row reaches the client wire. This lets a "secure window" over a
- * keyed table stream the body while stripping the keys per row.
+ * `rowTransform`) — resolved by the projection's `shapeKey` and run at the STREAM EDGE, per request, for
+ * this shape only (ADR-0055 decision 5). The order on egress is **transform first, then omission**: the
+ * transform runs against the fetched row, then the edge strips the row to the client keep-set
+ * (`columns ∪ primaryKey`) before it reaches the client wire. This lets a "secure window" over a keyed
+ * table stream the body while stripping the keys per row. Such a shape is private-tier by construction
+ * (its bytes depend on the reader) and is answered `cache-control: private, no-store`.
  *
  * `serverOnlyColumns` are owner column keys the transform must READ but that are NOT in the client shape
  * (e.g. a `keysWithheld` control flag). Such a key stays omitted from the client keep-set, yet is ADDED
@@ -1097,8 +1098,11 @@ export function defineReadProjection<
   // When a subset is requested, set the shape's `columns` allow-list to the KEPT physical column names
   // so an omitted (e.g. heavy jsonb) column is never fetched over the wire — not merely stripped after.
   // serverOnlyColumns are added ON TOP of the kept names: a server-only column must be FETCHED (so the
-  // egress rowTransform can read it) even though it is omitted from the client keep-set — egress omission
-  // then strips it after the transform runs. Resolve key -> physical name the same way getProjectedColumns
+  // egress rowTransform can read it) even though it is omitted from the client keep-set. It is stripped
+  // after the transform runs, at the STREAM EDGE — `createStreamGate` (packages/server/src/circuits/edge.ts)
+  // rewrites each row of a transform shape's long-poll body and then narrows it to `entry.localTable`'s
+  // columns, which is precisely this keep-set. So the column rides the engine's stream and comes off the
+  // wire one hop before the client. Resolve key -> physical name the same way getProjectedColumns
   // does (the drizzle column's `.name`), never a hand-map. A full-width projection (no omitted keys, hence
   // no serverOnlyColumns — validated above) declares no allow-list at all.
   const ownerColumns = getColumns(owner.table) as Record<string, { name: string }>;
@@ -1172,6 +1176,7 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
       validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
     }
     validateRegistryTableUniqueness(input.tables);
+    validateRegistryShapeKeyUniqueness(input.tables);
     validateRegistryLifecycleGroups(input.tables);
     validateStorageDeclaration(input.storage);
     validateRowClassification(input.tables, input.rowClasses);
@@ -1197,6 +1202,7 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
     validateSyncTableEntry(entry as SyncTableEntry<AnyPgTable>);
   }
   validateRegistryTableUniqueness(input);
+  validateRegistryShapeKeyUniqueness(input);
   validateRegistryLifecycleGroups(input);
 
   return input;
@@ -1235,6 +1241,40 @@ function validateRegistryTableUniqueness(registry: SyncTableRegistry) {
     }
 
     declaredBy.set(identity, key);
+  }
+}
+
+/**
+ * A registry must not expose the same PUBLIC `shapeKey` twice. This is a DISTINCT identity from the
+ * local table checked by {@link validateRegistryTableUniqueness}: `shapeKey` is what a subscription
+ * request names on the wire and what the control plane resolves an entry by (`resolveEntryByShapeKey`
+ * is first-match), while the local identity is the PGlite table a client reads into. They coincide by
+ * default (`shapeKey` falls back to `tableName`), so the local check already covers the common case,
+ * and read projections over one physical table stay legal because `as` yields a distinct value for
+ * BOTH identities. The only way to collide here is an EXPLICIT `shape.shapeKey` that diverges from the
+ * table name: two such entries would leave the second permanently unreachable, silently served the
+ * first's shape (and therefore the first's row filter). Write-only entries carry no shape and are
+ * skipped — they are not publicly requestable. Fails closed at module-eval, for every consumer.
+ */
+function validateRegistryShapeKeyUniqueness(registry: SyncTableRegistry) {
+  const declaredBy = new Map<string, string>();
+
+  for (const [key, entry] of Object.entries(registry)) {
+    const shape = (entry as SyncTableEntry<AnyPgTable>).shape;
+    if (shape === undefined) continue;
+
+    const firstKey = declaredBy.get(shape.shapeKey);
+
+    if (firstKey !== undefined) {
+      throw new Error(
+        `shapeKey "${shape.shapeKey}" is declared by two registry entries ("${firstKey}" and "${key}"): ` +
+          `a duplicate shapeKey makes the second entry unreachable — the control plane resolves a ` +
+          `subscription by shapeKey and would serve the first entry's shape. Give each entry a unique ` +
+          `shape.shapeKey, or use defineReadProjection (a distinct "as") for a second shape over one table.`,
+      );
+    }
+
+    declaredBy.set(shape.shapeKey, key);
   }
 }
 
@@ -1828,6 +1868,24 @@ function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
         `defineSyncTable (or a projection of one — asReadonly / asEphemeral / defineReadProjection), which ` +
         `stashes the column-builder factory the client requires (ADR-0029 P1) to derive its local ` +
         `synced/overlay/journal objects. Hand-assembled entries are unsupported.`,
+    );
+  }
+
+  // ADR-0055 decision 5: an egress `serverProjection.rowTransform` makes the shape's bytes a function
+  // of the SUBJECT — the stream edge rewrites them per request, with the subject from the stream
+  // token — so the shape is private-tier BY CONSTRUCTION and cannot be served from a scope-keyed
+  // shared stream. Letting the two ride together would produce exactly what `readShapeTier` refuses
+  // for `scope` + `rowFilter`: a stream cached under a scope key while carrying subject-dependent
+  // bytes, which is a disclosure rather than a stale row. Checked HERE rather than in `readShapeTier`
+  // because the transform lives on the ENTRY (a projection attaches it after its shape is built), and
+  // this is the one validation every registrable entry passes through, projections included.
+  if (entry.serverProjection?.rowTransform != null && entry.shape?.scope != null) {
+    throw new Error(
+      `[pgxsinkit] shape "${entry.shape.shapeKey}" declares both scope and a serverProjection.rowTransform ` +
+        `— an egress transform rewrites the stream's bytes per request with the reader's subject, so the ` +
+        `shape is private-tier by construction (ADR-0055 decision 5) and cannot be served from a ` +
+        `scope-keyed shared stream. Drop the transform and pre-compute the redaction into a column the ` +
+        `shape projects, or drop scope and keep this shape private.`,
     );
   }
 

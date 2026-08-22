@@ -16,8 +16,10 @@ import {
   barrierPath,
   createBarrierHandler,
   createRefreshHandler,
+  createReleaseHandler,
   createSubscribeHandler,
   refreshPath,
+  releasePath,
   subscribePath,
 } from "./circuits/subscribe";
 import { createPgmqEventQueue } from "./events/pgmq-queue";
@@ -346,6 +348,10 @@ export function createSyncServer<
 
     router.post(subscribePath, createSubscribeHandler(subscribeOptions));
     router.post(refreshPath, createRefreshHandler(subscribeOptions));
+    // The close half of subscribe. Every grant subscribe handed out is an engine refcount, and
+    // `refcount > 0` blocks dormancy and eviction — so without this route a deployment's shape set only
+    // ever grows. Best-effort and at most once, on the client's side; see `releaseStreamGrants`.
+    router.post(releasePath, createReleaseHandler({ engine: readPath.engine, key: readPath.key, resolveAuthClaims }));
     router.get(
       barrierPath,
       createBarrierHandler({
@@ -516,7 +522,7 @@ export type { IdentityResolution } from "./events/identity";
 
 // The Circuits-native read path (ADR-0055) — shape lifecycle only. Reads terminate on
 // durable-streams and never traverse the engine.
-export { compileShapeRequest, resolveEntryByShapeKey } from "./circuits/compile";
+export { compileShapeRequest, fingerprintShapeRequest, resolveEntryByShapeKey } from "./circuits/compile";
 export type { CompiledShapeRequest, ShapeRequest } from "./circuits/compile";
 export { CircuitsEngineError, createCircuitsEngineClient } from "./circuits/engine-client";
 export type { CircuitsEngineClient, CircuitsEngineOptions } from "./circuits/engine-client";
@@ -535,15 +541,24 @@ export type {
   StreamTokenClaims,
   StreamTokenVerification,
 } from "./circuits/stream-token";
-export { authorizeStreamRead, createStreamGate, readStreamToken, STREAM_READ_EXPOSED_HEADERS } from "./circuits/edge";
-export type { EntitlementSet, GateDecision, StreamGateOptions } from "./circuits/edge";
+export {
+  authorizeStreamRead,
+  createStreamGate,
+  EntitlementsUnavailableError,
+  readStreamToken,
+  STREAM_READ_EXPOSED_HEADERS,
+} from "./circuits/edge";
+export type { EntitlementSet, GateDecision, StreamAuthorizationOptions, StreamGateOptions } from "./circuits/edge";
 export {
   barrierPath,
   createBarrierHandler,
   createRefreshHandler,
+  createReleaseHandler,
   createSubscribeHandler,
   refreshPath,
   refreshStreamToken,
+  releasePath,
+  releaseStreamGrants,
   subscribePath,
   subscribeToShapes,
 } from "./circuits/subscribe";

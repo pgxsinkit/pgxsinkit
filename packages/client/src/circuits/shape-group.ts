@@ -28,6 +28,15 @@ export interface ShapeGroupOptions {
   live?: boolean;
   fetch?: typeof fetch;
   signal?: AbortSignal;
+  /**
+   * One shape's read ENDED — `null` for a normal end, an error for a read that died mid-session.
+   *
+   * Forwarded straight from {@link readShapeStream}'s `onEnd`, and never fired for a stream this
+   * group closed itself: `unsubscribeAll` is the caller's own instruction, not a condition to
+   * recover from. See `readShapeStream` for why a consumer that ignores this goes permanently quiet
+   * instead of failing.
+   */
+  onStreamEnd?: (shape: string, error: Error | null) => void;
 }
 
 /**
@@ -55,6 +64,54 @@ export function createShapeGroup(options: ShapeGroupOptions) {
   // how many streams answer at once.
   let queue: Promise<void> = Promise.resolve();
 
+  function closeEveryStream(): void {
+    closed = true;
+    for (const subscription of subscriptions.values()) {
+      subscription.close();
+    }
+    subscriptions.clear();
+  }
+
+  async function openEveryStream(): Promise<void> {
+    await Promise.all(
+      names.map(async (shape) => {
+        const spec = options.shapes[shape]!;
+        const subscription = await readShapeStream(
+          {
+            url: spec.url,
+            offset: spec.offset ?? STREAM_START,
+            token: options.token,
+            live: options.live ?? true,
+            ...(options.onTokenRejected ? { onTokenRejected: options.onTokenRejected } : {}),
+            ...(options.fetch ? { fetch: options.fetch } : {}),
+            ...(options.signal ? { signal: options.signal } : {}),
+          },
+          (batch) => {
+            if (closed) return;
+            if (batch.upToDate) caughtUp.add(shape);
+            queue = queue.then(() =>
+              closed
+                ? undefined
+                : deliver({ shape, envelopes: batch.envelopes, offset: batch.offset, upToDate: batch.upToDate }),
+            );
+            return queue;
+          },
+          (error) => {
+            // `closed` here is OUR teardown, not the stream's: a group that closed its streams
+            // asked for exactly this, and reporting it would send the caller chasing a recovery.
+            if (closed) return;
+            options.onStreamEnd?.(shape, error);
+          },
+        );
+        if (closed) {
+          subscription.close();
+          return;
+        }
+        subscriptions.set(shape, subscription);
+      }),
+    );
+  }
+
   return {
     /**
      * `true` once **every** shape in the group has reported up-to-date at least once — the group
@@ -76,48 +133,25 @@ export function createShapeGroup(options: ShapeGroupOptions) {
       deliver = onBatch;
     },
 
-    /** Open every stream. Resolves once each has produced its first response. */
+    /**
+     * Open every stream. Resolves once each has produced its first response.
+     *
+     * A start that FAILS closes whatever it managed to open. K streams open concurrently, so one
+     * refusing leaves the others reading a group the caller is about to discard — and since the
+     * caller's answer to a failed open is another attempt (`startCircuitsSync`'s restart ladder),
+     * every attempt would strand another live reader. The group is spent either way: `closed` latches,
+     * and a stream still resolving its first response finds it set and closes itself below.
+     */
     async start(): Promise<void> {
-      await Promise.all(
-        names.map(async (shape) => {
-          const spec = options.shapes[shape]!;
-          const subscription = await readShapeStream(
-            {
-              url: spec.url,
-              offset: spec.offset ?? STREAM_START,
-              token: options.token,
-              live: options.live ?? true,
-              ...(options.onTokenRejected ? { onTokenRejected: options.onTokenRejected } : {}),
-              ...(options.fetch ? { fetch: options.fetch } : {}),
-              ...(options.signal ? { signal: options.signal } : {}),
-            },
-            (batch) => {
-              if (closed) return;
-              if (batch.upToDate) caughtUp.add(shape);
-              queue = queue.then(() =>
-                closed
-                  ? undefined
-                  : deliver({ shape, envelopes: batch.envelopes, offset: batch.offset, upToDate: batch.upToDate }),
-              );
-              return queue;
-            },
-          );
-          if (closed) {
-            subscription.close();
-            return;
-          }
-          subscriptions.set(shape, subscription);
-        }),
-      );
+      try {
+        await openEveryStream();
+      } catch (error) {
+        closeEveryStream();
+        throw error;
+      }
     },
 
-    unsubscribeAll(): void {
-      closed = true;
-      for (const subscription of subscriptions.values()) {
-        subscription.close();
-      }
-      subscriptions.clear();
-    },
+    unsubscribeAll: closeEveryStream,
   };
 }
 

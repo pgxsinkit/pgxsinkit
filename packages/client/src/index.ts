@@ -494,6 +494,12 @@ const READ_STREAM_SILENT = "read stream silent: no server response inside the si
 /** `status.lastError` while subscribe keeps failing for a reason the subject cannot act on. */
 const CONTROL_PLANE_UNREACHABLE = "control plane unreachable: subscribe is failing and retrying";
 /**
+ * `status.lastError` while a live read has died and its group is re-subscribing (ADR-0056 decision 7,
+ * backlog 0010). Distinct from {@link READ_STREAM_SILENT}, which is the opposite evidence: nothing
+ * failed, and that is the problem.
+ */
+const STREAM_LOST = "read stream lost; re-subscribing";
+/**
  * Non-enumerable brand stamped on an opfs-repacked instance {@link createClientPGlite} mints (ADR-0049): the
  * opfs-repacked VFS owns its store on a dedicated OPFS directory and reports NO `dataDir` (a custom VFS, the
  * field is honestly `undefined`), so the BYO "non-persistent" guard ({@link classifyNonPersistentDataDir},
@@ -2344,6 +2350,20 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         status.phase = "degraded";
         degradedReason = "stream";
         status.lastError = `${CONTROL_PLANE_UNREACHABLE}: ${describeErrorChain(error)}`;
+        options.onStatusChange?.(status);
+      },
+      // A live read that ended — a stream the engine evicted, a `403` past a re-mint, a lost
+      // connection — with the group already re-subscribing behind it. Same precedence and the same
+      // recovery as `onSubscribeError`, because it is the same kind of fault: the transport, not the
+      // store. It never masks `auth-needed` (the subject can fix that one) and never masks a
+      // commit-failure degraded (that one names a store that is diverging), and the next delivered
+      // batch clears it.
+      onStreamError: (error: Error) => {
+        if (status.phase === "auth-needed") return;
+        if (status.phase === "degraded" && degradedReason === "commit") return;
+        status.phase = "degraded";
+        degradedReason = "stream";
+        status.lastError = `${STREAM_LOST}: ${describeErrorChain(error)}`;
         options.onStatusChange?.(status);
       },
       // ADR-0013: a persistent read-path auth failure is its own status — the app prompts re-login

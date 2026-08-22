@@ -7,8 +7,12 @@ import {
   authorizeStreamRead,
   CircuitsEngineError,
   createBarrierHandler,
+  createRefreshHandler,
   createSubscribeHandler,
+  fingerprintShapeRequest,
   importStreamTokenKey,
+  mintStreamToken,
+  refreshStreamToken,
   subscribeToShapes,
   type CircuitsEngineClient,
   type EntitlementSet,
@@ -76,7 +80,7 @@ function stubEngine(): CircuitsEngineClient & { created: unknown[] } {
       };
     },
     releaseShape: async () => {},
-    replicationState: async () => ({ lsn: "0/0", sync: true, pendingFlips: 0, flipFailures: 0 }),
+    replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
   } as CircuitsEngineClient & { created: unknown[] };
 }
 
@@ -166,17 +170,44 @@ describe("subscribe", () => {
     expect(engine.created).toHaveLength(1);
   });
 
-  it("creates nothing while the entitlement set is unavailable", async () => {
+  // An entitlement set that is not ready is an OUTAGE, never a denial. A client told "not entitled"
+  // clears that scope and unsubscribes (ADR-0055 decision 6), so answering a set that is merely
+  // catching up that way turns a few seconds of propagation lag into data loss. It throws, and the
+  // route answers 503 — the same treatment a degraded engine gets, for the same reason.
+  it("refuses to decide while the entitlement set is unavailable", async () => {
     const engine = stubEngine();
-    const result = await subscribeToShapes(
-      { registry, engine, entitlements: { ready: false, permits: () => true, scopesFor: () => [["off-1"]] }, key },
-      { sub: "person-a" },
-      [{ shapeKey: "offering_content" }],
-      NOW,
+    const unavailable = { ready: false, permits: () => true, scopesFor: () => [["off-1"]] };
+
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
+    await expect(
+      subscribeToShapes(
+        { registry, engine, entitlements: unavailable, key },
+        { sub: "person-a" },
+        [{ shapeKey: "offering_content" }],
+        NOW,
+      ),
+    ).rejects.toThrow(/entitlement set is unavailable/);
+
+    // Still the original property: nothing was registered and no capability exists to be revoked.
+    expect(engine.created).toEqual([]);
+
+    const handle = createSubscribeHandler({
+      registry,
+      engine,
+      entitlements: unavailable,
+      key,
+      resolveAuthClaims: () => ({ sub: "person-a" }),
+    });
+    const response = await handle(
+      new Request("http://cp/sync/v1/subscribe", {
+        method: "POST",
+        body: JSON.stringify({ subscriptions: [{ shapeKey: "offering_content" }] }),
+      }),
     );
 
-    expect(result.token).toBeUndefined();
-    expect(result.denied[0]?.reason).toBe("entitlements unavailable");
+    expect(response.status).toBe(503);
+    // Critically NOT a denial: nothing in the body may read as lost entitlement.
+    expect(await response.json()).toEqual({ error: "entitlements unavailable" });
     expect(engine.created).toEqual([]);
   });
 
@@ -205,7 +236,7 @@ describe("subscribe under engine failure", () => {
         throw new CircuitsEngineError(status, "degraded", "engine degraded");
       },
       releaseShape: async () => {},
-      replicationState: async () => ({ lsn: null, sync: false, pendingFlips: 0, flipFailures: 1 }),
+      replicationState: async () => ({ lsn: null, pendingFlips: 0, flipFailures: 1 }),
     } as unknown as CircuitsEngineClient;
   }
 
@@ -231,12 +262,185 @@ describe("subscribe under engine failure", () => {
   });
 });
 
-// The barrier's cache is sound for `sync`/`pendingFlips` because staleness only ever moves those
-// terms BACKWARDS: a stale reading can delay an alignment, never satisfy one falsely. `flipFailures`
+// The re-mint route runs every few minutes for the life of every subscription, and its `revoked` list
+// is the wire's clear-this-scope instruction. So the unavailable-is-not-a-denial rule binds harder
+// here than on subscribe: an entitlement subscription a few seconds behind would otherwise empty a
+// subject's store on every reconnect.
+describe("refresh while the entitlement set is unavailable", () => {
+  it("answers 503 and revokes nothing", async () => {
+    const token = await mintStreamToken(key, {
+      sub: "person-a",
+      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: ["off-1"] }],
+      ttlSeconds: 300,
+      now: NOW,
+    });
+    const handle = createRefreshHandler({
+      registry,
+      entitlements: { ready: false, permits: () => true, scopesFor: () => [["off-1"]] },
+      key,
+      resolveAuthClaims: () => ({ sub: "person-a" }),
+    });
+
+    const response = await handle(
+      new Request("http://cp/sync/v1/refresh", { method: "POST", body: JSON.stringify({ token }) }),
+    );
+
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toEqual({ error: "entitlements unavailable" });
+    // The word that must NOT appear: a `revoked` entry is what makes a client clear its rows.
+    expect(body["revoked"]).toBeUndefined();
+  });
+});
+
+// A private-tier grant is NOT self-authorizing at re-mint (ADR-0055 decision 6, amended). Its
+// predicate is compiled out of the subject's claims, and a claim it reads can change while the
+// subscription lives — so the re-mint recompiles the shape against the CURRENT claims and admits the
+// grant only if the result is the same shape the grant was issued for. Re-verifying the JWT proves
+// the bearer is still who they were; only the recompile proves the shape is still theirs.
+describe("re-mint re-authorizes the private tier", () => {
+  const TENANT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const TENANT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  // Keyed on a claim that is NOT `sub`, which is the whole point: the subject is unchanged across
+  // every case below, so a re-mint that only re-verified the subject would wave all of them through.
+  const documents = defineSyncTable({
+    tableName: "tenant_documents",
+    makeColumns: () => ({ id: uuid("id").primaryKey(), tenantId: uuid("tenant_id").notNull(), body: text("body") }),
+    primaryKey: ["id"],
+    mode: "readonly",
+    shape: {
+      rowFilter: (c) => ({
+        customPredicate: (claims) => {
+          const tenant = claims.app_metadata?.["tenant"];
+          return typeof tenant === "string" ? p.eq(c.tenantId, tenant) : DENY_ALL_PREDICATE;
+        },
+      }),
+    },
+  });
+  const tenantRegistry = defineSyncRegistry({ tables: { documents } });
+  const gate = { key, durableStreamsUrl: "http://ds" };
+
+  async function subscribeAs(tenant: string) {
+    const engine = stubEngine();
+    const result = await subscribeToShapes(
+      { registry: tenantRegistry, engine, key },
+      { sub: "person-a", app_metadata: { tenant } },
+      [{ shapeKey: "tenant_documents" }],
+      NOW,
+    );
+    expect(result.granted.map((g) => g.streamPath)).toEqual(["shape/s1"]);
+    return result;
+  }
+
+  it("keeps a grant whose shape still compiles the same", async () => {
+    const initial = await subscribeAs(TENANT_A);
+    const refreshed = await refreshStreamToken(
+      { registry: tenantRegistry, key },
+      { sub: "person-a", app_metadata: { tenant: TENANT_A } },
+      initial.token!,
+      NOW + 1,
+    );
+
+    expect(refreshed.revoked).toEqual([]);
+    expect(refreshed.granted.map((g) => g.path)).toEqual(["shape/s1"]);
+    // Re-authorized means re-minted: the fresh token opens the same stream the old one did.
+    expect((await authorizeStreamRead(gate, refreshed.token!, "shape/s1", NOW + 1)).allow).toBe(true);
+  });
+
+  // The subject is still permitted something — just not THIS shape. Revoking anyway is the design:
+  // the grant names one stream and that stream serves the old predicate, and minting a new shape here
+  // would bump an engine refcount nothing ever releases. The client re-subscribes, is granted the
+  // shape its claims now compile to, and re-snapshots because the handle differs (ADR-0056 d7).
+  it("revokes a grant whose predicate now compiles differently, even though it still permits", async () => {
+    const initial = await subscribeAs(TENANT_A);
+    const refreshed = await refreshStreamToken(
+      { registry: tenantRegistry, key },
+      { sub: "person-a", app_metadata: { tenant: TENANT_B } },
+      initial.token!,
+      NOW + 1,
+    );
+
+    expect(refreshed.granted).toEqual([]);
+    expect(refreshed.revoked).toEqual([
+      { shapeKey: "tenant_documents", reason: "shape predicate changed for this subject" },
+    ]);
+    // And the bound is real: the re-minted token does not open the stream the old predicate served.
+    expect(await authorizeStreamRead(gate, refreshed.token ?? null, "shape/s1", NOW + 1)).toMatchObject({
+      allow: false,
+    });
+  });
+
+  // Nothing to compare against is nothing that could establish the grant is still the right one, so
+  // it fails closed. The recovery costs a re-subscribe, never a row the subject may still read.
+  it("revokes a private grant carrying no fingerprint", async () => {
+    const token = await mintStreamToken(key, {
+      sub: "person-a",
+      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "tenant_documents" }],
+      now: NOW,
+    });
+    const refreshed = await refreshStreamToken(
+      { registry: tenantRegistry, key },
+      { sub: "person-a", app_metadata: { tenant: TENANT_A } },
+      token,
+      NOW + 1,
+    );
+
+    expect(refreshed.granted).toEqual([]);
+    expect(refreshed.revoked).toEqual([
+      {
+        shapeKey: "tenant_documents",
+        reason: "private grant carries no fingerprint and cannot be re-authorized",
+      },
+    ]);
+  });
+
+  // The comparison above is only sound if the fingerprint is a function of MEANING. A predicate
+  // arrives from an author's closure, whose branches may build `{ col, op, value }` in any order, so
+  // key order must not register — while the values, which are the authorization, must.
+  it("fingerprints by meaning: key order is invisible, values are not", async () => {
+    const canonical = await fingerprintShapeRequest({
+      table: "tenant_documents",
+      where: {
+        and: [
+          { col: "tenant_id", op: "eq", value: TENANT_A },
+          { col: "archived", isNull: true },
+        ],
+      },
+      columns: ["id", "body"],
+    });
+    const reordered = await fingerprintShapeRequest({
+      columns: ["id", "body"],
+      where: {
+        and: [
+          { value: TENANT_A, op: "eq", col: "tenant_id" },
+          { isNull: true, col: "archived" },
+        ],
+      },
+      table: "tenant_documents",
+    });
+    const otherTenant = await fingerprintShapeRequest({
+      table: "tenant_documents",
+      where: {
+        and: [
+          { col: "tenant_id", op: "eq", value: TENANT_B },
+          { col: "archived", isNull: true },
+        ],
+      },
+      columns: ["id", "body"],
+    });
+
+    expect(reordered).toBe(canonical);
+    expect(otherTenant).not.toBe(canonical);
+  });
+});
+
+// The barrier's cache is sound for `pendingFlips` because staleness only ever moves that term
+// BACKWARDS: a stale reading can delay an alignment, never satisfy one falsely. `flipFailures`
 // inverts that — a cached pre-degradation zero would license exactly the alignment the term exists
 // to refuse — so a degraded reading is never cached.
 describe("barrier cache", () => {
-  function engineReporting(states: { sync: boolean; pendingFlips: number; flipFailures: number }[]) {
+  function engineReporting(states: { pendingFlips: number; flipFailures: number }[]) {
     let index = 0;
     const reads = { count: 0 };
     const engine = {
@@ -252,10 +456,10 @@ describe("barrier cache", () => {
   const get = () => new Request("http://cp/sync/v1/barrier");
 
   it("caches a healthy reading", async () => {
-    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 0, flipFailures: 0 }]);
+    const { engine, reads } = engineReporting([{ pendingFlips: 0, flipFailures: 0 }]);
     const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
 
-    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 0, flipFailures: 0 });
+    expect(await (await handle(get())).json()).toEqual({ pendingFlips: 0, flipFailures: 0 });
     await handle(get());
     expect(reads.count).toBe(1);
   });
@@ -263,10 +467,10 @@ describe("barrier cache", () => {
   // Uncached by default, so an unconverged engine is re-read every time rather than being believed
   // for a window — the cache is an opt-in for deployments that have measured the trade.
   it("re-reads every time with no cache window", async () => {
-    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 2, flipFailures: 0 }]);
+    const { engine, reads } = engineReporting([{ pendingFlips: 2, flipFailures: 0 }]);
     const handle = createBarrierHandler({ engine });
 
-    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 2, flipFailures: 0 });
+    expect(await (await handle(get())).json()).toEqual({ pendingFlips: 2, flipFailures: 0 });
     await handle(get());
     await handle(get());
     expect(reads.count).toBe(3);
@@ -277,10 +481,10 @@ describe("barrier cache", () => {
   // instead of being masked for a window, and is what stops a stale zero from ever being served in
   // its place. Deleting the guard makes this fail: the reading is served once and never re-read.
   it("never caches a degraded reading", async () => {
-    const { engine, reads } = engineReporting([{ sync: true, pendingFlips: 4, flipFailures: 1 }]);
+    const { engine, reads } = engineReporting([{ pendingFlips: 4, flipFailures: 1 }]);
     const handle = createBarrierHandler({ engine, maxAgeSeconds: 60 });
 
-    expect(await (await handle(get())).json()).toEqual({ sync: true, pendingFlips: 4, flipFailures: 1 });
+    expect(await (await handle(get())).json()).toEqual({ pendingFlips: 4, flipFailures: 1 });
     await handle(get());
     await handle(get());
     expect(reads.count).toBe(3);

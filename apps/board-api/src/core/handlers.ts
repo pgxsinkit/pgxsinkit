@@ -108,7 +108,16 @@ export async function createBoardSyncHandler(options: BoardSyncHandlerOptions): 
  */
 export async function createBoardStreamHandler(options: BoardStreamHandlerOptions): Promise<FetchHandler> {
   const key = await importStreamTokenKey(options.streamTokenSecret);
-  const handleStreamRead = createStreamGate({ key, durableStreamsUrl: options.durableStreamsUrl });
+  // The same `boardSyncRegistry` the control plane compiles shapes from — the edge resolves each
+  // granted shapeKey in it to learn whether the shape declares an egress `serverProjection.rowTransform`
+  // it must rewrite (ADR-0055 decision 5). Read off the module import rather than taken as an option,
+  // matching `createBoardWriteHandler`/`createBoardSyncHandler`: the board serves exactly one registry,
+  // and a second way to name it is a second way for the two halves to disagree.
+  const handleStreamRead = createStreamGate({
+    key,
+    registry: boardSyncRegistry,
+    durableStreamsUrl: options.durableStreamsUrl,
+  });
 
   return async (request) => {
     const stripped = stripFunctionPrefix(request, "board-stream");

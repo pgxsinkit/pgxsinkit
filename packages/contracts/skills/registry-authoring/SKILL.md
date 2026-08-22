@@ -321,37 +321,37 @@ export const assessmentDefinitionAdminSummary = defineReadProjection(assessmentD
 
 - It **owns no table**: its `table` IS the owner's, so nothing new is migrated and nothing leaks into a
   drizzle-kit schema barrel. Only its `localTable` (named `as`) and shape are its own.
-- `columns` is a typed subset of the owner's keys, and the local table carries the owner's **real per-column
-  types restricted to those keys** (Picked from the owner), so a row typechecks by property key with no
-  casts. The PK is always kept **at runtime**, but the type is a safe **under-claim** — a PK column not in
-  `columns` is synced yet absent from the type, so list it to read it typed. Column definitions are reused
-  (never restated), and the subset becomes the shape's **emitted** column set, so an omitted (heavy) column
-  is **never streamed**, not merely stripped.
-- The physical table it reads is **derived** from the owner — you never name a source string (the resolved
-  `physicalTable` is internal, not a registry input). The `rowFilter` callback receives the OWNER's full
-  columns: the engine matches on the physical table's columns independently of what the shape emits, so the
+- `columns` is a typed subset of the owner's keys; the local table carries the owner's real per-column types
+  restricted to those keys, so a row typechecks by property key with no casts. The PK is always kept **at
+  runtime** but the type is a safe **under-claim** — list a PK column in `columns` to read it typed. The
+  subset becomes the shape's **emitted** column set, so an omitted (heavy) column is **never streamed**.
+- The physical table is **derived** from the owner — you never name a source string. The `rowFilter`
+  callback receives the OWNER's full columns: the engine matches on columns the shape does not emit, so the
   predicate may reference a column the subset omits.
-- It is **readonly**; put it in the authoritative registry under its own key and in the reading client's
-  registry. RLS for its reads lives on the **owner** (a projection adds no DDL to a table it doesn't own), so
-  its `customPredicate` must be a subset of what that RLS allows. The control plane resolves each shape by
-  `shapeKey`, so owner and projection coexist over one physical table.
+- It is **readonly**; register it under its own key in the authoritative registry and in the reading client's.
+  RLS for its reads lives on the **owner** (a projection adds no DDL), so its `customPredicate` must be a
+  subset of what that RLS allows. The control plane resolves each shape by `shapeKey`, so owner and
+  projection coexist over one physical table.
 
 ### Redacting projection: keep the secret out of the row, not out of the response
 
-**Redact in Postgres, not in flight.** Nothing rewrites rows on the read path — the engine materialises a
-shape and the edge proxies bytes — so model a "window" over a keyed table as SCHEMA: compute the redacted
-value into its own column (generated or trigger-maintained), sync THAT, and split the projections by predicate
-on the control flag. The engine matches on columns a shape does not emit, so the flag never reaches the client
-and the raw value never enters durable-streams storage.
+**Prefer redacting in Postgres.** Model a "window" over a keyed table as SCHEMA where you can: compute the
+redacted value into its own column (generated or trigger-maintained), sync THAT, and split the projections by
+predicate on the control flag — the flag never reaches the client and the raw value never enters storage.
 
-`serverProjection` (an egress `rowTransform`) and `serverOnlyColumns` remain registry declarations whose
-guards fire at definition time: `serverOnlyColumns` requires BOTH `serverProjection.rowTransform` and
-`columns`, and must be disjoint from `columns` and the PK. **No inheritance — enforced:**
-`defineReadProjection` THROWS when the owner declares an egress `rowTransform` unless the projection states
-its own (usually the same fn, plus `serverOnlyColumns` for its control-flag inputs) or opts out with the
-literal `serverProjection: "unredacted"` — only after confirming the kept columns leak nothing. `"unredacted"`
-over a transform-less owner is itself rejected, so a stale opt-out cannot pre-authorize a leak the owner gains
-later.
+`serverProjection` (an egress `rowTransform`) is the escape hatch when the decision is per-row and cannot be
+pre-computed. It runs **at the stream edge**, per request: the edge rewrites every row of the JSON long-poll
+body, then strips each row to the client keep-set — which takes `serverOnlyColumns` (fetched so the transform
+can read them) off the wire. Costs, confined to shapes that declare one: `claims` are `{ sub }` only (richer
+claims belong in `rowFilter.customPredicate`); the shape is private-tier (`scope` + `rowTransform` is refused)
+and answered `cache-control: private, no-store`; JSON long-poll only — an SSE read gets `406`.
+
+Guards fire at definition time: `serverOnlyColumns` requires BOTH `serverProjection.rowTransform` and
+`columns`, disjoint from `columns` and the PK. **No inheritance — enforced:** `defineReadProjection` THROWS
+when the owner declares a `rowTransform` unless the projection states its own (usually the same fn, plus
+`serverOnlyColumns` for its control flags) or opts out with the literal `serverProjection: "unredacted"` —
+only after confirming the kept columns leak nothing. `"unredacted"` over a transform-less owner is itself
+rejected, so a stale opt-out cannot pre-authorize a leak the owner gains later.
 
 ## Classify rows and assert registry invariants (ADR-0052)
 
@@ -409,19 +409,19 @@ It scopes the **browser** store only; Node mints stay `file://` and export clone
 
 ## Consistency groups: scope them to the joined cluster
 
-`consistencyGroup` binds tables into one subscription that commits **atomically** — a reader never sees one
-grouped table advanced past another for the same server transaction. Each member is its own stream, and the
-group commits only when **every** member's most recent response asserted up-to-date (offsets are per-stream,
-so the gate is that predicate rather than a shared frontier; each alignment generation's first commit also
-waits on the engine's barrier). Default is none — a per-table singleton committing on its own. Three scoping
-rules:
+`consistencyGroup` binds tables into one subscription that commits **atomically at boot and catch-up
+alignment** — a reader never sees one grouped table advanced past another for a transaction the group caught
+up on. Each member is its own stream; the group commits when **every** member's most recent response asserted
+up-to-date (offsets are per-stream, so the gate is that predicate, plus the engine barrier on each alignment
+generation's first commit). Live deliveries commit per response, so two halves of one transaction can land a
+few milliseconds apart — a documented window (backlog 0014), not a guarantee. Default is none — a per-table
+singleton committing on its own. Three scoping rules:
 
 1. **Group the transactionally-joined cluster** — tables written together in one server transaction and
    rendered joined (FK parent + children); that is what the atomic commit protects. If the app otherwise
    needs post-ack re-reads to hide half-applied transactions, the tables belong in a group.
-2. **Quiet members are affordable.** durable-streams answers every long-poll timeout with `204` and the
-   up-to-date header, so a rarely-written reference table re-asserts freshness each cycle rather than
-   holding its group behind a stale watermark — don't keep a lookup table out of its natural group.
+2. **Quiet members are affordable.** Every `204` long-poll timeout re-asserts up-to-date, so a rarely-written
+   reference table never holds its group behind a stale watermark — keep lookup tables in their natural group.
 3. **Don't group "everything".** A group commits at the pace of its slowest member; unrelated clusters go
    in separate groups or stay singletons.
 

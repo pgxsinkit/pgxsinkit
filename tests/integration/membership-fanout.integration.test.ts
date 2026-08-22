@@ -110,6 +110,7 @@ describe("membership fan-out (readwrite) integration", () => {
     // each resolving the test identity from the x-test-sub header via the shared adapter.
     stack = await startNativeSyncStack({
       env,
+      registry: membershipFanoutSyncRegistry,
       createServer: (readPath) =>
         createSyncServer({
           registry: membershipFanoutSyncRegistry,

@@ -92,6 +92,7 @@ export async function startPlacementFixtureServer(opts: {
 
   const handleStreamRead = createStreamGate({
     key: streamTokenKey,
+    registry: fkSyncRegistry,
     durableStreamsUrl: opts.durableStreamsUrl,
   });
   await installPlpgsqlBatchFunction(server.drizzle, fkSyncRegistry);

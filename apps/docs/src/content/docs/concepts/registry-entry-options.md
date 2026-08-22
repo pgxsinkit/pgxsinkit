@@ -328,6 +328,20 @@ serverProjection: {
 },
 ```
 
+**Where it runs, and what it costs.** At the **stream edge**, per request, on the JSON long-poll body —
+the edge resolves the shape, rewrites every row, then strips each row to the shape's client keep-set.
+Three consequences follow, and they are the whole cost of the feature:
+
+- The `claims` a transform sees at the edge are **`{ sub }` and nothing else**. A stream token carries
+  the subject, not the JWT it was minted from. A rewrite that needs richer claims is not expressible
+  here — put the subject-dependent part in the shape's `rowFilter.customPredicate`, which is compiled
+  at subscribe time from the full verified claims.
+- The bytes are a function of the reader, so a shape declaring a transform is **private-tier by
+  construction** and is answered `cache-control: private, no-store`. It is never CDN-shareable.
+  Declaring `scope` alongside a `rowTransform` is rejected at definition time for that reason. Every
+  shape that declares no transform is untouched by this and keeps the caching it had.
+- Such a shape is **JSON long-poll only**: an SSE read of it is refused with `406`.
+
 **When to use.** Conditional redaction: hide a field from everyone but its owner; trim a large blob for
 non-privileged callers. It never alters the local schema or the shape definition, so it never splits
 the shape sharing the engine does by ref-counting identical definitions.
@@ -339,10 +353,11 @@ A read projection (`defineReadProjection`) may carry its own
 recipe: a table stores the item body (a `jsonb payload` with the answer key inside) plus a
 `keysWithheld` control flag; a projection **streams the body, strips the keys per row**. Because the
 transform must _read_ the control flag — which is not part of the client shape — declare it in
-`serverOnlyColumns`. The native shape definition separates **matching** from **emission** — a shape's
-predicate may reference columns the shape never emits — so those owner keys stay off the client wire by
-construction rather than by a later omission pass, and the ordering hazard between rewriting and
-omission has nothing left to order.
+`serverOnlyColumns`. Those owner columns **are** fetched onto the engine's stream, deliberately: the
+transform is the only thing that reads them, and it cannot read a column nobody fetched. They come off
+the wire one hop later, at the stream edge, which strips each row to the client keep-set **after** the
+transform has run. The ordering hazard between rewriting and omission is therefore answered in one
+place — transform first, strip second — rather than split between two.
 
 ```ts
 export const secureItemWindow = defineReadProjection(secureItem, {
@@ -456,7 +471,9 @@ These four axes are orthogonal to read/write mode and to authorization. They are
 
 **What it achieves.** Binds tables onto one group of shape streams that commits **atomically** — the
 group applies only when **every** shape in it has just reported up-to-date, so a reader never sees one
-grouped table advanced past another for the same server transaction.
+grouped table advanced past another for the same server transaction — with one qualification: that is
+exact at boot and catch-up, while a live change commits per response, leaving a window bounded by the
+member streams' response inter-arrival (normally milliseconds).
 
 ```ts
 const TEAM_SCOPE = "team-scope";
