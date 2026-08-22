@@ -32,6 +32,12 @@ and prod databases with sync-ready support functions.
 7. Apply migrations to target database.
    - Dev/local: bun run db:migrate
    - Staging/prod: apply the same committed infra/drizzle/ history via your deployment runner.
+   - If the migration **adds** a table the Circuits engine must sync — or **drops and re-creates**
+     one — add it to the engine's table list (`ELECTRIC_CIRCUITS_PG_TABLES`: the explicit list the
+     compose stacks set, derived by `resolveCircuitsPgTables` for the lanes) and **restart the
+     engine**. The engine resolves its table list once, at boot; a table that starts matching
+     afterwards is not synced until the restart, and a re-created table is not noticed at all
+     (fork issue pgxsinkit/electric-circuits#11 tracks picking these up without a restart).
 8. Ensure the latest committed governance migration has been applied when governance metadata changed.
    - This uses the same bun run db:migrate path because governance migrations are committed into infra/drizzle/.
 9. Ensure the latest committed sync-function migration has been applied when the apply function changes.
