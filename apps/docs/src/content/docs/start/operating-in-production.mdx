@@ -121,6 +121,13 @@ against the subject's current claims and revokes the grant if it no longer compi
 was granted — so a **claims** change (a role removed, a tenant switched) is bounded by the same TTL as
 an entitlement change, without the subject having to re-authenticate for it to take effect.
 
+The re-mint only _narrows_, though. A scope a subject **gains** after subscribing — a membership
+acquired mid-session, or a shape that was refused at subscribe — is granted at the next subscribe: a
+boot, or the automatic restart that follows a stream ending or a grant being revoked. It does not
+arrive within the TTL on its own. Widening an existing private-tier grant is the exception, by way of
+the fingerprint: a claims change that compiles to a different predicate is revoked at the re-mint, and
+the restart re-subscribes with the new claims.
+
 ## Engine shape claims: a closed subscription gives them back
 
 Every grant a subscribe hands out is a claim on an engine shape, and the engine's claim count is what

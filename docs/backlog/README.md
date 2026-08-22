@@ -32,3 +32,6 @@ Rules:
 - [0012 — durable-streams needs a persistent volume before staging](0012-durable-streams-staging-persistence.md) — candidate
 - [0013 — Engine-side claim leases (retry-safe shape release)](0013-engine-claim-leases.md) — candidate
 - [0014 — A cross-stream commit fence (live cross-shape atomicity)](0014-cross-stream-commit-fence.md) — candidate
+- [0015 — Entitlement gain is not surfaced mid-session (a re-mint only narrows)](0015-entitlement-gain-mid-session.md) — candidate
+- [0016 — Runtime `params` are declared end to end and wired nowhere](0016-runtime-params-wired-nowhere.md) — candidate
+- [0017 — `shapeKey` uniqueness is checked before schema qualification](0017-shapekey-uniqueness-after-qualification.md) — candidate

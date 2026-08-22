@@ -191,6 +191,13 @@ executes.
      entitlement set, the private tier by recompiling the shape with the subject's current claims and
      comparing the fingerprint carried in the grant — a predicate that now denies, or now compiles
      differently, is revoked, and the client re-subscribes for the shape its claims compile to.
+   - *(Amended 2026-08-22.)* **A re-mint only narrows.** It re-authorizes the grants the token holds;
+     it does not expand the subject's entitlements again. A scope **gained** after subscribe — a
+     membership acquired mid-session, or a shape refused at subscribe — is granted at the next
+     subscribe (a boot, or a restart after a stream ends or a grant is revoked), not within the TTL.
+     Private-tier widening is the exception: a claims change that compiles to a different predicate
+     fails the fingerprint, is revoked, and the restart re-subscribes with the new claims. Surfacing
+     gain mid-session is backlog 0015.
    - *(Amended 2026-08-22.)* **Closing a session releases the engine claims its subscribe acquired.**
      Each grant is one `POST /shapes` join and the engine's refcount blocks dormancy and eviction, so
      the session hands them back on close (`/sync/v1/release`, at most once, never retried — the
