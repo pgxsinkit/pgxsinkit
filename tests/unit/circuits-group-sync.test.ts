@@ -153,7 +153,14 @@ function stubEngine(generation: string): CircuitsEngineClient & { released: stri
         path = `shape/${generation}${next}`;
         assigned.set(fingerprint, path);
       }
-      return { shapeId: path, table: request.table, streamPath: path, streamUrl: `http://ds/${path}` };
+      return {
+        shapeId: path,
+        table: request.table,
+        streamPath: path,
+        streamUrl: `http://ds/${path}`,
+        subscription: request.subscription ?? "~minted",
+        leaseSeconds: 1800,
+      };
     },
     releaseShape: async (shapeId: string) => {
       released.push(shapeId);

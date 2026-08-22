@@ -347,17 +347,20 @@ app.post(subscribePath, async (context) => {
 });
 
 // Built per request over the active registry for the same reason subscribe is, and now for a second:
-// the re-mint recompiles every private-tier grant to re-authorize it, so it needs the registry the
-// grant was compiled from.
+// the re-mint recompiles every grant — to re-authorize the private tier, and to RENEW every grant's
+// engine claim by repeating its create (fork ADR-0008) — so it needs both the registry the grant was
+// compiled from and the engine holding the claim.
 app.post(refreshPath, async (context) => {
   const registry = requireActiveRegistry();
   if (!registry) return context.json({ message: "Perf-lab registry is not ready yet." }, 503);
-  return createRefreshHandler({ registry: registry.registry, key: streamTokenKey, resolveAuthClaims })(context.req.raw);
+  return createRefreshHandler({ registry: registry.registry, engine, key: streamTokenKey, resolveAuthClaims })(
+    context.req.raw,
+  );
 });
 
-// The close half of subscribe: every grant is an engine refcount, and `refcount > 0` blocks dormancy
-// and eviction, so a lab that only ever subscribed would grow its shape set for the life of the
-// process. No registry needed — the token carries the claims to give back.
+// The close half of subscribe: every grant is a named claim on an engine shape, and a live claim
+// blocks dormancy and eviction, so a lab that only ever subscribed would hold every shape it ever
+// touched for a full lease window. No registry needed — the token carries the claims to give back.
 app.post(releasePath, (context) =>
   createReleaseHandler({ engine, key: streamTokenKey, resolveAuthClaims })(context.req.raw),
 );

@@ -20,15 +20,14 @@ import {
 } from "@pgxsinkit/server";
 
 // The close half of the native subscribe path. Every grant subscribe hands out is one `POST /shapes`
-// join, and the engine's refcount is the ONLY thing that tells it a reader exists — native reads
-// terminate on durable-streams and never touch it — so `refcount > 0` blocks dormancy and eviction
-// alike. Without a release, a deployment's shape set only ever grows, across restarts.
+// join, and a live claim is the ONLY thing that tells the engine a reader exists — native reads
+// terminate on durable-streams and never touch it — so one live claim blocks dormancy and eviction
+// alike. Without a release, every shape waits out its full lease window before it can be reclaimed.
 //
-// What these tests pin is the at-most-once contract, on both sides. The engine's
-// `DELETE /shapes/{id}` carries no claim identity: it decrements a shared counter. So a LOST release
-// costs one leaked claim, while a DOUBLE release takes a claim that belongs to somebody else and can
-// park a shape dormant under a live reader. Every assertion below is about counting claims exactly:
-// one per grant on the way out, never twice, and never one the caller did not hold.
+// What these tests pin is that every claim is NAMED and released BY that name (fork ADR-0008). One
+// release per grant on the way out, each carrying its own claim id — which is what makes a repeat
+// harmless rather than a theft, and what keeps two grants that deduplicated onto one shape
+// distinguishable. Refusals are still refusals: a token is only ever its own subject's to give back.
 
 const key = await importStreamTokenKey("release-test-secret");
 const NOW = 1_700_000_000;
@@ -51,29 +50,50 @@ const registry = defineSyncRegistry({ tables: { content } });
 const OFF_A = "11111111-1111-4111-8111-111111111111";
 const OFF_B = "22222222-2222-4222-8222-222222222222";
 
-/** An engine stub recording the shapeIds it was asked to release, in order. */
-function stubEngine(options?: { failRelease?: boolean }): CircuitsEngineClient & { released: string[] } {
+/**
+ * An engine stub recording what it was asked to release, in order — the shapeId in `released` and the
+ * `(shapeId, claim)` pair in `releases`, because the claim is the half that says WHICH join is being
+ * given back.
+ *
+ * Its creates honour the subscription contract: the id is echoed back, and repeating it renews rather
+ * than taking a second claim.
+ */
+function stubEngine(options?: {
+  failRelease?: boolean;
+}): CircuitsEngineClient & { released: string[]; releases: { shapeId: string; claim: string }[] } {
   const released: string[] = [];
+  const releases: { shapeId: string; claim: string }[] = [];
+  const byClaim = new Map<string, { shapeId: string; streamPath: string }>();
   let next = 0;
   return {
     released,
+    releases,
     createShape: async (request) => {
-      next += 1;
+      const claim = request.subscription ?? `~minted-${next + 1}`;
+      let handle = byClaim.get(claim);
+      if (handle === undefined) {
+        next += 1;
+        handle = { shapeId: `s${next}`, streamPath: `shape/s${next}` };
+        byClaim.set(claim, handle);
+      }
       return {
-        shapeId: `s${next}`,
+        shapeId: handle.shapeId,
         table: request.table,
-        streamPath: `shape/s${next}`,
-        streamUrl: `http://ds:8080/v1/stream/shape/s${next}`,
+        streamPath: handle.streamPath,
+        streamUrl: `http://ds:8080/v1/stream/${handle.streamPath}`,
+        subscription: claim,
+        leaseSeconds: 1800,
       };
     },
-    releaseShape: async (shapeId: string) => {
+    releaseShape: async (shapeId: string, claim: string) => {
       if (options?.failRelease === true) {
         throw new CircuitsEngineError(502, "boom", "[pgxsinkit] circuits engine DELETE /shapes → 502");
       }
       released.push(shapeId);
+      releases.push({ shapeId, claim });
     },
     replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
-  } as CircuitsEngineClient & { released: string[] };
+  } as CircuitsEngineClient & { released: string[]; releases: { shapeId: string; claim: string }[] };
 }
 
 function mutableEntitlements(allowed: Set<string>): EntitlementSet {
@@ -132,8 +152,8 @@ describe("releaseStreamGrants", () => {
     const token = await mintStreamToken(key, {
       sub: "person-a",
       grants: [
-        { path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_A] },
-        { path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_B] },
+        { path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] },
+        { path: "shape/s1", shapeId: "s1", claim: "claim-b", shapeKey: "offering_content", scope: [OFF_B] },
       ],
       now: NOW,
     });
@@ -142,6 +162,12 @@ describe("releaseStreamGrants", () => {
 
     expect(result).toEqual({ released: 2 });
     expect(engine.released).toEqual(["s1", "s1"]);
+    // And each release names its OWN claim, which is what makes the two distinguishable at all: one
+    // shapeId, two joins, two ids. Releasing `claim-a` twice would leave `claim-b` held.
+    expect(engine.releases).toEqual([
+      { shapeId: "s1", claim: "claim-a" },
+      { shapeId: "s1", claim: "claim-b" },
+    ]);
   });
 
   // A session releases at CLOSE, which is routinely well past a 5-minute TTL. Expiry bounds how long
@@ -151,7 +177,7 @@ describe("releaseStreamGrants", () => {
     const engine = stubEngine();
     const token = await mintStreamToken(key, {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_A] }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] }],
       ttlSeconds: 300,
       now: NOW - 86_400,
     });
@@ -159,16 +185,16 @@ describe("releaseStreamGrants", () => {
     const result = await releaseStreamGrants({ engine, key }, { sub: "person-a" }, token, NOW);
 
     expect(result).toEqual({ released: 1 });
-    expect(engine.released).toEqual(["s1"]);
+    expect(engine.releases).toEqual([{ shapeId: "s1", claim: "claim-a" }]);
   });
 
   // A token presented by anyone but its own subject is not a release, it is an attempt to drop the
-  // victim's claims — and because the engine's DELETE has no claim identity, it would succeed.
+  // victim's claims — and it names them exactly, so it would succeed.
   it("refuses a token whose subject is not the caller, and releases nothing", async () => {
     const engine = stubEngine();
     const token = await mintStreamToken(key, {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_A] }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] }],
       now: NOW,
     });
 
@@ -188,7 +214,7 @@ describe("the release route", () => {
     const handle = createReleaseHandler({ engine, key, resolveAuthClaims: () => null });
     const token = await mintStreamToken(key, {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_A] }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] }],
       now: NOW,
     });
 
@@ -206,7 +232,7 @@ describe("the release route", () => {
     const handle = createReleaseHandler({ engine, key, resolveAuthClaims: () => ({ sub: "person-b" }) });
     const token = await mintStreamToken(key, {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_A] }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] }],
       now: NOW,
     });
 
@@ -222,7 +248,7 @@ describe("the release route", () => {
     const handle = createReleaseHandler({ engine, key, resolveAuthClaims: () => ({ sub: "person-a" }) });
     const forged = await mintStreamToken(await importStreamTokenKey("some-other-secret"), {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_A] }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] }],
       now: NOW,
     });
 
@@ -233,15 +259,15 @@ describe("the release route", () => {
     expect(engine.released).toEqual([]);
   });
 
-  // An engine that could not answer has not dropped the claims — but the client must still not come
-  // back, because a release it believes was lost may in fact have landed. 503 says "this deployment,
-  // not you", and the claims leak until the engine grows leases (backlog 0012).
+  // An engine that could not answer has not dropped the claims. 503 says "this deployment, not you",
+  // and the client is free to come back: the release names its claims, so a retry that races one that
+  // actually landed is a no-op. Either way the residue is bounded — an unrenewed claim lapses.
   it("503s when the engine cannot answer", async () => {
     const engine = stubEngine({ failRelease: true });
     const handle = createReleaseHandler({ engine, key, resolveAuthClaims: () => ({ sub: "person-a" }) });
     const token = await mintStreamToken(key, {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: [OFF_A] }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] }],
       now: NOW,
     });
 
@@ -249,6 +275,33 @@ describe("the release route", () => {
 
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "sync engine unavailable" });
+  });
+
+  // The property the whole of fork ADR-0008 exists to give this route: a release is IDEMPOTENT. The
+  // route no longer has to protect anyone from a repeat — it forwards both, the engine makes the
+  // second a no-op, and both answer 200. Before claims were named, the second `DELETE` decremented a
+  // shared counter and took a claim belonging to somebody else.
+  it("answers a repeated release the same way, forwarding both to the engine", async () => {
+    const engine = stubEngine();
+    const handle = createReleaseHandler({ engine, key, resolveAuthClaims: () => ({ sub: "person-a" }) });
+    const token = await mintStreamToken(key, {
+      sub: "person-a",
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-a", shapeKey: "offering_content", scope: [OFF_A] }],
+      now: NOW,
+    });
+
+    const first = await handle(post(token));
+    const second = await handle(post(token));
+
+    expect([first.status, second.status]).toEqual([200, 200]);
+    expect(await first.json()).toEqual({ released: 1 });
+    expect(await second.json()).toEqual({ released: 1 });
+    // Both reached the engine, naming the SAME claim both times — the id is what makes the repeat a
+    // no-op there rather than a second decrement here.
+    expect(engine.releases).toEqual([
+      { shapeId: "s1", claim: "claim-a" },
+      { shapeId: "s1", claim: "claim-a" },
+    ]);
   });
 });
 
@@ -275,9 +328,9 @@ describe("a subscription session's close", () => {
     expect(engine.released.sort()).toEqual(["s1", "s2"]);
   });
 
-  // The at-most-once rule, at the one place a client can break it by accident: a stop racing a
-  // teardown closes the same session twice, and a second release would steal another subscriber's
-  // claim off a shape this one has already given back.
+  // A second close sends nothing — not because a repeat would be unsafe (it is a no-op now: see the
+  // route's idempotence test above) but because it could only ever be redundant. The latch is there
+  // so a stop racing a teardown does not make a pointless request.
   it("sends exactly one release however many times it is closed", async () => {
     const engine = stubEngine();
     const routed = routeToHandlers(engine, mutableEntitlements(new Set([OFF_A])));
@@ -314,7 +367,8 @@ describe("a subscription session's close", () => {
   });
 
   // A control plane that refuses or cannot be reached must not take the caller down with it: the
-  // release is fire-and-forget, and its failure is invisible on purpose (no retry — see the route).
+  // release is fire-and-forget, and its failure is invisible because `close()` is synchronous and its
+  // commonest caller is a page unload — there is no one left to report to. The claims lapse.
   it("swallows a failed release rather than throwing out of close()", async () => {
     const engine = stubEngine();
     const routed = routeToHandlers(engine, mutableEntitlements(new Set([OFF_A])));

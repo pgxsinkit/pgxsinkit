@@ -40,6 +40,9 @@ const engine: CircuitsEngineClient = {
     table: request.table,
     streamPath: "shape/s1",
     streamUrl: "http://ds/shape/s1",
+    // Echoed, and the same handle every time: repeating a create with its own id is a RENEW.
+    subscription: request.subscription ?? "~minted",
+    leaseSeconds: 1800,
   }),
   releaseShape: async () => {},
   replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),

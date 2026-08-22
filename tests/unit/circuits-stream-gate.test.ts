@@ -36,9 +36,15 @@ async function tokenFor(grants: Parameters<typeof mintStreamToken>[1]["grants"],
   return mintStreamToken(key, { sub, grants, now: NOW });
 }
 
-const sharedGrant = { path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: ["off-1", "grp-1"] };
-const privateGrant = { path: "shape/s7", shapeId: "s7", shapeKey: "notes" };
-const transformGrant = { path: "shape/s3", shapeId: "s3", shapeKey: "secured_item_window" };
+const sharedGrant = {
+  path: "shape/s1",
+  shapeId: "s1",
+  claim: "claim-s1",
+  shapeKey: "offering_content",
+  scope: ["off-1", "grp-1"],
+};
+const privateGrant = { path: "shape/s7", shapeId: "s7", claim: "claim-s7", shapeKey: "notes" };
+const transformGrant = { path: "shape/s3", shapeId: "s3", claim: "claim-s3", shapeKey: "secured_item_window" };
 
 // A secure "window" over a keyed table — the worked example the registry docs give. The owner holds the
 // item body (a jsonb `payload` with the answer key inside), a kept `metadata` column, and a
@@ -129,7 +135,7 @@ describe("gate", () => {
 
   it("refuses a scope the subject is not entitled to, even with a valid token", async () => {
     const token = await tokenFor([
-      { path: "shape/s9", shapeId: "s9", shapeKey: "offering_content", scope: ["off-2", null] },
+      { path: "shape/s9", shapeId: "s9", claim: "claim-s9", shapeKey: "offering_content", scope: ["off-2", null] },
     ]);
     expect(await authorizeStreamRead(options, token, "shape/s9", NOW)).toEqual({
       allow: false,

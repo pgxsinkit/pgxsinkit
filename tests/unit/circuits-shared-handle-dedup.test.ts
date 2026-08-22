@@ -56,13 +56,16 @@ test("two public projections survive engine deduplication onto one shared stream
       table: request.table,
       streamPath: "shape/shared",
       streamUrl: "http://ds/shape/shared",
+      // Two claims, one shape: the id is echoed so each projection can renew and release its own.
+      subscription: request.subscription ?? "~minted",
+      leaseSeconds: 1800,
     }),
     releaseShape: async () => {},
     replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
   } as CircuitsEngineClient;
   const claims = () => ({ sub: "person-a" });
   const subscribe = createSubscribeHandler({ registry, engine, key, resolveAuthClaims: claims });
-  const refresh = createRefreshHandler({ registry, key, resolveAuthClaims: claims });
+  const refresh = createRefreshHandler({ registry, engine, key, resolveAuthClaims: claims });
   const barrier = createBarrierHandler({ engine, resolveAuthClaims: claims });
   const envelope: StreamEnvelope = {
     type: "projection_source",

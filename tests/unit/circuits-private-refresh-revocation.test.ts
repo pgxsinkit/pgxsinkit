@@ -33,6 +33,8 @@ const engine = {
     table: request.table,
     streamPath: "shape/s1",
     streamUrl: "http://ds/shape/s1",
+    subscription: request.subscription ?? "~minted",
+    leaseSeconds: 1800,
   }),
   releaseShape: async () => {},
   replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
@@ -48,7 +50,7 @@ test("a private grant is revoked when refreshed claims no longer satisfy its row
   expect(initial.granted).toHaveLength(1);
 
   const refreshed = await refreshStreamToken(
-    { registry, key },
+    { registry, engine, key },
     { sub: "user-1", app_metadata: { roles: [] } },
     initial.token!,
     NOW + 1,

@@ -27,6 +27,21 @@ export interface StreamGrant {
    */
   shapeId: string;
   /**
+   * The **subscription id** this grant's claim was taken under — the name the control plane gave it
+   * on `POST /shapes` (fork ADR-0008).
+   *
+   * Carried for the same reason {@link StreamGrant.shapeId} is: renewal and release are stateless.
+   * The re-mint renews this exact claim (the same create, repeated with this id) and the release
+   * route drops this exact claim (`DELETE /shapes/{id}?subscription=…`) — both of them from the
+   * signed token alone, with nothing remembered server-side. It is also what makes a release
+   * idempotent: a claim named is a claim that can only be given back once, however many times the
+   * request arrives.
+   *
+   * Distinct per grant even when two grants share a `shapeId`: two joins onto one deduplicated shape
+   * are two claims, and one id could only ever release one of them.
+   */
+  claim: string;
+  /**
    * Scope values, positionally matching the shape's declared scope columns. Shared tier only; a
    * private-tier grant has none, and its authorization is the token itself.
    */
@@ -122,6 +137,7 @@ export async function mintStreamToken(key: CryptoKey, options: MintStreamTokenOp
       path: grant.path,
       shapeKey: grant.shapeKey,
       shapeId: grant.shapeId,
+      claim: grant.claim,
       ...(grant.scope !== undefined ? { scope: [...grant.scope] } : {}),
       ...(grant.fp !== undefined ? { fp: grant.fp } : {}),
     })),

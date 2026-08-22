@@ -112,8 +112,8 @@ function hang(init: RequestInit | undefined, release: Promise<void>): Promise<Re
  * A stub engine handing back a STABLE path per distinct shape request, so a re-subscribe resumes.
  *
  * It records what was RELEASED too: a restart closes the old session, and the claims that session
- * took must go back before the new one takes its own — otherwise every recovery ratchets the shape's
- * refcount up by one and `refcount > 0` pins it active for good.
+ * took must go back before the new one takes its own — otherwise every recovery leaves a named claim
+ * behind, and each one pins the shape active until its lease lapses.
  */
 function stableEngine(): CircuitsEngineClient & { released: string[] } {
   const assigned = new Map<string, string>();
@@ -127,7 +127,14 @@ function stableEngine(): CircuitsEngineClient & { released: string[] } {
         path = `shape/s${assigned.size + 1}`;
         assigned.set(fingerprint, path);
       }
-      return { shapeId: path, table: request.table, streamPath: path, streamUrl: `http://ds/${path}` };
+      return {
+        shapeId: path,
+        table: request.table,
+        streamPath: path,
+        streamUrl: `http://ds/${path}`,
+        subscription: request.subscription ?? "~minted",
+        leaseSeconds: 1800,
+      };
     },
     releaseShape: async (shapeId: string) => {
       released.push(shapeId);

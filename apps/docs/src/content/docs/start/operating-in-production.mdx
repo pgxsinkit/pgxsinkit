@@ -130,17 +130,23 @@ the restart re-subscribes with the new claims.
 
 ## Engine shape claims: a closed subscription gives them back
 
-Every grant a subscribe hands out is a claim on an engine shape, and the engine's claim count is what
-keeps that shape active — native reads terminate on durable-streams, so the count is the only thing
+Every grant a subscribe hands out is a **named claim** on an engine shape, and a live claim is what
+keeps that shape active — native reads terminate on durable-streams, so a claim is the only thing
 telling the engine a reader exists. Closing a subscription releases those claims (`POST
-/sync/v1/release`, **best-effort and at most once**, never retried), which is what lets an idle shape
-go dormant and eventually be evicted.
+/sync/v1/release`), which is what lets an idle shape go dormant and eventually be evicted promptly.
 
-Claims of a client that **crashed or was unloaded** before its release left the browser are not
-reclaimed: they hold their shape active until the engine is restarted. That is the deliberate trade —
-the engine's release has no claim identity, so a retry that raced a release which actually landed
-would take a different subscriber's claim instead. If you see the active shape count or engine memory
-growing without bound, that residual leak is the thing to measure.
+A claim is also a **lease**. It counts as live only while it is renewed within the engine's
+`ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS` window, and the control plane renews every still-authorized grant
+on the token re-mint. So claims of a client that **crashed or was unloaded** before its release left
+the browser are reclaimed by the engine within one lease window rather than held until a restart —
+nothing renews them once the session is gone. Because each claim is named, the release is
+**idempotent**: repeating one is the same act once, and cannot take another subscriber's claim.
+
+That pairing has a configuration requirement, and the control plane enforces it: if the engine's lease
+window is **shorter than twice** the stream-token TTL, subscribe and refresh answer `503
+{"error":"sync engine lease window shorter than the token TTL"}` rather than serving sessions whose
+shapes would lapse after a single missed refresh. Raise `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`, lower
+`ttlSeconds`, or set the idle window to `0` (which disables dormancy, and with it leases).
 
 ## The browser connection budget (serve the gateway over HTTP/2)
 

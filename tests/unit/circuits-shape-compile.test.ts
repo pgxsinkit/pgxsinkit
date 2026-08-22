@@ -175,17 +175,45 @@ it("posts the compiled body to the engine and returns its handle", async () => {
           table: "offering_content",
           streamPath: "shape/s1",
           streamUrl: "http://ds:8080/v1/stream/shape/s1",
+          // Every create is recorded under a named, leased subscription (fork ADR-0008), and the
+          // client refuses an answer that omits either — see the create-validation test below.
+          subscription: "claim-1",
+          leaseSeconds: 1800,
         }),
         { status: 200 },
       );
     }) as unknown as typeof fetch,
   });
 
-  const handle = await client.createShape({ table: "offering_content" });
+  const handle = await client.createShape({ table: "offering_content", subscription: "claim-1" });
 
   expect(seen?.url).toBe("http://engine:4000/shapes");
-  expect(seen?.body).toEqual({ table: "offering_content" });
+  // The subscription id travels in the BODY, beside the definition: it names the claim this create
+  // takes, and repeating the same pair is a renewal rather than a second join.
+  expect(seen?.body).toEqual({ table: "offering_content", subscription: "claim-1" });
   expect(handle.streamPath).toBe("shape/s1");
+  expect(handle.subscription).toBe("claim-1");
+  expect(handle.leaseSeconds).toBe(1800);
+});
+
+// A release names the claim it is giving back, in the query string, url-encoded — that is what makes
+// it idempotent, and what keeps two joins on one deduplicated shape distinguishable. There is no
+// anonymous `DELETE /shapes/{id}` left in this client: the engine still accepts one, but it carries
+// no claim identity and is not retry-safe.
+it("releases by claim, encoding both the shape id and the subscription", async () => {
+  let seen: { url: string; method: string | undefined } | undefined;
+  const client = createCircuitsEngineClient({
+    baseUrl: "http://engine:4000",
+    fetch: (async (url: string, init: RequestInit) => {
+      seen = { url, method: init.method };
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+
+  await client.releaseShape("shape/s 1", "claim/one");
+
+  expect(seen?.method).toBe("DELETE");
+  expect(seen?.url).toBe("http://engine:4000/shapes/shape%2Fs%201?subscription=claim%2Fone");
 });
 
 // The barrier is readable only WHOLE (ADR-0056 decision 3). An engine that omits `flipFailures`

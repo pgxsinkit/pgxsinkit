@@ -50,16 +50,30 @@ function mutableEntitlements(allowed: Set<string>): EntitlementSet {
   };
 }
 
+/**
+ * Keyed by the CLAIM, so repeating a create with the same subscription id renews it — same handle,
+ * no second shape. That is the engine's contract (fork ADR-0008), and the re-mint depends on it: a
+ * renewal that came back a different handle is a revocation, not a survival.
+ */
 function stubEngine(): CircuitsEngineClient {
+  const byClaim = new Map<string, number>();
   let next = 0;
   return {
     createShape: async (request) => {
-      next += 1;
+      const claim = request.subscription ?? `~minted-${next + 1}`;
+      let index = byClaim.get(claim);
+      if (index === undefined) {
+        next += 1;
+        index = next;
+        byClaim.set(claim, index);
+      }
       return {
-        shapeId: `s${next}`,
+        shapeId: `s${index}`,
         table: request.table,
-        streamPath: `shape/s${next}`,
-        streamUrl: `http://ds:8080/v1/stream/shape/s${next}`,
+        streamPath: `shape/s${index}`,
+        streamUrl: `http://ds:8080/v1/stream/shape/s${index}`,
+        subscription: claim,
+        leaseSeconds: 1800,
       };
     },
     releaseShape: async () => {},

@@ -6,10 +6,16 @@ import {
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
 
-import { compileShapeRequest, fingerprintShapeRequest, resolveEntryByShapeKey } from "./compile";
+import {
+  compileShapeRequest,
+  fingerprintShapeRequest,
+  resolveEntryByShapeKey,
+  type CompiledShapeRequest,
+} from "./compile";
 import { EntitlementsUnavailableError, type EntitlementSet } from "./edge";
 import { CircuitsEngineError, type CircuitsEngineClient } from "./engine-client";
 import { DEFAULT_STREAM_TOKEN_TTL_SECONDS, mintStreamToken, verifyStreamToken, type StreamGrant } from "./stream-token";
+import type { CircuitsShapeHandle, CreateShapeRequest } from "./wire";
 
 /**
  * One shape a client wants to follow.
@@ -67,6 +73,145 @@ export interface SubscribeOptions {
   ttlSeconds?: number;
   /** Deployment-supplied runtime params, handed to `rowFilter.customPredicate` as its second argument. */
   params?: Record<string, unknown>;
+}
+
+/**
+ * The engine's subscription lease is shorter than this deployment's token TTL — a **configuration**
+ * fault, not a request one.
+ *
+ * The control plane renews every live claim on exactly one cadence: the token re-mint, which the
+ * client drives at `expiresAt - skew` and which therefore lands at most `ttlSeconds` apart. The
+ * engine releases a claim not renewed within `leaseSeconds` (`ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`).
+ * So a deployment whose lease window is under two TTLs has no margin at all: one refresh delayed by a
+ * retry, a redeploy, or a sleeping tab, and a live session's shape goes dormant underneath it. The
+ * factor of two is the margin for exactly one missed refresh.
+ *
+ * Refused loudly rather than papered over, because both numbers are the operator's and neither the
+ * subject nor the client can do anything about either. The routes answer 503 — "this deployment, not
+ * you" — and never a denial: a client told it lost entitlement truncates its rows.
+ */
+export class CircuitsLeaseConfigError extends Error {
+  /** The engine's `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`, as the create response reported it. */
+  readonly leaseSeconds: number;
+  /** The stream-token TTL this control plane is configured with. */
+  readonly ttlSeconds: number;
+
+  constructor(leaseSeconds: number, ttlSeconds: number) {
+    super(
+      `[pgxsinkit] the sync engine's shape lease window (${leaseSeconds}s, ` +
+        `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS) is shorter than twice this control plane's stream-token TTL ` +
+        `(${ttlSeconds}s, the \`ttlSeconds\` option). Claims are renewed on the token re-mint, so a single ` +
+        `missed refresh would let a live session's subscription lapse and its shape go dormant underneath ` +
+        `it. Raise ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS to at least ${2 * ttlSeconds}, lower \`ttlSeconds\` to ` +
+        `at most ${Math.floor(leaseSeconds / 2)}, or set ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS=0 to disable ` +
+        `leases entirely.`,
+    );
+    this.name = "CircuitsLeaseConfigError";
+    this.leaseSeconds = leaseSeconds;
+    this.ttlSeconds = ttlSeconds;
+  }
+}
+
+/**
+ * `leaseSeconds === 0` means the engine has dormancy — and with it leases — switched off, so there is
+ * no window to fall out of and nothing to check. Anything else must cover two re-mints.
+ */
+function assertLeaseCoversTtl(leaseSeconds: number, ttlSeconds: number): void {
+  if (leaseSeconds !== 0 && leaseSeconds < 2 * ttlSeconds) throw new CircuitsLeaseConfigError(leaseSeconds, ttlSeconds);
+}
+
+/**
+ * The engine must record a claim under the name it was given — on the create that TAKES it and on
+ * every create that RENEWS it alike.
+ *
+ * An engine that renames a claim is one this control plane can neither renew nor release by id, which
+ * is the whole protocol (fork ADR-0008): the renewal would take a second claim every time, and the
+ * release would name something the engine never held. That is the wrong engine, not a degraded one,
+ * so it throws rather than degrading — there is no answer this client could go on to give.
+ */
+function assertClaimRecorded(handle: CircuitsShapeHandle, claim: string): void {
+  if (handle.subscription === claim) return;
+  throw new Error(
+    `[pgxsinkit] the engine recorded this shape claim under \`${handle.subscription}\` rather than the ` +
+      `subscription id it was sent (\`${claim}\`). Renewal and release are BY that id (fork ADR-0008), ` +
+      `so an engine that renames a claim is not the one this client targets.`,
+  );
+}
+
+/**
+ * Compile one shape for one scope — the single form both the subscribe and the re-mint paths use.
+ *
+ * Shared between them on purpose: the re-mint RENEWS each grant's engine claim by repeating the create
+ * that took it, so the request it sends has to be the request subscribe would build today. Two
+ * spellings of "compile this grant" would be two chances for a renew to name a different definition
+ * than the grant it is renewing — which the engine would answer with a different handle, and this
+ * route would read as a revocation.
+ */
+function compileGrant(
+  options: Pick<SubscribeOptions, "registry" | "params">,
+  claims: JwtClaims | null,
+  shapeKey: string,
+  scope?: readonly PredicateValue[],
+): CompiledShapeRequest {
+  return compileShapeRequest(options.registry, {
+    shapeKey,
+    claims,
+    ...(scope !== undefined ? { scope } : {}),
+    ...(options.params ? { params: options.params } : {}),
+  });
+}
+
+/** What a renewal attempt came to. `renewed` is the only outcome that keeps the grant. */
+type RenewalOutcome = { renewed: true } | { revoked: string };
+
+/**
+ * Renew one grant's engine claim: the SAME create, repeated with the SAME subscription id.
+ *
+ * This is the whole of the lease protocol on our side (fork ADR-0008). The engine has no separate
+ * renew route because it needs none — a create naming a claim the shape already holds returns the same
+ * handle, counts nothing, and moves the lease. So the re-mint, which already re-authorizes every grant
+ * on the client's own refresh cadence, renews for free and renews exactly the grants that survived.
+ *
+ * The two failure outcomes are both "this is no longer the stream the client follows", and both end in
+ * `revoked` rather than an error, because the client's answer to a revocation — truncate and
+ * re-subscribe — is precisely the right one:
+ *
+ * - **A different handle.** The claim lapsed, or the shape was evicted, so this call re-subscribed
+ *   instead of renewing (ADR-0007) and the engine handed back a fresh shape on a fresh path. The
+ *   grant names the old one. The claim just taken is released immediately: nothing is following that
+ *   new stream, and the client's re-subscribe will take its own.
+ * - **409.** The id names a different shape. Nothing was taken, so there is nothing to give back.
+ *
+ * Anything else the engine says is an OUTAGE and propagates — the route answers 503. A revocation
+ * would tell the client it lost the scope, and a client told that clears the rows. An engine that
+ * renames the claim propagates too, through {@link assertClaimRecorded}: that one is not an outage
+ * either, it is the wrong engine.
+ */
+async function renewGrantClaim(
+  engine: CircuitsEngineClient,
+  request: CreateShapeRequest,
+  grant: StreamGrant,
+  ttlSeconds: number,
+): Promise<RenewalOutcome> {
+  let handle;
+  try {
+    handle = await engine.createShape({ ...request, subscription: grant.claim });
+  } catch (error) {
+    if (error instanceof CircuitsEngineError && error.status === 409) {
+      return { revoked: "subscription id is held by another shape; re-subscribe" };
+    }
+    throw error;
+  }
+  assertClaimRecorded(handle, grant.claim);
+  // The handle comparison and the release of a fresh claim come BEFORE the lease guard, deliberately:
+  // a misconfigured window is fatal to this request, and throwing it first would strand the claim
+  // this very call just took.
+  if (handle.shapeId !== grant.shapeId || handle.streamPath !== grant.path) {
+    await engine.releaseShape(handle.shapeId, grant.claim);
+    return { revoked: "shape stream changed; re-subscribe" };
+  }
+  assertLeaseCoversTtl(handle.leaseSeconds, ttlSeconds);
+  return { renewed: true };
 }
 
 /**
@@ -142,6 +287,7 @@ export async function subscribeToShapes(
   const granted: GrantedSubscription[] = [];
   const denied: DeniedSubscription[] = [];
   const grants: StreamGrant[] = [];
+  const ttlSeconds = options.ttlSeconds ?? DEFAULT_STREAM_TOKEN_TTL_SECONDS;
 
   for (const request of requests) {
     const deny = (reason: string, scope?: readonly PredicateValue[]) =>
@@ -163,12 +309,7 @@ export async function subscribeToShapes(
 
     for (const scope of expanded.scopes) {
       const scoped = scope !== undefined ? { scope } : {};
-      const compiled = compileShapeRequest(options.registry, {
-        shapeKey: request.shapeKey,
-        claims,
-        ...scoped,
-        ...(options.params ? { params: options.params } : {}),
-      });
+      const compiled = compileGrant(options, claims, request.shapeKey, scope);
       if (compiled.outcome === "deny") {
         deny(compiled.reason, scope);
         continue;
@@ -191,16 +332,40 @@ export async function subscribeToShapes(
       // generated from the scope values, which the entitlement re-check already covers.
       const fp = compiled.tier === "private" ? { fp: await fingerprintShapeRequest(compiled.request) } : {};
 
+      // The claim is NAMED before it is taken, and the name is ours (fork ADR-0008). That is what
+      // makes this create idempotent — a repeat with the same id renews rather than joining twice —
+      // and what makes the release retry-safe: `DELETE ?subscription=…` drops this claim and only
+      // this one. A uuid per grant, never per shape: two grants that deduplicate onto one shapeId are
+      // two joins, and one id could only ever release one of them.
+      const claim = crypto.randomUUID();
+
       // Deliberately unguarded: see the note above on why an engine fault is not a denial.
-      const handle = await options.engine.createShape(compiled.request);
+      const handle = await options.engine.createShape({ ...compiled.request, subscription: claim });
+      assertClaimRecorded(handle, claim);
+      // Checked per create rather than once at boot: the lease window is the engine's to report, and
+      // this is the only place it is reported. A misconfigured pairing must surface as a 503 on the
+      // very first subscribe, not as sessions quietly lapsing an idle window later.
+      //
+      // The claim is already taken by the time this can trip, so it is handed back before the error
+      // leaves — nobody will ever follow this stream. Best effort, and the failure is SWALLOWED: the
+      // configuration fault is what the operator has to see, and a release that also fails must not
+      // mask it. An unreleased claim lapses on its own.
+      try {
+        assertLeaseCoversTtl(handle.leaseSeconds, ttlSeconds);
+      } catch (error) {
+        await options.engine.releaseShape(handle.shapeId, claim).catch(() => {});
+        throw error;
+      }
+
       granted.push({ shapeKey: request.shapeKey, ...scoped, shapeId: handle.shapeId, streamPath: handle.streamPath });
-      // The grant carries the shapeId this `createShape` returned, and that is what makes the release
-      // route possible at all: this join is a refcount the engine will hold forever unless the session
-      // that took it gives it back (see {@link releaseStreamGrants}).
+      // The grant carries the shapeId this `createShape` returned AND the claim it was taken under,
+      // and together they are what make the renew and release routes possible at all: both are
+      // stateless, so the signed token is the only record of what this session holds.
       grants.push({
         path: handle.streamPath,
         shapeKey: request.shapeKey,
         shapeId: handle.shapeId,
+        claim,
         ...scoped,
         ...fp,
       });
@@ -209,7 +374,6 @@ export async function subscribeToShapes(
 
   if (subject === null || grants.length === 0) return { granted, denied };
 
-  const ttlSeconds = options.ttlSeconds ?? DEFAULT_STREAM_TOKEN_TTL_SECONDS;
   const token = await mintStreamToken(options.key, { sub: subject, grants, ttlSeconds, now });
   return { token, expiresAt: now + ttlSeconds, granted, denied };
 }
@@ -263,6 +427,12 @@ export function createSubscribeHandler(
       if (error instanceof CircuitsEngineError) {
         return Response.json({ error: "sync engine unavailable" }, { status: 503 });
       }
+      // A lease window shorter than the token TTL is an operator's misconfiguration, and it joins the
+      // 503s for the same reason: it is a statement about this deployment, never about this subject's
+      // entitlements. Denying instead would make an unserviceable pairing look like lost access.
+      if (error instanceof CircuitsLeaseConfigError) {
+        return Response.json({ error: "sync engine lease window shorter than the token TTL" }, { status: 503 });
+      }
       if (error instanceof EntitlementsUnavailableError) {
         return Response.json({ error: "entitlements unavailable" }, { status: 503 });
       }
@@ -311,23 +481,35 @@ export interface RefreshResult {
  *
  * A fingerprint mismatch is a REVOCATION by design, including when the recompiled predicate would
  * still permit the subject something. The grant names one stream, that stream serves the old
- * predicate, and this route may not hand out a new one — creating the new shape here would bump an
- * engine refcount that is only released when the session closes, and this route is not the session's
- * close. So the grant is revoked, the client re-subscribes, the
+ * predicate, and this route may not hand out a new one — the client's re-subscribe is where a new
+ * shape is created, and this route is not that. So the grant is revoked, the client re-subscribes, the
  * control plane creates the shape its current claims compile to, and because the handle differs the
- * client re-snapshots through ADR-0056 decision 7's must-refetch. No engine call happens here at all.
+ * client re-snapshots through ADR-0056 decision 7's must-refetch.
+ *
+ * **This is also where every surviving grant's engine claim is RENEWED** (fork ADR-0008). A claim is a
+ * lease: the engine releases one not renewed within `leaseSeconds`, because native reads terminate on
+ * durable-streams and the renewal is the only liveness signal it has. Renewing here rather than on a
+ * timer is what makes the cadence honest — this route already runs once per subject per TTL window and
+ * already decides which grants are still authorized, so the renewal covers exactly the grants that
+ * survived and costs no extra round trip. A revoked grant is deliberately NOT renewed: its lease
+ * lapses and the engine reclaims the shape.
+ *
+ * The renewal is the same create, repeated with the grant's own `claim` id. Its outcomes are in
+ * {@link renewGrantClaim}; a renewal that comes back a different handle, or 409s, revokes the grant
+ * with a re-subscribe reason rather than failing the whole re-mint.
  *
  * `registry` is therefore REQUIRED rather than optional: a refresh route that cannot recompile cannot
- * re-authorize the private tier, and the only honest alternatives are revoking every private grant or
- * waving them all through. Both are wrong, so the pairing is a type error instead.
+ * re-authorize the private tier — and now cannot renew either, since the renewal IS the compiled
+ * create. `engine` is required for the same reason.
  *
  * Throws {@link EntitlementsUnavailableError} rather than revoking when the set cannot be consulted —
  * the same outage-is-not-a-denial rule {@link subscribeToShapes} follows, and it matters more here:
  * `revoked` is the wire's clear-this-scope instruction, and this route runs every few minutes for
- * the life of every subscription.
+ * the life of every subscription. An engine that cannot answer a renewal joins it, as does a lease
+ * window this deployment's TTL does not fit inside ({@link CircuitsLeaseConfigError}).
  */
 export async function refreshStreamToken(
-  options: Pick<SubscribeOptions, "registry" | "entitlements" | "key" | "ttlSeconds" | "params">,
+  options: Pick<SubscribeOptions, "registry" | "engine" | "entitlements" | "key" | "ttlSeconds" | "params">,
   claims: JwtClaims | null,
   expiringToken: string,
   now: number,
@@ -341,6 +523,7 @@ export async function refreshStreamToken(
 
   const granted: StreamGrant[] = [];
   const revoked: DeniedSubscription[] = [];
+  const ttlSeconds = options.ttlSeconds ?? DEFAULT_STREAM_TOKEN_TTL_SECONDS;
 
   for (const grant of verified.claims.grants) {
     const scoped = grant.scope !== undefined ? { scope: grant.scope } : {};
@@ -348,11 +531,7 @@ export async function refreshStreamToken(
       // Private tier: re-authorize by recompiling. See the note above on why the signed grant alone
       // is not the entitlement — the predicate is a function of claims that may have changed since
       // it was issued.
-      const compiled = compileShapeRequest(options.registry, {
-        shapeKey: grant.shapeKey,
-        claims,
-        ...(options.params ? { params: options.params } : {}),
-      });
+      const compiled = compileGrant(options, claims, grant.shapeKey);
       if (compiled.outcome === "deny") {
         revoked.push({ shapeKey: grant.shapeKey, reason: compiled.reason });
         continue;
@@ -369,6 +548,13 @@ export async function refreshStreamToken(
       }
       if ((await fingerprintShapeRequest(compiled.request)) !== grant.fp) {
         revoked.push({ shapeKey: grant.shapeKey, reason: "shape predicate changed for this subject" });
+        continue;
+      }
+      // Re-authorized, so renew the claim it holds — the recompiled request is exactly the one that
+      // took it, which the fingerprint just proved.
+      const renewal = await renewGrantClaim(options.engine, compiled.request, grant, ttlSeconds);
+      if ("revoked" in renewal) {
+        revoked.push({ shapeKey: grant.shapeKey, reason: renewal.revoked });
         continue;
       }
       granted.push(grant);
@@ -396,12 +582,24 @@ export async function refreshStreamToken(
       revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: "not entitled to this scope" });
       continue;
     }
+    // Still entitled, so renew. The shared tier carries no fingerprint — its predicate is generated
+    // from the scope values, which is why the entitlement check above is the whole question — so the
+    // request is recompiled here, through the same {@link compileGrant} subscribe used.
+    const compiled = compileGrant(options, claims, grant.shapeKey, grant.scope);
+    if (compiled.outcome === "deny") {
+      revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: compiled.reason });
+      continue;
+    }
+    const renewal = await renewGrantClaim(options.engine, compiled.request, grant, ttlSeconds);
+    if ("revoked" in renewal) {
+      revoked.push({ shapeKey: grant.shapeKey, ...scoped, reason: renewal.revoked });
+      continue;
+    }
     granted.push(grant);
   }
 
   if (granted.length === 0) return { granted, revoked };
 
-  const ttlSeconds = options.ttlSeconds ?? DEFAULT_STREAM_TOKEN_TTL_SECONDS;
   const token = await mintStreamToken(options.key, { sub: subject, grants: granted, ttlSeconds, now });
   return { token, expiresAt: now + ttlSeconds, granted, revoked };
 }
@@ -409,15 +607,17 @@ export async function refreshStreamToken(
 /**
  * The re-mint route. Takes the expiring token, answers with a fresh one and the list of grants that
  * did not survive re-authorization — the shared tier's against the live entitlement set, the private
- * tier's against a recompile with the subject's current claims.
+ * tier's against a recompile with the subject's current claims — and **renews the engine claim of
+ * every grant that did survive** (fork ADR-0008).
  *
- * `registry` for that recompile, and required for the reason {@link refreshStreamToken} gives.
+ * `registry` for that recompile and `engine` for that renewal, both required for the reasons
+ * {@link refreshStreamToken} gives.
  *
  * 200 even when everything was revoked, for the same reason subscribe answers 200 on a full denial:
  * the per-grant reasons ARE the response, and a client that lost one scope of K needs to know which.
  */
 export function createRefreshHandler(
-  options: Pick<SubscribeOptions, "registry" | "entitlements" | "key" | "ttlSeconds" | "params"> & {
+  options: Pick<SubscribeOptions, "registry" | "engine" | "entitlements" | "key" | "ttlSeconds" | "params"> & {
     resolveAuthClaims?: (request: Request) => Promise<JwtClaims | null> | JwtClaims | null;
   },
 ) {
@@ -451,6 +651,15 @@ export function createRefreshHandler(
       if (error instanceof EntitlementsUnavailableError) {
         return Response.json({ error: "entitlements unavailable" }, { status: 503 });
       }
+      // An engine that could not answer a RENEWAL is the same case: the claim is still held (a lease
+      // outlives a failed renewal by the rest of its window), the token the client holds still works,
+      // and a `revoked` answer would clear rows over a transient fault.
+      if (error instanceof CircuitsEngineError) {
+        return Response.json({ error: "sync engine unavailable" }, { status: 503 });
+      }
+      if (error instanceof CircuitsLeaseConfigError) {
+        return Response.json({ error: "sync engine lease window shorter than the token TTL" }, { status: 503 });
+      }
       throw error;
     }
     return Response.json(result);
@@ -461,12 +670,11 @@ export function createRefreshHandler(
  * Give back the engine claims a token's grants acquired — the close half of subscribe.
  *
  * **Why this route exists.** A native `POST /shapes` with a definition the engine already holds does
- * not create a second shape: it JOINS the existing one and increments its refcount. That refcount is
- * load-bearing rather than bookkeeping — `refcount > 0` blocks both dormancy and eviction, precisely
- * because native durable-streams reads bypass the engine entirely, so the refcount is the only thing
- * that tells it a reader it cannot see still exists. Without a release, every shape any subject ever
- * subscribed to stays active and tailer-maintained forever, across restarts, and `max_shapes` has
- * nothing dormant left to evict.
+ * not create a second shape: it JOINS the existing one, under a claim of its own. Live claims are
+ * load-bearing rather than bookkeeping — one live claim blocks both dormancy and eviction, precisely
+ * because native durable-streams reads bypass the engine entirely, so a claim is the only thing that
+ * tells it a reader it cannot see still exists. Without a release, a shape waits out its whole lease
+ * window before it can go dormant, every time.
  *
  * **The token IS the request**, exactly as on the re-mint path: its signature proves this control
  * plane minted these grants, so nothing has to be stored server-side to know what was acquired.
@@ -477,16 +685,17 @@ export function createRefreshHandler(
  *
  * **ONE release per GRANT, deliberately not deduplicated by `shapeId`.** Two grants naming one shape
  * are two joins — the engine deduplicated identical definitions and counted both (ADR-0055 decision
- * 6) — so collapsing them here would return one of two claims and leak the other permanently.
+ * 6) — so collapsing them here would return one of two claims and leak the other permanently. Each
+ * grant releases its OWN claim (`DELETE /shapes/{id}?subscription=<claim>`), which is what makes one
+ * release distinguishable from the other at all.
  *
- * **The client's obligation is AT MOST ONCE, and it must never retry.** The engine's
- * `DELETE /shapes/{id}` carries no claim identity: it decrements the shared refcount and cannot tell
- * whose claim it just dropped. So the two failure modes are wildly asymmetric. A LOST release leaves
- * one claim too many — the status quo before this route existed, bounded to sessions that crashed or
- * were unloaded, and self-correcting only when the process is restarted. A DOUBLE release *steals
- * another subscriber's claim*, which can park a shape dormant underneath a live reader that is still
- * following its stream. Best-effort and silent beats retried and correct-looking; the robust form —
- * engine-side claim leases, where release is by claim id and therefore idempotent — is backlog 0012.
+ * **Idempotent and retry-safe** (fork ADR-0008). A claim is named, so releasing it twice is releasing
+ * it once: the second `DELETE` is a no-op `200` and cannot touch another subscriber's claim. That is
+ * a change in kind from the anonymous refcount decrement this route was first written against, and it
+ * collapses the old asymmetry — a client, a proxy or an operator may repeat a release freely. A
+ * release that never arrives at all is not a permanent leak either: the claim is a LEASE, renewed on
+ * the token re-mint, so a session that crashed or was unloaded has its claims reclaimed by the engine
+ * within `leaseSeconds`. What this route buys is promptness, not correctness.
  *
  * Refusals are refusals, not no-ops: a bad signature or a mismatched subject answers an error rather
  * than `{ released: 0 }`, because a token presented by anyone but its own subject is not a release,
@@ -506,13 +715,18 @@ export async function releaseStreamGrants(
   if (verified.claims.sub !== subject) return { refused: "token subject does not match the caller" };
 
   for (const grant of verified.claims.grants) {
-    await options.engine.releaseShape(grant.shapeId);
+    await options.engine.releaseShape(grant.shapeId, grant.claim);
   }
   return { released: verified.claims.grants.length };
 }
 
 /**
  * The release route: the token a session was given, back at its close.
+ *
+ * **Safe to call more than once.** Every grant releases a NAMED claim, so a repeat is the same act
+ * once (fork ADR-0008) — a duplicate close, a proxy retry or an operator replaying a request all
+ * answer 200 and change nothing. The client still sends it at most once, but that is now a matter of
+ * not making a pointless request rather than of correctness.
  *
  * 403 rather than 200 on a refusal — see {@link releaseStreamGrants} for why a refused release must
  * be visible. 401 when the caller has no subject, the same rule subscribe and re-mint follow: an
@@ -546,10 +760,11 @@ export function createReleaseHandler(
     try {
       result = await releaseStreamGrants(options, claims, body.token, Math.floor(Date.now() / 1000));
     } catch (error) {
-      // An engine that could not answer has not dropped the claims, and the client must NOT come back
-      // to try again — a release it believes was lost may in fact have landed, and the retry is the
-      // double release. 503 says "this deployment, not you"; the claims leak until the engine grows
-      // leases (backlog 0012).
+      // An engine that could not answer has not dropped the claims. 503 says "this deployment, not
+      // you", and a client is free to come back: releases are named and therefore idempotent (fork
+      // ADR-0008), so a retry that races a release which actually landed is a no-op rather than a
+      // theft. Whether it retries or not, the residue is bounded by the lease — an unreleased claim
+      // lapses within `leaseSeconds` of its last renewal.
       if (error instanceof CircuitsEngineError) {
         return Response.json({ error: "sync engine unavailable" }, { status: 503 });
       }

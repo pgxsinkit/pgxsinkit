@@ -24,14 +24,25 @@ import {
 function engineWithCounters(onRelease?: (shapeId: string) => void) {
   let created = 0;
   let released = 0;
+  // Keyed by claim so a repeat create RENEWS (same handle) rather than minting a second shape; the
+  // counter still records every call, renewals included.
+  const byClaim = new Map<string, number>();
   const engine = {
     createShape: async (request) => {
       created += 1;
+      const claim = request.subscription ?? `~minted-${created}`;
+      let index = byClaim.get(claim);
+      if (index === undefined) {
+        index = byClaim.size + 1;
+        byClaim.set(claim, index);
+      }
       return {
-        shapeId: `s${created}`,
+        shapeId: `s${index}`,
         table: request.table,
-        streamPath: `shape/s${created}`,
-        streamUrl: `http://ds/shape/s${created}`,
+        streamPath: `shape/s${index}`,
+        streamUrl: `http://ds/shape/s${index}`,
+        subscription: claim,
+        leaseSeconds: 1800,
       };
     },
     releaseShape: async (shapeId: string) => {

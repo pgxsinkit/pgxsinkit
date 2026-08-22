@@ -348,9 +348,11 @@ export function createSyncServer<
 
     router.post(subscribePath, createSubscribeHandler(subscribeOptions));
     router.post(refreshPath, createRefreshHandler(subscribeOptions));
-    // The close half of subscribe. Every grant subscribe handed out is an engine refcount, and
-    // `refcount > 0` blocks dormancy and eviction — so without this route a deployment's shape set only
-    // ever grows. Best-effort and at most once, on the client's side; see `releaseStreamGrants`.
+    // The close half of subscribe. Every grant subscribe handed out is a named claim on an engine
+    // shape, and a live claim blocks dormancy and eviction — so without this route every shape waits
+    // out its full lease window before it can be reclaimed. The release is idempotent (each grant
+    // names its own claim), and a release that never arrives is reclaimed by the lease anyway; see
+    // `releaseStreamGrants`.
     router.post(releasePath, createReleaseHandler({ engine: readPath.engine, key: readPath.key, resolveAuthClaims }));
     router.get(
       barrierPath,
@@ -551,6 +553,7 @@ export {
 export type { EntitlementSet, GateDecision, StreamAuthorizationOptions, StreamGateOptions } from "./circuits/edge";
 export {
   barrierPath,
+  CircuitsLeaseConfigError,
   createBarrierHandler,
   createRefreshHandler,
   createReleaseHandler,

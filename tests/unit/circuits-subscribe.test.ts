@@ -6,7 +6,9 @@ import { DENY_ALL_PREDICATE, defineSyncRegistry, defineSyncTable, p } from "@pgx
 import {
   authorizeStreamRead,
   CircuitsEngineError,
+  CircuitsLeaseConfigError,
   createBarrierHandler,
+  createCircuitsEngineClient,
   createRefreshHandler,
   createSubscribeHandler,
   fingerprintShapeRequest,
@@ -14,7 +16,9 @@ import {
   mintStreamToken,
   refreshStreamToken,
   subscribeToShapes,
+  verifyStreamToken,
   type CircuitsEngineClient,
+  type CreateShapeRequest,
   type EntitlementSet,
 } from "@pgxsinkit/server";
 
@@ -64,24 +68,39 @@ const entitlements: EntitlementSet = {
     subject === "person-a" && shapeKey === "offering_content" ? HELD.map((held) => [held]) : [],
 };
 
-function stubEngine(): CircuitsEngineClient & { created: unknown[] } {
-  const created: unknown[] = [];
+/**
+ * An engine stub that honours the subscription contract (fork ADR-0008): a create is recorded under
+ * the id it was given and echoes it back, and REPEATING it with that id renews — the same handle, no
+ * second shape. `created` records every call, renewals included, so a test can see exactly what was
+ * sent and under which claim.
+ */
+function stubEngine(leaseSeconds = 1800): CircuitsEngineClient & { created: CreateShapeRequest[] } {
+  const created: CreateShapeRequest[] = [];
+  const byClaim = new Map<string, { shapeId: string; streamPath: string }>();
   let next = 0;
   return {
     created,
     createShape: async (request) => {
       created.push(request);
-      next += 1;
+      const claim = request.subscription ?? `~minted-${next + 1}`;
+      let handle = byClaim.get(claim);
+      if (handle === undefined) {
+        next += 1;
+        handle = { shapeId: `s${next}`, streamPath: `shape/s${next}` };
+        byClaim.set(claim, handle);
+      }
       return {
-        shapeId: `s${next}`,
+        shapeId: handle.shapeId,
         table: request.table,
-        streamPath: `shape/s${next}`,
-        streamUrl: `http://ds:8080/v1/stream/shape/s${next}`,
+        streamPath: handle.streamPath,
+        streamUrl: `http://ds:8080/v1/stream/${handle.streamPath}`,
+        subscription: claim,
+        leaseSeconds,
       };
     },
     releaseShape: async () => {},
     replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
-  } as CircuitsEngineClient & { created: unknown[] };
+  } as CircuitsEngineClient & { created: CreateShapeRequest[] };
 }
 
 describe("subscribe", () => {
@@ -226,6 +245,153 @@ describe("subscribe", () => {
   });
 });
 
+// Every claim this control plane takes on an engine shape is NAMED, and the name travels in the
+// signed grant (fork ADR-0008). That is what makes the release idempotent and the renewal possible at
+// all: both are stateless, so the token is the only record of what a session holds.
+describe("subscribe names every claim it takes", () => {
+  it("sends a distinct subscription per grant, and carries it in the grant", async () => {
+    const engine = stubEngine();
+    const result = await subscribeToShapes(
+      { registry, engine, entitlements, key },
+      { sub: "person-a" },
+      [{ shapeKey: "offering_content" }, { shapeKey: "notes" }],
+      NOW,
+    );
+
+    // One id per CREATE, and every one of them non-empty and distinct — a shared id would make two
+    // joins indistinguishable, and one release would give back a claim the other still needs.
+    const sent = engine.created.map((request) => request.subscription);
+    expect(sent.every((id) => typeof id === "string" && id !== "")).toBe(true);
+    expect(new Set(sent).size).toBe(3);
+
+    const verified = await verifyStreamToken(key, result.token!, NOW);
+    expect(verified.ok).toBe(true);
+    const claims = verified.ok ? verified.claims.grants.map((grant) => grant.claim) : [];
+    // The grant carries exactly the id that was sent, in order: the release route has nothing else to
+    // go on.
+    expect(claims).toEqual(sent as string[]);
+  });
+
+  // An engine that files a claim under a name other than the one it was given cannot be renewed or
+  // released by id, which is the whole protocol. That is the wrong engine, not a degraded one.
+  it("throws when the engine records a claim under a different id", async () => {
+    const renaming = {
+      createShape: async (request: CreateShapeRequest) => ({
+        shapeId: "s1",
+        table: request.table,
+        streamPath: "shape/s1",
+        streamUrl: "http://ds/shape/s1",
+        subscription: "an-id-of-my-own",
+        leaseSeconds: 1800,
+      }),
+      releaseShape: async () => {},
+      replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
+    } as unknown as CircuitsEngineClient;
+
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
+    await expect(
+      subscribeToShapes(
+        { registry, engine: renaming, entitlements, key },
+        { sub: "person-a" },
+        [{ shapeKey: "notes" }],
+        NOW,
+      ),
+    ).rejects.toThrow(/recorded this shape claim under/);
+  });
+
+  // The barrier's rule applied to the create: a create answer missing the subscription it was
+  // recorded under, or the window that subscription lives in, leaves a claim nothing can renew and
+  // nothing can release by id. Defaulting either would invent a lease the engine never granted.
+  it("refuses an engine whose create answer omits the subscription or the lease", async () => {
+    const answering = (body: Record<string, unknown>) =>
+      createCircuitsEngineClient({
+        baseUrl: "http://engine",
+        fetch: (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch,
+      });
+    const whole = {
+      shapeId: "s1",
+      table: "notes",
+      streamPath: "shape/s1",
+      streamUrl: "http://ds/shape/s1",
+      subscription: "given-back",
+      leaseSeconds: 1800,
+    };
+
+    for (const missing of ["subscription", "leaseSeconds"] as const) {
+      const body = { ...whole };
+      delete (body as Record<string, unknown>)[missing];
+      // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
+      await expect(
+        subscribeToShapes(
+          { registry, engine: answering(body), key },
+          { sub: "person-a" },
+          [{ shapeKey: "notes" }],
+          NOW,
+        ),
+      ).rejects.toThrow(new RegExp(`unusable \\\`${missing}\\\``));
+    }
+  });
+});
+
+// Claims are renewed on ONE cadence — the token re-mint — so an engine whose lease window is shorter
+// than two TTLs would drop a live session's shape after a single missed refresh. That is an
+// operator's misconfiguration, and it is refused loudly rather than served: 503, never a denial,
+// because nothing about it is a statement about this subject's entitlements.
+describe("the lease window must cover the token TTL", () => {
+  const subscribeWith = (leaseSeconds: number, ttlSeconds: number) =>
+    subscribeToShapes(
+      { registry, engine: stubEngine(leaseSeconds), entitlements, key, ttlSeconds },
+      { sub: "person-a" },
+      [{ shapeKey: "notes" }],
+      NOW,
+    );
+
+  it("refuses a lease window shorter than twice the TTL", async () => {
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
+    await expect(subscribeWith(500, 300)).rejects.toThrow(CircuitsLeaseConfigError);
+    // Both numbers and the knob that fixes them are named: the operator reading this log owns both.
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
+    await expect(subscribeWith(500, 300)).rejects.toThrow(/500s.*ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS/s);
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
+    await expect(subscribeWith(500, 300)).rejects.toThrow(/300s.*ttlSeconds/s);
+  });
+
+  // Exactly two TTLs is the margin for one missed refresh, and is accepted.
+  it("accepts a window of two TTLs or more", async () => {
+    expect((await subscribeWith(600, 300)).granted).toHaveLength(1);
+    expect((await subscribeWith(1800, 300)).granted).toHaveLength(1);
+  });
+
+  // `0` is the engine saying dormancy — and with it leases — is switched off. There is no window to
+  // fall out of, so there is nothing to check.
+  it("accepts leaseSeconds 0, which is leases disabled", async () => {
+    expect((await subscribeWith(0, 300)).granted).toHaveLength(1);
+  });
+
+  // At the route it is a 503 in the outage family, and the body must not read as lost entitlement:
+  // a client told that truncates the scope and unsubscribes.
+  it("answers 503 at the route, never a denial", async () => {
+    const handle = createSubscribeHandler({
+      registry,
+      engine: stubEngine(60),
+      entitlements,
+      key,
+      ttlSeconds: 300,
+      resolveAuthClaims: () => ({ sub: "person-a" }),
+    });
+
+    const response = await handle(
+      new Request("http://cp/sync/v1/subscribe", {
+        method: "POST",
+        body: JSON.stringify({ subscriptions: [{ shapeKey: "notes" }] }),
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "sync engine lease window shorter than the token TTL" });
+  });
+});
+
 // A degraded engine refuses shape creation (503). The route must NOT relay that as a denial: a
 // client told "not entitled" truncates that scope and unsubscribes, so reporting an outage that way
 // would turn a transient engine fault into client-side data loss.
@@ -262,6 +428,239 @@ describe("subscribe under engine failure", () => {
   });
 });
 
+// A claim is a LEASE (fork ADR-0008): the engine releases one that is not renewed within its idle
+// window, because native reads terminate on durable-streams and the renewal is the only liveness
+// signal it has. The re-mint is where pgxsinkit renews — it already runs once per subject per TTL
+// window and already decides which grants are still authorized, so the renewal covers exactly those
+// and costs no extra round trip.
+describe("the re-mint renews every grant it re-authorizes", () => {
+  /** What the engine should do when a claim it already holds is presented again. */
+  type Renewal = "renew" | "new-handle" | "conflict" | "outage" | "short-lease" | "rename";
+
+  /**
+   * An engine recording every `(request, subscription)` it was asked to create under, whose answer to
+   * a REPEAT create a test can steer — the four outcomes a renewal actually has.
+   */
+  function recordingEngine(onRepeat: (claim: string) => Renewal = () => "renew") {
+    const calls: { table: string; where: unknown; subscription: string | undefined }[] = [];
+    const releases: { shapeId: string; claim: string }[] = [];
+    const byClaim = new Map<string, { shapeId: string; streamPath: string }>();
+    let next = 0;
+    const answer = (handle: { shapeId: string; streamPath: string }, table: string, claim: string) => ({
+      shapeId: handle.shapeId,
+      table,
+      streamPath: handle.streamPath,
+      streamUrl: `http://ds:8080/v1/stream/${handle.streamPath}`,
+      subscription: claim,
+      leaseSeconds: 1800,
+    });
+    const engine = {
+      calls,
+      releases,
+      createShape: async (request: CreateShapeRequest) => {
+        calls.push({ table: request.table, where: request.where, subscription: request.subscription });
+        const claim = request.subscription ?? `~minted-${next + 1}`;
+        const held = byClaim.get(claim);
+        const verdict: Renewal = held === undefined ? "renew" : onRepeat(claim);
+        if (verdict === "conflict") {
+          throw new CircuitsEngineError(409, "already belongs to shape s99", "engine conflict");
+        }
+        if (verdict === "outage") throw new CircuitsEngineError(503, "degraded", "engine degraded");
+        if (held !== undefined && verdict === "renew") return answer(held, request.table, claim);
+        // An operator lowered ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS under a live session: the claim is
+        // renewed, but the window it now lives in no longer covers two of this deployment's TTLs.
+        if (held !== undefined && verdict === "short-lease") {
+          return { ...answer(held, request.table, claim), leaseSeconds: 60 };
+        }
+        // The renewal is filed under a name of the engine's choosing — the next renewal would take a
+        // second claim, and the release would name something it never held.
+        if (held !== undefined && verdict === "rename") {
+          return { ...answer(held, request.table, claim), subscription: `${claim}-renamed` };
+        }
+        // Either the first create, or a renewal that arrived after the claim lapsed and therefore
+        // RE-SUBSCRIBED: a fresh shape on a fresh path (ADR-0007).
+        next += 1;
+        const handle = { shapeId: `s${next}`, streamPath: `shape/s${next}` };
+        byClaim.set(claim, handle);
+        return answer(handle, request.table, claim);
+      },
+      releaseShape: async (shapeId: string, claim: string) => {
+        releases.push({ shapeId, claim });
+      },
+      replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
+    };
+    return engine as unknown as CircuitsEngineClient & { calls: typeof calls; releases: typeof releases };
+  }
+
+  /** An entitlement set a test can narrow between the subscribe and the re-mint. */
+  function heldScopes(allowed: Set<string>): EntitlementSet {
+    return {
+      ready: true,
+      permits: (subject, shapeKey, scope) =>
+        subject === "person-a" && shapeKey === "offering_content" && allowed.has(String(scope[0])),
+      scopesFor: (subject, shapeKey) =>
+        subject === "person-a" && shapeKey === "offering_content" ? [...allowed].map((held) => [held]) : [],
+    };
+  }
+
+  async function claimsOf(token: string): Promise<string[]> {
+    const verified = await verifyStreamToken(key, token, NOW);
+    return verified.ok ? verified.claims.grants.map((grant) => grant.claim) : [];
+  }
+
+  // Both tiers, and the SAME id each time: a renewal under a new id would be a second join, which is
+  // exactly the leak the lease exists to close.
+  it("repeats each grant's create under its own claim id, both tiers", async () => {
+    const engine = recordingEngine();
+    const allowed = new Set(["off-1", "off-2"]);
+    const options = { registry, engine, entitlements: heldScopes(allowed), key };
+    const initial = await subscribeToShapes(
+      options,
+      { sub: "person-a" },
+      [{ shapeKey: "offering_content" }, { shapeKey: "notes" }],
+      NOW,
+    );
+    const acquired = await claimsOf(initial.token!);
+    expect(acquired).toHaveLength(3);
+    const subscribeCalls = [...engine.calls];
+
+    const refreshed = await refreshStreamToken(options, { sub: "person-a" }, initial.token!, NOW + 1);
+
+    expect(refreshed.revoked).toEqual([]);
+    expect(refreshed.granted.map((grant) => grant.path)).toEqual(["shape/s1", "shape/s2", "shape/s3"]);
+    // One renewal per grant, naming the same claim AND the same definition — a renewal of a different
+    // definition would be a different shape, which the engine would answer with a different handle.
+    const renewals = engine.calls.slice(subscribeCalls.length);
+    expect(renewals.map((call) => call.subscription)).toEqual(acquired);
+    expect(renewals.map((call) => [call.table, call.where])).toEqual(
+      subscribeCalls.map((call) => [call.table, call.where]),
+    );
+    // The re-minted token carries the same claims forward: they are the same claims.
+    expect(await claimsOf(refreshed.token!)).toEqual(acquired);
+  });
+
+  // A grant that lost its authorization is deliberately NOT renewed: its lease lapses and the engine
+  // reclaims the shape. Renewing it would pin a shape for a subject who may no longer read it.
+  it("does not renew a grant it revoked", async () => {
+    const engine = recordingEngine();
+    const allowed = new Set(["off-1", "off-2"]);
+    const options = { registry, engine, entitlements: heldScopes(allowed), key };
+    const initial = await subscribeToShapes(options, { sub: "person-a" }, [{ shapeKey: "offering_content" }], NOW);
+    const [keptClaim, lostClaim] = await claimsOf(initial.token!);
+    const subscribeCalls = engine.calls.length;
+
+    allowed.delete("off-2");
+    const refreshed = await refreshStreamToken(options, { sub: "person-a" }, initial.token!, NOW + 1);
+
+    expect(refreshed.revoked.map((entry) => entry.reason)).toEqual(["not entitled to this scope"]);
+    expect(engine.calls.slice(subscribeCalls).map((call) => call.subscription)).toEqual([keptClaim]);
+    expect(engine.calls.slice(subscribeCalls).map((call) => call.subscription)).not.toContain(lostClaim);
+  });
+
+  // The claim lapsed (or its shape was evicted), so the renewal RE-SUBSCRIBED and the engine handed
+  // back a different shape on a different path. The grant names the old one, and the client is
+  // following the old one — so the grant is revoked and the client re-subscribes. The claim the
+  // renewal just took is released immediately: nobody is reading that stream.
+  it("revokes a grant whose renewal came back a different handle, and gives back the new claim", async () => {
+    const engine = recordingEngine(() => "new-handle");
+    const allowed = new Set(["off-1"]);
+    const options = { registry, engine, entitlements: heldScopes(allowed), key };
+    const initial = await subscribeToShapes(options, { sub: "person-a" }, [{ shapeKey: "offering_content" }], NOW);
+    const [claim] = await claimsOf(initial.token!);
+
+    const refreshed = await refreshStreamToken(options, { sub: "person-a" }, initial.token!, NOW + 1);
+
+    expect(refreshed.granted).toEqual([]);
+    expect(refreshed.revoked).toEqual([
+      { shapeKey: "offering_content", scope: ["off-1"], reason: "shape stream changed; re-subscribe" },
+    ]);
+    expect(engine.releases).toEqual([{ shapeId: "s2", claim: claim! }]);
+  });
+
+  // One name, one shape. A 409 means the id names something else entirely — nothing was taken, so
+  // there is nothing to give back, and no retry changes it. The client re-subscribes under a new id.
+  it("revokes on a 409 and releases nothing, because nothing was taken", async () => {
+    const engine = recordingEngine(() => "conflict");
+    const allowed = new Set(["off-1"]);
+    const options = { registry, engine, entitlements: heldScopes(allowed), key };
+    const initial = await subscribeToShapes(options, { sub: "person-a" }, [{ shapeKey: "offering_content" }], NOW);
+
+    const refreshed = await refreshStreamToken(options, { sub: "person-a" }, initial.token!, NOW + 1);
+
+    expect(refreshed.granted).toEqual([]);
+    expect(refreshed.revoked).toEqual([
+      {
+        shapeKey: "offering_content",
+        scope: ["off-1"],
+        reason: "subscription id is held by another shape; re-subscribe",
+      },
+    ]);
+    expect(engine.releases).toEqual([]);
+  });
+
+  // The claim-recording assertion is not a subscribe-only check: a renewal filed under another name
+  // is the same wrong engine, and reached one re-mint later. Both call sites go through
+  // `assertClaimRecorded`, so there is exactly one place this can be got wrong.
+  it("throws when a RENEWAL is recorded under a different id", async () => {
+    const engine = recordingEngine(() => "rename");
+    const allowed = new Set(["off-1"]);
+    const options = { registry, engine, entitlements: heldScopes(allowed), key };
+    const initial = await subscribeToShapes(options, { sub: "person-a" }, [{ shapeKey: "offering_content" }], NOW);
+
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
+    await expect(refreshStreamToken(options, { sub: "person-a" }, initial.token!, NOW + 1)).rejects.toThrow(
+      /recorded this shape claim under/,
+    );
+  });
+
+  // The lease guard is checked on every create, so it catches a window lowered UNDER a live session,
+  // not only a deployment that was misconfigured from the start. At the re-mint it is a 503 like any
+  // other deployment fault — never a `revoked`, which would make the client clear rows over a
+  // configuration change it has no part in.
+  it("answers 503 at the route when a renewal reports a lease shorter than twice the TTL", async () => {
+    const engine = recordingEngine(() => "short-lease");
+    const allowed = new Set(["off-1"]);
+    const options = { registry, engine, entitlements: heldScopes(allowed), key };
+    const initial = await subscribeToShapes(options, { sub: "person-a" }, [{ shapeKey: "offering_content" }], NOW);
+
+    const handle = createRefreshHandler({ ...options, resolveAuthClaims: () => ({ sub: "person-a" }) });
+    const response = await handle(
+      new Request("http://cp/sync/v1/refresh", { method: "POST", body: JSON.stringify({ token: initial.token }) }),
+    );
+
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toEqual({ error: "sync engine lease window shorter than the token TTL" });
+    // Nothing revoked, and nothing given back: the claim is still held and the client's token still
+    // works until its own TTL lapses.
+    expect(body["revoked"]).toBeUndefined();
+    expect(engine.releases).toEqual([]);
+  });
+
+  // An engine that could not answer a renewal is an OUTAGE, and the outage-is-not-a-denial rule binds
+  // hardest here: `revoked` is the wire's clear-this-scope instruction, and this route runs every few
+  // minutes for the life of every subscription. The claim is still held — a lease outlives a failed
+  // renewal by the rest of its window — and the token the client holds still works.
+  it("answers 503 at the route when a renewal fails, and revokes nothing", async () => {
+    const engine = recordingEngine(() => "outage");
+    const allowed = new Set(["off-1"]);
+    const options = { registry, engine, entitlements: heldScopes(allowed), key };
+    const initial = await subscribeToShapes(options, { sub: "person-a" }, [{ shapeKey: "offering_content" }], NOW);
+
+    const handle = createRefreshHandler({ ...options, resolveAuthClaims: () => ({ sub: "person-a" }) });
+    const response = await handle(
+      new Request("http://cp/sync/v1/refresh", { method: "POST", body: JSON.stringify({ token: initial.token }) }),
+    );
+
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toEqual({ error: "sync engine unavailable" });
+    // The word that must NOT appear: a `revoked` entry is what makes a client clear its rows.
+    expect(body["revoked"]).toBeUndefined();
+    expect(engine.releases).toEqual([]);
+  });
+});
+
 // The re-mint route runs every few minutes for the life of every subscription, and its `revoked` list
 // is the wire's clear-this-scope instruction. So the unavailable-is-not-a-denial rule binds harder
 // here than on subscribe: an entitlement subscription a few seconds behind would otherwise empty a
@@ -270,12 +669,13 @@ describe("refresh while the entitlement set is unavailable", () => {
   it("answers 503 and revokes nothing", async () => {
     const token = await mintStreamToken(key, {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "offering_content", scope: ["off-1"] }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-1", shapeKey: "offering_content", scope: ["off-1"] }],
       ttlSeconds: 300,
       now: NOW,
     });
     const handle = createRefreshHandler({
       registry,
+      engine: stubEngine(),
       entitlements: { ready: false, permits: () => true, scopesFor: () => [["off-1"]] },
       key,
       resolveAuthClaims: () => ({ sub: "person-a" }),
@@ -321,6 +721,8 @@ describe("re-mint re-authorizes the private tier", () => {
   const tenantRegistry = defineSyncRegistry({ tables: { documents } });
   const gate = { key, durableStreamsUrl: "http://ds" };
 
+  // The engine comes back with the result: a re-mint RENEWS every grant it re-authorizes, so it has
+  // to be given the same engine the claims were taken on.
   async function subscribeAs(tenant: string) {
     const engine = stubEngine();
     const result = await subscribeToShapes(
@@ -330,13 +732,13 @@ describe("re-mint re-authorizes the private tier", () => {
       NOW,
     );
     expect(result.granted.map((g) => g.streamPath)).toEqual(["shape/s1"]);
-    return result;
+    return { ...result, engine };
   }
 
   it("keeps a grant whose shape still compiles the same", async () => {
     const initial = await subscribeAs(TENANT_A);
     const refreshed = await refreshStreamToken(
-      { registry: tenantRegistry, key },
+      { registry: tenantRegistry, engine: initial.engine, key },
       { sub: "person-a", app_metadata: { tenant: TENANT_A } },
       initial.token!,
       NOW + 1,
@@ -355,7 +757,7 @@ describe("re-mint re-authorizes the private tier", () => {
   it("revokes a grant whose predicate now compiles differently, even though it still permits", async () => {
     const initial = await subscribeAs(TENANT_A);
     const refreshed = await refreshStreamToken(
-      { registry: tenantRegistry, key },
+      { registry: tenantRegistry, engine: initial.engine, key },
       { sub: "person-a", app_metadata: { tenant: TENANT_B } },
       initial.token!,
       NOW + 1,
@@ -376,11 +778,11 @@ describe("re-mint re-authorizes the private tier", () => {
   it("revokes a private grant carrying no fingerprint", async () => {
     const token = await mintStreamToken(key, {
       sub: "person-a",
-      grants: [{ path: "shape/s1", shapeId: "s1", shapeKey: "tenant_documents" }],
+      grants: [{ path: "shape/s1", shapeId: "s1", claim: "claim-1", shapeKey: "tenant_documents" }],
       now: NOW,
     });
     const refreshed = await refreshStreamToken(
-      { registry: tenantRegistry, key },
+      { registry: tenantRegistry, engine: stubEngine(), key },
       { sub: "person-a", app_metadata: { tenant: TENANT_A } },
       token,
       NOW + 1,

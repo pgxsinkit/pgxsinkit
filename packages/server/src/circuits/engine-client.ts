@@ -7,7 +7,15 @@ export interface CircuitsEngineOptions {
   fetch?: typeof fetch;
 }
 
-/** An engine call that did not return 2xx, carrying the status so a caller can map it to its own. */
+/**
+ * An engine call that did not return 2xx, carrying the status so a caller can map it to its own.
+ *
+ * The one status with a MEANING rather than a severity is **409**: a create whose `subscription` id
+ * is already held by a different shape (fork ADR-0008 — one name, one shape). It is the caller's
+ * conflict, not an outage, and no retry changes it; match it as `error.status === 409` and re-subscribe
+ * under a fresh id. Everything else is either a request this client built wrong (4xx) or an engine
+ * that could not answer (5xx), and both propagate as a 503 to the client.
+ */
 export class CircuitsEngineError extends Error {
   readonly status: number;
   readonly body: string;
@@ -48,27 +56,63 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
 
   return {
     /**
-     * Register a shape and get the stream to follow.
+     * Register a shape and get the stream to follow — **and renew that registration**.
+     *
+     * There is deliberately no `renewShape`: a renewal IS this call, repeated with the same
+     * `request.subscription` on the same definition (fork ADR-0008). The engine answers the same
+     * handle, counts nothing extra, and moves the lease forward. That is also why a create whose
+     * response was lost can simply be sent again, and why the control plane's token re-mint can renew
+     * every live claim without a second route.
+     *
+     * Two outcomes a caller must distinguish:
+     * - **409** ({@link CircuitsEngineError.status}) — the id names a DIFFERENT shape already. One
+     *   name, one shape; nothing was taken, and a retry will not change it.
+     * - a **different handle** — the claim had lapsed or the shape was evicted, so this call
+     *   re-subscribed rather than renewed. The stream the old grant named is not this one (ADR-0007).
      *
      * The engine shares by definition: two identical bodies collapse onto one maintained stream and
-     * return the same handle, ref-counted. Nothing here has to check for that or cache against it —
-     * which is exactly why the shared tier's predicate must be GENERATED. Two subscribers in one
-     * scope produce identical bodies only because neither's identity reached the predicate.
+     * return the same handle. Nothing here has to check for that or cache against it — which is
+     * exactly why the shared tier's predicate must be GENERATED. Two subscribers in one scope produce
+     * identical bodies only because neither's identity reached the predicate; they are still two
+     * distinct subscriptions, because each names its own claim.
+     *
+     * The answer is VALIDATED, not cast, for the same reason {@link replicationState} validates the
+     * barrier: an engine that acknowledges a create without saying which subscription it recorded or
+     * how long that subscription lives cannot be renewed or released by id at all, and defaulting
+     * either field would invent a lease this control plane was never promised.
      */
     async createShape(request: CreateShapeRequest): Promise<CircuitsShapeHandle> {
-      return (await call("/shapes", {
+      const body = (await call("/shapes", {
         method: "POST",
         body: JSON.stringify(request),
-      })) as CircuitsShapeHandle;
+      })) as Partial<CircuitsShapeHandle> | null;
+      if (body === null || typeof body !== "object") throw unusableCreate("the body", body);
+      if (typeof body.shapeId !== "string") throw unusableCreate("shapeId", body.shapeId);
+      if (typeof body.streamPath !== "string") throw unusableCreate("streamPath", body.streamPath);
+      if (typeof body.subscription !== "string" || body.subscription === "") {
+        throw unusableCreate("subscription", body.subscription);
+      }
+      if (typeof body.leaseSeconds !== "number") throw unusableCreate("leaseSeconds", body.leaseSeconds);
+      return body as CircuitsShapeHandle;
     },
 
     /**
-     * Drop one subscription's claim on a shape. The shape itself survives its other subscribers and
-     * then follows the engine's retention lifecycle (idle → dormant → evicted); this is a release,
-     * not a delete.
+     * Release ONE named subscription's claim on a shape (`DELETE /shapes/{id}?subscription=…`).
+     *
+     * **Idempotent**, and that is the whole point of naming the claim: releasing one that is already
+     * gone is a no-op `200` rather than a decrement that steals another subscriber's. A caller whose
+     * response was lost may simply send it again.
+     *
+     * There is no anonymous form here. The engine still accepts a bare `DELETE /shapes/{id}` as a
+     * legacy refcount decrement, but it carries no claim identity and is not retry-safe, so this
+     * client never issues one.
+     *
+     * The shape itself survives its other subscribers and then follows the engine's retention
+     * lifecycle (idle → dormant → evicted); this is a release, not a delete.
      */
-    async releaseShape(shapeId: string): Promise<void> {
-      await call(`/shapes/${encodeURIComponent(shapeId)}`, { method: "DELETE" });
+    async releaseShape(shapeId: string, subscription: string): Promise<void> {
+      const query = `?subscription=${encodeURIComponent(subscription)}`;
+      await call(`/shapes/${encodeURIComponent(shapeId)}${query}`, { method: "DELETE" });
     },
 
     /**
@@ -116,6 +160,22 @@ function unusableBarrier(field: string, value: unknown): Error {
     `[pgxsinkit] the engine's GET /replication/lsn answered with an unusable \`${field}\` (${JSON.stringify(value)}). ` +
       `This client requires an engine reporting the whole convergence barrier — \`lsn\`, \`pendingFlips\` and ` +
       `\`flipFailures\` (ADR-0056 decision 3); the engine at this URL is not the one this client targets.`,
+  );
+}
+
+/**
+ * An engine whose create answer this client cannot read is not a degraded engine — it is the wrong
+ * engine, exactly as {@link unusableBarrier} says of the barrier. A create that does not name the
+ * subscription it was recorded under, or the window that subscription must be renewed within, leaves
+ * a claim nothing can renew and nothing can release by id; defaulting either would manufacture a
+ * lease the engine never granted.
+ */
+function unusableCreate(field: string, value: unknown): Error {
+  return new Error(
+    `[pgxsinkit] the engine's POST /shapes answered with an unusable \`${field}\` (${JSON.stringify(value)}). ` +
+      `This client requires an engine that records every shape claim under a named, leased subscription — ` +
+      `\`shapeId\`, \`streamPath\`, \`subscription\` and \`leaseSeconds\` (fork ADR-0008); the engine at this ` +
+      `URL is not the one this client targets.`,
   );
 }
 

@@ -54,6 +54,7 @@ function oneShotRouter(options: {
   });
   const refresh = createRefreshHandler({
     registry,
+    engine: options.engine,
     entitlements: options.entitlements,
     key: options.key,
     resolveAuthClaims: () => ({ sub: "person-a" }),
@@ -89,6 +90,8 @@ test("a shared scope revoked while offline is cleared on the next public sync st
       table: request.table,
       streamPath: "shape/s1",
       streamUrl: "http://ds/shape/s1",
+      subscription: request.subscription ?? "~minted",
+      leaseSeconds: 1800,
     }),
     releaseShape: async () => {},
     replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),
@@ -155,6 +158,8 @@ test("refresh-time shared-scope revocation clears that scope and stops its strea
       table: request.table,
       streamPath: "shape/s1",
       streamUrl: "http://ds/shape/s1",
+      subscription: request.subscription ?? "~minted",
+      leaseSeconds: 1800,
     }),
     releaseShape: async () => {},
     replicationState: async () => ({ lsn: "0/0", pendingFlips: 0, flipFailures: 0 }),

@@ -118,16 +118,19 @@ export interface SubscriptionSession {
    */
   refresh: () => Promise<string | null>;
   /**
-   * Close the session and hand its engine shape claims back — **best-effort, at most once**.
+   * Close the session and hand its engine shape claims back — **promptly, best-effort**.
    *
-   * Synchronous and fire-and-forget by design. Every grant this session was given is a refcount the
-   * engine holds (a `POST /shapes` join), and `refcount > 0` blocks both dormancy and eviction, so a
-   * session that never released leaves its shapes active and tailer-maintained forever. But the
-   * engine's `DELETE /shapes/{id}` carries no claim identity — it decrements a shared counter — so a
-   * release sent TWICE takes a claim that belongs to somebody else, and can park a shape underneath a
-   * live reader. That asymmetry is why this fires exactly one request, never retries it, and never
-   * reports whether it landed: a lost release costs one leaked claim, a duplicated one costs another
-   * subscriber's stream.
+   * Synchronous and fire-and-forget by design. Every grant this session was given is a named claim on
+   * an engine shape (a `POST /shapes` join), and a live claim blocks both dormancy and eviction, so
+   * releasing at close is what lets an idle shape be reclaimed now rather than at the end of its lease
+   * window.
+   *
+   * Not reporting whether it landed is a consequence of WHEN this runs, not of a correctness trade.
+   * The release is idempotent — each grant names its own claim, so a repeat is the same act once
+   * (fork ADR-0008) — but the most common close is a page unload, which cannot await anything or
+   * retry anything. So it fires once, silently, and the lease covers the rest: a release lost with the
+   * document leaves claims the engine reclaims within its lease window (`leaseSeconds`), because
+   * nothing renews them once the session is gone.
    */
   close: () => void;
 }
@@ -267,10 +270,12 @@ export async function openSubscriptionSession(
    * way a session ends, and a release that dies with the document is the leak this route exists to
    * stop.
    *
-   * Errors are SWALLOWED and nothing is retried. That is the at-most-once rule, not laziness — the
-   * engine's `DELETE /shapes/{id}` is not idempotent (no claim identity, a bare refcount decrement),
-   * so a retry that races a first attempt which actually landed would steal another subscriber's
-   * claim. One lost claim is the tolerable failure; two claims dropped for one join is not.
+   * Errors are SWALLOWED and nothing is retried — because there is nothing here that COULD retry,
+   * not because a retry would be unsafe. The release names each claim and is idempotent (fork
+   * ADR-0008), so repeating it is harmless; but `close()` is synchronous and its commonest caller is
+   * a page unload, which has no future in which to try again and no one left to report to. A release
+   * that dies with the document leaves claims the engine reclaims within one lease window, since
+   * nothing renews them once the session is gone.
    */
   function sendRelease(releaseToken: string): void {
     void (async () => {
@@ -297,8 +302,9 @@ export async function openSubscriptionSession(
     close: () => {
       closed = true;
       // A session that was granted nothing holds no claim and has nothing to give back. The
-      // `releaseSent` latch is what makes a second `close()` — a stop racing a teardown, say — a no-op
-      // rather than a double release.
+      // `releaseSent` latch makes a second `close()` — a stop racing a teardown, say — a no-op: the
+      // server would answer the repeat 200 and change nothing (releases are by claim id and therefore
+      // idempotent), so the latch is about not making a request that can only be redundant.
       if (initialToken === null || releaseSent) return;
       releaseSent = true;
       sendRelease(initialToken);

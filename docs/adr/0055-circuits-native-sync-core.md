@@ -198,10 +198,17 @@ executes.
      Private-tier widening is the exception: a claims change that compiles to a different predicate
      fails the fingerprint, is revoked, and the restart re-subscribes with the new claims. Surfacing
      gain mid-session is backlog 0015.
-   - *(Amended 2026-08-22.)* **Closing a session releases the engine claims its subscribe acquired.**
-     Each grant is one `POST /shapes` join and the engine's refcount blocks dormancy and eviction, so
-     the session hands them back on close (`/sync/v1/release`, at most once, never retried — the
-     engine's DELETE carries no claim identity, so a double release would take another subscriber's).
+   - *(Amended 2026-08-22.)* **Every grant names its claim, renews it, and gives it back.** Each grant
+     is one `POST /shapes` join taken under a caller-chosen `subscription` id the grant carries, and a
+     live claim blocks dormancy and eviction. The claim is a **lease**: the re-mint renews it by
+     repeating the same create with the same id (a renewal that comes back a different handle, or a
+     409, revokes the grant and the client re-subscribes), and the session releases it on close
+     (`/sync/v1/release` → `DELETE /shapes/{id}?subscription=…`). Because the claim is named, **release
+     is idempotent** — a repeat is the same act once — and a release that never arrives is reclaimed by
+     the engine within one lease window. See the fork's
+     [ADR-0008](https://github.com/pgxsinkit/electric-circuits/blob/main/docs/adr/0008-subscriptions-are-identified-idempotent-and-leased.md).
+     A deployment whose `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS` is under twice the token TTL is refused
+     with a 503: one missed refresh would lapse a live session.
    - **The token must be excluded from the cache key.** Including it gives every subscriber a unique
      key and destroys the sharing this tier exists for. This is not an optimisation detail; it is a
      correctness condition for the tier.
