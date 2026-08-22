@@ -55,6 +55,8 @@ import {
   ExecutionLimitMismatchError,
   executionLimitMismatchToWire,
   type ExecutionLimitConfig,
+  ProvisionStalledError,
+  provisionStalledToWire,
   readControlEnvelope,
   shouldApplyControlMessage,
   wrapControlEnvelope as controlEnvelope,
@@ -111,6 +113,13 @@ const DRIZZLE_PGLITE_IDENTITY_PARSERS: ParserOptions = {
   1187: identityParser,
   1182: identityParser,
 };
+
+/**
+ * Cadence (ms) of the "worker store provision still pending" heartbeat rail line, emitted from the moment a
+ * spare provision attempt starts until it settles. Diagnosability only — no policy hangs off it (the bound is
+ * `provisionAdoptionBudgetMs`): it is what turns a silent stall into a visible one on the rail.
+ */
+const PROVISION_PENDING_HEARTBEAT_MS = 5_000;
 
 export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
   /**
@@ -179,6 +188,19 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    * channel to probe, so an enabled value is rejected as unsupported before engine boot.
    */
   executionLimit?: ExecutionLimitConfig;
+  /**
+   * How long an attach may wait for the engine's IN-FLIGHT spare provision (ADR-0032 decision 5) before it
+   * fails typed with {@link ProvisionStalledError} instead of waiting. Measured from the provision attempt's
+   * START, not from the attach — a tab attaching late inherits however much of the budget the spare has
+   * already burned. The stalled attempt is LEFT RUNNING (an in-flight OPFS/IDB store open cannot be safely
+   * abandoned — a second open against the same store is an ownership conflict), so a later attach still
+   * ADOPTS it if it completes; refusing costs at most one extra initdb, never data (the spare is schemaless
+   * and holds no writes). Default 20000. `Number.POSITIVE_INFINITY` restores the unbounded wait (NOT
+   * recommended: a stalled spare then hangs every attach forever). Must be > 0 — anything else throws at
+   * construction. This bounds the ACCELERATOR only; nothing is inferred from it about engine liveness
+   * (ADR-0049 D5's refusal of timing-based engine-death detection is unchanged).
+   */
+  provisionAdoptionBudgetMs?: number;
   /** Injected transport binder. Defaults to auto-detecting the SharedWorker/dedicated-worker global scope. */
   installGlobal?: boolean;
   /** Injected codec (ADR-0032 S2 §1). Defaults to the v1 identity codec. */
@@ -267,6 +289,17 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   const codec = options.codec ?? identityCodec;
   const tokenExpiryMarginMs = options.tokenExpiryMarginMs ?? 30_000;
   const convergenceIntervalMs = options.convergenceIntervalMs ?? 15_000;
+  // The spare-store adoption budget (see the option's doc): the bound on how long an attach waits for an
+  // in-flight provision. Validated here — a non-positive/NaN budget would refuse every attach that met a
+  // pending spare, so it fails at construction rather than at the first sign-in.
+  const provisionAdoptionBudgetMs = options.provisionAdoptionBudgetMs ?? 20_000;
+  if (!(provisionAdoptionBudgetMs > 0)) {
+    throw new Error(
+      `[pgxsinkit] provisionAdoptionBudgetMs must be > 0 (got ${String(options.provisionAdoptionBudgetMs)}); it ` +
+        "bounds how long an attach waits for an in-flight spare provision. Use Number.POSITIVE_INFINITY for the " +
+        "unbounded wait.",
+    );
+  }
   // ADR-0049 D1: the placement probe's OPFS grant for THIS SharedWorker lifetime. Set true only by a GRANTED
   // `shared-worker` (SW-direct) probe, so both the provision-mint (default `createPglite` factory) and the boot
   // create (below) resolve the OPFS-repacked backend. False is the honest capability-absence invariant — the
@@ -379,7 +412,18 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   // A provision request performs a bounded authority read before it may mint. An attach that arrives during
   // that read waits for the attempt to settle, then either adopts the minted store or runs the ordinary boot
   // path. This keeps provision a pure accelerator without racing a replacement underneath live deletion.
+  // That wait is BOUNDED by `provisionAdoptionBudgetMs` (see `boot`), so a spare whose create never settles
+  // refuses the attach typed instead of hanging it — hence the start stamp, the settlement flag, and the
+  // attempt's store path tracked alongside the promise.
   let provisionAttempt: Promise<void> | null = null;
+  /** `nowStamp()` at which the current {@link provisionAttempt} was created — the budget's origin. */
+  let provisionAttemptStartedAt = 0;
+  /** Whether {@link provisionAttempt} is still in flight (settlement is observed, never inferred from timing). */
+  let provisionAttemptPending = false;
+  /** The store path the current attempt is minting — what a refusal reports, resolved before any boot runs. */
+  let provisionAttemptStorePath = "";
+  /** The "still pending" heartbeat's handle; cleared the moment the attempt settles (never outlives it). */
+  let provisionHeartbeat: ReturnType<typeof setInterval> | null = null;
 
   // ─── Outbound-convergence gate — the tab's Offline toggle over the bridge (ADR-0032 S3) ───────────
   // The worker owns convergence; the tab forwards its Offline flag as `set-online`. When suppressed the
@@ -513,9 +557,46 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
 
   const boot = async (attach: AttachPayload): Promise<SyncClient<TRegistry>> => {
     await placementGate;
-    // Provision owns no recovery policy. Wait only for its bounded pre-mint check/create attempt; a declined
-    // attempt leaves `provisioned` null and this attach continues through createSyncClient's full phase machine.
-    await provisionAttempt?.catch(() => undefined);
+    // Provision owns no recovery policy, and it is a pure ACCELERATOR — so this attach waits for an in-flight
+    // attempt only within `provisionAdoptionBudgetMs`, counted from the ATTEMPT's start (a late attach inherits
+    // the burned budget). A declined/settled attempt leaves `provisioned` null and this attach continues through
+    // createSyncClient's full phase machine; a spare whose create never settles instead REFUSES this attach typed
+    // (`ProvisionStalledError`), so the host can rebind to a fresh store rather than wait forever. The stalled
+    // attempt is deliberately left running — an in-flight store open cannot be safely abandoned (a second open is
+    // an ownership conflict) — and a later attach still adopts it if it completes. Nothing here infers engine
+    // death from elapsed time (ADR-0049 D5 unchanged); it bounds the accelerator only.
+    const pendingAttempt = provisionAttempt;
+    if (pendingAttempt !== null) {
+      const startedAt = provisionAttemptStartedAt;
+      const remainingMs = Math.max(0, provisionAdoptionBudgetMs - (nowStamp() - startedAt));
+      if (Number.isFinite(remainingMs)) {
+        // A real timer: the worker has no injected clock, so tests drive this with a small budget.
+        let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          pendingAttempt.catch(() => undefined),
+          new Promise<void>((resolve) => {
+            budgetTimer = setTimeout(resolve, remainingMs);
+          }),
+        ]);
+        if (budgetTimer !== undefined) clearTimeout(budgetTimer);
+      } else {
+        // `Number.POSITIVE_INFINITY` — the opted-in unbounded wait.
+        await pendingAttempt.catch(() => undefined);
+      }
+      if (provisionAttemptPending) {
+        const elapsedMs = Math.round(nowStamp() - startedAt);
+        syncDebug("worker provision adoption stalled — attach refused", {
+          storePath: provisionAttemptStorePath,
+          elapsedMs,
+          budgetMs: provisionAdoptionBudgetMs,
+        });
+        throw new ProvisionStalledError({
+          storePath: provisionAttemptStorePath,
+          elapsedMs,
+          budgetMs: provisionAdoptionBudgetMs,
+        });
+      }
+    }
     const attachLimit = attach.executionLimit?.maxDispatchMs;
     if (placementEngineHome === "shared-worker" && attachLimit !== undefined) {
       throw new Error(
@@ -1110,14 +1191,29 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
           await pglite;
         });
         provisionAttempt = attempt;
-        void attempt.then(
-          () => {
-            if (provisionAttempt === attempt) provisionAttempt = null;
-          },
-          () => {
-            if (provisionAttempt === attempt) provisionAttempt = null;
-          },
-        );
+        const attemptStartedAt = nowStamp();
+        provisionAttemptStartedAt = attemptStartedAt;
+        provisionAttemptStorePath = storePath;
+        provisionAttemptPending = true;
+        // Heartbeat the pending attempt onto the rail so a stalled create is VISIBLE (the failure that
+        // motivated the budget showed `boot pglite.create start` and then nothing at all). Cleared on
+        // settlement below, so it never outlives the attempt it reports on.
+        const heartbeat = setInterval(() => {
+          syncDebug("worker store provision still pending", {
+            storePath,
+            elapsedMs: Math.round(nowStamp() - attemptStartedAt),
+          });
+        }, PROVISION_PENDING_HEARTBEAT_MS);
+        provisionHeartbeat = heartbeat;
+        const settled = (): void => {
+          clearInterval(heartbeat);
+          if (provisionHeartbeat === heartbeat) provisionHeartbeat = null;
+          if (provisionAttempt === attempt) {
+            provisionAttempt = null;
+            provisionAttemptPending = false;
+          }
+        };
+        void attempt.then(settled, settled);
         void attempt.then(
           () =>
             postBridgeMessage(port, codec, "provision-ack", {
@@ -1420,6 +1516,12 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       throw error;
     } finally {
       ports.clear();
+      // A torn-down host reports on nothing: stop the pending-provision heartbeat even when the attempt it
+      // watches is the stalled one that never settles.
+      if (provisionHeartbeat !== null) {
+        clearInterval(provisionHeartbeat);
+        provisionHeartbeat = null;
+      }
       setSyncDebugSink(undefined);
     }
   };
@@ -1479,6 +1581,9 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
 function serializeError(error: unknown): BridgeErrorWire {
   if (error instanceof ExecutionLimitMismatchError) {
     return { message: error.message, detail: executionLimitMismatchToWire(error) };
+  }
+  if (error instanceof ProvisionStalledError) {
+    return { message: error.message, detail: provisionStalledToWire(error) };
   }
   if (error instanceof Error) {
     const detail = (error as Error & { detail?: unknown }).detail;

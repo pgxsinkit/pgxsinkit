@@ -78,6 +78,7 @@ import {
   executionLimitMismatchFromWire,
   type ExecutionLimitConfig,
   isStaleIdentity,
+  provisionStalledFromWire,
   readControlEnvelope,
   wrapControlEnvelope,
 } from "./engine-control";
@@ -228,7 +229,9 @@ export class ElectedEngineUnconstructibleError extends Error {
  *
  * - **SW-direct.** The attempt lives in the SharedWorker and is left running (an in-flight store open cannot be
  *   safely abandoned — a second open against the same store is an ownership conflict). A later
- *   {@link attachSyncClient} ADOPTS it if it completed and WAITS on it if it is genuinely stuck; a retried
+ *   {@link attachSyncClient} ADOPTS it if it completed, and waits on a genuinely stuck one only within the
+ *   engine's spare-store adoption budget (`provisionAdoptionBudgetMs`, default 20000 from the attempt's start),
+ *   past which that attach is refused with {@link ProvisionStalledError} instead of hanging; a retried
  *   provision re-acks against the SAME attempt, so a second open never starts. A stuck storage open blocks that
  *   store whether or not it was ever provisioned, and expiring this promise neither causes nor cures that.
  * - **Elected.** This deadline is ALSO the provision claim's expiry, so the claim releases here too. When it is
@@ -2842,6 +2845,10 @@ function rebuildError(error: RpcResultPayload["error"]): Error {
   if (error && "detail" in error) {
     const mismatch = executionLimitMismatchFromWire(error.detail);
     if (mismatch !== undefined) return mismatch;
+    // An attach refused because the engine's in-flight spare provision outran the adoption budget: the host
+    // branches on the TYPE to rebind to a fresh store, so it must cross the bridge as the class.
+    const stalled = provisionStalledFromWire(error.detail);
+    if (stalled !== undefined) return stalled;
     // A no-grant engine home refusing an `opfs-committed` store: the consumer branches on the TYPE to offer
     // the destroy-then-rebuild exit, so it must cross the bridge as the class, not a name-tagged plain Error.
     const unreachable = committedStoreUnreachableFromWire(error.detail);

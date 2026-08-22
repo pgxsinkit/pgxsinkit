@@ -18,7 +18,23 @@ export interface CreateOpfsRepackedPGliteOptions<
   readonly directory: OpfsDirectoryHandle;
   /** PGlite options other than the factory-owned dataDir, fs, and relaxedDurability fields. */
   readonly pglite?: HostOptions<TExtensions>;
+  /**
+   * Optional progress callback for the two long, otherwise-invisible steps of an OPFS-repacked create.
+   * Called once per phase, in order, and only on the success path:
+   *
+   * - `"vfs-opened"` — the store's sync access handles are acquired and the repacked filesystem is open.
+   *   Everything before this is handle acquisition, which is where a create that never returns stalls.
+   * - `"pglite-ready"` — PGlite's own boot (WASM instantiation, initdb or catalog open) has completed.
+   *
+   * Diagnosability only: it carries no policy, must not throw, and a create's outcome never depends on it.
+   * The host uses it to stamp a boot rail, so a stalled create is attributable to a phase rather than
+   * silent.
+   */
+  readonly onPhase?: (phase: OpfsRepackedCreatePhase) => void;
 }
+
+/** The create phases {@link CreateOpfsRepackedPGliteOptions.onPhase} reports, in the order they occur. */
+export type OpfsRepackedCreatePhase = "vfs-opened" | "pglite-ready";
 
 /**
  * The factory-owned PGlite instance: a plain PGlite plus the one explicit
@@ -45,6 +61,7 @@ export async function createOpfsRepackedPGlite<TExtensions extends Extensions = 
 ): Promise<OpfsRepackedPGlite<TExtensions>> {
   assertHostOptions(options.pglite);
   const adapter = await openOpfsRepackedFsForPort(new OpfsRepackedPort(options.directory), filesystemOptions(options));
+  options.onPhase?.("vfs-opened");
 
   try {
     const pg = new FactoryOwnedPGlite(
@@ -56,6 +73,7 @@ export async function createOpfsRepackedPGlite<TExtensions extends Extensions = 
       adapter,
     );
     await pg.waitReady;
+    options.onPhase?.("pglite-ready");
     adapter.strictSync();
     return pg as FactoryOwnedPGlite & PGliteInterfaceExtensions<TExtensions>;
   } catch (cause) {

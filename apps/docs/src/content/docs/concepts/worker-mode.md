@@ -225,6 +225,26 @@ termination and respawn. It is disabled by default, applies only to elected plac
 the worker entry must carry the same value. A mismatch raises `ExecutionLimitMismatchError`; enabling it
 on SW-direct Safari is rejected because a page cannot terminate that in-scope SharedWorker engine.
 
+### Spare-store adoption budget
+
+The login-screen **spare store** is a pure accelerator: the worker pre-creates a schemaless PGlite so the
+first attach adopts a store whose `initdb` has already run. An attach arriving while that create is still in
+flight waits for it — but only within `provisionAdoptionBudgetMs`, an engine-construction option on
+`defineSyncWorker` measured from the provision attempt's **start** (default 20 s), never from the attach.
+Past the budget the attach fails with `ProvisionStalledError` (carrying `storePath`, `elapsedMs`, `budgetMs`)
+rather than waiting, so a signed-in user never sits on "starting local database" indefinitely.
+
+Handle it by rebinding to a fresh store path, or by retrying: the stalled create is deliberately **left
+running** — an in-flight store open cannot be safely abandoned, a second open against the same store being an
+ownership conflict — so a later attach still adopts it if it completes. Refusing a spare costs at most one
+extra `initdb` and never data, because the spare is schemaless and holds no writes.
+`Number.POSITIVE_INFINITY` restores the unbounded wait; any value at or below zero is rejected at
+construction.
+
+This is **not** engine-death detection. Nothing about the engine's liveness is inferred from the elapsed
+time; the budget bounds one accelerator, and placement's refusal to infer a dead engine from timing is
+unchanged.
+
 ### Selecting a role per attach
 
 A single worker file can bake **more than one registry variant** (e.g. the board's admin and member

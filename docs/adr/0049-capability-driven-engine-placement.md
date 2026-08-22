@@ -4,6 +4,11 @@ Status: accepted (2026-07-21; revised four times same day across pre-implementat
 commitment namespaces + lifecycle, liveness policy, election ownership, relocation semantics, and
 provenance gates reworked; the plan carries the accepted-risk register that closes the review cycle)
 
+Amended (2026-08-22): the engine's attach waits for an in-flight spare provision only within
+`provisionAdoptionBudgetMs` (default 20 s from provision start); past it the attach fails typed
+(`ProvisionStalledError`) so the host rebinds to a fresh store. This bounds the ACCELERATOR, not engine
+liveness — D5's refusal of timing-based engine-death detection is unchanged.
+
 ADR-0048 delivered `opfs-repacked` — a constant-four-handle OPFS VFS that runs on every engine,
 including WebKit's ~252-handle cap — but left hosting as "a consumer decision outside this package",
 and ADR-0032 put the whole sync engine inside a native `SharedWorker`, where Chromium and Firefox
@@ -93,7 +98,10 @@ layer above `RepackedVfs.open()`.
    minting on **any** placement it performs the bounded store-meta read, and a live `deleting`
    record declines the pre-mint so the first attach runs the ordinary resumable phase machine.
    A rejected precreate likewise falls back through that complete phase machine, never directly
-   to a replacement mint beneath unresolved authority.
+   to a replacement mint beneath unresolved authority. An attach meeting an attempt that is still
+   IN FLIGHT waits for it only within the spare-store adoption budget (see the amendment above): a
+   pure accelerator may never become a boot dependency, so past the budget the attach is refused
+   typed while the attempt is left running for a later attach to adopt.
 
 3. **Spawn on grant only.** No per-tab hot-spare workers. A non-leader tab's worker would never
    serve a request (tabs talk through the toolkit's own channels, unlike upstream `PGliteWorker`
