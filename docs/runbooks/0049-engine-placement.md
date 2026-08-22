@@ -176,6 +176,43 @@ executionLimit: {
   `attachSyncClient` call. A worker configured with a limit must use capability/elected placement;
   observing it on SW-direct is a construction error and attach is rejected before engine boot.
 
+## Provision adoption budget (on by default)
+
+**Symptom.** After sign-in the app sits on "Starting local database…" forever. The forwarded rail shows
+`boot pglite.create start` with no matching `done` and no error, then a `worker store provision still
+pending` line every 5 s. The pre-created **spare store** (the login screen's warm mint) is stuck inside
+its create, and the attach behind it was waiting for it with no bound.
+
+**What the budget does.** The engine's boot waits for an in-flight provision attempt only within
+`provisionAdoptionBudgetMs` — an engine-construction option on `defineSyncWorker`, default **20 s**,
+measured from the provision attempt's START (not from the attach, so a late tab inherits whatever the
+spare has already burned). Past it the attach is refused instead of waiting. The stalled attempt is
+deliberately **left running**: an in-flight store open cannot be safely abandoned (a second open against
+the same store is an ownership conflict), so a later attach still adopts it if it ever completes.
+
+**The typed outcome.** The attach rejects with `ProvisionStalledError` (exported from
+`@pgxsinkit/client`), carrying `storePath`, `elapsedMs`, and `budgetMs`. It crosses the worker bridge as
+the CLASS (tagged `detail`, `code: "provision-stalled"`), so hosts `instanceof`-branch it rather than
+matching message prose.
+
+**What a host does.** Treat it as "this store path is not openable right now", not as a fatal boot
+failure: surface a real error state instead of an endless spinner, then **rebind to a fresh store** (a new
+`storePath`, or `destroyStoreArtifacts` + rebuild after quiescing the worker) — or simply retry the attach,
+which succeeds the moment the stalled create lands, because the refusal clears the engine's boot promise and
+the spare is adopted if it completed. A retry taken while the create is STILL stalled is refused again at
+once (that budget is already spent), so back off rather than spin. Refusing a spare costs at most one extra
+`initdb` and never data: it is schemaless and holds no writes.
+
+**The knob.** `defineSyncWorker({ provisionAdoptionBudgetMs })`. `Number.POSITIVE_INFINITY` restores the
+old unbounded wait (not recommended — a stalled spare then hangs every attach); a value at or below zero
+throws at construction. This bounds the ACCELERATOR only: nothing is inferred from it about whether the
+engine is alive, and D5's refusal of timing-based engine-death detection is unchanged.
+
+**More rail.** The OPFS create now also emits `boot pglite.create phase` with `phase` =
+`module-loaded` → `directory-ready` → `vfs-opened` → `pglite-ready`, so a stalled create is attributable
+to a step (factory module load, store-directory handle, sync-access-handle acquisition, PGlite boot)
+instead of being a silent gap between `start` and `done`.
+
 ## `destroy()` (peer refusal, force)
 
 `destroy()` on the attached facade wipes the entire local store (synced cache + overlay + journal)

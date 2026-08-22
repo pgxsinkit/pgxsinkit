@@ -371,11 +371,11 @@ test("(E) strict durability selected → the board boots and writes still work",
 
 test("(F) sign-in after the spare provision completes adopts the provisioned store", async ({ browser }) => {
   // The login screen pre-provisions a spare store (~2.5s of PGlite create/initdb inside the elected worker). A
-  // robot that clicks sign-in immediately races AHEAD of the provision ack and takes the fresh-attach path —
-  // which is exactly how the provisioned-spare adoption stall shipped unnoticed: every lane clicked early, and
-  // only human-paced logins (spare already complete) hit the claim → coordinator adoption → pipe handover.
-  // This test IS the human: it waits for the worker's provision rail line before signing in, then proves the
-  // boot ADOPTED the provisioned store (never a second initdb) and that the adopted engine serves writes.
+  // robot that clicks sign-in immediately races AHEAD of that create and takes the fresh-attach path — which is
+  // exactly how the provisioned-spare adoption stall shipped unnoticed: every lane clicked early, and only
+  // human-paced logins (spare already COMPLETE) hit the claim → coordinator adoption → pipe handover. This test
+  // IS the human: it waits until the spare's initdb has actually SETTLED before signing in, then proves the boot
+  // ADOPTED the provisioned store (never a second initdb) and that the adopted engine serves writes.
   test.setTimeout(150_000);
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
@@ -384,9 +384,13 @@ test("(F) sign-in after the spare provision completes adopts the provisioned sto
   try {
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
-    // The elected engine worker's console is page-visible; its rail line marks the spare's initdb settling.
+    // Wait for the CREATE to finish, not for it to start: `worker store provisioned` is logged the moment the
+    // provision is registered — before initdb — so polling it clicks sign-in mid-initdb, the very race this
+    // scenario exists to avoid. `boot pglite.create done {ms}` is the `timeAsync` completion line, emitted only
+    // once PGlite.create resolves inside the elected worker. The worker's rail is page-visible, and the first
+    // attach may also receive a `[replay]`-prefixed copy of the buffered line — either copy proves the same fact.
     await expect
-      .poll(() => consoleLines.some((line) => line.includes("worker store provisioned")), { timeout: 60_000 })
+      .poll(() => consoleLines.some((line) => line.includes("boot pglite.create done")), { timeout: 60_000 })
       .toBe(true);
 
     await signIn(page, ALICE);

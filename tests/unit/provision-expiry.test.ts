@@ -488,7 +488,11 @@ describe("provisionSyncWorker settles at the expiry deadline — it never hangs 
 // attempt rather than booting fresh, and a retried provision re-acks against it instead of starting a second
 // open. That is exactly what `ProvisionExpiredError` documents for this placement, and it is pinned here against
 // the REAL `defineSyncWorker` (over a `MessageChannel`, no Worker) with a `createPglite` that never settles —
-// the scripted-SW harness above has no worker-side attempt to model. The ELECTED half of the split — the same
+// the scripted-SW harness above has no worker-side attempt to model. That attach-side WAIT is itself bounded by
+// the engine's spare-store adoption budget (`provisionAdoptionBudgetMs`, default 20000 from the attempt's start,
+// past which the attach is refused with `ProvisionStalledError`); the bound is pinned in
+// `provision-adoption-budget.test.ts`, so this test opts OUT of it (`Number.POSITIVE_INFINITY`) to isolate the
+// wait-vs-second-open property it exists for. The ELECTED half of the split — the same
 // deadline releasing the provision claim, and a last-claim release retiring and TERMINATING the engine with its
 // attempt inside it — is the granted-lock case in the first block.
 //
@@ -576,6 +580,8 @@ describe("the expiry bounds the PROMISE, not the worker-side create attempt", ()
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
+      // Opt out of the spare-store adoption budget: this test pins WHAT the attach waits on, not for how long.
+      provisionAdoptionBudgetMs: Number.POSITIVE_INFINITY,
       // The genuinely stuck storage open: the create this provision asks for NEVER settles.
       createPglite: () => {
         opens.count += 1;

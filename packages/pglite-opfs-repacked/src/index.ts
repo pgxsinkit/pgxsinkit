@@ -13,6 +13,7 @@ export {
 export {
   createOpfsRepackedPGlite,
   type CreateOpfsRepackedPGliteOptions,
+  type OpfsRepackedCreatePhase,
   type OpfsRepackedPGlite,
 } from "./pglite-factory";
 export { OpfsRepackedFS, type RepackedDurability } from "./opfs-repacked-fs";

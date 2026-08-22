@@ -389,3 +389,92 @@ export function engineRelocatedFromWire(detail: unknown): EngineRelocatedError |
   if (candidate.outcome !== "not-dispatched" && candidate.outcome !== "unknown") return undefined;
   return new EngineRelocatedError(candidate.outcome);
 }
+
+// ─── E. ProvisionStalledError (the spare-store adoption budget) ───────────────────
+
+/** The stable clone-safe discriminator a stalled spare adoption carries on the wire. Branch on this, never prose. */
+export const PROVISION_STALLED_CODE = "provision-stalled";
+
+/**
+ * The clone-safe wire form of a stalled spare adoption. Like the execution-limit and relocation errors it
+ * travels inside the EXISTING bridge error `detail` field (the `{ message, detail }` shape `serializeError`
+ * produces), so no new protocol field is needed; the attach side calls {@link provisionStalledFromWire} on
+ * every bridge error `detail` and rebuilds the CLASS.
+ */
+export interface ProvisionStalledWire {
+  code: typeof PROVISION_STALLED_CODE;
+  storePath: string;
+  elapsedMs: number;
+  budgetMs: number;
+}
+
+/**
+ * Thrown at attach when the engine's IN-FLIGHT spare provision (the pre-spawned schemaless store of ADR-0032
+ * decision 5) has not settled within the engine's `provisionAdoptionBudgetMs` — measured from the provision
+ * attempt's START, not from this attach. The spare is a pure ACCELERATOR, never a boot dependency, so an
+ * attach must never hang behind one: past the budget the attach is REFUSED typed, and the host can rebind to
+ * a fresh store (or retry) instead of sitting on "starting local database…" forever.
+ *
+ * What this is NOT: engine-death detection. Nothing is inferred about the engine's liveness from the elapsed
+ * time (ADR-0049 D5 refuses timing-based death inference, unchanged). The stalled attempt is deliberately LEFT
+ * RUNNING — an in-flight OPFS/IDB store open cannot be safely abandoned, a second open against the same store
+ * being an ownership conflict — so a later attach still ADOPTS it if it completes. Abandoning a slow spare
+ * costs at most one extra initdb, never data: the spare is schemaless and holds no writes.
+ *
+ * Survives the worker bridge AS THIS CLASS via the tagged {@link ProvisionStalledWire} `detail` (the same
+ * tagged-detail pair the execution-limit and relocation errors use), so a consumer can `instanceof`-branch it.
+ */
+export class ProvisionStalledError extends Error {
+  readonly code = PROVISION_STALLED_CODE;
+  /** The store whose in-flight spare provision has not settled. */
+  readonly storePath: string;
+  /** How long that provision attempt has been running, in ms (measured from ITS start). */
+  readonly elapsedMs: number;
+  /** The budget it outran, in ms (the engine's effective `provisionAdoptionBudgetMs`). */
+  readonly budgetMs: number;
+
+  constructor(init: { storePath: string; elapsedMs: number; budgetMs: number }) {
+    super(
+      `[pgxsinkit] attach refused for ${JSON.stringify(init.storePath)}: the spare store's create has not ` +
+        `settled within ${init.budgetMs}ms (${init.elapsedMs}ms elapsed since the provision started). The ` +
+        "spare is a pure ACCELERATOR, never a boot dependency, so the attach is refused instead of waiting " +
+        'forever — rebind to a fresh store (or retry the attach) rather than showing an endless "starting ' +
+        'local database". The stalled attempt is LEFT RUNNING (an in-flight store open cannot be safely ' +
+        "abandoned), so a later attach adopts it if it completes. Nothing is inferred here about the engine " +
+        "being alive or dead. Tune or disable the bound with `defineSyncWorker`'s `provisionAdoptionBudgetMs`.",
+    );
+    this.name = "ProvisionStalledError";
+    this.storePath = init.storePath;
+    this.elapsedMs = init.elapsedMs;
+    this.budgetMs = init.budgetMs;
+  }
+}
+
+/** Encode a {@link ProvisionStalledError} to its clone-safe wire form for the bridge error `detail` field. */
+export function provisionStalledToWire(error: ProvisionStalledError): ProvisionStalledWire {
+  return {
+    code: PROVISION_STALLED_CODE,
+    storePath: error.storePath,
+    elapsedMs: error.elapsedMs,
+    budgetMs: error.budgetMs,
+  };
+}
+
+/**
+ * Reconstruct a typed {@link ProvisionStalledError} from a bridge error's `detail`. STRICT shape check:
+ * returns `undefined` for anything that is not exactly the `{ code: "provision-stalled", storePath,
+ * elapsedMs, budgetMs }` wire form (a foreign/absent detail, a wrong code, a missing/mistyped field, a
+ * non-object), so an unrelated failure is never misclassified as a stalled spare.
+ */
+export function provisionStalledFromWire(detail: unknown): ProvisionStalledError | undefined {
+  if (typeof detail !== "object" || detail === null) return undefined;
+  const candidate = detail as { code?: unknown; storePath?: unknown; elapsedMs?: unknown; budgetMs?: unknown };
+  if (candidate.code !== PROVISION_STALLED_CODE) return undefined;
+  if (typeof candidate.storePath !== "string") return undefined;
+  if (typeof candidate.elapsedMs !== "number" || typeof candidate.budgetMs !== "number") return undefined;
+  return new ProvisionStalledError({
+    storePath: candidate.storePath,
+    elapsedMs: candidate.elapsedMs,
+    budgetMs: candidate.budgetMs,
+  });
+}

@@ -212,6 +212,12 @@ export {
   type EngineRelocatedOutcome,
   type ExecutionLimitConfig,
   ExecutionLimitMismatchError,
+  PROVISION_STALLED_CODE,
+  // The typed refusal a stalled spare-store adoption raises — the companion to `ProvisionExpiredError`
+  // above: that one bounds the PROVISION call, this one bounds an ATTACH waiting on the spare.
+  ProvisionStalledError,
+  provisionStalledFromWire,
+  type ProvisionStalledWire,
 } from "./worker/engine-control";
 export { createOpfsEffects, type OpfsEffects, type OpfsEffectsDeps } from "./opfs-effects";
 export {
@@ -605,16 +611,24 @@ export async function createClientPGlite(
         const createOpfsRepacked =
           options?.pgliteFactories?.createOpfsRepacked ??
           (await import("@pgxsinkit/pglite-opfs-repacked")).createOpfsRepackedPGlite;
+        // A create that never returns used to leave the rail at `boot pglite.create start` with nothing after
+        // it — indistinguishable from a lost worker. These four phase lines split the create into its long
+        // steps (module load, directory handle, handle acquisition, PGlite boot), so a stall is attributable.
+        syncDebug("boot pglite.create phase", { phase: "module-loaded" });
         const getStoreDirectoryHandle =
           options?.pgliteFactories?.getStoreDirectoryHandle ??
           (() => createOpfsEffects(storePath).getStoreDirectoryHandle());
         const directory = await getStoreDirectoryHandle();
+        syncDebug("boot pglite.create phase", { phase: "directory-ready" });
         return openWithBoundedRetries(
           () =>
             createOpfsRepacked({
               directory: directory as CreateOpfsRepackedPGliteOptions["directory"],
               durability: relaxedDurability ? "relaxed" : "strict",
               extentSize: OPFS_STORE_EXTENT_SIZE,
+              // The factory's own two phases: handles acquired (`vfs-opened`) and PGlite booted
+              // (`pglite-ready`). Same rail line, so one grep shows the whole create.
+              onPhase: (phase) => syncDebug("boot pglite.create phase", { phase }),
               // The store is engine-less by construction (only `live` is a create-time extension); the sync
               // engine attaches post-create (ADR-0032 S1). Restore + pre-warmed boot assets ride the same
               // `pglite` sub-options the idb path uses.

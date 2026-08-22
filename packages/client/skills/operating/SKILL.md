@@ -210,14 +210,14 @@ working as designed. Inspect the worker itself (`chrome://inspect/#workers`) for
 (CORS rejections surface only there, a missing `Access-Control-Expose-Headers` on the edge included). Full
 model: <https://pgxsinkit.github.io/concepts/worker-mode/>.
 
-**Placement and relocation diagnostics.** Pull `client.bootReport()` and inspect `storageBackend`
-(`opfs-repacked`/`idbfs`/`filesystem`/`memory`), `engineHome` (`shared-worker`/`elected-worker`/
-`in-process`) and `storageFallbackReason`; never user-agent-sniff the backend. During elected-engine handoff
-`EngineRelocatedError("not-dispatched")` is safe to retry, while `"unknown"` means a dispatched mutation may
-already be journaled — inspect/reconcile, never retry blindly. The opt-in `executionLimit` is disabled by
-default (no finite worst-case query duration exists, and the limit converts slow to terminated by policy);
-it is elected-only and must match between the worker entry and every tab
-(`ExecutionLimitMismatchError`), and SW-direct Safari rejects it as unsupported.
+**Placement and relocation diagnostics.** Pull `client.bootReport()`: `storageBackend`, `engineHome`
+(`shared-worker`/`elected-worker`/`in-process`), `storageFallbackReason`; never user-agent-sniff the backend. On
+elected-engine handoff `EngineRelocatedError("not-dispatched")` is safe to retry; `"unknown"` means a dispatched
+mutation may already be journaled — inspect/reconcile, never retry. The opt-in `executionLimit` is disabled by
+default (no finite worst-case query duration exists; slow becomes terminated by policy), is elected-only, must
+match across the worker entry and every tab (`ExecutionLimitMismatchError`); SW-direct rejects it. An attach
+waits for an in-flight spare provision only within `provisionAdoptionBudgetMs` (default 20s from provision
+start), then raises `ProvisionStalledError` — rebind to a fresh store; it bounds the accelerator, not liveness.
 
 ## Live-query manager: dedup + keep-alive (ADR-0040)
 
