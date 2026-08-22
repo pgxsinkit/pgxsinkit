@@ -77,7 +77,7 @@ services:
   # The EDGE is deliberately absent: it is TypeScript in `packages/server` (ADR-0055 decision 8), so
   # the lane runs it in-process, which is also what lets a test revoke an entitlement between polls.
   engine:
-    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/electric-circuits/engine:sha-0d336cf}
+    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/electric-circuits/engine:sha-474577a}
     environment:
       ELECTRIC_CIRCUITS_DS_URL: http://ds:8791
       ELECTRIC_CIRCUITS_PG_URL: postgres://${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}:${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}@postgres:5432/${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
