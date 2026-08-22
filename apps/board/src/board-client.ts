@@ -2,10 +2,12 @@ import { useSyncExternalStore } from "react";
 
 import { boardMemberRegistry, boardSyncRegistry } from "@pgxsinkit/board-schema";
 import {
+  type AttachedSyncClient,
   attachSyncClient,
   type AuthTokenSnapshot,
   type BootReport,
   createSyncClient,
+  ProvisionStalledError,
   syncDebug,
   type SyncClient,
 } from "@pgxsinkit/client";
@@ -15,6 +17,7 @@ import { createSyncClientHooks } from "@pgxsinkit/react";
 import { createOfflineControl, createWorkerOfflineControl, type OfflineControl } from "./board/offline";
 import { warmPgliteBootAssets } from "./board/pglite-warm";
 import { boardStorageDeclaration, readBackendPreference, readDurabilityPreference } from "./board/storage-preference";
+import type { OpenUserStoreResult } from "./board/store-registry";
 import { boardEngineWorkerFactory, boardStoreRegistry, boardWorkerMode } from "./board/store-registry-default";
 import { boardConfig } from "./config";
 import { supabase } from "./lib/supabase";
@@ -156,34 +159,62 @@ export async function createBoardSyncClient(
   // store's SharedWorker FACTORY (ADR-0049 D5) — a fresh connection that adopts the store `createStore`
   // provisioned (by storePath, not by sharing its port), and that `bridgeSilenceMs` rebuilds on a dead worker. ──
   if (boardWorkerMode && store.storeId != null) {
-    const client = await attachSyncClient({
-      registry,
-      // The `worker` FACTORY form (not `port:`) arms SharedWorker-death recovery: paired with
-      // `bridgeSilenceMs`, a silent (presumed-dead) engine triggers ONE reconnect that rebuilds the store's
-      // SharedWorker through this factory and re-attaches (ADR-0049 D5). Provision minted on its own
-      // connection; this attach adopts that store by storePath — the handoff is port-agnostic.
-      worker: boardEngineWorkerFactory(store.storePath),
-      bridgeSilenceMs: BOARD_BRIDGE_SILENCE_MS,
-      storeId: store.storeId,
-      storePath: store.storePath,
-      // The wire storage declaration (ADR-0050): posted pre-placement on the port and bound by the engine.
-      // The board's registries are storage-silent (the preferences are a dynamic demo toggle), so this wire
-      // declaration is what decides backend (probe vs declared idbfs) and durability.
-      storage: boardStorageDeclaration(readDurabilityPreference(), readBackendPreference()),
-      // The worker bakes both registries and selects by role at boot (the spare was provisioned before
-      // the role was known); the tab additionally builds its OWN write handles from `registry` above.
-      role,
-      // Fresh-store prefetch overlap (ADR-0032 S4): a just-claimed spare / fresh create is schemaless, so
-      // let the worker overlap the shape catch-up with schema exec + journal recovery + reconcile. A
-      // returning user's mapped store is NOT fresh, so this stays false and the worker boots sequentially.
-      freshStore: store.fresh,
-      // The tab pushes this at attach + on notifyAuthChanged, and answers the worker's expiry pulls.
-      getToken: () => currentTokenSnapshot(userId),
-      // Boot observability (ADR-0034): the one-shot push fires only if THIS tab is attached when the
-      // worker's boot finalizes.
-      onBootReport: reportBoot,
-      ...(onStatusChange ? { onStatusChange } : {}),
-    });
+    const attachedStoreId = store.storeId;
+    // ONE attach shape, applied to whichever store we are attaching to — the first attempt below and the
+    // stalled-spare retry after it MUST stay byte-identical apart from the store, so they cannot drift.
+    const attachTo = (target: OpenUserStoreResult) =>
+      attachSyncClient({
+        registry,
+        // The `worker` FACTORY form (not `port:`) arms SharedWorker-death recovery: paired with
+        // `bridgeSilenceMs`, a silent (presumed-dead) engine triggers ONE reconnect that rebuilds the store's
+        // SharedWorker through this factory and re-attaches (ADR-0049 D5). Provision minted on its own
+        // connection; this attach adopts that store by storePath — the handoff is port-agnostic.
+        worker: boardEngineWorkerFactory(target.storePath),
+        bridgeSilenceMs: BOARD_BRIDGE_SILENCE_MS,
+        ...(target.storeId != null ? { storeId: target.storeId } : {}),
+        storePath: target.storePath,
+        // The wire storage declaration (ADR-0050): posted pre-placement on the port and bound by the engine.
+        // The board's registries are storage-silent (the preferences are a dynamic demo toggle), so this wire
+        // declaration is what decides backend (probe vs declared idbfs) and durability.
+        storage: boardStorageDeclaration(readDurabilityPreference(), readBackendPreference()),
+        // The worker bakes both registries and selects by role at boot (the spare was provisioned before
+        // the role was known); the tab additionally builds its OWN write handles from `registry` above.
+        role,
+        // Fresh-store prefetch overlap (ADR-0032 S4): a just-claimed spare / fresh create is schemaless, so
+        // let the worker overlap the shape catch-up with schema exec + journal recovery + reconcile. A
+        // returning user's mapped store is NOT fresh, so this stays false and the worker boots sequentially.
+        freshStore: target.fresh,
+        // The tab pushes this at attach + on notifyAuthChanged, and answers the worker's expiry pulls.
+        getToken: () => currentTokenSnapshot(userId),
+        // Boot observability (ADR-0034): the one-shot push fires only if THIS tab is attached when the
+        // worker's boot finalizes.
+        onBootReport: reportBoot,
+        ...(onStatusChange ? { onStatusChange } : {}),
+      });
+
+    let client: AttachedSyncClient<typeof boardSyncRegistry>;
+    try {
+      client = await attachTo(store);
+    } catch (error) {
+      if (!(error instanceof ProvisionStalledError)) throw error;
+      // The pre-provisioned spare never settled: the engine BOUNDS the adoption wait
+      // (`provisionAdoptionBudgetMs`) and rejects rather than leaving the boot wedged on "Starting local
+      // database…" forever. The spare is an accelerator, never a dependency — so drop the stuck store and
+      // boot on a fresh one rather than surfacing an error the user can only answer by reloading. Nothing
+      // here has to clean the stalled engine up: its claims release on their own (provision expiry /
+      // last-claim retirement), and the half-built directory it left behind is a recorded `opfs-candidate`
+      // the next boot deletes and rebuilds.
+      syncDebug("boot spare store adoption stalled — rebinding to a fresh store", {
+        storePath: store.storePath,
+        elapsedMs: error.elapsedMs,
+        budgetMs: error.budgetMs,
+      });
+      const rebound = await boardStoreRegistry.rebindAfterStall(userId, attachedStoreId);
+      // Exactly ONE retry. A second stall (or any other failure) propagates untouched: a fresh store that
+      // also cannot provision is a real fault, and BoardClientBoot's error screen is where it belongs.
+      client = await attachTo(rebound);
+    }
+
     // The Offline toggle forwards over the bridge (`set-online`) — the worker owns the convergence driver.
     const offline = createWorkerOfflineControl((online) => client.setOnline(online));
     // Late-attach fallback (ADR-0034): a tab that attaches AFTER the worker's boot finalized never gets the

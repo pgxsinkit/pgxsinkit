@@ -131,6 +131,19 @@ export interface StoreRegistry {
    */
   openUserStore: (userId: string) => Promise<OpenUserStoreResult>;
   /**
+   * Stalled-spare recovery. The engine bounds how long an attach may wait for a pre-provisioned spare to
+   * settle (`provisionAdoptionBudgetMs`): past the budget the attach REJECTS with `ProvisionStalledError`
+   * rather than leaving the boot wedged on "Starting local database…" forever. This re-points `userId` at a
+   * store that is NOT the stalled one so the caller can attach a second time. Under the registry lock: when
+   * the binding still names `stalledStoreId`, mint a fresh id and bind it; otherwise the binding was ALREADY
+   * moved off the stalled store (the eager open's own corrupt-spare recovery, or another tab) — use that
+   * current id as-is, never a second mint. The result is always `fresh: true` (a fresh/recovery store is
+   * schemaless, exactly as a claimed spare is) and REPLACES the per-user memo, so later `openUserStore`
+   * callers share the rebound store. Registry storage unavailable → the deterministic per-user fallback, as
+   * everywhere else here. Emits `boot spare store stalled — rebinding`.
+   */
+  rebindAfterStall: (userId: string, stalledStoreId: string) => Promise<OpenUserStoreResult>;
+  /**
    * Apply-time entry point (ADR-0050): under the registry lock, atomically drop EVERY binding and the
    * spare, recording their exact store paths on the Obsolete-stores list. Runs BEFORE the new preferences
    * are written (see `applyStoragePreferences`), so an interruption leaves dropped bindings under the old
@@ -499,6 +512,58 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
         },
       );
       return opening;
+    },
+
+    rebindAfterStall: async (userId, stalledStoreId) => {
+      try {
+        const { storeId, minted } = await adapters.withLock(async () => {
+          const state = readState(adapters);
+          const boundId = state.map[userId];
+          // Still bound to the stalled store (the ordinary case): mint a fresh id and re-point the binding at
+          // it. A binding that VANISHED underneath us (an Apply/wipe collapsed the map) takes the same branch
+          // — there is no current store to reuse either way.
+          if (boundId == null || boundId === stalledStoreId) {
+            const freshId = adapters.randomId();
+            writeState(adapters, { ...state, map: { ...state.map, [userId]: freshId } });
+            return { storeId: freshId, minted: true };
+          }
+          // The binding already moved OFF the stalled store — the eager open's own recovery
+          // (openSpareRecovering rejected, then reconcileMapEntry re-pointed), or another tab did it. Take
+          // that store as-is: a second mint here would strand a store nothing ever attaches to.
+          return { storeId: boundId, minted: false };
+        });
+
+        const storePath = storePathForStore(storeId);
+        // Order against the claim path's LATER eager reconcile does not matter: reconcileMapEntry only writes
+        // while `map[userId]` is still the id it recovered FROM (the stalled spare), and we have just
+        // re-pointed away from that — so a reconcile arriving after this call is already a no-op.
+        const pglite = adapters.createStore(storePath);
+        const result: OpenUserStoreResult = { storeId, storePath, pglite, fresh: true };
+        // Replace the per-user memo: the memoised result still describes the STALLED store, and the provider
+        // mount that follows the caller's retry must share the store we actually attached to.
+        const remembered = Promise.resolve(result);
+        openByUser.set(userId, remembered);
+        // Same drop-cache-on-failure as openUserStore — and it also OBSERVES this rejection, which nothing
+        // else would: the worker-mode caller attaches by store path and never awaits this promise.
+        void pglite.catch(() => {
+          if (openByUser.get(userId) === remembered) openByUser.delete(userId);
+        });
+        syncDebug("boot spare store stalled — rebinding", { stalledStoreId, storeId, minted });
+        return result;
+      } catch {
+        // RESILIENCE: the registry storage itself is unavailable, so there is no claim to rebind — mirror
+        // openUserStoreUncached's catch and hand back the deterministic per-user store (no eager create; the
+        // library opens `storePath` itself). Memoised like every other result so the later provider mount
+        // agrees with the store the caller just booted on. Conservatively NOT fresh (a prior session's store
+        // may live at that path).
+        const fallback: OpenUserStoreResult = {
+          storeId: null,
+          storePath: fallbackStorePathForUser(userId),
+          fresh: false,
+        };
+        openByUser.set(userId, Promise.resolve(fallback));
+        return fallback;
+      }
     },
   };
 }

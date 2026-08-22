@@ -272,6 +272,99 @@ describe("board spare-store registry", () => {
   });
 });
 
+// ─── rebindAfterStall: the attach hit the engine's provision-adoption budget and needs another store ──
+
+describe("rebindAfterStall — a stalled spare provision rebinds the user onto a usable store", () => {
+  it("(a) mints and binds a FRESH store, and a LATER eager recovery of the stalled spare cannot move it back", async () => {
+    const stalledPath = storePathForStore("spare-1");
+    // Hold the claimed spare's create open, exactly as the real stall does (the provision never settles),
+    // then let it FAIL — so the claim path runs its own corrupt-spare recovery AFTER the rebind already
+    // re-pointed the binding. That late `reconcileMapEntry` must be a no-op.
+    const gate = Promise.withResolvers<void>();
+    const harness = makeHarness({ initial: { version: 1, map: {}, spare: "spare-1" } });
+    const adapters: StoreRegistryAdapters = {
+      ...harness.adapters,
+      createStore: async (storePath) => {
+        if (storePath === stalledPath) {
+          await gate.promise;
+          throw new Error("the provision never settled");
+        }
+        return harness.adapters.createStore(storePath);
+      },
+    };
+    const registry = createStoreRegistry(adapters);
+
+    const opened = await registry.openUserStore("user-1");
+    expect(opened.storeId).toBe("spare-1");
+    expect(harness.state()?.map).toEqual({ "user-1": "spare-1" });
+
+    // The attach blew the adoption budget: rebind.
+    const rebound = await registry.rebindAfterStall("user-1", "spare-1");
+
+    expect(rebound.storeId).toBe("gen-1"); // a freshly minted id, never the stalled one
+    expect(rebound.storePath).toBe(storePathForStore("gen-1"));
+    expect(rebound.fresh).toBe(true); // a fresh store is schemaless — same reasoning as a claimed spare
+    expect(await rebound.pglite).toBeDefined();
+    expect(harness.createdStorePaths).toContain(storePathForStore("gen-1"));
+    expect(harness.state()?.map).toEqual({ "user-1": "gen-1" });
+
+    // Now let the stalled spare's create finally reject: the claim path deletes its idb and recovers onto
+    // ANOTHER fresh id, then tries to re-point the binding from `spare-1` — which no longer names it.
+    gate.resolve();
+    await opened.pglite;
+    await Promise.resolve();
+
+    expect(harness.deletedDatabases).toContain(idbNameForStore("spare-1"));
+    expect(harness.createdStorePaths).toContain(storePathForStore("gen-2")); // the recovery's own store
+    expect(harness.state()?.map).toEqual({ "user-1": "gen-1" }); // the rebind stands, the reconcile is a no-op
+  });
+
+  it("(b) the binding already moved off the stalled store: uses it as-is, never a second mint", async () => {
+    const harness = makeHarness({ initial: { version: 1, map: { "user-1": "recovered-1" } } });
+    const registry = createStoreRegistry(harness.adapters);
+
+    const rebound = await registry.rebindAfterStall("user-1", "stalled-1");
+
+    expect(rebound.storeId).toBe("recovered-1"); // the eager recovery's (or another tab's) store
+    expect(rebound.storePath).toBe(storePathForStore("recovered-1"));
+    expect(rebound.fresh).toBe(true);
+    expect(await rebound.pglite).toBeDefined();
+    // No id was minted and the binding is untouched — a second mint would strand a never-attached store.
+    expect(harness.state()?.map).toEqual({ "user-1": "recovered-1" });
+    expect(harness.createdStorePaths).toEqual([storePathForStore("recovered-1")]);
+  });
+
+  it("(c) replaces the per-user memo: a later openUserStore returns the REBOUND store", async () => {
+    const harness = makeHarness({ initial: { version: 1, map: { "user-1": "stalled-1" } } });
+    const registry = createStoreRegistry(harness.adapters);
+
+    const first = await registry.openUserStore("user-1");
+    expect(first.storeId).toBe("stalled-1");
+
+    const rebound = await registry.rebindAfterStall("user-1", "stalled-1");
+    const after = await registry.openUserStore("user-1");
+
+    // The provider mount that follows the retry shares the store the client actually attached to.
+    expect(after).toBe(rebound);
+    expect(after.storeId).toBe("gen-1");
+    expect(await after.pglite).toBe(await rebound.pglite);
+  });
+
+  it("(d) registry disabled (storage throws): falls back to the deterministic per-user store", async () => {
+    const harness = makeHarness({ storageThrows: true });
+    const registry = createStoreRegistry(harness.adapters);
+
+    const rebound = await registry.rebindAfterStall("user-1", "stalled-1");
+
+    expect(rebound.storeId).toBeNull();
+    expect(rebound.storePath).toBe(fallbackStorePathForUser("user-1"));
+    expect(rebound.pglite).toBeUndefined();
+    // The deterministic fallback path may hold a prior session's store — conservatively NOT fresh.
+    expect(rebound.fresh).toBe(false);
+    expect(harness.createdStorePaths).toEqual([]);
+  });
+});
+
 // ─── Obsolete stores (ADR-0050): Apply drops bindings to the list; boots destroy it best-effort ──────
 
 describe("obsoleteAllStores — Apply atomically drops every binding onto the Obsolete-stores list", () => {
