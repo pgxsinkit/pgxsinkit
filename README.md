@@ -30,7 +30,7 @@ client reads through a token-gated stream edge. Three things it requires:
   and the shape compiler matches it.
 - **A gateway that speaks HTTP/2 to browsers.** Each subscription is one held long-poll, so a subject
   with several scopes exhausts the browser's ~6-connections-per-origin ceiling on HTTP/1.1 and writes
-  starve behind held reads. HTTP/2 multiplexes them onto one connection.
+  starve behind held reads. HTTP/2+ multiplexes them onto one connection.
 
 ## Install
 

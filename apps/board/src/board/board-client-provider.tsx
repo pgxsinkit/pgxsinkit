@@ -38,9 +38,14 @@ export function useBoardOffline(): OfflineControl | null {
 
 /**
  * Boots the board's sync client for the signed-in identity: opens the local PGlite store, applies the
- * registry schema, and starts streaming the `board-sync` shapes the identity is allowed to see. Mount
- * it keyed by `userId` so each identity gets its own local store. Children render once the client is
- * ready; rows then arrive reactively (`useLiveRows`) as the initial sync streams in.
+ * registry schema, and starts streaming the `board-sync` shapes the identity is allowed to see. Each
+ * identity gets its own local store. Children render once the client is ready; rows then arrive
+ * reactively (`useLiveRows`) as the initial sync streams in.
+ *
+ * The boot lives in an inner component KEYED by the identity it booted for, so callers do not have to key
+ * this one: any change of `userId`/`isAdmin` remounts the boot, and the previous boot's client, status and
+ * error cannot leak into the next identity — fresh `useState` values are the reset, and the effect cleanup
+ * below stops the outgoing client.
  */
 export function BoardClientProvider({
   userId,
@@ -51,6 +56,14 @@ export function BoardClientProvider({
   isAdmin: boolean;
   children: ReactNode;
 }) {
+  return (
+    <BoardClientBoot key={`${userId}:${isAdmin}`} userId={userId} isAdmin={isAdmin}>
+      {children}
+    </BoardClientBoot>
+  );
+}
+
+function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmin: boolean; children: ReactNode }) {
   const [client, setClient] = useState<BoardSyncClient | null>(null);
   const [offline, setOffline] = useState<OfflineControl | null>(null);
   const [status, setStatus] = useState<SyncRuntimeStatus | null>(null);
@@ -59,10 +72,6 @@ export function BoardClientProvider({
   useEffect(() => {
     let active = true;
     let created: BoardSyncClient | undefined;
-    setClient(null);
-    setOffline(null);
-    setStatus(null);
-    setError(null);
 
     void (async () => {
       try {

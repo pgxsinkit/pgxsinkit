@@ -1,5 +1,5 @@
 import type { Session } from "@supabase/supabase-js";
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
 import { timeAsync } from "@pgxsinkit/client";
 
@@ -33,9 +33,9 @@ export function AuthProvider({
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [signingOut, setSigningOut] = useState(false);
-  const transitionRef = useRef<ReturnType<typeof createAuthTransitionCoordinator> | null>(null);
-  const transition = transitionRef.current ?? createAuthTransitionCoordinator();
-  transitionRef.current = transition;
+  // One coordinator per mount: a lazy `useState` initializer, so it is created once and keeps a stable
+  // identity for the lifetime of the provider (the effect below depends on it).
+  const [transition] = useState(createAuthTransitionCoordinator);
 
   useEffect(() => {
     let active = true;

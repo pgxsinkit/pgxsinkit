@@ -93,7 +93,7 @@
     "validate:refresh": "PGXSINKIT_FORCE=1 bun run validate:full"
   },
   "dependencies": {
-    "jose": "6.2.9"
+    "jose": "6.2.10"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.5",
@@ -104,21 +104,21 @@
     "@types/node": "26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
-    "@vitejs/plugin-react": "6.0.5",
+    "@vitejs/plugin-react": "6.1.0",
     "bun-types": "^1.4.0",
     "drizzle-kit": "1.0.0-rc.4",
     "drizzle-orm": "1.0.0-rc.4",
     "drizzle-seed": "1.0.0-rc.4",
-    "hono": "4.13.2",
-    "oxfmt": "0.63.0",
-    "oxlint": "1.78.0",
+    "hono": "4.13.3",
+    "oxfmt": "0.64.0",
+    "oxlint": "1.79.0",
     "oxlint-tsgolint": "7.0.2001",
     "postgres": "3.4.9",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "tsx": "4.23.12",
     "typescript": "^7.0.2",
-    "vite": "8.2.1",
+    "vite": "8.2.2",
     "zod": "4.4.3"
   },
   "overrides": {

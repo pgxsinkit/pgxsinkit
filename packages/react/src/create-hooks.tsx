@@ -63,6 +63,13 @@ function subscribeRawPglite<TRow extends Record<string, unknown>>(
   });
 }
 
+/**
+ * Shared "no subscription yet" rows. The hooks DERIVE their return value during render, so this has to be
+ * one stable identity — a fresh `[]` per render would defeat the memoised return object and re-fire every
+ * consumer effect that depends on `rows`.
+ */
+const EMPTY_ROWS: never[] = [];
+
 const EMPTY_MUTATION_SUMMARY: MutationSummary = {
   pendingCount: 0,
   sendingCount: 0,
@@ -108,6 +115,11 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
    * lazy-relation safety net (ADR-0021) — a raw string is not parameterised/quoted predictably, so a
    * `lazy` relation referenced here will read empty/stale unless you `client.ensureSynced([...])` first.
    * Prefer {@link useLiveDrizzleRows} / {@link useLiveQueryRaw} for anything touching lazy relations.
+   *
+   * `loading` and `rows` are derived from which subscription the latest snapshot belongs to, so a
+   * `ready: false → true` interlude with unchanged inputs keeps the previous rows while it re-subscribes
+   * (`loading: true`) instead of briefly reporting zero rows — the same "keep the previous rows while
+   * loading" policy already applied across a query change.
    */
   function useLiveRows<TRow extends Record<string, unknown> = Record<string, unknown>>(
     query: string,
@@ -128,36 +140,40 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     const paramsKey = JSON.stringify(options?.params ?? []);
     const stableParams = useMemo<unknown[]>(() => JSON.parse(paramsKey) as unknown[], [paramsKey]);
 
-    const [state, setState] = useState<{ rows: TRow[]; loading: boolean; error: Error | null }>({
-      rows: [],
-      loading: ready,
+    const canRun = ready && (overridePglite != null || contextClient != null);
+    // The run token: ONE object whose identity changes exactly when the subscription inputs change, and
+    // `null` when the hook cannot subscribe. It is the effect's only dependency AND the tag on every
+    // snapshot the effect writes, so `loading` is derived during render ("does the snapshot belong to the
+    // current run?") instead of being written synchronously from the effect.
+    const run = useMemo(
+      () => (canRun ? { query, params: stableParams, client: contextClient, pglite: overridePglite } : null),
+      [canRun, query, stableParams, contextClient, overridePglite],
+    );
+
+    const [snapshot, setSnapshot] = useState<{ run: typeof run; rows: TRow[]; error: Error | null }>({
+      run: null,
+      rows: EMPTY_ROWS,
       error: null,
     });
 
     useEffect(() => {
-      const canRun = ready && (overridePglite != null || contextClient != null);
-      if (!canRun) {
-        setState({ rows: [], loading: ready, error: null });
-        return;
-      }
+      if (run == null) return;
 
       let active = true;
       let subscription: LiveRowsSubscription<TRow> | undefined;
 
-      setState((prev) => ({ rows: prev.rows, loading: true, error: null }));
-
       const onRows = (rows: TRow[]) => {
         if (active) {
           syncDebug("live query updated → re-render", { rows: rows.length });
-          setState({ rows, loading: false, error: null });
+          setSnapshot({ run, rows, error: null });
         }
       };
 
       // The raw-PGlite override subscribes directly (unchanged); the seam path is the SAME `pglite.live`
       // wrapper the in-process client exposes, so behaviour is identical when no override is given.
-      const subscribe = overridePglite
-        ? subscribeRawPglite<TRow>(overridePglite, query, stableParams, onRows)
-        : contextClient!.subscribeLiveRows<Record<string, unknown>>({ sql: query, params: stableParams }, (rows) =>
+      const subscribe = run.pglite
+        ? subscribeRawPglite<TRow>(run.pglite, run.query, run.params, onRows)
+        : run.client!.subscribeLiveRows<Record<string, unknown>>({ sql: run.query, params: run.params }, (rows) =>
             onRows(rows as TRow[]),
           );
 
@@ -168,11 +184,11 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
             return;
           }
           subscription = registered as LiveRowsSubscription<TRow>;
-          setState({ rows: registered.initialRows as TRow[], loading: false, error: null });
+          setSnapshot({ run, rows: registered.initialRows as TRow[], error: null });
         })
         .catch((error: unknown) => {
           if (active) {
-            setState({ rows: [], loading: false, error: error instanceof Error ? error : new Error(String(error)) });
+            setSnapshot({ run, rows: EMPTY_ROWS, error: error instanceof Error ? error : new Error(String(error)) });
           }
         });
 
@@ -180,9 +196,17 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         active = false;
         subscription?.unsubscribe();
       };
-    }, [contextClient, overridePglite, query, ready, stableParams]);
+    }, [run]);
 
-    return state;
+    // Derived, never stored: a snapshot is authoritative only for the run it was tagged with. Holding the
+    // previous run's rows until the new one settles is exactly what the old synchronous
+    // `setState({ rows: prev.rows, loading: true })` did; no client (or `ready: false`) reads as no rows.
+    const settled = run != null && snapshot.run === run;
+    const rows = run == null ? EMPTY_ROWS : snapshot.rows;
+    const loading = ready && !settled;
+    const error = settled ? snapshot.error : null;
+
+    return useMemo(() => ({ rows, loading, error }), [rows, loading, error]);
   }
 
   function useLiveRow<TRow extends Record<string, unknown> = Record<string, unknown>>(
@@ -200,6 +224,11 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
    * then `client.prepareQuery` scans the compiled SQL for the lazy relations it reads (∪ the optional
    * `use`), activates + hydrates them, and only then subscribes the live query — so it is never
    * registered against an un-hydrated lazy relation (ADR-0021).
+   *
+   * `loading`/`hydrating`/`rows` are derived from which subscription the latest snapshot belongs to, so a
+   * `ready: false → true` interlude with unchanged inputs keeps the previous rows while it re-subscribes
+   * (`loading: true`) instead of briefly reporting zero rows — the same "keep the previous rows while
+   * loading" policy already applied across a query change.
    */
   function useGuardedDrizzleLive<TRows extends readonly unknown[]>(
     buildQuery: (client: SyncClient<TRegistry>) => DrizzleSqlBuilder<TRows>,
@@ -228,20 +257,37 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
 
     const sqlKey = queryInfo != null ? JSON.stringify(queryInfo.sql) : null;
 
-    const [state, setState] = useState<LiveRowsState<TRows>>({
-      rows: [] as unknown as TRows,
-      loading: ready,
-      hydrating: ready,
+    // The run token: ONE object whose identity changes exactly when the subscription must be rebuilt, and
+    // `null` when the hook cannot subscribe. It is the effect's only dependency AND the tag on every
+    // snapshot the effect writes, so `loading`/`hydrating` are derived during render instead of being
+    // written synchronously from the effect. `keepAliveMs` rides along inside the token precisely because
+    // it is NOT a dep: it is read at subscribe time and never resubscribes (ADR-0040 decision 4, above).
+    const run = useMemo(
+      () =>
+        ready && contextClient != null && queryInfo != null
+          ? { client: contextClient, queryInfo, useList, keepAliveMs }
+          : null,
+      // sqlKey/useKey are stable JSON snapshots; queryInfo/useList/keepAliveMs are captured in the token.
+      // oxlint-disable-next-line react-hooks/exhaustive-deps -- sqlKey/useKey are the stable proxies for queryInfo
+      [contextClient, sqlKey, useKey, ready],
+    );
+
+    const [snapshot, setSnapshot] = useState<{
+      run: typeof run;
+      rows: TRows;
+      hydrated: boolean;
+      error: Error | null;
+    }>({
+      run: null,
+      rows: EMPTY_ROWS as unknown as TRows,
+      hydrated: false,
       error: null,
     });
 
     useEffect(() => {
-      if (!ready || contextClient == null || queryInfo == null) {
-        setState({ rows: [] as unknown as TRows, loading: ready, hydrating: false, error: null });
-        return;
-      }
+      if (run == null) return;
 
-      const { sql, selectedFields } = queryInfo;
+      const { sql, selectedFields } = run.queryInfo;
       // Render the query safe to MATERIALISE: hand the seam the select's unique field aliases so it wraps a
       // JOIN with same-named columns (two `title`) under a positional column-alias-list — otherwise PGlite's
       // live query refuses it (`column "title" specified more than once`) and same-named columns collapse.
@@ -258,8 +304,6 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
       let active = true;
       let subscription: LiveRowsSubscription<Record<string, unknown>> | undefined;
 
-      setState((prev) => ({ rows: prev.rows, loading: true, hydrating: true, error: null }));
-
       // Scan the compiled SQL for the lazy relations the query reads (∪ `use`), ACTIVATE them (streams
       // started, tripwire satisfied), THEN subscribe via the client's live-rows seam — so a query is never
       // registered against a dormant lazy relation (ADR-0021), and the same hook drives both the in-process
@@ -272,23 +316,30 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
       // promise and `hydrating` clears at the first snapshot. The seam guarantees rows-before-signal (it
       // refreshes the live query against the caught-up store before resolving), so clearing `hydrating`
       // here can never present zero rows as "empty" while the catch-up rows are still in flight.
-      void contextClient
-        .prepareQuery({ sql: sql.sql, ...(useList ? { use: useList } : {}) })
+      void run.client
+        .prepareQuery({ sql: sql.sql, ...(run.useList ? { use: run.useList } : {}) })
         .then(() => {
           if (!active) return undefined;
-          return contextClient
+          return run.client
             .subscribeLiveRows<Record<string, unknown>>(
               {
                 sql: sql.sql,
                 params: sql.params,
                 ...(fields ? { fields } : {}),
-                ...(useList ? { use: useList } : {}),
-                ...(keepAliveMs != null ? { keepAliveMs } : {}),
+                ...(run.useList ? { use: run.useList } : {}),
+                ...(run.keepAliveMs != null ? { keepAliveMs: run.keepAliveMs } : {}),
               },
               (rows) => {
                 if (active) {
                   syncDebug("live query updated → re-render", { rows: rows.length });
-                  setState((prev) => ({ rows: mapRows(rows), loading: false, hydrating: prev.hydrating, error: null }));
+                  // A diff can land before the initial snapshot, so carry `hydrated` over only when the
+                  // previous snapshot belongs to THIS run — otherwise it is the previous run's flag.
+                  setSnapshot((prev) => ({
+                    run,
+                    rows: mapRows(rows),
+                    hydrated: prev.run === run ? prev.hydrated : false,
+                    error: null,
+                  }));
                 }
               },
             )
@@ -304,15 +355,17 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
                 rows: registered.initialRows.length,
                 hydrating: registered.hydrated != null,
               });
-              setState((prev) => ({
+              // No `hydrated` promise ⇒ every referenced group was already caught up at subscribe time, so
+              // this first snapshot IS the hydrated one (the steady-state fast path).
+              setSnapshot({
+                run,
                 rows: mapRows(registered.initialRows),
-                loading: false,
-                hydrating: registered.hydrated != null ? prev.hydrating : false,
+                hydrated: registered.hydrated == null,
                 error: null,
-              }));
+              });
               if (registered.hydrated) {
                 void registered.hydrated.then(() => {
-                  if (active) setState((prev) => ({ ...prev, hydrating: false }));
+                  if (active) setSnapshot((prev) => (prev.run === run ? { ...prev, hydrated: true } : prev));
                 });
               }
               return undefined;
@@ -320,10 +373,10 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         })
         .catch((error: unknown) => {
           if (active) {
-            setState({
-              rows: [] as unknown as TRows,
-              loading: false,
-              hydrating: false,
+            setSnapshot({
+              run,
+              rows: EMPTY_ROWS as unknown as TRows,
+              hydrated: true,
               error: error instanceof Error ? error : new Error(String(error)),
             });
           }
@@ -333,11 +386,19 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         active = false;
         subscription?.unsubscribe();
       };
-      // sqlKey/useKey are stable JSON snapshots; queryInfo is captured inside the effect.
-      // oxlint-disable-next-line react-hooks/exhaustive-deps -- sqlKey/useKey are the stable proxies for queryInfo
-    }, [contextClient, sqlKey, useKey, ready]);
+    }, [run]);
 
-    return state;
+    // Derived, never stored: a snapshot is authoritative only for the run it was tagged with, and it is
+    // "hydrated" only once the subscription's `hydrated` promise resolved (or there was none to await).
+    // A failed run settles hydrated so an error is not reported as a permanent catch-up, and with no run
+    // there is nothing catching up, so `hydrating` is false (`loading` alone reports the missing client).
+    const settled = run != null && snapshot.run === run;
+    const rows = run == null ? (EMPTY_ROWS as unknown as TRows) : snapshot.rows;
+    const loading = ready && !settled;
+    const hydrating = run != null && !(settled && snapshot.hydrated);
+    const error = settled ? snapshot.error : null;
+
+    return useMemo(() => ({ rows, loading, hydrating, error }), [rows, loading, hydrating, error]);
   }
 
   /**
@@ -419,6 +480,10 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
    * EVERY writable journal, folded to one {@link MutationSummary}. ONE subscription drives a global sync
    * indicator — no `hydrating` flag, because journals are local and never network-hydrated. Cheap enough to
    * mount permanently (ADR-0040 dedup: one registration regardless of subscriber count).
+   *
+   * `loading` and `summary` are derived from which subscription the latest snapshot belongs to, so a
+   * `ready: false → true` interlude keeps the previous summary while it re-subscribes (`loading: true`)
+   * instead of briefly reporting the zero summary.
    */
   function useMutationSummary(options?: { ready?: boolean }): {
     summary: MutationSummary;
@@ -428,25 +493,25 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     const client = useContext(SyncClientContext);
     const ready = options?.ready ?? true;
 
-    const [state, setState] = useState<{ summary: MutationSummary; loading: boolean; error: Error | null }>({
+    // The run token (see `useLiveRows`): the client is the only subscription input, wrapped so that a
+    // `ready` flip yields a fresh identity — otherwise the pre-flip snapshot would read as settled.
+    const run = useMemo(() => (ready && client != null ? { client } : null), [ready, client]);
+
+    const [snapshot, setSnapshot] = useState<{ run: typeof run; summary: MutationSummary; error: Error | null }>({
+      run: null,
       summary: EMPTY_MUTATION_SUMMARY,
-      loading: ready,
       error: null,
     });
 
     useEffect(() => {
-      if (!ready || client == null) {
-        setState({ summary: EMPTY_MUTATION_SUMMARY, loading: ready, error: null });
-        return;
-      }
+      if (run == null) return;
 
       let active = true;
       let subscription: MutationSummarySubscription | undefined;
-      setState((prev) => ({ summary: prev.summary, loading: true, error: null }));
 
-      void client.mutations
+      void run.client.mutations
         .subscribeSummary((summary) => {
-          if (active) setState({ summary, loading: false, error: null });
+          if (active) setSnapshot({ run, summary, error: null });
         })
         .then((registered) => {
           if (!active) {
@@ -454,13 +519,13 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
             return;
           }
           subscription = registered;
-          setState({ summary: registered.initial, loading: false, error: null });
+          setSnapshot({ run, summary: registered.initial, error: null });
         })
         .catch((error: unknown) => {
           if (active) {
-            setState({
+            setSnapshot({
+              run,
               summary: EMPTY_MUTATION_SUMMARY,
-              loading: false,
               error: error instanceof Error ? error : new Error(String(error)),
             });
           }
@@ -470,9 +535,15 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         active = false;
         subscription?.unsubscribe();
       };
-    }, [client, ready]);
+    }, [run]);
 
-    return state;
+    // Derived, never stored — see `useLiveRows`.
+    const settled = run != null && snapshot.run === run;
+    const summary = run == null ? EMPTY_MUTATION_SUMMARY : snapshot.summary;
+    const loading = ready && !settled;
+    const error = settled ? snapshot.error : null;
+
+    return useMemo(() => ({ summary, loading, error }), [summary, loading, error]);
   }
 
   /**
@@ -480,6 +551,11 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
    * every writable table, filtered by `table` / `entityKey` / `statuses` / `limit`, ordered newest-first.
    * Route/feature-scoped — mount it where a diagnostics view is open, not app-wide (prefer
    * {@link useMutationSummary} for a global indicator). No `hydrating` flag (journals are local).
+   *
+   * `loading` and `rows` are derived from which subscription the latest snapshot belongs to, so a
+   * `ready: false → true` interlude with unchanged filters keeps the previous rows while it re-subscribes
+   * (`loading: true`) instead of briefly reporting zero rows — the same "keep the previous rows while
+   * loading" policy already applied across a filter change.
    */
   function useMutationList(options?: MutationListOptions<TRegistry> & { ready?: boolean }): {
     rows: MutationSummaryDetail[];
@@ -497,25 +573,29 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
       [filtersKey],
     );
 
-    const [state, setState] = useState<{ rows: MutationSummaryDetail[]; loading: boolean; error: Error | null }>({
-      rows: [],
-      loading: ready,
+    // The run token (see `useLiveRows`): the client and the JSON-stable filters are the only subscription
+    // inputs, so its identity changes exactly when the subscription must be rebuilt — which lets `loading`
+    // be derived during render instead of written synchronously from the effect.
+    const run = useMemo(
+      () => (ready && client != null ? { client, filters: stableFilters } : null),
+      [ready, client, stableFilters],
+    );
+
+    const [snapshot, setSnapshot] = useState<{ run: typeof run; rows: MutationSummaryDetail[]; error: Error | null }>({
+      run: null,
+      rows: EMPTY_ROWS,
       error: null,
     });
 
     useEffect(() => {
-      if (!ready || client == null) {
-        setState({ rows: [], loading: ready, error: null });
-        return;
-      }
+      if (run == null) return;
 
       let active = true;
       let subscription: { unsubscribe: () => void } | undefined;
-      setState((prev) => ({ rows: prev.rows, loading: true, error: null }));
 
-      void client.mutations
-        .subscribe(stableFilters, (rows) => {
-          if (active) setState({ rows, loading: false, error: null });
+      void run.client.mutations
+        .subscribe(run.filters, (rows) => {
+          if (active) setSnapshot({ run, rows, error: null });
         })
         .then((registered) => {
           if (!active) {
@@ -523,11 +603,11 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
             return;
           }
           subscription = registered;
-          setState({ rows: registered.initial, loading: false, error: null });
+          setSnapshot({ run, rows: registered.initial, error: null });
         })
         .catch((error: unknown) => {
           if (active) {
-            setState({ rows: [], loading: false, error: error instanceof Error ? error : new Error(String(error)) });
+            setSnapshot({ run, rows: EMPTY_ROWS, error: error instanceof Error ? error : new Error(String(error)) });
           }
         });
 
@@ -535,11 +615,15 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         active = false;
         subscription?.unsubscribe();
       };
-      // stableFilters is the JSON-stable proxy for the filter inputs.
-      // oxlint-disable-next-line react-hooks/exhaustive-deps -- filtersKey is the stable proxy for stableFilters
-    }, [client, ready, filtersKey]);
+    }, [run]);
 
-    return state;
+    // Derived, never stored — see `useLiveRows`.
+    const settled = run != null && snapshot.run === run;
+    const rows = run == null ? EMPTY_ROWS : snapshot.rows;
+    const loading = ready && !settled;
+    const error = settled ? snapshot.error : null;
+
+    return useMemo(() => ({ rows, loading, error }), [rows, loading, error]);
   }
 
   return {
