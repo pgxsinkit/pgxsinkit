@@ -94,7 +94,10 @@ describe("pgxsinkit-generate output directory resolution", () => {
 // committed migrations for the fingerprint the CURRENT registry's Event streams imply, so adding a stream
 // without regenerating fails in CI rather than at the first enqueue onto a queue that does not exist.
 describe("pgxsinkit-generate --events drift detection", () => {
-  const scratchRoot = mkdtempSync(join(process.cwd(), "tmp", "agents", "generate-cli-"));
+  // `tmp/` is gitignored, so a fresh checkout (CI) has no `tmp/agents` for mkdtemp to create into.
+  const scratchParent = join(process.cwd(), "tmp", "agents");
+  mkdirSync(scratchParent, { recursive: true });
+  const scratchRoot = mkdtempSync(join(scratchParent, "generate-cli-"));
 
   afterAll(() => {
     rmSync(scratchRoot, { recursive: true, force: true });
