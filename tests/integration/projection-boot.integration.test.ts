@@ -1,9 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
-import { count } from "drizzle-orm";
+import { count, eq } from "drizzle-orm";
 
 import { asReadonly, defineReadProjection, defineSyncRegistry, type JwtClaims } from "@pgxsinkit/contracts";
-import { projectsSyncRegistry, projectsTable } from "@pgxsinkit/schema";
+import {
+  projectionKeyRowsSyncRegistry,
+  projectionKeyRowsTable,
+  projectsSyncRegistry,
+  projectsTable,
+} from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import {
   createServerDb,
@@ -145,6 +150,124 @@ describe("member-style client boot over asReadonly + defineReadProjection entrie
         expect(summaryRows[0]?.count).toBe(2);
       });
     } finally {
+      sync.unsubscribe();
+      await pg.close();
+    }
+  }, 30_000);
+});
+
+// `clientProjection.omitColumns` may remove a server PK component only when `localPrimaryKey`
+// deliberately narrows identity and the row predicate pins every removed component. This is the
+// userday-shaped case: server identity `(id, owner_id)`, client identity `(id)`, owner omitted.
+//
+// The full lifecycle matters. A backfill/upsert must not leak `owner_id` into the projected local
+// row, while a body-less delete must translate the engine's server identity to the local identity.
+// A projection-only assertion would miss the latter and leave stale rows behind.
+describe("client projection with a predicate-pinned composite server key", () => {
+  const OWNER_SUB = "b0a7c0de-0000-4000-8000-0000000000f2";
+  const OTHER_OWNER = "b0a7c0de-0000-4000-8000-0000000000f3";
+  const SEEDED_ID = "c2000000-0000-4000-8000-000000000001";
+  const LIVE_ID = "c2000000-0000-4000-8000-000000000002";
+
+  let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof projectionKeyRowsSyncRegistry>>>;
+  let server!: ReturnType<typeof createSyncServer<typeof projectionKeyRowsSyncRegistry>>;
+  const serverDb = createServerDb(projectionKeyRowsSyncRegistry, env.databaseUrl);
+  const projectedLocalSchemaSql = generateLocalSchemaSql(projectionKeyRowsSyncRegistry);
+
+  beforeAll(async () => {
+    stack = await startNativeSyncStack({
+      env,
+      registry: projectionKeyRowsSyncRegistry,
+      createServer: (readPath) =>
+        createSyncServer({
+          registry: projectionKeyRowsSyncRegistry,
+          db: serverDb.db,
+          resolveAuthClaims: (): JwtClaims => ({ role: "authenticated", sub: OWNER_SUB }),
+          readPath,
+        }),
+    });
+    server = stack.server;
+  });
+
+  beforeEach(async () => {
+    await server.drizzle.delete(projectionKeyRowsTable);
+    await server.drizzle.insert(projectionKeyRowsTable).values([
+      { id: SEEDED_ID, ownerId: OWNER_SUB, value: "seeded-visible" },
+      // The same narrowed local key may exist under another owner because owner_id is part of the
+      // server PK. Predicate pinning is what makes only one of them enter this subject's shape.
+      { id: SEEDED_ID, ownerId: OTHER_OWNER, value: "seeded-hidden" },
+    ]);
+  });
+
+  afterAll(async () => {
+    await stack.stop();
+    await serverDb.close();
+  });
+
+  it("syncs projected backfill and live upserts, then deletes by the narrowed local key", async () => {
+    const pg = await createCircuitsTestPGlite();
+    await pg.exec(projectedLocalSchemaSql);
+
+    let rejectOnSyncError: ((error: Error) => void) | null = null;
+    const syncError = new Promise<never>((_resolve, reject) => {
+      rejectOnSyncError = reject;
+    });
+    let markInitialSyncDone: (() => void) | null = null;
+    const initialSyncDone = new Promise<void>((resolve) => {
+      markInitialSyncDone = resolve;
+    });
+
+    const sync = await startCircuitsSync(pg, {
+      registry: projectionKeyRowsSyncRegistry,
+      controlPlaneUrl: stack.controlPlaneUrl,
+      streamBaseUrl: stack.streamBaseUrl,
+      metadataSchema: DEFAULT_METADATA_SCHEMA,
+      onInitialSync: () => {
+        markInitialSyncDone?.();
+        markInitialSyncDone = null;
+      },
+      onSyncError: (error) => rejectOnSyncError?.(error),
+    });
+
+    const localDb = drizzleOver(pg);
+    const localRows = getSyncedLocalTable(projectionKeyRowsSyncRegistry, "projection_key_rows");
+    const waitWithoutSyncError = (assertion: () => Promise<void>) => Promise.race([waitFor(assertion), syncError]);
+
+    try {
+      await Promise.race([initialSyncDone, syncError]);
+
+      await waitWithoutSyncError(async () => {
+        const rows = await localDb.select().from(localRows);
+        expect(rows).toEqual([{ id: SEEDED_ID, value: "seeded-visible" }]);
+      });
+
+      await server.drizzle
+        .insert(projectionKeyRowsTable)
+        .values({ id: LIVE_ID, ownerId: OWNER_SUB, value: "live-created" });
+
+      await waitWithoutSyncError(async () => {
+        const rows = await localDb.select().from(localRows).where(eq(localRows.id, LIVE_ID));
+        expect(rows).toEqual([{ id: LIVE_ID, value: "live-created" }]);
+      });
+
+      await server.drizzle
+        .update(projectionKeyRowsTable)
+        .set({ value: "live-updated" })
+        .where(eq(projectionKeyRowsTable.id, LIVE_ID));
+
+      await waitWithoutSyncError(async () => {
+        const rows = await localDb.select().from(localRows).where(eq(localRows.id, LIVE_ID));
+        expect(rows).toEqual([{ id: LIVE_ID, value: "live-updated" }]);
+      });
+
+      await server.drizzle.delete(projectionKeyRowsTable).where(eq(projectionKeyRowsTable.id, LIVE_ID));
+
+      await waitWithoutSyncError(async () => {
+        const rows = await localDb.select().from(localRows).where(eq(localRows.id, LIVE_ID));
+        expect(rows).toHaveLength(0);
+      });
+    } finally {
+      rejectOnSyncError = null;
       sync.unsubscribe();
       await pg.close();
     }

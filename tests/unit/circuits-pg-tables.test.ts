@@ -8,6 +8,7 @@ import {
   demoSyncRegistry,
   fkSyncRegistry,
   membershipFanoutSyncRegistry,
+  projectionKeyRowsSyncRegistry,
   projectsSyncRegistry,
   rlsSyncRegistry,
 } from "@pgxsinkit/schema";
@@ -29,6 +30,7 @@ const laneRegistries = [
   demoSyncRegistry,
   demoMembershipSyncRegistry,
   projectsSyncRegistry,
+  projectionKeyRowsSyncRegistry,
   fkSyncRegistry,
   rlsSyncRegistry,
   membershipFanoutSyncRegistry,
@@ -60,6 +62,7 @@ describe("resolveCircuitsPgTables", () => {
       "authors",
       "fk_children",
       "fk_parents",
+      "projection_key_rows",
       "projects",
       "rls_todos",
       "todos",

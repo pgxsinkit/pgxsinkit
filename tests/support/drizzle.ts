@@ -60,7 +60,18 @@ export function makeApplyTarget(
       isEnum: typed.columnType?.startsWith("PgEnum") === true,
     });
   }
-  return { table, columnByName, propertyKeyByName, primaryKey, applyMode, columnTypes, insertRenderCache: new Map() };
+  return {
+    table,
+    columnByName,
+    propertyKeyByName,
+    primaryKey,
+    // Fixture targets carry no localPrimaryKey narrowing: the server identity IS the local identity.
+    serverPrimaryKey: primaryKey,
+    droppedKeyColumns: [],
+    applyMode,
+    columnTypes,
+    insertRenderCache: new Map(),
+  };
 }
 
 /**

@@ -520,6 +520,20 @@ export interface ApplyTarget {
   /** Primary-key column NAMES, in order (from the entry, local-projection override honoured). */
   primaryKey: string[];
   /**
+   * The SERVER primary-key column names, in declaration order — the order the engine joins stream-key
+   * components in (`schema.rs` `key_string`). Identical to {@link primaryKey} except under a
+   * `clientProjection.localPrimaryKey` narrowing, where the stream key still carries every server
+   * component and the local key is a subset.
+   */
+  serverPrimaryKey: string[];
+  /**
+   * Server-key components `clientProjection.localPrimaryKey` drops (subscribe-time compile refuses the
+   * narrowing unless the shape's predicate pins each to a single value). The engine force-includes
+   * every server pk component in emitted rows and keys, so the applier projects exactly these away —
+   * any OTHER unknown column stays a loud config error.
+   */
+  droppedKeyColumns: string[];
+  /**
    * CDC insert-apply policy (ADR-0045), from the entry. `"insert"` (default) applies a CDC insert as a
    * plain INSERT so a genuine PK collision surfaces; `"upsert"` applies it idempotently (ON CONFLICT DO
    * UPDATE) because this table legitimately receives locally-derived provisional rows.
@@ -553,6 +567,17 @@ export function resolveApplyTarget<TRegistry extends SyncTableRegistry, TKey ext
     columnByName[column.name] = column;
     propertyKeyByName[column.name] = propertyKey;
   }
+  // Both pk specs are stored verbatim (property key OR column name) — normalize each against the
+  // table that actually carries its columns: the local key against the projected synced table, the
+  // server key against the full server table (a dropped component has no local column to resolve by).
+  const localPrimaryKey = getLocalSyncedTablePrimaryKeyColumns(entry).map((declared) =>
+    columns[declared] ? columns[declared].name : declared,
+  );
+  const localPrimaryKeySet = new Set(localPrimaryKey);
+  const serverColumns = getColumns(entry.table as AnyPgTable) as Record<string, PgColumn>;
+  const serverPrimaryKey = entry.primaryKey.columns.map((declared) =>
+    serverColumns[declared] ? serverColumns[declared].name : declared,
+  );
   return {
     table: table as AnyPgTable,
     columnByName,
@@ -562,9 +587,9 @@ export function resolveApplyTarget<TRegistry extends SyncTableRegistry, TKey ext
     // differ, the un-normalized form reaches `columnByName`/`propertyKeyByName`, which are keyed by
     // column name, and every update and delete throws "column not found". Resolving here, where the
     // table's own columns are in hand, makes the field match what it has always claimed to be.
-    primaryKey: getLocalSyncedTablePrimaryKeyColumns(entry).map((declared) =>
-      columns[declared] ? columns[declared].name : declared,
-    ),
+    primaryKey: localPrimaryKey,
+    serverPrimaryKey,
+    droppedKeyColumns: serverPrimaryKey.filter((name) => !localPrimaryKeySet.has(name)),
     applyMode: entry.applyMode,
     columnTypes: deriveSyncColumnTypes(entry),
     insertRenderCache: new Map(),

@@ -31,9 +31,30 @@ const readState = defineSyncTable({
   mode: "readonly",
 });
 
-const registry = defineSyncRegistry({ tables: { notes, readState } });
+// The userday-shaped narrowing: server identity (id, owner_id), local identity (id), the owner
+// omitted from the projection and pinned by the shape's predicate (subscribe-time compile refuses
+// the narrowing otherwise). The engine still keys the stream by the FULL server identity and
+// force-includes every server pk component in the emitted row, so the translator carries the
+// server->local projection for both directions.
+const narrowed = defineSyncTable({
+  tableName: "narrowed_rows",
+  makeColumns: () => ({
+    id: uuid("id").notNull(),
+    ownerId: uuid("owner_id").notNull(),
+    body: text("body"),
+  }),
+  primaryKey: ["id", "ownerId"],
+  mode: "readonly",
+  clientProjection: {
+    omitColumns: ["ownerId"],
+    localPrimaryKey: { columns: ["id"] },
+  },
+});
+
+const registry = defineSyncRegistry({ tables: { notes, readState, narrowed } });
 const noteTarget = resolveApplyTarget(registry, "notes");
 const readTarget = resolveApplyTarget(registry, "readState");
+const narrowedTarget = resolveApplyTarget(registry, "narrowed");
 
 const UNIT_SEPARATOR = "\u001f";
 
@@ -59,6 +80,31 @@ describe("primary key from a stream key", () => {
 
   it("refuses a key whose part count does not match the primary key", () => {
     expect(() => primaryKeyFromStreamKey(readTarget, "person-1")).toThrow(/2-column primary key/);
+  });
+
+  // A localPrimaryKey narrowing: the key still carries the FULL server identity, split by the server
+  // key and projected onto the local one — the pinned owner component is dropped, not bound.
+  it("projects a narrowed local key out of the full server key", () => {
+    const key = ["row-1", "owner-1"].join(UNIT_SEPARATOR);
+    expect(primaryKeyFromStreamKey(narrowedTarget, key)).toEqual({ id: "row-1" });
+  });
+
+  it("still refuses a narrowed-target key that does not carry the full server identity", () => {
+    expect(() => primaryKeyFromStreamKey(narrowedTarget, "row-1")).toThrow(/2-column primary key/);
+  });
+
+  // Composite components are ESCAPED by the engine (`escape_key_component`): a literal backslash
+  // rides as `\\` and a literal U+001F as `\x1f`, which is what keeps the joined string injective.
+  // The split must decode them or a pk containing either never matches its own row.
+  it("unescapes composite key components", () => {
+    expect(primaryKeyFromStreamKey(readTarget, [`a\\\\b`, "42"].join(UNIT_SEPARATOR))).toEqual({
+      person_id: "a\\b",
+      item_id: 42,
+    });
+    expect(primaryKeyFromStreamKey(readTarget, [`x\\x1fy`, "42"].join(UNIT_SEPARATOR))).toEqual({
+      person_id: `x${UNIT_SEPARATOR}y`,
+      item_id: 42,
+    });
   });
 });
 
@@ -87,6 +133,28 @@ describe("envelope translation", () => {
     expect(
       envelopeToChange(noteTarget, envelope({ key: "n1", value, headers: { operation: "upsert" } })).headers,
     ).toEqual({ operation: "upsert" });
+  });
+
+  // The engine's `resolve_columns` force-includes every server pk component in the projection, so
+  // the pinned owner arrives on every upsert; the translator projects exactly that column off and
+  // nothing else (an unknown column must still fail loudly downstream).
+  it("projects the dropped, predicate-pinned key component off an upsert row", () => {
+    const change = envelopeToChange(narrowedTarget, {
+      type: "narrowed_rows",
+      key: ["row-1", "owner-1"].join(UNIT_SEPARATOR),
+      value: { id: "row-1", owner_id: "owner-1", body: "hello" },
+      headers: { operation: "upsert" },
+    });
+    expect(change.value).toEqual({ id: "row-1", body: "hello" });
+  });
+
+  it("translates a narrowed delete to the local identity", () => {
+    const change = envelopeToChange(narrowedTarget, {
+      type: "narrowed_rows",
+      key: ["row-1", "owner-1"].join(UNIT_SEPARATOR),
+      headers: { operation: "delete" },
+    });
+    expect(change.value).toEqual({ id: "row-1" });
   });
 
   it("refuses a non-delete envelope with no row body", () => {
