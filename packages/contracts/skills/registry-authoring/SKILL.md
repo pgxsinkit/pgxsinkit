@@ -15,7 +15,7 @@ description: >-
 metadata:
   type: core
   library: "@pgxsinkit/contracts"
-  library_version: "0.2.8"
+  library_version: "0.3.0"
   source: https://pgxsinkit.github.io/start/getting-started/
 ---
 

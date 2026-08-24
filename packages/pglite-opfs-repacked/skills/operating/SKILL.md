@@ -11,7 +11,7 @@ description: >-
 metadata:
   type: task
   library: "@pgxsinkit/pglite-opfs-repacked"
-  library_version: "0.2.8"
+  library_version: "0.3.0"
   source: https://pgxsinkit.github.io/packages/pglite-opfs-repacked/
 ---
 

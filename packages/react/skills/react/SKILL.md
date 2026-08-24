@@ -16,7 +16,7 @@ metadata:
   type: framework
   framework: react
   library: "@pgxsinkit/react"
-  library_version: "0.2.8"
+  library_version: "0.3.0"
   source: https://pgxsinkit.github.io/
 requires:
   - react
