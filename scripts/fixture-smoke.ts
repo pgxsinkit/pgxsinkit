@@ -186,7 +186,10 @@ await assert.rejects(
       typeof error === "object" && error !== null && "message" in error
         ? String(error.message)
         : String(error);
-    return /not exported|could not resolve|cannot find module/i.test(message);
+    // bun >= 1.4 reports a subpath the export map blocks as "Cannot find package '<pkg>' imported
+    // from …" (older bun: "Cannot find module …"). Both are RESOLUTION failures — the point of the
+    // check is distinguishing those from an evaluation failure of a file that wrongly resolved.
+    return /not exported|could not resolve|cannot find (module|package)/i.test(message);
   },
   "package-internal OPFS modules must remain blocked by the export map",
 );
