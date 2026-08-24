@@ -154,6 +154,41 @@ describe("gate", () => {
   });
 });
 
+it("answers a client-aborted long-poll with a quiet 499, never a thrown AbortError", async () => {
+  // A clean client stop() aborts the downstream request mid-long-poll; the forwarded fetch then
+  // rejects with an AbortError. That is cancellation, not failure — it must not escape the gate as
+  // an exception (it surfaced as a 500 + raw DOMException in consumer logs at every shutdown).
+  const gate = createStreamGate({
+    key,
+    registry,
+    entitlements: entitled,
+    durableStreamsUrl: "http://ds:8080/v1/stream/",
+    fetch: (async (_url: URL, init: RequestInit) => {
+      const signal = init.signal!;
+      return await new Promise((_resolve, reject) => {
+        const rejectAborted = () => reject(new DOMException("The connection was closed.", "AbortError"));
+        if (signal.aborted) return rejectAborted();
+        signal.addEventListener("abort", rejectAborted);
+      });
+    }) as unknown as typeof fetch,
+  });
+
+  const token = await tokenFor([sharedGrant]);
+  const controller = new AbortController();
+  const pending = gate(
+    new Request("http://edge/stream/shape/s1?offset=-1&live=true", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    }),
+    "shape/s1",
+    NOW,
+  );
+  controller.abort();
+
+  const response = await pending;
+  expect(response.status).toBe(499);
+});
+
 it("proxies with the ds query string intact and the token stripped", async () => {
   let seen: { url: string; auth: string | null } | undefined;
   const gate = createStreamGate({

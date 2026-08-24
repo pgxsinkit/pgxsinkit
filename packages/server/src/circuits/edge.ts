@@ -330,12 +330,29 @@ export function createStreamGate(options: StreamGateOptions) {
 
     const init: RequestInit = { method: request.method, headers: forwarded, signal: request.signal };
 
+    // A downstream that walks away mid-long-poll (a client's clean `stop()`/unsubscribe) aborts
+    // `request.signal`, and the forwarded fetch rejects with an AbortError. That is the cancellation
+    // working as designed, not a failure — but left to propagate it surfaced as a 500 plus a raw
+    // DOMException in every consumer's error log, once per stream, at every clean shutdown. Nothing
+    // is ever delivered on an aborted request, so answer the mount's await with 499 (client closed
+    // request) and stay quiet. A rejection with the signal NOT aborted is a real failure and still
+    // propagates.
+    const upstreamFetch = async (): Promise<Response> => {
+      try {
+        return await doFetch(upstreamUrl, init);
+      } catch (error) {
+        if (request.signal.aborted) return new Response(null, { status: 499 });
+        throw error;
+      }
+    };
+
     // The pass-through path hands back the upstream Response OBJECT, untouched. Not "an equivalent
     // response" — the same one, so a shape that declares no transform pays nothing for the existence
     // of this stage and keeps whatever caching headers durable-streams answered with.
-    if (transform == null || entry == null) return doFetch(upstreamUrl, init);
+    if (transform == null || entry == null) return upstreamFetch();
 
-    const upstream = await doFetch(upstreamUrl, init);
+    const upstream = await upstreamFetch();
+    if (upstream.status === 499) return upstream;
     const headers = rewrittenEgressHeaders(upstream.headers);
 
     // 204 long-poll timeouts, 304s, upstream errors, and HEAD probes: nothing to rewrite, but they
@@ -350,7 +367,15 @@ export function createStreamGate(options: StreamGateOptions) {
       return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
     }
 
-    const parsed = (await upstream.json()) as unknown;
+    // The body read can abort the same way the fetch can (the poll delivered headers, the client
+    // left before the body finished) — same cancellation, same quiet answer.
+    let parsed: unknown;
+    try {
+      parsed = (await upstream.json()) as unknown;
+    } catch (error) {
+      if (request.signal.aborted) return new Response(null, { status: 499 });
+      throw error;
+    }
     const isBatch = Array.isArray(parsed);
     const envelopes = (isBatch ? parsed : [parsed]) as ProxiedEnvelope[];
 
