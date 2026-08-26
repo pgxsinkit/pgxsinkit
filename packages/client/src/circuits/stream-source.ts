@@ -105,6 +105,12 @@ export interface ShapeStreamSubscription {
  * read is over and nothing failed"; `onEnd(error)` is the mid-session reset (ADR-0056 decision 7)
  * that a caller must answer with a re-subscribe.
  *
+ * ORDERING GUARANTEE: `onEnd(null)` is called only AFTER `onBatch` has been handed the batch that
+ * ends the read (the up-to-date batch of a `live: false` read; the `Stream-Closed` batch of any
+ * read). `closed` alone does not give that — it settles when the transport's fetch loop is done,
+ * which for a non-live read can be before the subscriber has consumed the final response — so the
+ * normal end is reported off the terminal batch, and a caller may close on `onEnd` without losing it.
+ *
  * The transport only. Everything above it — the fold, apply modes, the boot gate — stays
  * pgxsinkit's, which is ADR-0009's precedent applied to a new substrate: keep the transport,
  * internalize the semantics.
@@ -124,6 +130,20 @@ export async function readShapeStream(
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
 
+  const live = options.live ?? true;
+
+  // Our OWN close is not an end worth reporting: the caller asked for it, and a group tearing its
+  // streams down would otherwise hear K "the stream ended" reports and try to recover from a stop it
+  // ordered. `cancel()` resolves `closed` rather than rejecting it, so this suppresses a normal end;
+  // the flag also covers the race where a close lands while a read error is already in flight.
+  let closedByCaller = false;
+  let endReported = false;
+  const reportEnd = (error: Error | null): void => {
+    if (endReported || closedByCaller) return;
+    endReported = true;
+    onEnd?.(error);
+  };
+
   const unsubscribe = response.subscribeJson(async (batch) => {
     await onBatch({
       // The server flattens arrays onto the stream (PROTOCOL.md §9.1.2), so a batch's items are
@@ -140,20 +160,26 @@ export async function readShapeStream(
       // inbox and no error anywhere.
       upToDate: batch.upToDate,
     });
+    // THE NORMAL END IS REPORTED HERE, off the batch that ends the read — never off `closed`. The
+    // transport settles `closed` when its FETCH loop is done, and for a non-live read whose first
+    // response is already up-to-date that is inside `stream()` itself: the response is enqueued and
+    // the loop closed in the same tick, BEFORE any subscriber has consumed it. An `onEnd(null)` fired
+    // off that moment says "over, nothing failed" while the final batch is still queued, and a caller
+    // that (reasonably) closes on it aborts the subscriber loop with the batch undelivered — a
+    // `live: false` read of a populated stream then yields nothing, silently. The batch that ends a
+    // read is the transport's own stopping rule: a non-live read stops at its first up-to-date
+    // response, and any read stops at `Stream-Closed`.
+    if (batch.streamClosed === true || (!live && batch.upToDate)) reportEnd(null);
   });
 
-  // Our OWN close is not an end worth reporting: the caller asked for it, and a group tearing its
-  // streams down would otherwise hear K "the stream ended" reports and try to recover from a stop it
-  // ordered. `cancel()` resolves `closed` rather than rejecting it, so this suppresses a normal end;
-  // the flag also covers the race where a close lands while a read error is already in flight.
-  let closedByCaller = false;
   void response.closed.then(
     () => {
-      if (!closedByCaller) onEnd?.(null);
+      // A normal transport close is answered by the terminal batch above, which is already queued
+      // for the subscriber. The one normal close with NOTHING queued is the caller's own abort
+      // signal, and that one would otherwise wait forever.
+      if (options.signal?.aborted) reportEnd(null);
     },
-    (error: unknown) => {
-      if (!closedByCaller) onEnd?.(error instanceof Error ? error : new Error(String(error)));
-    },
+    (error: unknown) => reportEnd(error instanceof Error ? error : new Error(String(error))),
   );
 
   return {

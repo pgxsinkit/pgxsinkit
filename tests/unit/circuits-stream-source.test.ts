@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import { createTokenRecovery } from "@pgxsinkit/client";
+import { createTokenRecovery, readShapeStream, STREAM_START } from "@pgxsinkit/client";
+import type { StreamEnvelope } from "@pgxsinkit/contracts";
 
 // The token-recovery handler (ADR-0055 decisions 6 + 10). This is the one piece of the read
 // transport with real logic, and it sits on a sharp edge in `@durable-streams/client`: its onError
@@ -49,5 +50,75 @@ describe("token recovery", () => {
     expect(await recover(authError(404))).toBeUndefined();
     expect(await recover(new Error("network down"))).toBeUndefined();
     expect(called).toBe(0);
+  });
+});
+
+// The end of a read is reported off the batch that ends it, never off the transport's `closed`.
+// `@durable-streams/client` settles `closed` when its fetch loop is done — for a `live: false` read
+// whose first response is already up-to-date that is inside `stream()`, before any subscriber has
+// consumed the queued response. A caller closing on `onEnd` then aborted the subscriber loop with the
+// batch undelivered, and a populated stream read as empty (found by emergent's first native-path
+// integration run, 2026-08-26: every `materializeShape` returned `[]`).
+describe("readShapeStream end ordering", () => {
+  const envelope: StreamEnvelope = {
+    type: "public.widgets",
+    key: "w1",
+    headers: { operation: "upsert" },
+    value: { id: "w1" },
+  };
+
+  function upToDateResponse(envelopes: StreamEnvelope[]): typeof fetch {
+    return (async () =>
+      new Response(JSON.stringify(envelopes), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "Stream-Next-Offset": "0000000000000000_0000000000000042",
+          "Stream-Up-To-Date": "true",
+        },
+      })) as unknown as typeof fetch;
+  }
+
+  async function readToEnd(fetchStub: typeof fetch, closeOnBatch: boolean): Promise<string[]> {
+    const events: string[] = [];
+    const ended = Promise.withResolvers<void>();
+    const subscription = await readShapeStream(
+      {
+        url: "http://edge.test/stream/shape/s1",
+        offset: STREAM_START,
+        token: () => "t",
+        live: false,
+        fetch: fetchStub,
+      },
+      (batch) => {
+        events.push(`batch:${batch.envelopes.length}:${batch.upToDate}`);
+        if (closeOnBatch) {
+          subscription.close();
+          ended.resolve();
+        }
+      },
+      (error) => {
+        events.push(error ? `error:${error.message}` : "end");
+        ended.resolve();
+      },
+    );
+    await ended.promise;
+    // Anything that would still fire late shows up here rather than after the assertion.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    subscription.close();
+    return events;
+  }
+
+  it("delivers a non-live read's final batch BEFORE reporting the end", async () => {
+    expect(await readToEnd(upToDateResponse([envelope]), false)).toEqual(["batch:1:true", "end"]);
+  });
+
+  it("an empty non-live stream still delivers its (empty) up-to-date batch, then ends", async () => {
+    expect(await readToEnd(upToDateResponse([]), false)).toEqual(["batch:0:true", "end"]);
+  });
+
+  // The harness pattern: resolve on the up-to-date batch and close. Our own close is not an end.
+  it("a caller that closes on the final batch is handed the batch and hears no end", async () => {
+    expect(await readToEnd(upToDateResponse([envelope]), true)).toEqual(["batch:1:true"]);
   });
 });
