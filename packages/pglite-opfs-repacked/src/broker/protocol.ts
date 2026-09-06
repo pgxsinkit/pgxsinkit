@@ -382,8 +382,15 @@ export class PayloadReader {
 
   string(): string {
     const length = this.u32();
+    // `.slice()`, not the `.subarray()` `bytes()` hands out: a payload region lives in a
+    // `SharedArrayBuffer`, and Chrome REFUSES a shared-backed view to `TextDecoder.decode()`
+    // ("The provided ArrayBufferView value must not be shared" — the same `[AllowShared]` rule
+    // that bites `crypto.getRandomValues`). Node accepts it, so a browser is the only place this
+    // shows up, and it shows up as the SERVER rejecting every path-carrying request as malformed
+    // and detaching the client. Paths are short; the copy costs nothing.
+    const raw = this.bytes(length);
     try {
-      return textDecoder.decode(this.bytes(length));
+      return textDecoder.decode(raw.slice());
     } catch (cause) {
       throw new PayloadDecodeError(`a string is not valid UTF-8: ${String(cause)}`);
     }
