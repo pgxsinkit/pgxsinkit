@@ -5,16 +5,26 @@ substrings; a renamed or removed test must update this map in the same change.
 
 ## Coverage layers
 
-| Contract area                                                                                                  | Primary coverage                                                                                      |
-| -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Pure planning, replay, validation, path bounds, and allocator partition                                        | `pglite-opfs-repacked-state.test.ts`, including the multi-seed reference-filesystem command sequences |
-| Canonical formats, bounded readers, writer/reader closure, and projected-base sizing                           | `pglite-opfs-repacked-codec.test.ts`                                                                  |
-| Bootstrap, exact activation authority, longest-valid-log-prefix recovery, and recreate-only identity rejection | `pglite-opfs-repacked-recovery.test.ts`                                                               |
-| Data-before-metadata operations, zero barriers, strict ordering, and poison                                    | `pglite-opfs-repacked-operations.test.ts`                                                             |
-| Two-repack quarantine, projected replacement, forced-strict activation, and quota retry                        | `pglite-opfs-repacked-repack.test.ts`                                                                 |
-| Port operation labels and browser-failure persistence outcomes                                                 | `pglite-opfs-repacked-port.test.ts` and `pglite-opfs-repacked-fault-campaign.test.ts`                 |
-| PGlite construction, awaited host sync, cleanup, and poison delivery                                           | `pglite-opfs-repacked-adapter.test.ts` and `pglite-opfs-repacked-workload.test.ts`                    |
-| Actual OPFS handles and worker, tab, and browser termination                                                   | `tests/e2e/opfs-repacked/opfs-repacked.browser.test.ts`                                               |
+| Contract area                                                                                                  | Primary coverage                                                                                           |
+| -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Pure planning, replay, validation, path bounds, and allocator partition                                        | `pglite-opfs-repacked-state.test.ts`, including the multi-seed reference-filesystem command sequences      |
+| Canonical formats, bounded readers, writer/reader closure, and projected-base sizing                           | `pglite-opfs-repacked-codec.test.ts`                                                                       |
+| Bootstrap, exact activation authority, longest-valid-log-prefix recovery, and recreate-only identity rejection | `pglite-opfs-repacked-recovery.test.ts`                                                                    |
+| Data-before-metadata operations, zero barriers, strict ordering, and poison                                    | `pglite-opfs-repacked-operations.test.ts`                                                                  |
+| Two-repack quarantine, projected replacement, forced-strict activation, and quota retry                        | `pglite-opfs-repacked-repack.test.ts`                                                                      |
+| Port operation labels and browser-failure persistence outcomes                                                 | `pglite-opfs-repacked-port.test.ts` and `pglite-opfs-repacked-fault-campaign.test.ts`                      |
+| PGlite construction, awaited host sync, cleanup, and poison delivery                                           | `pglite-opfs-repacked-adapter.test.ts` and `pglite-opfs-repacked-workload.test.ts`                         |
+| Actual OPFS handles and worker, tab, and browser termination                                                   | `tests/e2e/opfs-repacked/opfs-repacked.browser.test.ts`                                                    |
+| Synchronous broker wire protocol, chunking, errno pass-through, per-client fd ownership, and detach            | `pglite-opfs-repacked-broker-operations.test.ts`, `-broker-transport.test.ts`, `-broker-lifecycle.test.ts` |
+
+The broker suites run both thread arrangements deliberately. `-broker-operations` and
+`-broker-transport` put the store and the blocking `serveForever()` loop in a Worker and block the
+CLIENT on the test thread, which is the production shape (a coordinator worker with futex-parked
+backends); bun permits `Atomics.wait` on the test thread, so no inversion is needed. `-broker-lifecycle`
+inverts it — the broker runs the async `serve()` loop on the test thread and the clients block inside
+Workers — because those cases assert on the SERVER's own state (which descriptors it still holds,
+which clients it still serves), and that also proves `serve()` services a client with no coordinator
+worker anywhere.
 
 The generated fault campaign discovers every persistent `write`, `truncate`, and `flush` occurrence
 from the deterministic port's immutable operation inventory. At both 8 KiB and 64 KiB it injects

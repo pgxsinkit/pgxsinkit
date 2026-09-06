@@ -99,6 +99,61 @@ await opfsRoot.removeEntry("example-database", { recursive: true });
 `CorruptStoreError` instead means activated bytes no longer form a recoverable store. Restore an
 external backup or delete and create fresh. The VFS never guesses another authority.
 
+## Coordinate several threads on one store: the sync broker
+
+A repacked store is a single owner. It holds four exclusive handles and one in-memory metadata
+generation, and nothing about it is shareable between JavaScript agents. When several threads need
+the same store — a multi-backend engine, where every backend runs wasm and parks in futexes, so it
+can never observe a promise — the store lives alone in a coordinator thread and every other thread
+asks it for file operations over a `SharedArrayBuffer`, blocking in `Atomics.wait` for the answer.
+
+`RepackedSyncBroker` is that coordinator; `RepackedSyncClient` is what a backend holds. Both are
+engine-agnostic: no PGlite, no wasm, and no OPFS appear anywhere in them.
+
+```ts
+// The coordinator thread — the only thread that ever touches the store.
+import { RepackedChannel, RepackedDoorbell, RepackedSyncBroker, RepackedVfs } from "@pgxsinkit/pglite-opfs-repacked";
+
+const doorbell = RepackedDoorbell.create();
+const vfs = await RepackedVfs.open(port);
+const broker = new RepackedSyncBroker({ vfs, doorbell });
+const channel = RepackedChannel.create({ id: 1, doorbell }); // 64 KiB payload by default
+broker.attach(channel);
+postMessage(channel.transfer()); // hand the two SharedArrayBuffers to the backend thread
+broker.serveForever(); // parks this thread; attach every channel BEFORE calling it
+```
+
+```ts
+// A backend thread — every call blocks until the coordinator answers.
+import { O_CREAT, O_RDWR, O_TRUNC, RepackedChannel, RepackedSyncClient } from "@pgxsinkit/pglite-opfs-repacked";
+
+const client = new RepackedSyncClient(RepackedChannel.attach(transfer));
+const { errno, fd } = client.open("/data", O_RDWR | O_CREAT | O_TRUNC);
+client.write(fd, bytes); // split across as many requests as the payload region needs
+client.fsync(fd);
+client.close(fd);
+```
+
+A file rejection is a returned `errno` (a WASI preview1 number, the same value `FsError.code`
+carries), never a throw. Only a transport failure throws: `RepackedBrokerTransportError` when the
+coordinator detached this client, refused its request, or did not answer inside the timeout, and
+`RepackedBrokerStoreError` when the store behind the coordinator failed.
+
+Three loop shapes exist. `serveForever()` parks the thread and never reaches its event loop, so it
+cannot receive a `postMessage` and every channel must be attached first; `doorbell.requestStop()`
+from another thread is the only way to end it. `serve()` is the same loop on `Atomics.waitAsync` for
+a host that must keep its event loop alive, and accepts attach and detach at any time. `serveOnce()`
+scans once and returns, for a host driving its own loop.
+
+`detach(channel)` closes every descriptor that client still held. A backend that dies mid-query
+therefore leaks nothing, and a descriptor always belongs to exactly one client — another client
+naming it gets `EBADF`.
+
+`fsync` is store-wide, because the store's only durability primitive is: on success, every byte
+written through the broker by any client before the call returned is recoverable. The store also
+resizes by path only, so a caller that needs a resize-by-descriptor keeps the path it opened with
+and calls `truncate(path, size)`.
+
 ## Stable errors
 
 Store errors expose a stable string `storeCode`; `FsError` carries PGlite-compatible numeric `code`,

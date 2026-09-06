@@ -35,6 +35,7 @@ const EXPECTED_IMPORTS: Record<string, readonly string[]> = {
 };
 
 const OPFS_REPACKED_RUNTIME_EXPORTS = [
+  // The PGlite adapter, its factory, and the stable runtime errors.
   "CorruptStoreError",
   "DurabilityModeMismatchError",
   "ExtentSizeMismatchError",
@@ -47,6 +48,29 @@ const OPFS_REPACKED_RUNTIME_EXPORTS = [
   "StoreRecreationRequiredError",
   "UnexpectedStoreEntryError",
   "createOpfsRepackedPGlite",
+  // The engine-agnostic store core a coordinator worker owns, with no PGlite, wasm, or OPFS in it.
+  "MemoryRepackedPort",
+  "RepackedVfs",
+  // The synchronous broker: one owner of the store, reached over SharedArrayBuffer by futex-parked
+  // backends that cannot await anything.
+  "DEFAULT_PAYLOAD_BYTES",
+  "O_APPEND",
+  "O_CREAT",
+  "O_EXCL",
+  "O_RDONLY",
+  "O_RDWR",
+  "O_TRUNC",
+  "O_WRONLY",
+  "RepackedBrokerStoreError",
+  "RepackedBrokerTransportError",
+  "RepackedChannel",
+  "RepackedDoorbell",
+  "RepackedSyncBroker",
+  "RepackedSyncClient",
+  "errnoName",
+  "fsErrorNameOf",
+  "planOpen",
+  "throwOnErrno",
 ] as const;
 
 /** Every static import specifier in an (unminified, double-quoted) ESM bundle. */

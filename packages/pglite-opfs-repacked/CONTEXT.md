@@ -60,6 +60,33 @@ _Avoid_: pending free, grace list
 An open file whose directory entry and persistent inode were removed while its descriptor stays
 usable; its extents are quarantined and only a runtime record keeps them readable.
 
+### Coordination
+
+**Broker**:
+The single owner of a store, answering synchronous file requests that arrive over shared memory so
+several threads reach one store. Never a second store, a cache, or a replica.
+_Avoid_: server (too generic), proxy, RPC host
+
+**Channel**:
+One client's `SharedArrayBuffer` — an `Int32Array` header plus a byte payload region — carrying one
+request and its answer at a time.
+_Avoid_: socket, pipe, queue (nothing is buffered: a channel holds exactly one in-flight request)
+
+**Doorbell**:
+The single shared word every client rings after publishing a request, so one blocking broker loop
+waits on one location and still serves any number of clients.
+_Avoid_: signal, event, semaphore
+
+**Detach**:
+Dropping a client and closing every descriptor it still held. The remedy for a dead backend and for
+a protocol violation alike; it never touches the store or any other client.
+_Avoid_: disconnect, kick, evict
+
+**Fault**:
+A transport or store failure reported to a client, as opposed to an errno. An errno leaves the
+client working; a fault means there was no answer to give.
+_Avoid_: error (reserved for the thrown classes), exception
+
 ### Failure
 
 **Poison**:
