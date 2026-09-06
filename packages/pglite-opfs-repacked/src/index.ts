@@ -65,3 +65,15 @@ export {
   type OpenPlan,
   type RepackedChannelTransfer,
 } from "./broker/protocol";
+
+// The WASI preview1 filesystem adapter: the seam where a wasm engine's file calls reach ONE store
+// through the broker, with fds 0-2 and every non-filesystem import left to the host.
+export {
+  WASI_ERRNO,
+  WASI_FILETYPE,
+  createWasiPreview1Fs,
+  normalizeWasiPath,
+  type WasiPreview1Fs,
+  type WasiPreview1FsFunctions,
+  type WasiPreview1FsOptions,
+} from "./wasi/preview1";

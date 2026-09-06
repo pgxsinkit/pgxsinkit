@@ -46,6 +46,19 @@ export interface PublicPackage {
    * production `react/jsx-runtime` and leaves every bare import external.
    */
   bundler: "bun" | "vite";
+  /**
+   * Also emit `dist/browser-bundle.js`: ONE self-contained ESM file with no imports at all, for a
+   * host that has no bundler and cannot resolve a bare specifier — a plain `<script type="module">`
+   * or worker in a browser, and a `file://` import in Node. The published `dist/index.js` cannot serve
+   * that purpose by design: it leaves every declared dependency external (the ADR-0038 artifact
+   * contract), so it carries bare `@electric-sql/pglite` imports.
+   *
+   * This is a REDISTRIBUTION artifact, not the publish surface: it vendors whatever the entry pulls
+   * in, is not referenced from `exports`, and is gitignored with the rest of `dist`. The artifact
+   * contract tests deliberately do not look at it — they pin `dist/index.js`, which is what consumers
+   * install.
+   */
+  browserBundle?: boolean;
 }
 
 // Declaration emit resolves workspace dependencies to their already-built
@@ -61,6 +74,9 @@ export const publicPackages: readonly PublicPackage[] = [
     packageDir: "packages/pglite-opfs-repacked",
     entrypoints: ["src/index.ts"],
     bundler: "bun",
+    // The wasm hosts that drive the sync broker + WASI adapter (a pgrust/PGlite worker, a coordinator
+    // worker) are plain JS with no build step: they need one file they can import by URL.
+    browserBundle: true,
   },
   {
     // `src/testing.ts` is the `@pgxsinkit/client/testing` subpath (ADR-0036) — a SEPARATE standalone bundle
@@ -167,7 +183,29 @@ export async function buildPackage(publicPackage: PublicPackage): Promise<void> 
     }
   }
 
+  if (publicPackage.browserBundle === true) {
+    emitBrowserBundle(publicPackage);
+  }
+
   console.log(`Built ${packageDir}`);
+}
+
+/**
+ * The self-contained ESM redistribution bundle. Spawned rather than built in-process for the same
+ * reason the artifact test spawns this script: an in-process `Bun.build` corrupts module resolution
+ * for anything imported afterwards in the same process.
+ */
+export function emitBrowserBundle(publicPackage: PublicPackage): void {
+  const outFile = resolve(repoRoot, publicPackage.packageDir, "dist", "browser-bundle.js");
+  const entrypoint = resolve(repoRoot, publicPackage.packageDir, publicPackage.entrypoints[0]!);
+  execFileSync("bun", ["build", entrypoint, "--target", "browser", "--format", "esm", "--outfile", outFile], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+  if (!existsSync(outFile)) {
+    throw new Error(`Browser bundle did not emit expected output file: ${outFile}`);
+  }
+  console.log(`Built ${publicPackage.packageDir} browser bundle`);
 }
 
 export function emitPackageDeclarations(packageDir: string): void {

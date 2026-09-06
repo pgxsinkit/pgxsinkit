@@ -71,6 +71,11 @@ const OPFS_REPACKED_RUNTIME_EXPORTS = [
   "fsErrorNameOf",
   "planOpen",
   "throwOnErrno",
+  // The WASI preview1 filesystem adapter over that broker: what a wasm engine's file calls land on.
+  "WASI_ERRNO",
+  "WASI_FILETYPE",
+  "createWasiPreview1Fs",
+  "normalizeWasiPath",
 ] as const;
 
 /** Every static import specifier in an (unminified, double-quoted) ESM bundle. */

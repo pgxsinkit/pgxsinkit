@@ -14,7 +14,7 @@
 
 import { RepackedChannel, RepackedDoorbell } from "../../src/broker/protocol";
 import type { RepackedChannelTransfer } from "../../src/broker/protocol";
-import type { BrokerWorkerReply, RemoteCall, RemoteResults } from "./broker-worker";
+import type { BrokerWorkerReply, RemoteCall, RemoteResults, WasiResults } from "./broker-worker";
 
 const WORKER_URL = new URL("./broker-worker.ts", import.meta.url);
 
@@ -96,6 +96,48 @@ export async function startClientWorker(
       if (result.kind !== "results") throw new Error("the client worker did not report results");
       return result;
     },
+    stop() {
+      worker.terminate();
+    },
+  };
+}
+
+export interface RemoteWasiHandle {
+  /** `path_open` each path with CREAT|TRUNC, keeping every descriptor. */
+  open(paths: readonly string[]): Promise<WasiResults>;
+  /** Release every descriptor, the way a thread does on its way out. */
+  closeAll(): Promise<WasiResults>;
+  stop(): void;
+}
+
+/**
+ * Boot a WASI preview1 adapter (and its own guest memory) inside a worker over an already-created
+ * channel. The BROKER stays on the test thread, which is the only arrangement in which its
+ * `openFdCount` can be watched while the adapter on the other side opens and releases descriptors.
+ */
+export async function startWasiWorker(
+  transfer: RepackedChannelTransfer,
+  requestTimeoutMs?: number,
+): Promise<RemoteWasiHandle> {
+  const worker = spawn();
+  const ready = nextReply(worker);
+  worker.postMessage({
+    kind: "wasi-boot",
+    channel: transfer,
+    ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
+  });
+  const reply = await ready;
+  if (reply.kind !== "ready") throw new Error("the WASI worker did not report ready");
+  const ask = async (message: unknown): Promise<WasiResults> => {
+    const answer = nextReply(worker);
+    worker.postMessage(message);
+    const result = await answer;
+    if (result.kind !== "wasi-results") throw new Error("the WASI worker did not report results");
+    return result;
+  };
+  return {
+    open: (paths) => ask({ kind: "wasi-open", paths }),
+    closeAll: () => ask({ kind: "wasi-close-all" }),
     stop() {
       worker.terminate();
     },
