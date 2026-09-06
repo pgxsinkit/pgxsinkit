@@ -8,6 +8,13 @@ import type { MemoryOperationSummary } from "../../packages/pglite-opfs-repacked
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+function lastFlush(port: MemoryRepackedPort): MemoryOperationSummary {
+  const flushes = port.observedOperations().filter((operation) => operation.operation === "flush");
+  const last = flushes.at(-1);
+  if (last === undefined) throw new Error("no flush was observed");
+  return last;
+}
+
 describe("opfs-repacked bounded persistence port", () => {
   test("the memory port exposes an immutable inventory of the exact labeled operations it observed", async () => {
     const port = new MemoryRepackedPort();
@@ -27,7 +34,7 @@ describe("opfs-repacked bounded persistence port", () => {
       { operation: "truncate", file: "arena.bin", label: "inventory.truncate" },
       { operation: "write", file: "arena.bin", label: "inventory.write" },
       { operation: "read", file: "arena.bin", label: "inventory.read" },
-      { operation: "flush", file: "arena.bin", label: "inventory.flush" },
+      { operation: "flush", file: "arena.bin", label: "inventory.flush", copiedBytes: 2 },
     ]);
     expect(() =>
       (observed as MemoryOperationSummary[]).push({ operation: "flush", file: "arena.bin", label: "mutated" }),
@@ -103,6 +110,105 @@ describe("opfs-repacked bounded persistence port", () => {
     expect(arenaByteOffset(0n, 8192)).toBe(8192n);
     expect(arenaByteOffset(1n, 8192, 7)).toBe(16_391n);
     expect(() => arenaByteOffset(1n << 32n, 8192)).toThrow(StoreLimitError);
+  });
+
+  test("a flush copies the bytes written since the previous flush, not the size of the file", async () => {
+    const port = new MemoryRepackedPort();
+    const handle = await port.acquire("arena.bin", "store.acquire.arena");
+    const fileBytes = 40 * 1024 * 1024;
+    const head = new Uint8Array(8192).fill(0x5a);
+    const tail = new Uint8Array(8192).fill(0x27);
+
+    handle.truncate(fileBytes, "arena.grow");
+    writeExact(handle, 0n, head, "arena.seed");
+    handle.flush("arena.flush.seed");
+    // Growing an empty file carries nothing across, so the first flush is the seed write and no more.
+    expect(lastFlush(port).copiedBytes).toBe(head.byteLength);
+
+    writeExact(handle, BigInt(fileBytes - tail.byteLength), tail, "arena.tail");
+    handle.flush("arena.flush.tail");
+    expect(lastFlush(port).copiedBytes).toBe(tail.byteLength);
+
+    const durable = port.durableBytes("arena.bin");
+    expect(durable.byteLength).toBe(fileBytes);
+    expect(durable.slice(0, head.byteLength)).toEqual(head);
+    expect(durable.slice(fileBytes - tail.byteLength)).toEqual(tail);
+    expect(durable.slice(head.byteLength, head.byteLength + 16)).toEqual(new Uint8Array(16));
+
+    handle.flush("arena.flush.clean");
+    expect(lastFlush(port).copiedBytes).toBe(0);
+    expect(port.pendingEffects()).toEqual([]);
+  });
+
+  test("a flush replays truncates and writes in order, including effects larger than the file", async () => {
+    const port = new MemoryRepackedPort();
+    const handle = await port.acquire("metadata-b.bin", "store.acquire.metadata-b");
+
+    // A write larger than the file it lands on grows the durable image with it.
+    writeExact(handle, 0n, textEncoder.encode("abcdef"), "metadata.write");
+    handle.flush("metadata.flush.grow");
+    expect(textDecoder.decode(port.durableBytes("metadata-b.bin"))).toBe("abcdef");
+    expect(lastFlush(port).copiedBytes).toBe(6);
+
+    // A truncate followed by a write past the new end leaves a hole that reads as zeros; it must not
+    // expose the bytes the truncate dropped, on either image.
+    handle.truncate(2, "metadata.shrink");
+    writeExact(handle, 4n, textEncoder.encode("XY"), "metadata.reappend");
+    handle.flush("metadata.flush.hole");
+    expect([...port.durableBytes("metadata-b.bin")]).toEqual([...textEncoder.encode("ab\u0000\u0000XY")]);
+    expect(lastFlush(port).copiedBytes).toBe(2);
+
+    // A write followed by a truncate that drops it inside one flush window ends at the truncate.
+    writeExact(handle, 6n, textEncoder.encode("ZZZZ"), "metadata.append");
+    handle.truncate(3, "metadata.shrink-again");
+    handle.flush("metadata.flush.shrink");
+    expect([...port.durableBytes("metadata-b.bin")]).toEqual([...textEncoder.encode("ab\u0000")]);
+
+    // Truncating away the whole file and rewriting it inside one window keeps the order too.
+    handle.truncate(0, "metadata.clear");
+    writeExact(handle, 0n, textEncoder.encode("fresh"), "metadata.rewrite");
+    handle.flush("metadata.flush.clear");
+    expect(textDecoder.decode(port.durableBytes("metadata-b.bin"))).toBe("fresh");
+
+    // Every stage left the durable image byte-identical to the volatile one it was replayed from.
+    const size = handle.getSize("metadata.size");
+    expect(port.durableBytes("metadata-b.bin")).toEqual(readExact(handle, 0n, size, 64, "metadata.read"));
+  });
+
+  test("a flush that throws before its effect leaves durable untouched and every effect pending", async () => {
+    const port = new MemoryRepackedPort();
+    const handle = await port.acquire("activation.bin", "store.acquire.activation");
+    writeExact(handle, 0n, textEncoder.encode("first"), "activation.write");
+    handle.flush("activation.flush");
+    port.clearObservedOperations();
+
+    writeExact(handle, 0n, textEncoder.encode("second"), "activation.overwrite");
+    port.injectFault({ operation: "flush", label: "activation.flush", outcome: "throw-before" });
+    expect(() => handle.flush("activation.flush")).toThrow("injected flush failure before effect");
+    expect(textDecoder.decode(port.durableBytes("activation.bin"))).toBe("first");
+    expect(lastFlush(port).copiedBytes).toBe(0);
+    expect(port.pendingEffects()).toHaveLength(1);
+
+    handle.flush("activation.flush");
+    expect(textDecoder.decode(port.durableBytes("activation.bin"))).toBe("second");
+    expect(lastFlush(port).copiedBytes).toBe(6);
+    expect(port.pendingEffects()).toEqual([]);
+  });
+
+  test("flushing one file makes only that file durable and leaves the rest pending", async () => {
+    const port = new MemoryRepackedPort();
+    const arena = await port.acquire("arena.bin", "store.acquire.arena");
+    const metadata = await port.acquire("metadata-a.bin", "store.acquire.metadata-a");
+    writeExact(arena, 0n, textEncoder.encode("arena"), "arena.write");
+    writeExact(metadata, 0n, textEncoder.encode("metadata"), "metadata.write");
+
+    arena.flush("arena.flush");
+    expect(port.pendingEffects().map((effect) => effect.file)).toEqual(["metadata-a.bin"]);
+    expect(port.durableBytes("metadata-a.bin")).toEqual(new Uint8Array());
+
+    port.terminate();
+    expect(textDecoder.decode(port.durableBytes("arena.bin"))).toBe("arena");
+    expect(port.durableBytes("metadata-a.bin")).toEqual(new Uint8Array());
   });
 
   test("unflushed effects can be absent, partial, or independently present after termination", async () => {

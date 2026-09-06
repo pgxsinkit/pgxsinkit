@@ -49,6 +49,20 @@ export interface MemoryOperationSummary {
   readonly operation: MemoryOperation;
   readonly file: OwnedFileName | undefined;
   readonly label: string;
+  /**
+   * Bytes this operation copied into the DURABLE image. Recorded on `flush` only, where it is the
+   * deterministic stand-in for flush cost: a flush must copy the bytes written since the previous
+   * flush, never the size of the file. Absent on every other operation.
+   */
+  readonly copiedBytes?: number;
+}
+
+/** The private, still-writable form of a record: `handleFlush` fills `copiedBytes` in after the copy. */
+interface MemoryOperationRecord {
+  readonly operation: MemoryOperation;
+  readonly file: OwnedFileName | undefined;
+  readonly label: string;
+  copiedBytes?: number;
 }
 
 function clone(bytes: Uint8Array): Uint8Array {
@@ -77,22 +91,23 @@ function applyTruncate(current: Uint8Array, size: number): Uint8Array {
 }
 
 /**
- * Resize a LIVE volatile file, keeping the bytes it already holds and reusing spare capacity.
+ * Resize a LIVE image — the volatile file or the durable one — keeping the bytes it already holds and
+ * reusing spare capacity.
  *
- * A volatile file is always `new Uint8Array(buffer, 0, length)`, so its backing buffer may be larger
+ * A live image is always `new Uint8Array(buffer, 0, length)`, so its backing buffer may be larger
  * than the file and `bytes.buffer.byteLength` is its capacity. That separation is what keeps this port
  * usable at real store sizes: replacing the whole array on every write and every truncate — which is
  * what the pure `apply*` helpers above do — makes each operation cost the size of the FILE rather than
  * the size of the operation, so an in-memory store grows QUADRATICALLY in the bytes written. Seeding a
  * 41 MB Postgres datadir (1,477 files, ~3,000 arena writes and growth truncates) took 98 seconds that
- * way and copied roughly 80 GB. Nothing needed those copies: `#durable` is only ever set from its own
- * `clone()`, `durableBytes()` clones, and the effect log holds the CALLER's source bytes rather than
- * the file's — so the live buffer is safe to mutate in place, and the same seed takes about a second.
+ * way and copied roughly 80 GB. Nothing needed those copies: the effect log holds the CALLER's source
+ * bytes rather than the file's, `durableBytes()` clones on the way out, and the two images never share
+ * a buffer — so both are safe to mutate in place, and the same seed takes about a second.
  *
  * Growth doubles, and any newly exposed region is zeroed: capacity left behind by an earlier truncate
  * still holds that truncated file's bytes, and a hole must read as zeros.
  */
-function resizeVolatile(current: Uint8Array, size: number): Uint8Array {
+function resizeImage(current: Uint8Array, size: number): Uint8Array {
   if (size <= current.byteLength) return new Uint8Array(current.buffer, 0, size);
   if (size <= current.buffer.byteLength) {
     const grown = new Uint8Array(current.buffer, 0, size);
@@ -165,7 +180,7 @@ export class MemoryRepackedPort implements RepackedPort {
   readonly #entryKinds = new Map<string, "file" | "directory">();
   readonly #open = new Set<OwnedFileName>();
   readonly #faults: MemoryFault[] = [];
-  readonly #operations: MemoryOperationSummary[] = [];
+  readonly #operations: MemoryOperationRecord[] = [];
   #effects: MemoryEffect[] = [];
   #nextEffectId = 1;
   #epoch = 1;
@@ -208,6 +223,10 @@ export class MemoryRepackedPort implements RepackedPort {
     }
     this.#entryKinds.set(name, kind);
     if (isOwnedFileName(name)) {
+      // Replacing an owned entry replaces BOTH images, so anything still pending for it describes a
+      // file that no longer exists; keeping it would let a later flush or termination replay it onto
+      // the replacement and break `durable + pending effects == volatile`.
+      this.#effects = this.#effects.filter((effect) => effect.file !== name);
       if (kind === "file") {
         this.#volatile.set(name, new Uint8Array());
         this.#durable.set(name, new Uint8Array());
@@ -329,17 +348,18 @@ export class MemoryRepackedPort implements RepackedPort {
     const fault = this.#takeFault("truncate", name, label);
     if (fault?.outcome === "quota") throw new DOMException("injected arena quota exhaustion", "QuotaExceededError");
     if (fault?.outcome === "throw-before") throw new Error("injected truncate failure before effect");
-    this.#volatile.set(name, resizeVolatile(this.#file(name), size));
+    this.#volatile.set(name, resizeImage(this.#file(name), size));
     this.#effects.push({ id: this.#nextEffectId++, file: name, kind: "truncate", size });
     if (fault?.outcome === "throw-after") throw new Error("injected truncate failure after effect");
   }
 
   handleFlush(name: OwnedFileName, label: string): void {
-    this.#recordOperation("flush", name, label);
+    const record = this.#recordOperation("flush", name, label);
+    record.copiedBytes = 0;
     const fault = this.#takeFault("flush", name, label);
+    // A throw-before flush made nothing durable and left every effect pending, so it copies nothing.
     if (fault?.outcome === "throw-before") throw new Error("injected flush failure before effect");
-    this.#durable.set(name, clone(this.#file(name)));
-    this.#effects = this.#effects.filter((effect) => effect.file !== name);
+    record.copiedBytes = this.#makeDurable(name);
     if (fault?.outcome === "throw-after") throw new Error("injected flush failure after effect");
   }
 
@@ -359,10 +379,53 @@ export class MemoryRepackedPort implements RepackedPort {
     const data = clone(source);
     const current = this.#file(name);
     const required = at + data.byteLength;
-    const target = required > current.byteLength ? resizeVolatile(current, required) : current;
+    const target = required > current.byteLength ? resizeImage(current, required) : current;
     target.set(data, at);
     this.#volatile.set(name, target);
     this.#effects.push({ id: this.#nextEffectId++, file: name, kind: "write", at, data });
+  }
+
+  /**
+   * Apply this file's pending effects onto the durable image, in order, and drop them. Returns the
+   * bytes copied.
+   *
+   * The old implementation made a file durable by cloning the whole volatile image, so every flush
+   * cost the size of the FILE. That is what the broker charges to every committing statement: a guest
+   * `fd_sync` becomes a store-wide `strictSync()`, and on a seeded Postgres datadir the arena is tens
+   * of MB, which showed up as a flat ~25 ms per writing statement in the browser benchmark. The effect
+   * log already IS the dirty set — `durable + pending effects == volatile` for every file, at all
+   * times — so replaying it costs the bytes written since the previous flush instead, and reproduces
+   * the volatile image byte for byte because both sides take the same steps through `resizeImage`.
+   */
+  #makeDurable(name: OwnedFileName): number {
+    let image = this.#durable.get(name) ?? new Uint8Array();
+    const remaining: MemoryEffect[] = [];
+    let copied = 0;
+    for (const effect of this.#effects) {
+      if (effect.file !== name) {
+        remaining.push(effect);
+        continue;
+      }
+      if (effect.kind === "truncate") {
+        const resized = resizeImage(image, effect.size);
+        // Growth past the current capacity carries the bytes already held into a new buffer; every
+        // other resize is a view onto the same one. A truncate copies nothing of its own.
+        if (resized.buffer !== image.buffer) copied += image.byteLength;
+        image = resized;
+        continue;
+      }
+      const required = effect.at + effect.data.byteLength;
+      if (required > image.byteLength) {
+        const grown = resizeImage(image, required);
+        if (grown.buffer !== image.buffer) copied += image.byteLength;
+        image = grown;
+      }
+      image.set(effect.data, effect.at);
+      copied += effect.data.byteLength;
+    }
+    this.#durable.set(name, image);
+    this.#effects = remaining;
+    return copied;
   }
 
   #takeFault(operation: MemoryOperation, file: string | undefined, label: string): MemoryFault | undefined {
@@ -381,8 +444,10 @@ export class MemoryRepackedPort implements RepackedPort {
     return this.#faults.splice(index, 1)[0];
   }
 
-  #recordOperation(operation: MemoryOperation, file: OwnedFileName | undefined, label: string): void {
-    this.#operations.push({ operation, file, label });
+  #recordOperation(operation: MemoryOperation, file: OwnedFileName | undefined, label: string): MemoryOperationRecord {
+    const record: MemoryOperationRecord = { operation, file, label };
+    this.#operations.push(record);
+    return record;
   }
 
   #validateRange(at: number, length: number): void {
