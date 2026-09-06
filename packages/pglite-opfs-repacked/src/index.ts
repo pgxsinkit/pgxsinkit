@@ -29,6 +29,19 @@ export {
 export { MemoryRepackedPort, type MemoryFault, type MemoryOperation } from "./core/memory-port";
 export type { RepackedFileHandle, RepackedPort, RepackedPortEntry } from "./core/port";
 
+/**
+ * The OPFS-backed port for that same store core: four `FileSystemSyncAccessHandle`s over one dedicated
+ * OPFS directory. `createOpfsRepackedPGlite` builds this internally, so a PGlite consumer never needs
+ * it; it is exported for a host that owns the store itself — a coordinator worker serving the sync
+ * broker to a wasm engine — and wants that store persisted rather than in memory. It must be
+ * constructed in a scope where `createSyncAccessHandle()` actually SUCCEEDS (a dedicated worker in
+ * every engine, plus a SharedWorker on real Safari); method presence is not proof, the window main
+ * thread is never such a scope, and a denial surfaces as an open failure rather than a fallback.
+ * `OpfsDirectoryHandle` is the structural slice of `FileSystemDirectoryHandle` the port actually uses,
+ * so a real handle satisfies it without a cast.
+ */
+export { OpfsRepackedPort, type OpfsDirectoryHandle } from "./opfs-port";
+
 // The synchronous broker: one coordinator worker owns the store, every other thread reaches it over a
 // SharedArrayBuffer channel and blocks in `Atomics.wait` for the answer.
 export { RepackedSyncBroker, type RepackedSyncBrokerOptions } from "./broker/server";

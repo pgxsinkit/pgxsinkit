@@ -51,6 +51,8 @@ const OPFS_REPACKED_RUNTIME_EXPORTS = [
   // The engine-agnostic store core a coordinator worker owns, with no PGlite, wasm, or OPFS in it.
   "MemoryRepackedPort",
   "RepackedVfs",
+  // The OPFS port for that core, for a host that owns the store itself and wants it persisted.
+  "OpfsRepackedPort",
   // The synchronous broker: one owner of the store, reached over SharedArrayBuffer by futex-parked
   // backends that cannot await anything.
   "DEFAULT_PAYLOAD_BYTES",
