@@ -55,6 +55,11 @@ function clone(bytes: Uint8Array): Uint8Array {
   return bytes.slice();
 }
 
+/**
+ * Replay a write onto a MATERIALIZED copy, for `terminate()`. Pure, and deliberately so: the
+ * termination model rebuilds a fresh image from the durable bytes plus the effect log, and nothing in
+ * it may alias the live volatile buffer.
+ */
 function applyWrite(current: Uint8Array, at: number, source: Uint8Array): Uint8Array {
   const required = at + source.byteLength;
   const next = required <= current.byteLength ? clone(current) : new Uint8Array(required);
@@ -63,11 +68,41 @@ function applyWrite(current: Uint8Array, at: number, source: Uint8Array): Uint8A
   return next;
 }
 
+/** The `terminate()` twin of `applyWrite`, and pure for the same reason. */
 function applyTruncate(current: Uint8Array, size: number): Uint8Array {
   if (size === current.byteLength) return clone(current);
   const next = new Uint8Array(size);
   next.set(current.subarray(0, Math.min(size, current.byteLength)));
   return next;
+}
+
+/**
+ * Resize a LIVE volatile file, keeping the bytes it already holds and reusing spare capacity.
+ *
+ * A volatile file is always `new Uint8Array(buffer, 0, length)`, so its backing buffer may be larger
+ * than the file and `bytes.buffer.byteLength` is its capacity. That separation is what keeps this port
+ * usable at real store sizes: replacing the whole array on every write and every truncate — which is
+ * what the pure `apply*` helpers above do — makes each operation cost the size of the FILE rather than
+ * the size of the operation, so an in-memory store grows QUADRATICALLY in the bytes written. Seeding a
+ * 41 MB Postgres datadir (1,477 files, ~3,000 arena writes and growth truncates) took 98 seconds that
+ * way and copied roughly 80 GB. Nothing needed those copies: `#durable` is only ever set from its own
+ * `clone()`, `durableBytes()` clones, and the effect log holds the CALLER's source bytes rather than
+ * the file's — so the live buffer is safe to mutate in place, and the same seed takes about a second.
+ *
+ * Growth doubles, and any newly exposed region is zeroed: capacity left behind by an earlier truncate
+ * still holds that truncated file's bytes, and a hole must read as zeros.
+ */
+function resizeVolatile(current: Uint8Array, size: number): Uint8Array {
+  if (size <= current.byteLength) return new Uint8Array(current.buffer, 0, size);
+  if (size <= current.buffer.byteLength) {
+    const grown = new Uint8Array(current.buffer, 0, size);
+    grown.fill(0, current.byteLength, size);
+    return grown;
+  }
+  const capacity = Math.max(size, current.buffer.byteLength * 2, 64);
+  const grown = new Uint8Array(new ArrayBuffer(capacity), 0, size);
+  grown.set(current);
+  return grown;
 }
 
 function isOwnedFileName(name: string): name is OwnedFileName {
@@ -294,7 +329,7 @@ export class MemoryRepackedPort implements RepackedPort {
     const fault = this.#takeFault("truncate", name, label);
     if (fault?.outcome === "quota") throw new DOMException("injected arena quota exhaustion", "QuotaExceededError");
     if (fault?.outcome === "throw-before") throw new Error("injected truncate failure before effect");
-    this.#volatile.set(name, applyTruncate(this.#file(name), size));
+    this.#volatile.set(name, resizeVolatile(this.#file(name), size));
     this.#effects.push({ id: this.#nextEffectId++, file: name, kind: "truncate", size });
     if (fault?.outcome === "throw-after") throw new Error("injected truncate failure after effect");
   }
@@ -319,8 +354,14 @@ export class MemoryRepackedPort implements RepackedPort {
   }
 
   #recordWrite(name: OwnedFileName, at: number, source: Uint8Array): void {
+    // The effect log owns its own copy: it is replayed against a MATERIALIZED image in `terminate()`,
+    // long after the live buffer moved on.
     const data = clone(source);
-    this.#volatile.set(name, applyWrite(this.#file(name), at, data));
+    const current = this.#file(name);
+    const required = at + data.byteLength;
+    const target = required > current.byteLength ? resizeVolatile(current, required) : current;
+    target.set(data, at);
+    this.#volatile.set(name, target);
     this.#effects.push({ id: this.#nextEffectId++, file: name, kind: "write", at, data });
   }
 
