@@ -257,6 +257,7 @@ const consumer = defineEventConsumer({
     });
   },
   onDeadLetter: (report) => alert(report), // the runner ALSO warn-logs every one, unconditionally
+  onPoll: (report) => (lastPollAt = report.at), // fires after EVERY read — your liveness heartbeat
 });
 consumer.start();
 process.on("SIGTERM", () => void consumer.stop()); // graceful: no new reads, in-flight callbacks awaited
@@ -283,6 +284,14 @@ process.on("SIGTERM", () => void consumer.stop()); // graceful: no new reads, in
   no library-owned DLQ table. Requeue is a deliberate act (`requeueDeadLetter`), never automatic.
 - One runner hosts many streams (independent loops each), so a small deployment runs one process and a large
   one splits `streams` across processes. Construction is query-free: the first statement is the first poll.
+- **Answer the liveness probe from `onPoll`, never from the callback.** The callback fires only on delivered
+  batches, so on an idle queue it goes silent — a probe wired to it reports a perfectly healthy runner as
+  dead. `onPoll` fires after **every** read (productive or empty, and in the `drainOnce` mode too) with
+  `{ stream, delivered, empty, fault, at }`: record `at` and let the probe fail when it is older than a few
+  idle ceilings. `fault: true` marks a read that failed (queue/database fault, or an unreadable body) — the
+  loop backs off and carries on, so treat it as queue health, not liveness. It fires on the read, before
+  delivery, so a slow callback never delays the beat, and a hook that throws is caught and warn-logged once
+  per runner rather than taking the loop down.
 
 **3b. No long-lived compute at all? `drainOnce()` on a schedule.** On a platform whose only server-side unit
 is a per-request function (managed Supabase, say), there is nowhere to put `start()` — and the queue would
