@@ -28,6 +28,13 @@ export {
   type RepackedVfsOpenOptions,
 } from "./core/repacked-vfs";
 export { MemoryRepackedPort, type MemoryFault, type MemoryOperation } from "./core/memory-port";
+
+/**
+ * Several stores as ONE tree, joined at path prefixes: a durable OPFS root with a memory-backed
+ * mount at a chosen prefix, handed to the broker as a single store. Which prefix, which port, and
+ * whether a mount is durable are the STORAGE OWNER's declarations — nothing is inferred.
+ */
+export { MountedRepackedVfs, type MountedRepackedVfsOptions, type RepackedMount } from "./core/mounted-vfs";
 export type { RepackedFileHandle, RepackedPort, RepackedPortEntry } from "./core/port";
 
 /**
