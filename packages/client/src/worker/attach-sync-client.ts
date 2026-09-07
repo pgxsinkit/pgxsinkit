@@ -588,6 +588,11 @@ const MUTATION_RPC_OPS: ReadonlySet<RpcOp> = new Set<RpcOp>([
   // `rawExec` is WRITE-CAPABLE (its docstring: any write it issues stays local and will NOT converge), so a
   // dispatched rawExec with a lost response is `"unknown"` — retrying could double-apply a local write.
   "rawExec",
+  // `rawTransaction` for the same reason, and more sharply: its statement list exists to WRITE atomically.
+  // Atomicity says nothing about whether the transaction committed before the response was lost — it says the
+  // store is in exactly one of the two states, and a lost response cannot tell the tab which. So `"unknown"`,
+  // never `"not-dispatched"`: a blind repeat of a committed delete-then-insert would re-apply it.
+  "rawTransaction",
 ]);
 
 export interface AttachSyncClientOptions<TRegistry extends SyncTableRegistry> {
@@ -2344,6 +2349,12 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     // itself stays blocked (below); these route the raw statement over the RPC round-trip instead.
     rawQuery: (sql, params, options) => rpc<Results>("rawQuery", [sql, params, options]),
     rawExec: (sql, options) => rpc<Results[]>("rawExec", [sql, options]),
+    // The ATOMIC raw seam: the whole list crosses in ONE round trip, so the transaction lives entirely inside
+    // the worker — a tab can never hold one open across the bridge (and a relocation mid-list is impossible).
+    // An empty list is NOT short-circuited here: the engine's own `rawTransaction` already opens no
+    // transaction for it, and dispatching anyway keeps every lifecycle rule (detach refusal, relocation
+    // settlement) uniform across the surface. A lost response settles `"unknown"` — see MUTATION_RPC_OPS.
+    rawTransaction: (statements, options) => rpc<Results[]>("rawTransaction", [statements, options]),
     // The GUARDED raw-SQL read (ADR-0032 decision 4) — the seam the worker host dispatches `guardedQuery` to.
     // Unlike `rawQuery` (raw inspection, no guard), this routes to the worker's `guardedRawQuery`, so the read
     // gate + lazy-group guard run worker-side. Only `rowMode` crosses in the options (see the bridge executor).

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 
 import type { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
@@ -127,5 +127,77 @@ describe("createSyncClient raw inspection surface", () => {
     expect(Array.isArray(results)).toBe(true);
     expect(results.length).toBe(2);
     expect((results[1]?.rows[0] as { n?: number })?.n).toBe(1);
+  });
+});
+
+// The TRANSACTIONAL raw seam (the consumer's atomic LOCAL-ONLY write): several statements, one PGlite
+// transaction, all-or-nothing. Raw SQL strings are the surface under test here (tier ③ by definition — the
+// seam exists precisely to carry SQL pgxsinkit does not model), but the ASSERTIONS read back through
+// Drizzle, so the rollback proof is a typed one.
+describe("createSyncClient rawTransaction", () => {
+  async function bootClient(storeName: string): Promise<SyncClient<SyncTableRegistry>> {
+    const booted = await createSyncClient({
+      registry: bootRegistry(),
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
+      batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+      syncEnabled: false,
+      ...testStoreAcknowledgment(),
+      precreatedPglite: createClientPGlite(memoryStoreForTests(storeName)),
+    });
+    await booted.ready;
+    return booted;
+  }
+
+  it("runs the statements in ONE transaction and returns one Results per statement", async () => {
+    client = await bootClient("raw-transaction-commit");
+    const results = await client.rawTransaction([
+      {
+        sql: "insert into profile (id, name) values ($1, $2)",
+        params: ["33333333-3333-3333-3333-333333333333", "Grace"],
+      },
+      { sql: "select id, name from profile order by name" },
+    ]);
+
+    expect(results.length).toBe(2);
+    expect(results[1]?.rows).toEqual([{ id: "33333333-3333-3333-3333-333333333333", name: "Grace" }]);
+    // Committed: the row survives the transaction.
+    const db = drizzleOver(client.pglite as unknown as PGlite);
+    expect(await db.select().from(profileTable)).toEqual([
+      { id: "33333333-3333-3333-3333-333333333333", name: "Grace" },
+    ]);
+  });
+
+  it("ROLLS BACK the whole list when a later statement fails, and rejects", async () => {
+    client = await bootClient("raw-transaction-rollback");
+    let rejected = "";
+    try {
+      await client.rawTransaction([
+        {
+          sql: "insert into profile (id, name) values ($1, $2)",
+          params: ["44444444-4444-4444-4444-444444444444", "Ada"],
+        },
+        // Fails at execution (invalid uuid text), AFTER the first statement has run.
+        { sql: "insert into profile (id, name) values ('not-a-uuid', 'Boom')" },
+      ]);
+    } catch (error) {
+      rejected = (error as Error).message;
+    }
+    expect(rejected.length).toBeGreaterThan(0);
+
+    // All-or-nothing: the FIRST statement's row is gone too.
+    const db = drizzleOver(client.pglite as unknown as PGlite);
+    expect(await db.select().from(profileTable)).toEqual([]);
+  });
+
+  it("resolves [] for an empty list WITHOUT opening a transaction", async () => {
+    client = await bootClient("raw-transaction-empty");
+    const transaction = spyOn(client.pglite as unknown as PGlite, "transaction");
+    try {
+      expect(await client.rawTransaction([])).toEqual([]);
+      expect(transaction).not.toHaveBeenCalled();
+    } finally {
+      transaction.mockRestore();
+    }
   });
 });

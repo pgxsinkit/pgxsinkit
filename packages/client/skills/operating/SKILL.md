@@ -152,18 +152,18 @@ catch-up readiness cannot answer (use `groupReady` for catch-up, `ensureSynced` 
 and `dropReadCache` are NOT proxied (no tab-local store; a cache rebuild is engine-wide). `destroy()` IS
 proxied through a tab-side supervisor: it refuses peers with `StoreDestroyRefusedError`, refuses owed journal
 rows unless `{ force: true }`, retires/closes the engine, then runs a resumable deletion. The lazy lifecycle
-methods ARE proxied, but the engine is SHARED: `desync(tableKey)` from one tab reverts the consistency group
-for EVERY attached tab (the footgun). For an ephemeral delivery window use `discardEphemeral(tableKey)`
-instead — the scoped, multi-tab-safe finalize (drops the ephemeral rows, reverts to dormant, refuses a group
-with any persistent member), safe under a shared engine because an ephemeral window is per-delivery-session
-and single-consumer. The exception is the INSPECTION surface `rawQuery(sql, params)` / `rawExec(sql)` (debug
-pages, REPLs, ad-hoc counts): identical on both clients (executed in the worker on the attach client), it
-runs raw against the local store — bypassing the journal/overlay, any write staying local and never
-converging — so it is not an app-data read path. `replAdapter(client)` shapes it into the `{ query, exec }`
-duck `@electric-sql/pglite-repl` needs. A worker file can bake multiple role variants and pick per attach via
-`resolveRegistry(role)` + the tab's `role`, and can pass the schema prepare hooks
-`prepareLocalDbBeforeSchema` / `prepareLocalDbAfterSchema` (app migrations, indexes, views) — worker-entry,
-not attach, options, because a hook is a function and cannot cross the bridge.
+methods ARE proxied, but the engine is SHARED: `desync(tableKey)` from one tab reverts the consistency group for
+EVERY attached tab (the footgun). For an ephemeral delivery window use `discardEphemeral(tableKey)` instead —
+the scoped, multi-tab-safe finalize (drops the ephemeral rows, reverts to dormant, refuses a group with any
+persistent member), safe under a shared engine because an ephemeral window is per-delivery-session and
+single-consumer. The exception is the INSPECTION surface `rawQuery` / `rawExec` / `rawTransaction` (debug pages,
+REPLs, ad-hoc counts, and your own LOCAL-ONLY tables): identical on both clients (executed in the worker on the
+attach client), it runs raw against the local store — bypassing the journal/overlay, any write staying local and
+never converging — so it is not an app-data read path. `replAdapter(client)` shapes it into the
+`{ query, exec }` duck `@electric-sql/pglite-repl` needs. A worker file can bake multiple role variants and pick
+per attach via `resolveRegistry(role)` + the tab's `role`, and can pass the schema prepare hooks
+`prepareLocalDbBeforeSchema` / `prepareLocalDbAfterSchema` (app migrations, indexes, views) — worker-entry, not
+attach, options, because a hook is a function and cannot cross the bridge.
 
 **Identity switches do not wait for worker retirement.** Scope each worker identity by `storePath` with a
 distinct, stable SharedWorker name; multiple stores may remain alive concurrently. Detach/stop the old client

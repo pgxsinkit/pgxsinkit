@@ -329,6 +329,18 @@ live-rows hooks. `client.pglite` itself stays unavailable. `replAdapter(client)`
 the `{ query, exec }` duck `@electric-sql/pglite-repl`'s `<Repl>` expects, so a SQL REPL works unchanged in
 worker mode (each statement routed through the bridge).
 
+The same surface has an **atomic** form, `client.rawTransaction(statements)`: the statements
+(`{ sql, params? }`) run in order inside **one** local transaction and resolve one `Results` each, a throw
+rolls the whole list back and rejects, and an empty list resolves `[]` without opening a transaction. It is
+for the **local-only tables your app owns** and pgxsinkit does not manage — anything that must
+delete-then-insert without a torn intermediate state — and it is the only way to get that in worker mode,
+where the tab has no PGlite of its own: the whole list crosses in a single RPC, so the transaction opens and
+closes inside the worker and the behaviour is identical to the in-process client. Every inspection caveat
+still applies (journal and overlay bypassed, writes stay local and never converge), so it is never the write
+path for a synced table — that remains `mutate` / `tables.*`. Like the write ops, a lost response after a
+worker relocation settles `outcome: "unknown"`: atomicity means the store is in exactly one of two states,
+not that a tab which lost the answer can tell which.
+
 Everything the engine emits crosses on **one broadcast event channel**: status, per-group readiness,
 conflict, quarantine, reject, schema-change, and the debug rail — re-exposed by `attachSyncClient` as the
 same `onStatusChange`/`onConflict`/… callbacks the in-process client takes. The bridge serializes through

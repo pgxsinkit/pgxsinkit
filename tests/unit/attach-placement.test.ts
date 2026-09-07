@@ -270,11 +270,14 @@ describe("a relocation notice settles in-flight ops by outcome (invariant 5)", (
     });
     await client.ready;
 
-    // Three in-flight ops the SW never answers: a MUTATION (flush), a READ (rawQuery), and the WRITE-CAPABLE
-    // `rawExec` — its lost response is UNKNOWN too (a write it issued may have applied locally; never retry-safe).
+    // Four in-flight ops the SW never answers: a MUTATION (flush), a READ (rawQuery), and the two
+    // WRITE-CAPABLE raw ops — `rawExec` and `rawTransaction`. Both settle UNKNOWN: a write they issued may
+    // have applied locally, and for the transaction atomicity only says the store is in one of two states —
+    // not which one a tab that lost the response is looking at. Never retry-safe.
     let mutErr: unknown;
     let readErr: unknown;
     let execErr: unknown;
+    let txErr: unknown;
     const mut = client.flush().catch((error: unknown) => {
       mutErr = error;
     });
@@ -284,10 +287,13 @@ describe("a relocation notice settles in-flight ops by outcome (invariant 5)", (
     const exec = client.rawExec("insert into t values (1)").catch((error: unknown) => {
       execErr = error;
     });
+    const tx = client.rawTransaction([{ sql: "insert into t values ($1)", params: [1] }]).catch((error: unknown) => {
+      txErr = error;
+    });
     await settle(1);
 
     sw.sendControl({ type: "engine-retiring", identity: ID0 });
-    await Promise.all([mut, read, exec]);
+    await Promise.all([mut, read, exec, tx]);
 
     expect(mutErr).toBeInstanceOf(EngineRelocatedError);
     expect((mutErr as EngineRelocatedError).outcome).toBe("unknown");
@@ -295,6 +301,8 @@ describe("a relocation notice settles in-flight ops by outcome (invariant 5)", (
     expect((readErr as EngineRelocatedError).outcome).toBe("not-dispatched");
     expect(execErr).toBeInstanceOf(EngineRelocatedError);
     expect((execErr as EngineRelocatedError).outcome).toBe("unknown");
+    expect(txErr).toBeInstanceOf(EngineRelocatedError);
+    expect((txErr as EngineRelocatedError).outcome).toBe("unknown");
 
     await client.stop();
   });

@@ -63,6 +63,28 @@ acked row **retires without a synced echo** (nothing local ever converges for it
 and throws at enqueue on an optimistic route. Never seed a phantom base row to satisfy `update` for an
 invisible target — that row + its overlay would linger forever behind the echo barrier; use `updateBlind`.
 
+**Tables pgxsinkit does not manage are the one exception — and they never converge.** If your app owns a
+LOCAL-ONLY relation the registry knows nothing about (a definition cache, a personal dictionary, a scratch
+index), the write path above does not apply to it: there is no journal row, no overlay and no server to ack
+it. Write it through the inspection surface — `rawExec(sql)` for a one-off, and `rawTransaction(statements)`
+when several statements must land together:
+
+```ts
+// Atomic replace of a local-only cache entry. One PGlite transaction, all-or-nothing, one Results per
+// statement; a throw rolls the whole list back, and `[]` resolves without opening a transaction at all.
+const [, inserted] = await client.rawTransaction([
+  { sql: "delete from my_local_cache where key = $1", params: [key] },
+  { sql: "insert into my_local_cache (key, body) values ($1, $2) returning key", params: [key, body] },
+]);
+```
+
+It is identical on the in-process and worker-attached client — the whole list crosses the bridge in ONE RPC
+and the transaction opens and closes inside the worker — so a tab with no PGlite of its own gets the same
+atomicity, rather than atomicity depending on where the engine happens to live. What it writes stays local
+and will NEVER converge, so it is never a shortcut for a synced table: those still go through
+`mutate` / `tables.*`. (Create such tables in `prepareLocalDbBeforeSchema` / `prepareLocalDbAfterSchema`, and
+remember a `destroy()` or a backend change takes them with it.)
+
 ## The third lane: Event streams are NOT the write path
 
 High-volume, append-only client facts — "viewed this", interaction logs, review grades — are never edited,
