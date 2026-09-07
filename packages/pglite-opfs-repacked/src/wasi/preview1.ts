@@ -63,9 +63,16 @@
  * - **`fd_sync`/`fd_datasync`.** Both map to the broker's `fsync`, whose durability is STORE-WIDE: on
  *   success every byte written through the broker by ANY client before the call returned is
  *   recoverable. That is stronger than `fd_sync` promises, never weaker.
- * - **symlinks.** The store has none: `path_readlink` is `EINVAL` (POSIX's answer for a non-symlink),
- *   `path_symlink` and `path_link` are `ENOTSUP`, and `SYMLINK_FOLLOW` in a `path_filestat_get`
- *   lookup flag makes no difference (`stat` and `lstat` agree).
+ * - **symlinks.** The store HAS them, and `SYMLINK_FOLLOW` therefore means something everywhere it
+ *   appears: `path_filestat_get` picks `stat` or `lstat`, and a `path_open` without it sends
+ *   `O_NOFOLLOW` so a final component that IS a link answers `ELOOP` instead of opening its target.
+ *   `path_unlink_file` removes the LINK, never the target — that is the core's `unlink`, not
+ *   something added here. `path_symlink` writes a link and `path_readlink` reads one back, both
+ *   verbatim: the store takes ABSOLUTE targets only (see `validateSymlinkTarget`), so a relative
+ *   target is `EINVAL` rather than being silently reinterpreted, and an absolute one is a STORE
+ *   path — which is the same thing as a guest path whenever the preopen is the store root, the
+ *   default and the only arrangement a datadir uses. `path_link` remains `ENOTSUP`: the store has
+ *   no hard links.
  * - **`fd_advise`** is a no-op success. **`fd_filestat_set_times`/`path_filestat_set_times`** answer
  *   `ENOTSUP`: the broker exposes no `utimes` opcode, and inventing an adapter-local timestamp would
  *   make two threads on ONE store disagree about a file's mtime, which is exactly what this whole
@@ -81,7 +88,7 @@
  */
 
 import type { RepackedSyncClient } from "../broker/client";
-import { O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY } from "../broker/protocol";
+import { O_CREAT, O_EXCL, O_NOFOLLOW, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY } from "../broker/protocol";
 import type { BrokerStat } from "../broker/protocol";
 
 /**
@@ -97,6 +104,7 @@ export const WASI_ERRNO = {
   INVAL: 28,
   IO: 29,
   ISDIR: 31,
+  LOOP: 32,
   NOENT: 44,
   NOSYS: 52,
   NOTDIR: 54,
@@ -448,6 +456,11 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
   }
 
   // ---- stat ----------------------------------------------------------------
+  function filetypeOf(kind: BrokerStat["kind"]): number {
+    if (kind === "directory") return WASI_FILETYPE.DIRECTORY;
+    return kind === "symlink" ? WASI_FILETYPE.SYMBOLIC_LINK : WASI_FILETYPE.REGULAR_FILE;
+  }
+
   function writeFilestat(ptr: number, path: string, stat: BrokerStat): void {
     // Zero first: the struct has padding the guest is entitled to see as zero, and a reused stack
     // slot would otherwise hand it whatever the last call left there.
@@ -457,8 +470,9 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
     const times = [stat.atimeMs, stat.mtimeMs, stat.ctimeMs].map((ms) => ms * NS_PER_MS);
     data.setBigUint64(ptr + 0, 1n, true); // dev
     data.setBigUint64(ptr + 8, inodeOf(path), true); // ino
-    data.setUint8(ptr + 16, isDirectory ? WASI_FILETYPE.DIRECTORY : WASI_FILETYPE.REGULAR_FILE);
+    data.setUint8(ptr + 16, filetypeOf(stat.kind));
     data.setBigUint64(ptr + 24, 1n, true); // nlink
+    // A link's size is its target's byte length, exactly as POSIX `lstat` reports it.
     data.setBigUint64(ptr + 32, isDirectory ? DIRECTORY_SIZE : stat.size, true);
     data.setBigUint64(ptr + 40, times[0]!, true); // atim
     data.setBigUint64(ptr + 48, times[1]!, true); // mtim
@@ -721,13 +735,11 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
         }
         let filetype = listing.filetypes.get(name);
         if (filetype === undefined) {
+          // `lstat`, so a link is reported as one: a guest that walks a directory to decide what to
+          // recurse into must see the link rather than whatever it points at.
           const child = client.lstat(entry.path === "/" ? `/${name}` : `${entry.path}/${name}`);
           filetype =
-            child.errno !== 0 || child.stat === undefined
-              ? WASI_FILETYPE.UNKNOWN
-              : child.stat.kind === "directory"
-                ? WASI_FILETYPE.DIRECTORY
-                : WASI_FILETYPE.REGULAR_FILE;
+            child.errno !== 0 || child.stat === undefined ? WASI_FILETYPE.UNKNOWN : filetypeOf(child.stat.kind);
           listing.filetypes.set(name, filetype);
         }
         const at = bufPtr + used;
@@ -779,9 +791,10 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
       return entryOf(fd) === undefined ? WASI_ERRNO.BADF : WASI_ERRNO.SUCCESS;
     },
 
-    path_open(dirfd, _dirflags, pathPtr, pathLen, oflags, rightsBase, rightsInheriting, fdflags, resultPtr) {
+    path_open(dirfd, dirflags, pathPtr, pathLen, oflags, rightsBase, rightsInheriting, fdflags, resultPtr) {
       const path = resolve(dirfd, pathPtr, pathLen);
       if (path === undefined) return WASI_ERRNO.BADF;
+      const followLinks = (dirflags & LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
       const base = toBigInt(rightsBase);
       const inheriting = toBigInt(rightsInheriting);
       const wantsRead = (base & RIGHTS_FD_READ) !== 0n;
@@ -795,8 +808,10 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
       const writable = wantsWrite;
 
       const openDirectory = (): number => {
-        const stat = client.stat(path);
+        const stat = followLinks ? client.stat(path) : client.lstat(path);
         if (stat.errno !== 0 || stat.stat === undefined) return stat.errno || WASI_ERRNO.IO;
+        // Without SYMLINK_FOLLOW a final component that IS a link must not be opened through.
+        if (stat.stat.kind === "symlink") return WASI_ERRNO.LOOP;
         if (stat.stat.kind !== "directory") return WASI_ERRNO.NOTDIR;
         if (create && exclusive) return WASI_ERRNO.EXIST;
         const fd = allocate({
@@ -827,6 +842,8 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
       if (create) flags |= O_CREAT;
       if (exclusive) flags |= O_EXCL;
       if (truncate) flags |= O_TRUNC;
+      // The broker follows a final link by default; the absent lookup flag is what turns that off.
+      if (!followLinks) flags |= O_NOFOLLOW;
       // O_APPEND is never sent: it is emulated on this side so the adapter's offset stays exact and
       // `fd_fdstat_set_flags` can add or remove APPEND on an already-open descriptor.
 
@@ -856,8 +873,8 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
     path_filestat_get(dirfd, flags, pathPtr, pathLen, resultPtr) {
       const path = resolve(dirfd, pathPtr, pathLen);
       if (path === undefined) return WASI_ERRNO.BADF;
-      // The store has no symbolic links, so following or not following one is the same query; both
-      // spellings exist so a guest that passes either gets the answer it expects.
+      // The split that makes `std::fs::symlink_metadata` differ from `std::fs::metadata`: without
+      // the flag the LINK is reported, with it the thing it points at.
       const follow = (flags & LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
       const stat = follow ? client.stat(path) : client.lstat(path);
       if (stat.errno !== 0 || stat.stat === undefined) return stat.errno || WASI_ERRNO.IO;
@@ -909,17 +926,30 @@ export function createWasiPreview1Fs(options: WasiPreview1FsOptions): WasiPrevie
       return WASI_ERRNO.SUCCESS;
     },
 
-    path_readlink(dirfd, pathPtr, pathLen, _bufPtr, _bufLen, _bufusedPtr) {
+    path_readlink(dirfd, pathPtr, pathLen, bufPtr, bufLen, bufusedPtr) {
       const path = resolve(dirfd, pathPtr, pathLen);
       if (path === undefined) return WASI_ERRNO.BADF;
-      // The store holds no symbolic links, so every existing path is not one: EINVAL is what POSIX
-      // `readlink` answers for a non-symlink, and ENOENT still has to win when nothing is there.
-      const stat = client.lstat(path);
-      return stat.errno !== 0 ? stat.errno : WASI_ERRNO.INVAL;
+      // EINVAL for a path that is not a link, ENOENT for one that is not there — both come from the
+      // store, whose errnos already ARE these numbers.
+      const link = client.readlink(path);
+      if (link.errno !== 0 || link.target === undefined) return link.errno || WASI_ERRNO.IO;
+      const encoded = textEncoder.encode(link.target);
+      // preview1 writes no terminator and truncates silently; `bufused === buflen` is how a caller
+      // learns its buffer was too small, so a short buffer must NOT be an error here.
+      const copied = Math.min(encoded.byteLength, bufLen);
+      if (copied > 0) bytes().set(encoded.subarray(0, copied), bufPtr);
+      view().setUint32(bufusedPtr, copied, true);
+      return WASI_ERRNO.SUCCESS;
     },
 
-    path_symlink(_oldPtr, _oldLen, dirfd, _newPtr, _newLen) {
-      return entryOf(dirfd)?.isDir === true ? WASI_ERRNO.NOTSUP : WASI_ERRNO.BADF;
+    path_symlink(oldPtr, oldLen, dirfd, newPtr, newLen) {
+      const path = resolve(dirfd, newPtr, newLen);
+      if (path === undefined) return WASI_ERRNO.BADF;
+      // The TARGET is the link's contents, not a path to walk: it is read verbatim (bar a trailing
+      // NUL from a fixed-size guest buffer) and stored as given. The store takes absolute targets
+      // only and answers EINVAL for anything else.
+      const target = readGuestString(oldPtr, oldLen).replace(/\0+$/u, "");
+      return client.symlink(target, path).errno;
     },
 
     path_link(oldDirfd, _oldFlags, _oldPtr, _oldLen, newDirfd, _newPtr, _newLen) {

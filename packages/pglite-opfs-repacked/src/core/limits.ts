@@ -1,6 +1,13 @@
 import { StoreLimitError } from "./errors";
 
-export const FORMAT_VERSION = 1;
+/**
+ * The on-disk format identity. Bumped to 2 by the symlink entry kind: a format-1 reader meets an
+ * inode kind and a transaction record it cannot decode, and the recreate-only version policy
+ * (ADR-0048 §3) is the store's ONLY evolution mechanism — one build reads and writes exactly one
+ * version, and a store identifying another one is rejected with `StoreRecreationRequiredError`
+ * before any content mutation. There is no migration and never will be.
+ */
+export const FORMAT_VERSION = 2;
 export const LIMITS_PROFILE_VERSION = 1;
 export const ARENA_HEADER_BYTES = 8192;
 export const MIN_EXTENT_BYTES = 8192;
@@ -9,6 +16,8 @@ export const DEFAULT_EXTENT_BYTES = 64 * 1024;
 export const MAX_COMPONENT_BYTES = 255;
 export const MAX_PATH_BYTES = 1024;
 export const MAX_PATH_DEPTH = 32;
+/** How many symbolic links one path resolution may traverse before it reports `ELOOP`. */
+export const MAX_SYMLINK_HOPS = 32;
 export const MAX_INODES = 65_536;
 export const MAX_EXTENTS_PER_INODE = 2 ** 20;
 export const MAX_TOTAL_EXTENTS = 2 ** 22;

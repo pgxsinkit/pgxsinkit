@@ -10,13 +10,23 @@ import {
   MAX_INODES,
   MAX_METADATA_BASE_READER_BYTES,
   MAX_METADATA_BASE_WRITER_BYTES,
+  MAX_PATH_BYTES,
   MAX_TOTAL_EXTENTS,
   checkedU64,
   validateExtentSize,
 } from "./limits";
-import { validatePathComponent } from "./path";
+import { validatePathComponent, validateSymlinkTarget } from "./path";
 import { IndexedExtentSet, estimateTxnPayloadBytes, validateState } from "./state-machine";
-import type { DirectoryInode, ExtentRun, FileInode, Inode, MetadataFile, TxnRecord, VfsState } from "./state-machine";
+import type {
+  DirectoryInode,
+  ExtentRun,
+  FileInode,
+  Inode,
+  MetadataFile,
+  SymlinkInode,
+  TxnRecord,
+  VfsState,
+} from "./state-machine";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -102,6 +112,12 @@ class BinaryWriter {
 
   string(value: string): void {
     validatePathComponent(value);
+    this.validatedString(textEncoder.encode(value));
+  }
+
+  /** A symbolic link's target: a whole PATH, so it is bounded by `MAX_PATH_BYTES`, not by a name. */
+  symlinkTarget(value: string): void {
+    validateSymlinkTarget(value);
     this.validatedString(textEncoder.encode(value));
   }
 
@@ -193,6 +209,29 @@ class BinaryReader {
       validatePathComponent(value);
     } catch (cause) {
       throw new CorruptStoreError(`encoded path component is invalid: ${String(cause)}`, { cause });
+    }
+    return value;
+  }
+
+  /** The reader half of {@link BinaryWriter.symlinkTarget}. */
+  symlinkTarget(): string {
+    const length = this.u16();
+    if (length === 0 || length > MAX_PATH_BYTES) {
+      throw new CorruptStoreError("encoded symlink target length is invalid");
+    }
+    let value: string;
+    try {
+      value = textDecoder.decode(this.raw(length));
+    } catch (cause) {
+      throw new CorruptStoreError("encoded symlink target is not valid UTF-8", { cause });
+    }
+    if (textEncoder.encode(value).byteLength !== length) {
+      throw new CorruptStoreError("encoded symlink target is not canonical UTF-8");
+    }
+    try {
+      validateSymlinkTarget(value);
+    } catch (cause) {
+      throw new CorruptStoreError(`encoded symlink target is invalid: ${String(cause)}`, { cause });
     }
     return value;
   }
@@ -334,9 +373,15 @@ function sortIfNeeded<Value>(values: Value[], compare: (left: Value, right: Valu
   return values;
 }
 
+const INODE_KIND_DIRECTORY = 0;
+const INODE_KIND_FILE = 1;
+const INODE_KIND_SYMLINK = 2;
+
 function writeInode(writer: BinaryWriter, inode: Inode): void {
   writer.validatedU64(inode.id);
-  writer.u8(inode.kind === "directory" ? 0 : 1);
+  writer.u8(
+    inode.kind === "directory" ? INODE_KIND_DIRECTORY : inode.kind === "file" ? INODE_KIND_FILE : INODE_KIND_SYMLINK,
+  );
   writer.u32(inode.mode);
   writer.validatedU64(inode.atimeMs);
   writer.validatedU64(inode.mtimeMs);
@@ -348,6 +393,8 @@ function writeInode(writer: BinaryWriter, inode: Inode): void {
       writer.validatedString(textEncoder.encode(name));
       writer.validatedU64(inodeId);
     }
+  } else if (inode.kind === "symlink") {
+    writer.symlinkTarget(inode.target);
   } else {
     writer.validatedU64(inode.size);
     writer.u32(inode.extents.length);
@@ -474,7 +521,7 @@ function readInode(reader: BinaryReader): Inode {
   const atimeMs = reader.u64();
   const mtimeMs = reader.u64();
   const ctimeMs = reader.u64();
-  if (kind === 0) {
+  if (kind === INODE_KIND_DIRECTORY) {
     const childCount = readBoundedCount(reader, MAX_INODES, "directory child");
     const children = new Map<string, bigint>();
     let previousName: string | undefined;
@@ -489,12 +536,24 @@ function readInode(reader: BinaryReader): Inode {
     const inode: DirectoryInode = { id, kind: "directory", mode, atimeMs, mtimeMs, ctimeMs, children };
     return inode;
   }
-  if (kind === 1) {
+  if (kind === INODE_KIND_FILE) {
     const size = reader.u64();
     const extentCount = readBoundedCount(reader, MAX_EXTENTS_PER_INODE, "file extent");
     const extents: bigint[] = [];
     for (let index = 0; index < extentCount; index += 1) extents.push(reader.u64());
     const inode: FileInode = { id, kind: "file", mode, atimeMs, mtimeMs, ctimeMs, size, extents };
+    return inode;
+  }
+  if (kind === INODE_KIND_SYMLINK) {
+    const inode: SymlinkInode = {
+      id,
+      kind: "symlink",
+      mode,
+      atimeMs,
+      mtimeMs,
+      ctimeMs,
+      target: reader.symlinkTarget(),
+    };
     return inode;
   }
   throw new CorruptStoreError("inode type is invalid");
@@ -637,6 +696,7 @@ const RECORD_CODES: Record<TxnRecord["kind"], number> = {
   removeDirectory: 7,
   rename: 8,
   reserveQuarantine: 9,
+  createSymlink: 10,
 };
 
 function encodeTxnRecord(record: TxnRecord): Uint8Array {
@@ -698,6 +758,16 @@ function encodeTxnRecord(record: TxnRecord): Uint8Array {
       writer.u64(record.destinationParentId);
       writer.string(record.destinationName);
       writer.u64(record.timestampMs);
+      break;
+    case "createSymlink":
+      writer.u64(record.parentId);
+      writer.string(record.name);
+      writer.u64(record.inodeId);
+      writer.u32(record.mode);
+      writer.u64(record.atimeMs);
+      writer.u64(record.mtimeMs);
+      writer.u64(record.ctimeMs);
+      writer.symlinkTarget(record.target);
       break;
     case "reserveQuarantine":
       writeExtentRuns(writer, record.extents);
@@ -791,6 +861,19 @@ function decodeTxnRecord(bytes: Uint8Array): TxnRecord {
       break;
     case 9:
       record = { kind: "reserveQuarantine", extents: readExtentRuns(reader) };
+      break;
+    case 10:
+      record = {
+        kind: "createSymlink",
+        parentId: reader.u64(),
+        name: reader.string(),
+        inodeId: reader.u64(),
+        mode: reader.u32(),
+        atimeMs: reader.u64(),
+        mtimeMs: reader.u64(),
+        ctimeMs: reader.u64(),
+        target: reader.symlinkTarget(),
+      };
       break;
     default:
       throw new CorruptStoreError("transaction record type is invalid");

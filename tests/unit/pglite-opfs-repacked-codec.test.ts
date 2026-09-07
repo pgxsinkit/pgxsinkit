@@ -29,7 +29,12 @@ import {
   StoreLimitError,
   StoreRecreationRequiredError,
 } from "../../packages/pglite-opfs-repacked/src/core/errors";
-import { ARENA_HEADER_BYTES, MAX_COMPONENT_BYTES } from "../../packages/pglite-opfs-repacked/src/core/limits";
+import {
+  ARENA_HEADER_BYTES,
+  FORMAT_VERSION,
+  LIMITS_PROFILE_VERSION,
+  MAX_COMPONENT_BYTES,
+} from "../../packages/pglite-opfs-repacked/src/core/limits";
 import {
   applyTxn,
   createInitialState,
@@ -112,20 +117,27 @@ function buildState(extentSize: number): VfsState {
   return state;
 }
 
-describe.each(EXTENT_SIZES)("opfs-repacked format-version-1 codecs at extent size %i", (extentSize) => {
+/** Any version this build is not: the recreate-only policy makes every other one unreadable. */
+const OTHER_FORMAT_VERSION = FORMAT_VERSION + 1;
+
+describe.each(EXTENT_SIZES)("opfs-repacked store-format codecs at extent size %i", (extentSize) => {
   test("arena identity is canonical", () => {
     const bytes = encodeArenaHeader({ extentSize });
     expect(bytes.byteLength).toBe(ARENA_HEADER_BYTES);
-    expect(decodeArenaHeader(bytes)).toEqual({ extentSize, limitsProfileVersion: 1, formatVersion: 1 });
+    expect(decodeArenaHeader(bytes)).toEqual({
+      extentSize,
+      limitsProfileVersion: LIMITS_PROFILE_VERSION,
+      formatVersion: FORMAT_VERSION,
+    });
     expect(decodeArenaHeader(bytes, extentSize)).toEqual({
       extentSize,
-      limitsProfileVersion: 1,
-      formatVersion: 1,
+      limitsProfileVersion: LIMITS_PROFILE_VERSION,
+      formatVersion: FORMAT_VERSION,
     });
     expect(() => decodeArenaHeader(bytes, extentSize === 8192 ? 64 * 1024 : 8192)).toThrow(ExtentSizeMismatchError);
 
     const wrongVersion = bytes.slice();
-    new DataView(wrongVersion.buffer).setUint32(8, 2, true);
+    new DataView(wrongVersion.buffer).setUint32(8, OTHER_FORMAT_VERSION, true);
     rewriteArenaChecksum(wrongVersion);
     expect(() => decodeArenaHeader(wrongVersion)).toThrow(StoreRecreationRequiredError);
 
@@ -267,7 +279,7 @@ describe.each(EXTENT_SIZES)("opfs-repacked format-version-1 codecs at extent siz
     const record = planMkdir(createInitialState(extentSize), "/a", { nowMs: 1n }).record;
     const frame = encodeTxnFrame({ generation: 1n, sequence: 1n, record });
     const wrongVersion = frame.slice();
-    new DataView(wrongVersion.buffer).setUint32(8, 2, true);
+    new DataView(wrongVersion.buffer).setUint32(8, OTHER_FORMAT_VERSION, true);
     expect(() => decodeTxnFrame(wrongVersion)).toThrow(CorruptStoreError);
     expect(() => decodeTxnFrame(wrongVersion)).not.toThrow(StoreRecreationRequiredError);
   });
@@ -420,7 +432,7 @@ describe.each(EXTENT_SIZES)("opfs-repacked format-version-1 codecs at extent siz
 
     const wrongVersion = base.slice();
     const wrongVersionView = new DataView(wrongVersion.buffer);
-    wrongVersionView.setUint32(8, 2, true);
+    wrongVersionView.setUint32(8, OTHER_FORMAT_VERSION, true);
     wrongVersionView.setBigUint64(16, 0n, true);
     wrongVersionView.setUint32(24, 1, true);
     wrongVersionView.setUint8(28, 255);

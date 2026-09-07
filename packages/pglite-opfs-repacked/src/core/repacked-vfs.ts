@@ -22,6 +22,7 @@ import {
 } from "./limits";
 import { openMetadataStore } from "./metadata-store";
 import type { OpenedMetadataStore } from "./metadata-store";
+import { encodedUtf8Length } from "./path";
 import { PortWriteError, arenaByteOffset, metadataFileName, truncateChecked, writeExact } from "./port";
 import type { RepackedFileHandle, RepackedPort } from "./port";
 import {
@@ -37,12 +38,22 @@ import {
   planResizeFile,
   planResizeFileForInode,
   planRmdir,
+  planSymlink,
   planUnlink,
   planUtimes,
   prepareTxnProjection,
   projectRepackForActivation,
+  resolveLinks,
 } from "./state-machine";
-import type { ExtentRun, FileInode, OrphanRecord, PreparedTxnProjection, TxnRecord } from "./state-machine";
+import type {
+  ExtentRun,
+  FileInode,
+  Inode,
+  OrphanRecord,
+  PreparedTxnProjection,
+  SymlinkInode,
+  TxnRecord,
+} from "./state-machine";
 
 interface Descriptor {
   inodeId: bigint;
@@ -121,7 +132,11 @@ export interface RepackedVfsOpenOptions {
 }
 
 export interface RepackedStat {
-  readonly kind: "directory" | "file";
+  /**
+   * `symlink` is only ever reported by `lstat` — `stat` follows the link and reports its target.
+   * A link's `size` is the UTF-8 byte length of its target, exactly as POSIX `lstat` reports it.
+   */
+  readonly kind: "directory" | "file" | "symlink";
   readonly mode: number;
   readonly size: bigint;
   readonly atimeMs: bigint;
@@ -159,7 +174,56 @@ export interface RepackedVfsMetrics {
   }>;
 }
 
-export class RepackedVfs {
+/**
+ * The file surface of a repacked store, as a TYPE.
+ *
+ * `RepackedVfs` is the one-store implementation; {@link MountedRepackedVfs} is a composite of
+ * several. Everything that takes a store — the sync broker above all — takes this, so a host can
+ * hand it either without the two knowing about each other.
+ */
+export interface RepackedFileSystem {
+  strictSync(): void;
+  assertHealthy(): void;
+  fail(cause: unknown): never;
+  metrics(): RepackedVfsMetrics;
+  repack(reason?: RepackReason): void;
+  runScheduledRepack(nowMs?: number): boolean;
+  /** The link-free absolute path `path` names; `follow` governs the final component only. */
+  resolvePath(path: string, follow?: boolean): string;
+  stat(path: string): RepackedStat;
+  lstat(path: string): RepackedStat;
+  symlink(target: string, path: string, nowMs: bigint): void;
+  readlink(path: string): string;
+  readdir(path: string): string[];
+  mkdir(path: string, options: { recursive?: boolean; mode?: number; nowMs: bigint }): void;
+  writeFile(
+    path: string,
+    data: string | Uint8Array,
+    options: { encoding?: string; mode?: number; flag?: string; nowMs: bigint },
+  ): void;
+  readFile(path: string): Uint8Array;
+  truncate(path: string, size: bigint, nowMs: bigint): void;
+  open(path: string, flags?: string, mode?: number, nowMs?: bigint): number;
+  fstat(fd: number): RepackedStat;
+  read(fd: number, buffer: Uint8Array, offset: number, length: number, position?: bigint): number;
+  write(
+    fd: number,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: bigint | undefined,
+    nowMs: bigint,
+  ): number;
+  chmod(path: string, mode: number, nowMs: bigint): void;
+  utimes(path: string, atimeMs: bigint, mtimeMs: bigint, ctimeMs: bigint): void;
+  unlink(path: string, nowMs: bigint): void;
+  rmdir(path: string, nowMs: bigint): void;
+  rename(oldPath: string, newPath: string, nowMs: bigint): void;
+  close(): void;
+  close(fd: number): void;
+}
+
+export class RepackedVfs implements RepackedFileSystem {
   readonly #store: OpenedMetadataStore;
   #status: "open" | "failed" | "closed" = "open";
   #failure: unknown;
@@ -343,34 +407,66 @@ export class RepackedVfs {
     return true;
   }
 
-  stat(path: string): RepackedStat {
-    return this.lstat(path);
+  /**
+   * The link-free absolute path `path` names, without touching anything. A composite VFS resolves
+   * across a mount boundary with it: this store answers for the part of the path it holds, stops at
+   * the first component it does not have, and carries the rest through verbatim.
+   */
+  resolvePath(path: string, follow = true): string {
+    this.#assertOpen();
+    return this.#resolve(path, follow);
   }
 
-  lstat(path: string): RepackedStat {
+  /** Follows a symbolic link on the final component; every intermediate link is always followed. */
+  stat(requestPath: string): RepackedStat {
     this.#assertOpen();
+    return this.#statValue(getInodeAtPath(this.#store.state, this.#resolve(requestPath, true)));
+  }
+
+  /** Reports the LINK itself when the final component is one. */
+  lstat(requestPath: string): RepackedStat {
+    this.#assertOpen();
+    return this.#statValue(getInodeAtPath(this.#store.state, this.#resolve(requestPath, false)));
+  }
+
+  /** Create a symbolic link at `path` pointing at the ABSOLUTE `target`. The target is not read. */
+  symlink(target: string, requestPath: string, nowMs: bigint): void {
+    this.#assertOpen();
+    const path = this.#resolve(requestPath, false);
+    this.#commit(planSymlink(this.#store.state, path, target, { nowMs }).record);
+  }
+
+  /** The target of the symbolic link at `path`. `EINVAL` when the path is not a link. */
+  readlink(requestPath: string): string {
+    this.#assertOpen();
+    const path = this.#resolve(requestPath, false);
     const inode = getInodeAtPath(this.#store.state, path);
-    return this.#statValue(inode);
+    if (inode.kind !== "symlink") throw new FsError("EINVAL", "path is not a symbolic link", { path });
+    return inode.target;
   }
 
-  readdir(path: string): string[] {
+  readdir(requestPath: string): string[] {
     this.#assertOpen();
+    const path = this.#resolve(requestPath, true);
     const inode = getInodeAtPath(this.#store.state, path);
     if (inode.kind !== "directory") throw new FsError("ENOTDIR", "path is not a directory", { path });
     return [...inode.children.keys()].sort();
   }
 
-  mkdir(path: string, options: { recursive?: boolean; mode?: number; nowMs: bigint }): void {
+  mkdir(requestPath: string, options: { recursive?: boolean; mode?: number; nowMs: bigint }): void {
     this.#assertOpen();
-    this.#commit(planMkdir(this.#store.state, path, options).record);
+    // The final component is the directory being CREATED, so it is never followed; a link already
+    // sitting there is `EEXIST`, exactly as POSIX `mkdir` reports it.
+    this.#commit(planMkdir(this.#store.state, this.#resolve(requestPath, false), options).record);
   }
 
   writeFile(
-    path: string,
+    requestPath: string,
     data: string | Uint8Array,
     options: { encoding?: string; mode?: number; flag?: string; nowMs: bigint },
   ): void {
     this.#assertOpen();
+    const path = this.#resolve(requestPath, true);
     const flags = this.#parseFlags(options.flag ?? "w");
     if (!flags.writable)
       throw new FsError("EBADF", "writeFile flags are not writable", { operation: "writeFile", path });
@@ -466,8 +562,9 @@ export class RepackedVfs {
     if (progress.error !== undefined) throw progress.error;
   }
 
-  readFile(path: string): Uint8Array {
+  readFile(requestPath: string): Uint8Array {
     this.#assertOpen();
+    const path = this.#resolve(requestPath, true);
     const inode = getInodeAtPath(this.#store.state, path);
     if (inode.kind !== "file") throw new FsError("EISDIR", "path is a directory", { path });
     const output = new Uint8Array(checkedSafeNumber(inode.size, "file read size"));
@@ -475,8 +572,9 @@ export class RepackedVfs {
     return output;
   }
 
-  truncate(path: string, size: bigint, nowMs: bigint): void {
+  truncate(requestPath: string, size: bigint, nowMs: bigint): void {
     this.#assertOpen();
+    const path = this.#resolve(requestPath, true);
     let inode = getInodeAtPath(this.#store.state, path);
     if (inode.kind !== "file") throw new FsError("EISDIR", "path is a directory", { path });
     if (size === inode.size) return;
@@ -520,8 +618,9 @@ export class RepackedVfs {
     this.#commit(plan.record, preparedCommit);
   }
 
-  open(path: string, flags = "r", mode = 0o100666, nowMs = 0n): number {
+  open(requestPath: string, flags = "r", mode = 0o100666, nowMs = 0n): number {
     this.#assertOpen();
+    const path = this.#resolve(requestPath, true);
     const parsed = this.#parseFlags(flags);
     let inode: FileInode;
     try {
@@ -641,35 +740,44 @@ export class RepackedVfs {
     return progress.bytes;
   }
 
-  chmod(path: string, mode: number, nowMs: bigint): void {
+  chmod(requestPath: string, mode: number, nowMs: bigint): void {
     this.#assertOpen();
-    this.#commit(planChmod(this.#store.state, path, mode, nowMs).record);
+    this.#commit(planChmod(this.#store.state, this.#resolve(requestPath, true), mode, nowMs).record);
   }
 
-  utimes(path: string, atimeMs: bigint, mtimeMs: bigint, ctimeMs: bigint): void {
+  utimes(requestPath: string, atimeMs: bigint, mtimeMs: bigint, ctimeMs: bigint): void {
     this.#assertOpen();
+    const path = this.#resolve(requestPath, true);
     this.#commit(planUtimes(this.#store.state, path, atimeMs, mtimeMs, ctimeMs).record);
   }
 
-  unlink(path: string, nowMs: bigint): void {
+  /** Removes a file or a SYMBOLIC LINK. The final component is never followed. */
+  unlink(requestPath: string, nowMs: bigint): void {
     this.#assertOpen();
+    const path = this.#resolve(requestPath, false);
     const inode = getInodeAtPath(this.#store.state, path);
-    if (inode.kind !== "file") throw new FsError("EISDIR", "path is a directory", { path });
-    const affected = [...this.#descriptors.values()].filter(
-      (descriptor) => descriptor.orphan === undefined && descriptor.inodeId === inode.id,
-    );
-    const orphan = affected.length > 0 ? makeOrphanRecord(inode) : undefined;
+    if (inode.kind === "directory") throw new FsError("EISDIR", "path is a directory", { path });
+    const affected =
+      inode.kind === "file"
+        ? [...this.#descriptors.values()].filter(
+            (descriptor) => descriptor.orphan === undefined && descriptor.inodeId === inode.id,
+          )
+        : [];
+    const orphan = inode.kind === "file" && affected.length > 0 ? makeOrphanRecord(inode) : undefined;
     this.#commit(planUnlink(this.#store.state, path, nowMs).record);
     if (orphan !== undefined) for (const descriptor of affected) descriptor.orphan = orphan;
   }
 
-  rmdir(path: string, nowMs: bigint): void {
+  rmdir(requestPath: string, nowMs: bigint): void {
     this.#assertOpen();
-    this.#commit(planRmdir(this.#store.state, path, nowMs).record);
+    this.#commit(planRmdir(this.#store.state, this.#resolve(requestPath, false), nowMs).record);
   }
 
-  rename(oldPath: string, newPath: string, nowMs: bigint): void {
+  /** Renames the entry itself: a symbolic link moves as a link, and its target is never followed. */
+  rename(oldRequestPath: string, newRequestPath: string, nowMs: bigint): void {
     this.#assertOpen();
+    const oldPath = this.#resolve(oldRequestPath, false);
+    const newPath = this.#resolve(newRequestPath, false);
     let destination: FileInode | undefined;
     try {
       const inode = getInodeAtPath(this.#store.state, newPath);
@@ -1121,23 +1229,28 @@ export class RepackedVfs {
     return descriptor;
   }
 
+  /** Every path entering the store is resolved here exactly once; planners then see no links. */
+  #resolve(path: string, follow: boolean): string {
+    return resolveLinks(this.#store.state, path, follow);
+  }
+
   #linkedFile(inodeId: bigint): FileInode {
     const inode = this.#store.state.inodes.get(inodeId);
     if (inode?.kind !== "file") throw new FsError("EBADF", "descriptor no longer references a file");
     return inode;
   }
 
-  #statValue(
-    inode:
-      | FileInode
-      | OrphanRecord
-      | { kind: "directory"; mode: number; atimeMs: bigint; mtimeMs: bigint; ctimeMs: bigint },
-  ): RepackedStat {
+  #statValue(inode: Inode | OrphanRecord): RepackedStat {
     const kind = "kind" in inode ? inode.kind : "file";
     return {
       kind,
       mode: inode.mode,
-      size: kind === "file" ? (inode as FileInode | OrphanRecord).size : 0n,
+      size:
+        kind === "file"
+          ? (inode as FileInode | OrphanRecord).size
+          : kind === "symlink"
+            ? BigInt(encodedUtf8Length((inode as SymlinkInode).target))
+            : 0n,
       atimeMs: inode.atimeMs,
       mtimeMs: inode.mtimeMs,
       ctimeMs: inode.ctimeMs,

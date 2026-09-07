@@ -312,7 +312,7 @@ describe("opfs-repacked WASI preview1 files", () => {
     expect(errors).toEqual([]);
   });
 
-  test("the symlink surface is answered without pretending the store has any", () => {
+  test("readlink rejects a non-link, hard links stay unsupported, and utimes is never invented", () => {
     memory.reset();
     const file = open("/not-a-link", OFLAGS_CREAT | OFLAGS_TRUNC);
     expect(wasi.fd_close(file.fd)).toBe(WASI_ERRNO.SUCCESS);
@@ -323,9 +323,9 @@ describe("opfs-repacked WASI preview1 files", () => {
     // EINVAL for an existing non-symlink is POSIX's own answer; ENOENT still has to win.
     expect(wasi.path_readlink(3, path.ptr, path.len, buf, 64, used)).toBe(WASI_ERRNO.INVAL);
     expect(wasi.path_readlink(3, missing.ptr, missing.len, buf, 64, used)).toBe(WASI_ERRNO.NOENT);
-    expect(wasi.path_symlink(path.ptr, path.len, 3, missing.ptr, missing.len)).toBe(WASI_ERRNO.NOTSUP);
+    // The store has no hard links and no per-file timestamps of its own; both stay honest refusals
+    // even now that SYMBOLIC links are real (see the symlink suite).
     expect(wasi.path_link(3, 0, path.ptr, path.len, 3, missing.ptr, missing.len)).toBe(WASI_ERRNO.NOTSUP);
-    // The store keeps no utimes, and the adapter refuses to invent one that only it would believe.
     expect(wasi.fd_filestat_set_times(3, 0n, 0n, 0)).toBe(WASI_ERRNO.SUCCESS);
     expect(wasi.path_filestat_set_times(3, 0, path.ptr, path.len, 0n, 0n, 4)).toBe(WASI_ERRNO.NOTSUP);
     expect(wasi.fd_advise(3, 0n, 0n, 0)).toBe(WASI_ERRNO.SUCCESS);

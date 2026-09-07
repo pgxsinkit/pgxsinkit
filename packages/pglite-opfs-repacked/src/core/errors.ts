@@ -3,9 +3,11 @@ export const FS_ERRNO = {
   EEXIST: 20,
   EINVAL: 28,
   EISDIR: 31,
+  ELOOP: 32,
   ENOENT: 44,
   ENOTDIR: 54,
   ENOTEMPTY: 55,
+  EXDEV: 75,
 } as const;
 
 export type FsErrorName = keyof typeof FS_ERRNO;
