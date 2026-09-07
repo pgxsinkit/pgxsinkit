@@ -50,6 +50,15 @@ export type { RepackedFileHandle, RepackedPort, RepackedPortEntry } from "./core
  */
 export { OpfsRepackedPort, type OpfsDirectoryHandle } from "./opfs-port";
 
+/**
+ * The same store's four files in an ordinary DIRECTORY, over `node:fs`. The port a build step uses:
+ * a host under Node or Bun fills a store where the bytes are ordinary files, ships those four files,
+ * and a browser's `OpfsRepackedPort` opens them as the same store — the format lives above the port,
+ * so neither side learns which one it is on. `node:fs` is imported lazily so the browser bundle can
+ * carry this module without a static `node:` import being compiled to nothing (see `./file-port`).
+ */
+export { FileRepackedPort } from "./file-port";
+
 // The synchronous broker: one coordinator worker owns the store, every other thread reaches it over a
 // SharedArrayBuffer channel and blocks in `Atomics.wait` for the answer.
 export { RepackedSyncBroker, type RepackedSyncBrokerOptions } from "./broker/server";

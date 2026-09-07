@@ -54,6 +54,9 @@ const OPFS_REPACKED_RUNTIME_EXPORTS = [
   "RepackedVfs",
   // The OPFS port for that core, for a host that owns the store itself and wants it persisted.
   "OpfsRepackedPort",
+  // The same four files in an ordinary directory, over `node:fs`: the port a Node/Bun build step
+  // fills a store on before shipping those four files to a browser.
+  "FileRepackedPort",
   // The synchronous broker: one owner of the store, reached over SharedArrayBuffer by futex-parked
   // backends that cannot await anything.
   "DEFAULT_PAYLOAD_BYTES",
