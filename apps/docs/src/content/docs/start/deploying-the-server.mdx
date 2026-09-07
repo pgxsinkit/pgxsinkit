@@ -271,10 +271,21 @@ const consumer = defineEventConsumer({
   streams: ["issue_viewed"], // optional: the knob that splits streams across processes (unknown name → throws)
   callback: async ({ stream, events }) => archive(stream, events),
   onDeadLetter: (report) => alert(report), // the runner ALSO warn-logs every one, unconditionally
+  onPoll: (report) => (lastPollAt = report.at), // fires after EVERY read — your liveness heartbeat
 });
 consumer.start();
 process.on("SIGTERM", () => void consumer.stop());
 ```
+
+**Answer your liveness probe from `onPoll`, not from the callback.** The callback fires only when a batch is
+delivered, so on an idle queue it says nothing at all and a probe wired to it reports a perfectly healthy
+runner as dead. `onPoll` fires after **every** read the runner performs — productive or empty, in this mode
+and in the bounded one below — with `{ stream, delivered, empty, fault, at }`. Record `at` and let the probe
+fail once it is older than a few idle ceilings. `fault: true` means the read itself failed (a queue or
+database fault, or a message body that could not be parsed); the runner backs off and keeps going, so read
+that as queue health rather than liveness. The hook fires on the read, before the batch is delivered, so a
+slow callback never delays the beat — and a hook that throws is caught and warn-logged once per runner, never
+allowed to take a loop down.
 
 Its defaults are sized for a small deployment, and each is a knob:
 

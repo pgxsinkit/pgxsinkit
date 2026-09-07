@@ -18,6 +18,7 @@ import {
   type EventConsumerBatch,
   type EventConsumerSleep,
   type EventDeadLetterReport,
+  type EventPollReport,
   type EventQueue,
 } from "@pgxsinkit/server";
 
@@ -221,6 +222,8 @@ interface Harness {
   clock: ReturnType<typeof manualClock>;
   batches: EventConsumerBatch[];
   deadLetters: EventDeadLetterReport[];
+  /** Every `onPoll` report, in fire order — the liveness heartbeat under assertion. */
+  polls: EventPollReport[];
   consumer: EventConsumer;
 }
 
@@ -234,6 +237,8 @@ function makeConsumer(
     visibilityTimeoutSeconds?: number;
     poll?: { floorMs?: number; ceilingMs?: number; factor?: number };
     withDeadLetterHook?: boolean;
+    /** Extra `onPoll` behaviour (the throwing-hook case); the harness always records the report first. */
+    onPoll?: (report: EventPollReport) => void;
   } = {},
 ): Harness {
   const fake = createFakeEventQueue();
@@ -243,6 +248,7 @@ function makeConsumer(
   const clock = manualClock();
   const batches: EventConsumerBatch[] = [];
   const deadLetters: EventDeadLetterReport[] = [];
+  const polls: EventPollReport[] = [];
 
   const consumer = defineEventConsumer({
     registry,
@@ -267,9 +273,13 @@ function makeConsumer(
             deadLetters.push(report);
           },
         }),
+    onPoll: (report) => {
+      polls.push(report);
+      options.onPoll?.(report);
+    },
   });
 
-  return { fake, ...counting, sleeper, renewalSleeper, clock, batches, deadLetters, consumer };
+  return { fake, ...counting, sleeper, renewalSleeper, clock, batches, deadLetters, polls, consumer };
 }
 
 let warn: ReturnType<typeof spyOn<Console, "warn">>;
@@ -781,6 +791,93 @@ describe("queue-fault resilience", () => {
 
     const warned = warn.mock.calls.map((call) => String(call[0]));
     expect(warned.some((line) => line.includes("could not read Event stream"))).toBe(true);
+  });
+});
+
+// The host's liveness heartbeat: the callback only fires on DELIVERED batches, so on an idle queue it goes
+// quiet and a readiness/liveness probe has nothing to beat from. `onPoll` fires after EVERY read instead,
+// productive or not, in both pacing modes.
+describe("onPoll — the per-read liveness hook", () => {
+  it("fires on an EMPTY read, and again on each subsequent one", async () => {
+    const harness = makeConsumer({ streams: [VIEWED] });
+    start(harness);
+
+    await waitUntil(() => harness.polls.length === 1, "the first poll report");
+    expect(harness.polls[0]).toEqual({
+      stream: VIEWED,
+      delivered: 0,
+      empty: true,
+      fault: false,
+      at: harness.clock.now(),
+    });
+
+    // The loop keeps beating while the queue stays idle — the whole point of the hook.
+    harness.sleeper.release();
+    await waitUntil(() => harness.polls.length === 2, "the second poll report");
+    expect(harness.polls[1]?.empty).toBe(true);
+  });
+
+  it("reports the DELIVERED count on a productive read", async () => {
+    const harness = makeConsumer({ streams: [VIEWED] });
+    await harness.fake.enqueueBatch([message(VIEWED), message(VIEWED)]);
+    start(harness);
+
+    await waitUntil(() => harness.polls.length === 2, "the productive read and the empty one after it");
+    // One read took both sub-batches; `delivered` counts sub-batches, the unit the queue works in.
+    expect(harness.polls[0]).toMatchObject({ stream: VIEWED, delivered: 2, empty: false, fault: false });
+    expect(harness.polls[1]).toMatchObject({ delivered: 0, empty: true, fault: false });
+  });
+
+  it("beats with `fault: true` when the READ itself fails", async () => {
+    const harness = makeConsumer({ streams: [VIEWED] });
+    harness.failReads(new Error("connection refused"), 1);
+    start(harness);
+
+    await waitUntil(() => harness.polls.length === 1, "the faulted poll report");
+    expect(harness.polls[0]).toMatchObject({ stream: VIEWED, delivered: 0, empty: true, fault: true });
+
+    // The loop survived the fault, so the next read beats normally — a host watching the heartbeat sees a
+    // turning loop throughout, and `fault` is what tells it the queue is unhealthy.
+    harness.sleeper.release();
+    await waitUntil(() => harness.polls.length === 2, "the recovered poll report");
+    expect(harness.polls[1]?.fault).toBe(false);
+  });
+
+  it("fires in the bounded drain mode too", async () => {
+    const harness = makeConsumer({ streams: [VIEWED], batchSize: 1 });
+    await harness.fake.enqueueBatch([message(VIEWED)]);
+
+    await harness.consumer.drainOnce();
+
+    // One productive read, then the empty one that ends the pass.
+    expect(harness.polls.map((report) => ({ delivered: report.delivered, empty: report.empty }))).toEqual([
+      { delivered: 1, empty: false },
+      { delivered: 0, empty: true },
+    ]);
+    expect(harness.polls.every((report) => report.stream === VIEWED && report.fault === false)).toBe(true);
+  });
+
+  it("a THROWING hook never takes the loop down, and warns ONCE per runner", async () => {
+    const harness = makeConsumer({
+      streams: [VIEWED],
+      onPoll: () => {
+        throw new Error("the liveness probe exploded");
+      },
+    });
+    start(harness);
+
+    // Three reads, every one of them through a throwing hook: the loop keeps turning and still delivers.
+    await waitUntil(() => harness.polls.length === 1, "the first poll report");
+    harness.sleeper.release();
+    await waitUntil(() => harness.polls.length === 2, "the second poll report");
+    await harness.fake.enqueueBatch([message(VIEWED)]);
+    harness.sleeper.release();
+    await waitUntil(() => harness.batches.length === 1, "the delivery after the throws");
+    expect(harness.polls.length).toBeGreaterThanOrEqual(3);
+
+    // Loud once, not once per poll: a hook that throws on every beat must not drown the operator's log.
+    const warned = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("`onPoll` hook"));
+    expect(warned).toHaveLength(1);
   });
 });
 

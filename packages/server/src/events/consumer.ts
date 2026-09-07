@@ -22,6 +22,11 @@ import {
  * shutdown. Construction stays query-free — the FIRST statement this runner sends is the first poll inside
  * `start()`.
  *
+ * Because the app owns the process, it also owns the health endpoint — so the runner reports the one thing
+ * that endpoint cannot see from outside: {@link DefineEventConsumerOptions.onPoll} fires after EVERY read,
+ * productive or empty, in both pacing modes. Beat a liveness probe from that, never from `callback`, which
+ * by design says nothing at all while the queue is idle.
+ *
  * One runner hosts many Event streams: each gets its own independent loop (a poison event or slow callback in
  * one stream must never head-of-line-block another), so small deployments run one process and large ones split
  * `streams` across processes.
@@ -154,6 +159,31 @@ export interface EventDeadLetterReport {
 }
 
 /**
+ * What {@link DefineEventConsumerOptions.onPoll} is told after each read — the host's liveness heartbeat.
+ *
+ * One report per read the runner performs, productive or not, in BOTH pacing modes. `delivered` counts the
+ * sub-batches that read returned (the queue's unit: one message, one callback invocation), and `empty` is
+ * exactly `delivered === 0` — including on a faulted read, which is why `fault` is a separate flag rather
+ * than something to infer from the counts.
+ */
+export interface EventPollReport {
+  /** The Event stream that was read. Each stream has its own loop, so each beats on its own cadence. */
+  readonly stream: string;
+  /** Sub-batches this read returned. `0` on an empty or faulted read. */
+  readonly delivered: number;
+  /** `delivered === 0` — nothing came back from this read. */
+  readonly empty: boolean;
+  /**
+   * The read itself FAILED: a queue/database fault, or a message body that could not be parsed (which fails
+   * the whole read). The runner backs off and carries on either way — a fault never ends a loop — so a host
+   * watching the heartbeat still sees it turning, and this is what tells it the queue is unhealthy.
+   */
+  readonly fault: boolean;
+  /** When the read settled, from the runner's own clock (`Date.now` unless one is injected). */
+  readonly at: number;
+}
+
+/**
  * The deterministic seam the runner waits on. `signal` is aborted by `stop()`, so a stopping runner never
  * lingers for a full idle ceiling. Injected only by tests; production uses an abortable `setTimeout`.
  */
@@ -233,6 +263,17 @@ export interface DefineEventConsumerOptions<TRegistry extends SyncTableRegistry>
    * the ADR's requirement and a hook that swallows (or throws) must not be able to make a dead letter silent.
    */
   onDeadLetter?: (report: EventDeadLetterReport) => void;
+  /**
+   * Notified after EVERY read the runner performs — productive or empty, in both pacing modes — which makes it
+   * the host's **liveness heartbeat**. The {@link DefineEventConsumerOptions.callback} fires only on delivered
+   * batches, so on an idle queue it goes quiet and a liveness/readiness probe answering from it would report a
+   * healthy runner as dead; beat from this instead and treat `fault` as the queue-health signal.
+   *
+   * It fires on the READ, before the batch is delivered, so a slow callback cannot delay the heartbeat. A hook
+   * that THROWS can never take a loop down: the throw is caught, warn-logged ONCE per runner (a hook that
+   * throws every poll must not drown the log), and the loop carries on.
+   */
+  onPoll?: (report: EventPollReport) => void;
   /** @internal The injectable wait — the deterministic seam the pacing tests drive. Defaults to `setTimeout`. */
   sleep?: EventConsumerSleep;
   /** @internal The injectable clock `drainOnce` measures its budget against. Defaults to `Date.now`. */
@@ -407,6 +448,34 @@ export function defineEventConsumer<TRegistry extends SyncTableRegistry>(
    * all this needs.
    */
   let drainStats: { delivered: number; deadLettered: number } | null = null;
+
+  // ─── The per-read heartbeat ──────────────────────────────────────────────────────────────────────────
+  /** Latched once the `onPoll` hook has thrown: the warn is per RUNNER, not per poll (see the option's doc). */
+  let pollHookFailed = false;
+  /**
+   * Beat once for one completed read. Called from BOTH pacing modes and from the fault paths, so a host
+   * watching this sees every turn of every loop; `empty` is derived here so the two modes cannot disagree
+   * about what an empty read is.
+   */
+  const reportPoll = (stream: string, delivered: number, fault: boolean): void => {
+    if (!options.onPoll) {
+      return;
+    }
+    try {
+      options.onPoll({ stream, delivered, empty: delivered === 0, fault, at: now() });
+    } catch (error) {
+      // A liveness hook that throws must never be able to stop the loop it is observing — that would turn a
+      // reporting bug into an outage. Loud once, then silent: it typically throws on EVERY poll.
+      if (!pollHookFailed) {
+        pollHookFailed = true;
+        console.warn(
+          "pgxsinkit: the `onPoll` hook threw; the event consumer carries on regardless (this is warned once " +
+            "per runner, not once per poll)",
+          error,
+        );
+      }
+    }
+  };
 
   // ─── Dead-lettering (ADR-0053 decision 7: the loudness lives HERE) ───────────────────────────────────
   const reportDeadLetter = (report: EventDeadLetterReport): void => {
@@ -644,11 +713,17 @@ export function defineEventConsumer<TRegistry extends SyncTableRegistry>(
       let productive = false;
       try {
         const messages = await queue.readBatch(stream, { visibilityTimeoutSeconds, maxMessages: batchSize });
+        // Beat on the READ, before delivery, so a slow callback cannot delay the heartbeat. `processDelivered`
+        // never throws, so this iteration can produce exactly one report: this one, or the fault one below.
+        reportPoll(stream, messages.length, false);
         if (messages.length > 0) {
           productive = true;
           await processDelivered(stream, messages, () => stopping);
         }
       } catch (error) {
+        // The read did not complete. An unparseable body fails the WHOLE read exactly as a queue fault does,
+        // so both beat the same way: nothing delivered, `fault: true`, and the loop carries on.
+        reportPoll(stream, 0, true);
         if (error instanceof MalformedEventQueueMessageError) {
           // The endpoint is the only writer of these queues and it writes contract-shaped bodies, so this is a
           // hand-inserted or corrupted message. It fails the WHOLE read, so it must go on sight or it wedges
@@ -716,7 +791,11 @@ export function defineEventConsumer<TRegistry extends SyncTableRegistry>(
           let messages: readonly DeliveredEventMessage[];
           try {
             messages = await queue.readBatch(stream, { visibilityTimeoutSeconds, maxMessages: batchSize });
+            // The heartbeat covers this pacing mode too — a scheduled drain is exactly the deployment whose
+            // host most wants to know a pass actually reached the queue.
+            reportPoll(stream, messages.length, false);
           } catch (error) {
+            reportPoll(stream, 0, true);
             if (error instanceof MalformedEventQueueMessageError) {
               // Same policy as the loop: it fails the WHOLE read, so it goes on sight and the stream stays
               // pending for the re-read that fetches the rest of the batch.

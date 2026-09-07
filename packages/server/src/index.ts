@@ -512,6 +512,7 @@ export type {
   EventDeadLetterReport,
   EventDrainOptions,
   EventDrainSummary,
+  EventPollReport,
 } from "./events/consumer";
 export {
   EVENT_LANE_FINGERPRINT_PREFIX,
