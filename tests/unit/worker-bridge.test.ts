@@ -624,6 +624,52 @@ describe("raw inspection RPC round trip (ADR-0032 S2)", () => {
     const result = await client.discardQuarantined("todos", { id: "e0000000-0000-0000-0000-000000000000" });
     expect(result).toBeUndefined();
   });
+
+  it("rawTransaction commits the whole list in ONE worker-side transaction", async () => {
+    const host = await makeHost();
+    const { client } = await attach(host);
+    await client.ready;
+
+    // A LOCAL-ONLY table the consumer owns — the seam's whole audience (pgxsinkit models no such relation,
+    // and nothing here syncs). The tab has no PGlite at all, so this is the only way to write it atomically.
+    await client.rawExec("create table local_notes (id int primary key, body text);");
+
+    const results = await client.rawTransaction([
+      { sql: "insert into local_notes (id, body) values ($1, $2)", params: [1, "first"] },
+      { sql: "insert into local_notes (id, body) values ($1, $2)", params: [2, "second"] },
+      { sql: "select count(*)::int as n from local_notes" },
+    ]);
+    expect(results.length).toBe(3);
+    expect((results[2]?.rows[0] as { n?: number })?.n).toBe(2);
+
+    // An empty list never reaches a transaction — it settles tab-side-observably as `[]`.
+    expect(await client.rawTransaction([])).toEqual([]);
+  });
+
+  it("rawTransaction ROLLS BACK across the bridge when a statement fails, and rejects tab-side", async () => {
+    const host = await makeHost();
+    const { client } = await attach(host);
+    await client.ready;
+    await client.rawExec("create table local_notes (id int primary key, body text);");
+
+    // try/catch, not `expect().rejects` — a MessageChannel-driven rejection does not settle the bun matcher
+    // here (the quirk the rawQuery test above calls out).
+    let rejected = "";
+    try {
+      await client.rawTransaction([
+        { sql: "insert into local_notes (id, body) values ($1, $2)", params: [1, "kept?"] },
+        // Duplicate primary key: fails AFTER the first insert has run inside the same transaction.
+        { sql: "insert into local_notes (id, body) values ($1, $2)", params: [1, "boom"] },
+      ]);
+    } catch (error) {
+      rejected = (error as Error).message;
+    }
+    expect(rejected.length).toBeGreaterThan(0);
+
+    // All-or-nothing in the WORKER's store: the first statement's row is gone too.
+    const counted = await client.rawQuery("select count(*)::int as n from local_notes");
+    expect((counted.rows[0] as { n?: number })?.n).toBe(0);
+  });
 });
 
 describe("desync / discardEphemeral RPC round trip (ADR-0021 + ADR-0032 S2)", () => {

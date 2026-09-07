@@ -1608,6 +1608,23 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
   /** {@link rawQuery} for multi-statement SQL, returning one {@link Results} per statement. */
   rawExec: (sql: string, options?: RawQueryOptions) => Promise<Results[]>;
   /**
+   * {@link rawQuery}'s ATOMIC form: run the given statements, in order, inside ONE local transaction and
+   * resolve one {@link Results} per statement. All-or-nothing — a statement that throws rolls the whole list
+   * back and rejects with its error; an empty list resolves `[]` without opening a transaction at all.
+   *
+   * The seam exists for a consumer that owns LOCAL-ONLY tables pgxsinkit does not manage (a definition cache,
+   * a personal dictionary — anything that must delete-then-insert without a torn intermediate state). It is
+   * the ONLY way to get that atomicity on a worker-attached client, where the tab has no PGlite of its own,
+   * and it behaves identically on both client forms rather than making atomicity depend on where the engine
+   * happens to live.
+   *
+   * Every {@link rawQuery} caveat still holds, transaction or not: the statements run raw against the local
+   * store, BYPASSING the mutation journal and optimistic overlay, so a write through here stays local and
+   * will NEVER converge. Use it for the tables the consumer owns — never for a synced table, whose only
+   * write path is `mutate` / `tables.*`.
+   */
+  rawTransaction: (statements: readonly RawStatement[], options?: RawQueryOptions) => Promise<Results[]>;
+  /**
    * @internal The worker host's guarded one-shot read seam (ADR-0032 decision 4): {@link rawQuery} PLUS the
    * ADR-0041 read gate and the ADR-0021 lazy-group guard, sharing one gate+guard core with the in-process
    * `query`/`queryRaw` builder path so the two entry points can never drift on guard semantics.
@@ -1820,6 +1837,16 @@ export type { MutationBatchItem, MutationDetail, MutationDiagnostics, MutationKi
  */
 export interface RawQueryOptions {
   rowMode?: "object" | "array";
+}
+
+/**
+ * One statement of a {@link SyncClient.rawTransaction} list: the SQL plus its bound params. Structured-clone
+ * safe by construction (a string and plain values), because on a worker-attached client the whole list
+ * crosses the bridge in a single RPC.
+ */
+export interface RawStatement {
+  readonly sql: string;
+  readonly params?: readonly unknown[];
 }
 
 /** The `{ query, exec }` duck `@electric-sql/pglite-repl` drives, backed by a client's inspection surface. */
@@ -3415,6 +3442,22 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // overlay involvement. The worker facade runs the identical call inside the worker's own client.
     rawQuery: (sql, params, options) => pglite.query(sql, params as unknown[] | undefined, options),
     rawExec: (sql, options) => pglite.exec(sql, options),
+    // The atomic form of the same surface. `pglite.transaction` opens ONE transaction and rolls it back on a
+    // throw, so the all-or-nothing guarantee is the store's, not a re-implementation here. An empty list is
+    // answered without touching the store at all — an empty transaction would be pure overhead on the single
+    // WASM thread (and, in worker mode, would serialise behind whatever else the engine is doing).
+    rawTransaction: async (statements, options) => {
+      if (statements.length === 0) {
+        return [];
+      }
+      return pglite.transaction(async (tx) => {
+        const results: Results[] = [];
+        for (const statement of statements) {
+          results.push(await tx.query(statement.sql, statement.params as unknown[] | undefined, options));
+        }
+        return results;
+      });
+    },
     // @internal: the guarded raw-SQL read the worker host dispatches `guardedQuery` to (ADR-0032 decision 4).
     guardedRawQuery,
     query: (build) => runGuardedQuery(build),

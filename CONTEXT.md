@@ -199,12 +199,18 @@ _Avoid_: "safe read" (vague), and calling `rawQuery` a guarded read — that is 
 surface, deliberately unguarded.
 
 **Inspection surface**:
-The raw, guard-free SQL pair `rawQuery`/`rawExec` (and the REPL adapter over them): identical on
-both client forms, executed directly against the local store, bypassing the read gate, the
-lazy-group guard, and the journal/overlay semantics — a write through it stays local and never
-converges. For debug pages, REPLs, and ad-hoc counts; never an app-data read or write path.
+The raw, guard-free SQL trio `rawQuery`/`rawExec`/`rawTransaction` (and the REPL adapter over the
+first two): identical on both client forms, executed directly against the local store, bypassing
+the read gate, the lazy-group guard, and the journal/overlay semantics — a write through it stays
+local and never converges. For debug pages, REPLs, and ad-hoc counts; never an app-data read path,
+and never the write path for a synced table.
+`rawTransaction` is the atomic member — one local transaction over an ordered statement list,
+all-or-nothing — and the one with a non-debug audience: the LOCAL-ONLY tables a consumer owns and
+pgxsinkit does not manage (a definition cache, a personal dictionary), which have no other way to
+be written atomically on a worker-attached client.
 _Avoid_: "raw reads" as a synonym for one-shot reads — a Guarded read is the app path; the
-inspection surface is for humans looking at the store.
+inspection surface is for humans looking at the store (or, for `rawTransaction`, for a consumer's
+own unmanaged tables).
 
 **Overlay**:
 The local table holding the optimistic value of a staged write until the synced

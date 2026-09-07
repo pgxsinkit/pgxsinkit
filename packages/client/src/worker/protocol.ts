@@ -274,7 +274,8 @@ export interface TokenResponsePayload {
 
 /**
  * The RPC ops the attach facade proxies to the worker's booted client — the write API (mirrors
- * `client.mutate`/flush), mutation-state reads, and the one-shot raw inspection reads (`rawQuery`/`rawExec`).
+ * `client.mutate`/flush), mutation-state reads, and the raw inspection surface (the one-shot `rawQuery`/
+ * `rawExec`, plus the atomic `rawTransaction`).
  */
 export type RpcOp =
   | "create"
@@ -306,6 +307,11 @@ export type RpcOp =
   | "diagnostics"
   | "rawQuery"
   | "rawExec"
+  // The ATOMIC raw seam: carries `[statements, options?]` — the whole `RawStatement[]` in ONE round trip, so
+  // the transaction opens and closes inside the worker. It cannot be composed tab-side out of `rawQuery`
+  // calls (each would be its own implicit transaction, and a relocation between two of them would tear the
+  // write), which is exactly why it is its own op.
+  | "rawTransaction"
   // Guarded one-shot Drizzle read (ADR-0032 decision 4): the attach client's Drizzle-over-bridge compiles a
   // read to SQL on the tab and routes it here as the {@link GuardedQueryWireArgs} tuple
   // `[sql, params?, { rowMode? }, use?]`. Unlike `rawQuery` (raw inspection, no guard), the worker runs the
