@@ -76,7 +76,8 @@
  *
  * ## Encoding
  *
- * Payloads are little-endian. Paths are `u32` byte length followed by UTF-8 bytes; sizes, offsets and
+ * Payloads are little-endian. Paths — and a symbolic link's TARGET, which is a path the store never
+ * walks — are `u32` byte length followed by UTF-8 bytes; sizes, offsets and
  * timestamps are unsigned 64-bit (`bigint`) because a virtual file may exceed 2^53 in principle and
  * the core store speaks `bigint` throughout. Byte counts that cannot exceed the payload region stay
  * `u32`. The single numeric answer of an operation travels in the header's 64-bit result pair, not in
@@ -145,8 +146,10 @@ export const OPCODE_UNLINK = 12;
 export const OPCODE_RENAME = 13;
 export const OPCODE_TRUNCATE = 14;
 export const OPCODE_SIZE = 15;
+export const OPCODE_SYMLINK = 16;
+export const OPCODE_READLINK = 17;
 const MIN_OPCODE = OPCODE_OPEN;
-const MAX_OPCODE = OPCODE_SIZE;
+const MAX_OPCODE = OPCODE_READLINK;
 
 export function isKnownOpcode(opcode: number): boolean {
   return Number.isInteger(opcode) && opcode >= MIN_OPCODE && opcode <= MAX_OPCODE;
@@ -165,11 +168,17 @@ export const O_CREAT = 0o100;
 export const O_EXCL = 0o200;
 export const O_TRUNC = 0o1000;
 export const O_APPEND = 0o2000;
-const O_KNOWN = O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_APPEND;
+/**
+ * Refuse to follow a symbolic link on the FINAL component. Linux's own bit value, and the wire form
+ * of a WASI `path_open` whose lookup flags omit `SYMLINK_FOLLOW`.
+ */
+export const O_NOFOLLOW = 0o400000;
+const O_KNOWN = O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_APPEND | O_NOFOLLOW;
 
 /** The stat shape on the wire: `kind` + mode + size + the three timestamps. */
 export const STAT_KIND_FILE = 0;
 export const STAT_KIND_DIRECTORY = 1;
+export const STAT_KIND_SYMLINK = 2;
 export const STAT_BYTES = 1 + 4 + 8 * 4;
 
 /** A `readdir` reply that ran out of payload room reports the cursor to resume from; -1 means done. */
@@ -196,6 +205,8 @@ export interface OpenPlan {
   /** The access the client asked for, enforced by the broker on top of the core descriptor. */
   readonly readable: boolean;
   readonly writable: boolean;
+  /** `false` for `O_NOFOLLOW`: a final component that IS a symbolic link must answer `ELOOP`. */
+  readonly follow: boolean;
 }
 
 /**
@@ -231,6 +242,7 @@ export function planOpen(flags: number): OpenPlan {
     requireExisting: false,
     readable,
     writable,
+    follow: (flags & O_NOFOLLOW) === 0,
     ...extra,
   });
 
@@ -420,7 +432,8 @@ export function joinResult(lo: number, hi: number): bigint {
 
 /** The stat shape both sides exchange; `bigint` everywhere the core is `bigint`. */
 export interface BrokerStat {
-  readonly kind: "directory" | "file";
+  /** `symlink` only ever comes back from `lstat`; `size` is then the target's UTF-8 byte length. */
+  readonly kind: "directory" | "file" | "symlink";
   readonly mode: number;
   readonly size: bigint;
   readonly atimeMs: bigint;
@@ -429,7 +442,9 @@ export interface BrokerStat {
 }
 
 export function writeStat(writer: PayloadWriter, stat: BrokerStat): void {
-  writer.u8(stat.kind === "directory" ? STAT_KIND_DIRECTORY : STAT_KIND_FILE);
+  writer.u8(
+    stat.kind === "directory" ? STAT_KIND_DIRECTORY : stat.kind === "symlink" ? STAT_KIND_SYMLINK : STAT_KIND_FILE,
+  );
   writer.u32(stat.mode);
   writer.u64(stat.size);
   writer.u64(stat.atimeMs);
@@ -438,7 +453,8 @@ export function writeStat(writer: PayloadWriter, stat: BrokerStat): void {
 }
 
 export function readStat(reader: PayloadReader): BrokerStat {
-  const kind = reader.u8() === STAT_KIND_DIRECTORY ? "directory" : "file";
+  const code = reader.u8();
+  const kind = code === STAT_KIND_DIRECTORY ? "directory" : code === STAT_KIND_SYMLINK ? "symlink" : "file";
   return {
     kind,
     mode: reader.u32(),

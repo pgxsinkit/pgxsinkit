@@ -6,13 +6,14 @@ import {
   MAX_METADATA_BASE_WRITER_BYTES,
   MAX_PATH_BYTES,
   MAX_PATH_DEPTH,
+  MAX_SYMLINK_HOPS,
   MAX_TOTAL_EXTENTS,
   MAX_U64,
   checkedAdd,
   checkedU64,
   validateExtentSize,
 } from "./limits";
-import { encodedUtf8Length, parsePath, validatePathComponent } from "./path";
+import { encodedUtf8Length, parsePath, validatePathComponent, validateSymlinkTarget } from "./path";
 
 export type InodeId = bigint;
 export type ExtentId = bigint;
@@ -41,7 +42,17 @@ export interface FileInode extends BaseInode {
   extents: ExtentId[];
 }
 
-export type Inode = DirectoryInode | FileInode;
+/**
+ * A symbolic link. It owns no extents and no children — the whole entry IS its absolute `target`,
+ * which path resolution restarts the walk at. See {@link validateSymlinkTarget} for why relative
+ * targets are refused.
+ */
+export interface SymlinkInode extends BaseInode {
+  kind: "symlink";
+  target: string;
+}
+
+export type Inode = DirectoryInode | FileInode | SymlinkInode;
 
 export interface OrphanRecord {
   inodeId: InodeId;
@@ -216,6 +227,17 @@ export type TxnRecord =
       timestampMs: bigint;
     }
   | {
+      kind: "createSymlink";
+      parentId: InodeId;
+      name: string;
+      inodeId: InodeId;
+      mode: number;
+      atimeMs: bigint;
+      mtimeMs: bigint;
+      ctimeMs: bigint;
+      target: string;
+    }
+  | {
       kind: "reserveQuarantine";
       extents: readonly ExtentRun[];
     };
@@ -232,7 +254,11 @@ export interface PreflightLimits {
 const BASE_STATE_FIXED_BYTES = 20;
 const DIRECTORY_INODE_FIXED_BYTES = 41;
 const FILE_INODE_FIXED_BYTES = 49;
+/** The common inode header plus the target's `u16` length prefix; the target bytes are added on. */
+const SYMLINK_INODE_FIXED_BYTES = 39;
 const CHILD_FIXED_BYTES = 10;
+/** The mode a symbolic link carries: `S_IFLNK | 0777`, the only mode POSIX gives a link. */
+export const SYMLINK_MODE = 0o120777;
 
 function childBaseBytes(name: string): number {
   return CHILD_FIXED_BYTES + encodedUtf8Length(name);
@@ -241,6 +267,9 @@ function childBaseBytes(name: string): number {
 function inodeBaseBytes(inode: Inode): number {
   if (inode.kind === "file") {
     return FILE_INODE_FIXED_BYTES + inode.extents.length * 8;
+  }
+  if (inode.kind === "symlink") {
+    return SYMLINK_INODE_FIXED_BYTES + encodedUtf8Length(inode.target);
   }
   let bytes = DIRECTORY_INODE_FIXED_BYTES;
   for (const name of inode.children.keys()) {
@@ -280,6 +309,8 @@ export function estimateTxnPayloadBytes(record: TxnRecord): number {
       return 1 + 1 + 8 + 8 + extentRunsPayloadBytes(record.allocated) + 16;
     case "rename":
       return 1 + 8 + 2 + encodedUtf8Length(record.sourceName) + 8 + 2 + encodedUtf8Length(record.destinationName) + 8;
+    case "createSymlink":
+      return 1 + 8 + 2 + encodedUtf8Length(record.name) + 8 + 4 + 24 + 2 + encodedUtf8Length(record.target);
     case "reserveQuarantine":
       return 1 + extentRunsPayloadBytes(record.extents);
   }
@@ -311,10 +342,11 @@ function projectedBaseDelta(state: VfsState, record: TxnRecord): number {
       const parent = directoryById(state, record.parentId);
       const inodeId = parent.children.get(record.name);
       const inode = inodeId === undefined ? undefined : state.inodes.get(inodeId);
-      if (inode?.kind !== "file") {
+      if (inode === undefined || inode.kind === "directory") {
         throw new FsError("ENOENT", "file does not exist");
       }
-      return -inodeBaseBytes(inode) - childBaseBytes(record.name) + inode.extents.length * 16;
+      const quarantined = inode.kind === "file" ? inode.extents.length * 16 : 0;
+      return -inodeBaseBytes(inode) - childBaseBytes(record.name) + quarantined;
     }
     case "changeMode":
     case "changeTimes":
@@ -356,6 +388,8 @@ function projectedBaseDelta(state: VfsState, record: TxnRecord): number {
       }
       return delta;
     }
+    case "createSymlink":
+      return SYMLINK_INODE_FIXED_BYTES + encodedUtf8Length(record.target) + childBaseBytes(record.name);
     case "reserveQuarantine": {
       const count = expandExtentRuns(record.extents, MAX_EXTENTS_PER_INODE).length;
       const reused = selectedExtentsAlreadyAvailable(state, record.extents);
@@ -477,9 +511,14 @@ function inodeById(state: VfsState, inodeId: InodeId): Inode {
 function fileById(state: VfsState, inodeId: InodeId): FileInode {
   const inode = inodeById(state, inodeId);
   if (inode.kind !== "file") {
-    throw new FsError("EISDIR", "inode is a directory");
+    throw new FsError("EISDIR", "inode is not a file");
   }
   return inode;
+}
+
+function joinPath(base: string, rest: readonly string[]): string {
+  if (rest.length === 0) return base;
+  return base === "/" ? `/${rest.join("/")}` : `${base}/${rest.join("/")}`;
 }
 
 function parentAndName(state: VfsState, path: string): { parent: DirectoryInode; name: string } {
@@ -581,6 +620,58 @@ export function getInodeAtPath(state: VfsState, path: string): Inode {
   return inode;
 }
 
+/**
+ * Resolve every symbolic link on `path` and report the link-free absolute path it names.
+ *
+ * `follow` governs the FINAL component only — the POSIX `stat`/`lstat` split. Every INTERMEDIATE
+ * link is always followed, because a path can only continue through the thing a link points at.
+ *
+ * A component that does not exist, or one whose parent turned out not to be a directory, stops the
+ * walk and the remainder is carried through verbatim: resolution answers "which path does this
+ * name", not "does it exist". The operation that follows reports `ENOENT`/`ENOTDIR` itself, or
+ * creates the tail — which is exactly what an `open(O_CREAT)` through a symlinked directory needs.
+ *
+ * Targets are absolute, so a hop restarts the walk at the root. `MAX_SYMLINK_HOPS` hops is `ELOOP`,
+ * and each expansion is re-validated by `parsePath`, so a chain that outgrows the store's depth or
+ * byte limits is rejected here rather than in a planner.
+ */
+export function resolveLinks(state: VfsState, path: string, follow: boolean): string {
+  const root = state.inodes.get(state.rootInodeId);
+  if (root === undefined) {
+    throw new StoreLimitError("root inode is missing");
+  }
+  let pending = parsePath(path);
+  let index = 0;
+  let current: Inode = root;
+  const resolved: string[] = [];
+  let hops = 0;
+  while (index < pending.length) {
+    const name = pending[index]!;
+    if (current.kind !== "directory") break;
+    const childId = current.children.get(name);
+    if (childId === undefined) break;
+    const child = state.inodes.get(childId);
+    if (child === undefined) {
+      throw new StoreLimitError("directory entry references a missing inode");
+    }
+    if (child.kind === "symlink" && (follow || index < pending.length - 1)) {
+      hops += 1;
+      if (hops > MAX_SYMLINK_HOPS) {
+        throw new FsError("ELOOP", `path traverses more than ${MAX_SYMLINK_HOPS} symbolic links`, { path });
+      }
+      pending = parsePath(joinPath(child.target, pending.slice(index + 1)));
+      index = 0;
+      current = root;
+      resolved.length = 0;
+      continue;
+    }
+    resolved.push(name);
+    current = child;
+    index += 1;
+  }
+  return joinPath(`/${resolved.join("/")}`, pending.slice(index));
+}
+
 export function planMkdir(
   state: VfsState,
   path: string,
@@ -670,6 +761,38 @@ export function planCreateFile(
   });
 }
 
+/** A symbolic link. Nothing about the TARGET is consulted — the link entry is the whole record. */
+export function planSymlink(
+  state: VfsState,
+  path: string,
+  target: string,
+  options: { mode?: number; nowMs: bigint },
+): TxnPlan<Extract<TxnRecord, { kind: "createSymlink" }>> {
+  const { parent, name } = parentAndName(state, path);
+  if (parent.children.has(name)) {
+    throw new FsError("EEXIST", "path already exists", { operation: "symlink", path });
+  }
+  if (state.inodes.size >= MAX_INODES) {
+    throw new StoreLimitError(`inode count would exceed ${MAX_INODES}`);
+  }
+  validateSymlinkTarget(target);
+  const inodeId = checkedU64(state.nextInodeId, "next inode ID");
+  advanceNextInodeId(inodeId);
+  const nowMs = validateTimestamp(options.nowMs);
+  return checkedPlan(state, {
+    kind: "createSymlink",
+    parentId: parent.id,
+    name,
+    inodeId,
+    mode: validateMode(options.mode ?? SYMLINK_MODE),
+    atimeMs: nowMs,
+    mtimeMs: nowMs,
+    ctimeMs: nowMs,
+    target,
+  });
+}
+
+/** Removes a FILE or a SYMBOLIC LINK. A link is unlinked as itself; its target is never touched. */
 export function planUnlink(
   state: VfsState,
   path: string,
@@ -681,7 +804,7 @@ export function planUnlink(
   if (inode === undefined) {
     throw new FsError("ENOENT", "path does not exist", { operation: "unlink", path });
   }
-  if (inode.kind !== "file") {
+  if (inode.kind === "directory") {
     throw new FsError("EISDIR", "path is a directory", { operation: "unlink", path });
   }
   const timestamp = validateTimestamp(nowMs);
@@ -866,10 +989,10 @@ function validateRenameTypes(source: Inode, destination: Inode | undefined): voi
   if (destination === undefined) {
     return;
   }
-  if (source.kind === "file" && destination.kind === "directory") {
+  if (source.kind !== "directory" && destination.kind === "directory") {
     throw new FsError("EISDIR", "cannot replace a directory with a file");
   }
-  if (source.kind === "directory" && destination.kind === "file") {
+  if (source.kind === "directory" && destination.kind !== "directory") {
     throw new FsError("ENOTDIR", "cannot replace a file with a directory");
   }
   if (destination.kind === "directory" && destination.children.size !== 0) {
@@ -1052,10 +1175,11 @@ function applyRemoveFile(state: VfsState, record: Extract<TxnRecord, { kind: "re
   if (inode === undefined) {
     throw new FsError("ENOENT", "file does not exist");
   }
-  if (inode.kind !== "file") {
+  if (inode.kind === "directory") {
     throw new FsError("EISDIR", "path is a directory");
   }
-  for (const extentId of inode.extents) {
+  const extents = inode.kind === "file" ? inode.extents : [];
+  for (const extentId of extents) {
     if (state.allocator.ownedBy.get(extentId) !== inode.id || state.allocator.quarantine.has(extentId)) {
       throw new StoreLimitError("file extent ownership is inconsistent");
     }
@@ -1066,10 +1190,43 @@ function applyRemoveFile(state: VfsState, record: Extract<TxnRecord, { kind: "re
   parent.ctimeMs = record.parentCtimeMs;
   state.inodes.delete(inode.id);
   state.parentByInode.delete(inode.id);
-  for (const extentId of inode.extents) {
+  for (const extentId of extents) {
     state.allocator.ownedBy.delete(extentId);
     state.allocator.quarantine.set(extentId, null);
   }
+}
+
+function applyCreateSymlink(state: VfsState, record: Extract<TxnRecord, { kind: "createSymlink" }>): void {
+  validatePathComponent(record.name);
+  const parent = directoryById(state, record.parentId);
+  if (parent.children.has(record.name)) {
+    throw new FsError("EEXIST", "directory entry already exists");
+  }
+  if (record.inodeId !== state.nextInodeId || state.inodes.has(record.inodeId)) {
+    throw new FsError("EINVAL", "createSymlink record has a non-canonical inode ID");
+  }
+  const nextInodeId = advanceNextInodeId(record.inodeId);
+  validateMode(record.mode);
+  validateTimestamp(record.atimeMs);
+  validateTimestamp(record.mtimeMs);
+  validateTimestamp(record.ctimeMs);
+  validateSymlinkTarget(record.target);
+  if (state.inodes.size >= MAX_INODES) {
+    throw new StoreLimitError(`inode count would exceed ${MAX_INODES}`);
+  }
+  const inode: SymlinkInode = {
+    id: record.inodeId,
+    kind: "symlink",
+    mode: record.mode,
+    atimeMs: record.atimeMs,
+    mtimeMs: record.mtimeMs,
+    ctimeMs: record.ctimeMs,
+    target: record.target,
+  };
+  parent.children.set(record.name, inode.id);
+  state.inodes.set(inode.id, inode);
+  state.parentByInode.set(inode.id, { parentId: parent.id, name: record.name });
+  state.nextInodeId = nextInodeId;
 }
 
 function applyChangeMode(state: VfsState, record: Extract<TxnRecord, { kind: "changeMode" }>): void {
@@ -1266,6 +1423,9 @@ export function applyTxn(state: VfsState, record: TxnRecord, prepared?: Prepared
     case "rename":
       applyRename(state, record);
       break;
+    case "createSymlink":
+      applyCreateSymlink(state, record);
+      break;
     case "reserveQuarantine":
       applyReserveQuarantine(state, record);
       break;
@@ -1282,7 +1442,9 @@ function cloneState(state: VfsState): VfsState {
         inodeId,
         inode.kind === "directory"
           ? { ...inode, children: new Map(inode.children) }
-          : { ...inode, extents: [...inode.extents] },
+          : inode.kind === "file"
+            ? { ...inode, extents: [...inode.extents] }
+            : { ...inode },
       ]),
     ),
     parentByInode: new Map([...state.parentByInode].map(([inodeId, entry]) => [inodeId, { ...entry }])),
@@ -1439,6 +1601,14 @@ export function validateState(state: VfsState): void {
         }
         visit(childId, child, childMetrics);
       }
+    } else if (inode.kind === "symlink") {
+      let targetBytes: number;
+      try {
+        targetBytes = validateSymlinkTarget(inode.target);
+      } catch (cause) {
+        throw new StoreLimitError(`symlink target is invalid: ${String(cause)}`, { cause });
+      }
+      calculatedBasePayloadBytes += SYMLINK_INODE_FIXED_BYTES + targetBytes;
     } else {
       calculatedBasePayloadBytes += FILE_INODE_FIXED_BYTES + inode.extents.length * 8;
       if (inode.extents.length !== extentCountForSize(inode.size, state.extentSize)) {
@@ -1503,7 +1673,9 @@ export function canonicalStateView(state: VfsState) {
             ...inode,
             children: [...inode.children.entries()].sort(([left], [right]) => left.localeCompare(right)),
           }
-        : { ...inode, extents: [...inode.extents] },
+        : inode.kind === "file"
+          ? { ...inode, extents: [...inode.extents] }
+          : { ...inode },
     );
   return {
     generation: state.generation,

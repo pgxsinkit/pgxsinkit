@@ -35,6 +35,8 @@
  *     path_remove_directory  → rmdir(path)
  *     path_unlink_file       → unlink(path)
  *     path_rename            → rename(oldPath, newPath)
+ *     path_symlink           → symlink(target, path)      (targets are ABSOLUTE; see the core)
+ *     path_readlink          → readlink(path)
  *     fd_filestat_set_size   → truncate(path, size) — the core resizes by PATH only, so the adapter
  *                              keeps the path it opened each fd with and resolves it here
  *
@@ -64,10 +66,12 @@ import {
   OPCODE_OPEN,
   OPCODE_READ,
   OPCODE_READDIR,
+  OPCODE_READLINK,
   OPCODE_RENAME,
   OPCODE_RMDIR,
   OPCODE_SIZE,
   OPCODE_STAT,
+  OPCODE_SYMLINK,
   OPCODE_TRUNCATE,
   OPCODE_UNLINK,
   OPCODE_WRITE,
@@ -134,6 +138,11 @@ export interface BrokerSizeResult extends BrokerResult {
 
 export interface BrokerReaddirResult extends BrokerResult {
   readonly entries: readonly string[];
+}
+
+export interface BrokerReadlinkResult extends BrokerResult {
+  /** The link's target, or `undefined` when the call was rejected. */
+  readonly target: string | undefined;
 }
 
 export interface BrokerReaddirPageResult extends BrokerReaddirResult {
@@ -271,9 +280,29 @@ export class RepackedSyncClient {
     return this.#statCall(OPCODE_STAT, (writer) => writer.string(path));
   }
 
-  /** The store has no symbolic links, so `lstat` and `stat` agree; both exist for a clean WASI map. */
+  /** Reports the LINK itself when the final component is one; `stat` follows it instead. */
   lstat(path: string): BrokerStatResult {
     return this.#statCall(OPCODE_LSTAT, (writer) => writer.string(path));
+  }
+
+  /**
+   * Create a symbolic link at `path` pointing at `target`. Targets are ABSOLUTE — the store refuses
+   * a relative one with `EINVAL` rather than reinterpreting it against the link's directory.
+   */
+  symlink(target: string, path: string): BrokerResult {
+    return {
+      errno: this.#call(OPCODE_SYMLINK, (writer) => {
+        writer.string(target);
+        writer.string(path);
+      }).errno,
+    };
+  }
+
+  /** The target of the symbolic link at `path`. `EINVAL` when the path is not a link. */
+  readlink(path: string): BrokerReadlinkResult {
+    const reply = this.#call(OPCODE_READLINK, (writer) => writer.string(path));
+    if (reply.errno !== 0) return { errno: reply.errno, target: undefined };
+    return { errno: 0, target: new PayloadReader(reply.bytes, reply.bytes.byteLength).string() };
   }
 
   /** The complete listing, paged transparently over as many requests as the channel needs. */

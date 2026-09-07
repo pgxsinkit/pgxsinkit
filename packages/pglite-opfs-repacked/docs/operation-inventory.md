@@ -1,6 +1,6 @@
 # PGlite filesystem operation inventory
 
-This is the Phase 1 gate for format version 1. It inventories the pinned
+This is the Phase 1 gate for the store format. It inventories the pinned
 `BaseFilesystem` surface before the closed transaction-record union is defined.
 The source of truth is `@electric-sql/pglite/basefs` as provided by the pinned
 `@pgxsinkit/pglite` fork.
@@ -56,10 +56,14 @@ The inventory requires records for these semantic transitions:
 4. change timestamps;
 5. resize a linked file;
 6. commit an extending linked-file write;
-7. remove a file;
+7. remove a file or a symbolic link;
 8. remove an empty directory;
 9. rename, optionally replacing a destination;
-10. reserve additional quarantined extents for a growing orphan.
+10. reserve additional quarantined extents for a growing orphan;
+11. create a symbolic link.
+
+Path RESOLUTION carries no record: a link is followed by reading the inode graph,
+never by mutating it.
 
 Ordinary in-range data writes, reads, stats, directory reads, descriptor creation,
 descriptor duplication/closure, and durability/lifecycle operations do not carry a
@@ -67,6 +71,6 @@ transaction record. State-derivable release sets are deliberately absent from th
 record set: the reducer derives them from the staged inode graph.
 
 Every record-bearing transition is one frame. If its exact frame or projected base
-cannot fit format-version-1 writer limits, planning rejects before persistent data
+cannot fit the format's writer limits, planning rejects before persistent data
 work; extending writes instead cap the admitted prefix where POSIX short-write
 semantics apply.

@@ -23,6 +23,8 @@ import {
 } from "../../packages/pglite-opfs-repacked/src/core/errors";
 import {
   DEFAULT_EXTENT_BYTES,
+  FORMAT_VERSION,
+  LIMITS_PROFILE_VERSION,
   MAX_ACTIVE_LOG_FRAMES,
   MAX_U64,
 } from "../../packages/pglite-opfs-repacked/src/core/limits";
@@ -41,6 +43,8 @@ import {
 import { MemoryRepackedPort } from "../../packages/pglite-opfs-repacked/test/support/memory-port";
 
 const EXTENT_SIZES = [8192, 65_536];
+/** Any version this build is not: the recreate-only policy makes every other one unreadable. */
+const OTHER_FORMAT_VERSION = FORMAT_VERSION + 1;
 
 async function replaceDurableFile(port: MemoryRepackedPort, name: OwnedFileName, bytes: Uint8Array): Promise<void> {
   const handle = await port.acquire(name, `fixture.acquire.${name}`);
@@ -327,7 +331,7 @@ describe("opfs-repacked bootstrap and bounded recovery", () => {
   test("integrity-invalid envelopes never classify version-looking bytes as another format", async () => {
     const arenaPort = new MemoryRepackedPort();
     const invalidArena = encodeArenaHeader({ extentSize: 8192 }).slice();
-    new DataView(invalidArena.buffer).setUint32(8, 2, true);
+    new DataView(invalidArena.buffer).setUint32(8, OTHER_FORMAT_VERSION, true);
     await replaceDurableFile(arenaPort, "arena.bin", invalidArena);
     expect(await openingError(arenaPort)).toBeInstanceOf(CorruptStoreError);
 
@@ -336,7 +340,7 @@ describe("opfs-repacked bootstrap and bounded recovery", () => {
     activated.repack();
     activated.close();
     const invalidOlderSlot = activationPort.durableBytes("activation.bin");
-    new DataView(invalidOlderSlot.buffer).setUint32(8, 2, true);
+    new DataView(invalidOlderSlot.buffer).setUint32(8, OTHER_FORMAT_VERSION, true);
     await replaceDurableFile(activationPort, "activation.bin", invalidOlderSlot);
     const selected = await RepackedVfs.open(activationPort);
     expect(selected.metrics().generation).toBe(2n);
@@ -350,7 +354,7 @@ describe("opfs-repacked bootstrap and bounded recovery", () => {
       sequence: 1n,
       record: planMkdir(createInitialState(8192), "/discarded", { nowMs: 1n }).record,
     });
-    new DataView(invalidFrame.buffer).setUint32(8, 2, true);
+    new DataView(invalidFrame.buffer).setUint32(8, OTHER_FORMAT_VERSION, true);
     await appendDurableFile(framePort, "metadata-a.bin", invalidFrame);
     const recovered = await RepackedVfs.open(framePort);
     expect(() => recovered.lstat("/discarded")).toThrow(FsError);
@@ -363,7 +367,7 @@ describe("opfs-repacked bootstrap and bounded recovery", () => {
     const arena = new Uint8Array(8193);
     arena.set(encodeArenaHeader({ extentSize: 8192 }));
     const arenaView = new DataView(arena.buffer);
-    arenaView.setUint32(8, 2, true);
+    arenaView.setUint32(8, OTHER_FORMAT_VERSION, true);
     arenaView.setUint32(
       ARENA_HEADER_CHECKSUM_OFFSET,
       crc32WithZeroedRange(arena.subarray(0, 8192), ARENA_HEADER_CHECKSUM_OFFSET, 4),
@@ -383,7 +387,7 @@ describe("opfs-repacked bootstrap and bounded recovery", () => {
       baseDigest: metadataBaseDigest(base),
     });
     const slotView = new DataView(slot.buffer);
-    slotView.setUint32(8, 2, true);
+    slotView.setUint32(8, OTHER_FORMAT_VERSION, true);
     slotView.setUint32(ACTIVATION_CHECKSUM_OFFSET, crc32WithZeroedRange(slot, ACTIVATION_CHECKSUM_OFFSET, 4), true);
     activation.set(slot);
     await replaceDurableFile(activationPort, "activation.bin", activation);
@@ -393,7 +397,7 @@ describe("opfs-repacked bootstrap and bounded recovery", () => {
     await replaceDurableFile(metadataPort, "arena.bin", new Uint8Array([0xff]));
     const unsupportedBase = encodeMetadataBase(createInitialState(8192));
     const unsupportedBaseView = new DataView(unsupportedBase.buffer);
-    unsupportedBaseView.setUint32(8, 2, true);
+    unsupportedBaseView.setUint32(8, OTHER_FORMAT_VERSION, true);
     unsupportedBaseView.setUint32(
       METADATA_HEADER_CHECKSUM_OFFSET,
       crc32WithZeroedRange(unsupportedBase, METADATA_HEADER_CHECKSUM_OFFSET, 4),
@@ -629,8 +633,8 @@ describe("opfs-repacked bootstrap and bounded recovery", () => {
       const header = new Uint8Array(48);
       header.set(new TextEncoder().encode("PGXRPF01"));
       const view = new DataView(header.buffer);
-      view.setUint32(8, 1, true);
-      view.setUint32(12, 1, true);
+      view.setUint32(8, FORMAT_VERSION, true);
+      view.setUint32(12, LIMITS_PROFILE_VERSION, true);
       view.setBigUint64(16, 1n, true);
       view.setBigUint64(24, 1n, true);
       view.setUint32(32, 0xffff_ffff, true);

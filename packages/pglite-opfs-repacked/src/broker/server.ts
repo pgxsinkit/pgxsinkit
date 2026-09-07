@@ -25,7 +25,7 @@
  */
 
 import { FS_ERRNO, FsError } from "../core/errors";
-import type { RepackedStat, RepackedVfs } from "../core/repacked-vfs";
+import type { RepackedFileSystem, RepackedStat } from "../core/repacked-vfs";
 import {
   FAULT_DETACHED,
   FAULT_NONE,
@@ -47,10 +47,12 @@ import {
   OPCODE_OPEN,
   OPCODE_READ,
   OPCODE_READDIR,
+  OPCODE_READLINK,
   OPCODE_RENAME,
   OPCODE_RMDIR,
   OPCODE_SIZE,
   OPCODE_STAT,
+  OPCODE_SYMLINK,
   OPCODE_TRUNCATE,
   OPCODE_UNLINK,
   OPCODE_WRITE,
@@ -105,8 +107,11 @@ class ProtocolViolation extends Error {
 }
 
 export interface RepackedSyncBrokerOptions {
-  /** The store this broker owns. Nothing else may hold it. */
-  readonly vfs: RepackedVfs;
+  /**
+   * The store this broker owns. Nothing else may hold it. A `RepackedVfs` is the one-store form; a
+   * `MountedRepackedVfs` serves several stores as one tree, and the broker cannot tell them apart.
+   */
+  readonly vfs: RepackedFileSystem;
   /** The shared doorbell every attached channel rings. */
   readonly doorbell: RepackedDoorbell;
   /** The timestamp the broker supplies to every core call. Defaults to the wall clock. */
@@ -125,7 +130,7 @@ export interface RepackedSyncBrokerOptions {
 
 export class RepackedSyncBroker {
   readonly doorbell: RepackedDoorbell;
-  readonly #vfs: RepackedVfs;
+  readonly #vfs: RepackedFileSystem;
   readonly #now: () => bigint;
   readonly #log: (message: string) => void;
   readonly #pollIntervalMs: number;
@@ -353,6 +358,13 @@ export class RepackedSyncBroker {
       }
       case OPCODE_SIZE:
         return this.#size(reader);
+      case OPCODE_SYMLINK: {
+        const target = reader.string();
+        this.#vfs.symlink(target, reader.string(), this.#now());
+        return OK;
+      }
+      case OPCODE_READLINK:
+        return this.#readlink(reader, writer);
       default:
         throw new ProtocolViolation(`unhandled opcode ${opcode}`);
     }
@@ -364,6 +376,17 @@ export class RepackedSyncBroker {
     const mode = reader.u32();
     const plan = planOpen(flags);
     const nowMs = this.#now();
+    // `O_NOFOLLOW`: the core always follows a final link, so the refusal is proved here first. A
+    // path that does not exist is not a link, and `O_CREAT` must still be free to create it.
+    if (!plan.follow) {
+      try {
+        if (this.#vfs.lstat(path).kind === "symlink") {
+          throw new FsError("ELOOP", "path is a symbolic link and O_NOFOLLOW was requested", { path });
+        }
+      } catch (cause) {
+        if (!(cause instanceof FsError) || cause.code !== FS_ERRNO.ENOENT) throw cause;
+      }
+    }
     if (plan.requireExisting) this.#vfs.lstat(path);
     if (plan.truncateFirst) this.#vfs.truncate(path, 0n, nowMs);
     let fd: number;
@@ -472,6 +495,12 @@ export class RepackedSyncBroker {
     const mode = reader.u32();
     this.#vfs.mkdir(path, { recursive, mode, nowMs: this.#now() });
     return OK;
+  }
+
+  /** The target of one symbolic link. The result is the target's byte length; the payload is it. */
+  #readlink(reader: PayloadReader, writer: PayloadWriter): Answer {
+    writer.string(this.#vfs.readlink(reader.string()));
+    return ok(writer.length, writer.length);
   }
 
   #size(reader: PayloadReader): Answer {

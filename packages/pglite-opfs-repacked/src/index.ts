@@ -22,6 +22,7 @@ export { OpfsRepackedFS, type RepackedDurability } from "./opfs-repacked-fs";
 // OPFS anywhere in it. This is what a coordinator worker owns and what the sync broker serves.
 export {
   RepackedVfs,
+  type RepackedFileSystem,
   type RepackedStat,
   type RepackedVfsMetrics,
   type RepackedVfsOpenOptions,
@@ -55,6 +56,7 @@ export {
   type BrokerReadResult,
   type BrokerReaddirPageResult,
   type BrokerReaddirResult,
+  type BrokerReadlinkResult,
   type BrokerResult,
   type BrokerSizeResult,
   type BrokerStatResult,
@@ -65,6 +67,7 @@ export {
   O_APPEND,
   O_CREAT,
   O_EXCL,
+  O_NOFOLLOW,
   O_RDONLY,
   O_RDWR,
   O_TRUNC,

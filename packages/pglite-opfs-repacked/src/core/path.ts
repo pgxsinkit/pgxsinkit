@@ -43,6 +43,24 @@ export function validatePathComponent(component: string): number {
   return bytes;
 }
 
+/**
+ * Validate a symbolic link's target and report its UTF-8 byte length.
+ *
+ * Targets are ABSOLUTE ONLY, and deliberately so: an absolute target resolves by restarting the
+ * walk at the store root, which needs no notion of "the directory the link lives in" and therefore
+ * survives a rename of the link. It is also all a Postgres datadir ever writes — `CREATE TABLESPACE`
+ * links `pg_tblspc/<oid>` at the absolute `LOCATION`. A relative target is `EINVAL`, not silently
+ * reinterpreted.
+ */
+export function validateSymlinkTarget(target: string): number {
+  const bytes = utf8Length(target, "symlink target");
+  if (bytes === 0 || bytes > MAX_PATH_BYTES) {
+    throw new FsError("EINVAL", `symlink target must be 1 to ${MAX_PATH_BYTES} UTF-8 bytes`);
+  }
+  parsePath(target);
+  return bytes;
+}
+
 export function parsePath(path: string): string[] {
   if (path === "/") {
     return [];

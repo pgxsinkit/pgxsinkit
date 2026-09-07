@@ -59,6 +59,7 @@ const OPFS_REPACKED_RUNTIME_EXPORTS = [
   "O_APPEND",
   "O_CREAT",
   "O_EXCL",
+  "O_NOFOLLOW",
   "O_RDONLY",
   "O_RDWR",
   "O_TRUNC",
