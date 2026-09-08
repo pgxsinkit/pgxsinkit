@@ -22,6 +22,7 @@ import {
   getSyncRegistryStorage,
   isStorageBackend,
   isStorageDurability,
+  isStorageEngineDeclaration,
   resolveStorageDeclaration,
   StorageDeclarationRefusedError,
 } from "@pgxsinkit/contracts";
@@ -47,6 +48,7 @@ import { wrapLiveQueryForMaterialization } from "../live-rows-sql";
 import type { LocalStoreVersionEvent } from "../local-store";
 import { createOpfsEffects } from "../opfs-effects";
 import { type PlacementProbeResult, probeOpfsSyncAccess } from "../placement-probe";
+import { createStoreEngineResolver, type StoreEngineFactory, type StoreEngineModuleLoader } from "../store-engine";
 import { idbStoreExists, META_STORE_UNAVAILABLE, readStoreMetaRecord, writeStoreMetaRecord } from "../store-meta";
 import { readTestStoreMarker, TEST_STORE_BACKEND, type TestStoreMarker } from "../store-path";
 import {
@@ -144,6 +146,12 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    * Takes a plain store PATH (ADR-0036); the internal `backendOverride` is the test lane's memory selection.
    */
   createPglite?: (storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>;
+  /**
+   * How this scope imports a DECLARED store-engine module (ADR-0050 addendum 2026-09-08). Defaults to the
+   * scope's own dynamic `import()`; injected by a unit test that has no module to load. It is consulted
+   * only when the store's bound declaration carries `storage.engine`, and never for the built-in store.
+   */
+  loadStoreEngineModule?: StoreEngineModuleLoader;
   /** The pgxsinkit control plane — subscribe, token re-mint, convergence barrier (ADR-0055). */
   controlPlaneUrl: string;
   /** The edge that serves durable-streams reads. */
@@ -347,7 +355,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   // provision payload bound the declaration (a construction-time constant could never see a wire declaration).
   const currentDurability = () =>
     engineStorage?.durability ?? getSyncRegistryStorage(options.registry)?.durability ?? "relaxed";
-  const createPglite =
+  const builtInCreatePglite: StoreEngineFactory =
     options.createPglite ??
     ((storePath: string, backendOverride?: "memory") =>
       createClientPGlite(storePath, {
@@ -356,6 +364,22 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         // SW-direct placement grant (ADR-0049 D1): a spare minted in-scope opens OPFS-repacked, matching the boot.
         ...(placementOpfsAccess ? { hasOpfsSyncAccess: true } : {}),
       }));
+  // The DECLARED store engine (ADR-0050 addendum 2026-09-08). A store whose bound declaration carries
+  // `storage.engine` is minted by THAT module, not by the built-in factory — generically: the toolkit
+  // imports a module URL and calls its `createPglite`, and knows nothing else about the engine behind it.
+  // Resolved per module URL and memoized (rejections included) for this scope's lifetime.
+  const resolveStoreEngine = createStoreEngineResolver(options.loadStoreEngineModule);
+  // Read at MINT time, never at construction: the declaration arrives on the first provision/attach payload,
+  // long after this closure is built, and it is immutable once bound — so every mint of this store resolves
+  // the same engine. A declared module that will not load or exports no factory throws LOUDLY here; it never
+  // degrades to the built-in store, which would report a healthy engine for one that never ran.
+  const createPglite: StoreEngineFactory = async (storePath, backendOverride) => {
+    const declaredEngine = engineStorage?.engine?.module;
+    if (declaredEngine === undefined) return await builtInCreatePglite(storePath, backendOverride);
+    const factory = await resolveStoreEngine(declaredEngine);
+    syncDebug("worker store engine declared", { storePath, module: declaredEngine });
+    return await factory(storePath, backendOverride);
+  };
   // A testing acknowledgment (ADR-0036) spread into THIS worker's options — needed when a test injects a
   // non-persistent BYO store (`precreatedPglite` / `pgliteInstance` / a memory-returning `createPglite`),
   // which `createSyncClient` would otherwise refuse. Forwarded to the boot below. A browser worker never
@@ -1936,6 +1960,12 @@ function invalidDeclarationField(declaration: SyncStorageDeclaration): string | 
   }
   if (declaration.durability !== undefined && !isStorageDurability(declaration.durability)) {
     return `durability "${String(declaration.durability)}"`;
+  }
+  // ADR-0050 addendum 2026-09-08: a declared engine must be `{ module }` naming an absolute or
+  // origin-relative module URL. A malformed one is refused here rather than at the first mint, so a
+  // typo surfaces at the handshake instead of halfway through a boot.
+  if (declaration.engine !== undefined && !isStorageEngineDeclaration(declaration.engine)) {
+    return `engine ${JSON.stringify(declaration.engine)}`;
   }
   return undefined;
 }

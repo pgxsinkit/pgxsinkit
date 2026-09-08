@@ -127,6 +127,31 @@ describe("sync config contracts", () => {
     ).toThrow(/invalid storage\.durability/);
   });
 
+  it("carries a storage.engine declaration (the store-factory module) through defineSyncRegistry", () => {
+    const registry = defineSyncRegistry({
+      tables: { thing: defineSyncTable({ tableName: "storage_thing_engine", makeColumns: makeStorageColumns }) },
+      storage: { engine: { module: "/store-engine/factory.js" } },
+    });
+    expect(getSyncRegistryStorage(registry)).toEqual({ engine: { module: "/store-engine/factory.js" } });
+  });
+
+  it("rejects an unusable storage.engine module at defineSyncRegistry (fail closed at module-eval)", () => {
+    // A document-relative specifier resolves against the importing scope's base URL, which differs between
+    // the tab and the worker the declaration travels to — so it is refused at definition, not at the mint.
+    expect(() =>
+      defineSyncRegistry({
+        tables: { thing: defineSyncTable({ tableName: "storage_bad_engine", makeColumns: makeStorageColumns }) },
+        storage: { engine: { module: "./factory.js" } },
+      }),
+    ).toThrow(/invalid storage\.engine/);
+    expect(() =>
+      defineSyncRegistry({
+        tables: { thing: defineSyncTable({ tableName: "storage_blank_engine", makeColumns: makeStorageColumns }) },
+        storage: { engine: { module: "" } },
+      }),
+    ).toThrow(/invalid storage\.engine/);
+  });
+
   it("rejects omitting primary-key columns from the client projection", () => {
     expect(() =>
       defineSyncTable({

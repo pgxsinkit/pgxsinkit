@@ -96,6 +96,23 @@ teardown, distinct from destroy.
    `runStoreDestruction`) stay — they serve `client.destroy()` and artifact destruction, not
    preference changes.
 
+**Addendum 2026-09-08 — the declaration carries a third field, `engine`.** `SyncStorageDeclaration`
+gains an optional `engine: { module }`, a store-factory module URL (absolute or origin-relative) whose
+default export — or named `createPglite` — mints the store instead of the toolkit's own
+`createClientPGlite`. It belongs in the declaration for the same reason `backend` and `durability` do,
+and for a stronger one: a store's datadir belongs to the engine that wrote it, so the engine is not a
+rendering preference over one store but part of the store's IDENTITY. Everything decisions 1–5 already
+say therefore applies unchanged and without exception — it travels in the declaration message and on
+the provision/attach payloads, registry-static outranks wire, per-field resolution is on explicit
+values only (compared on the `module` URL), and the binding is immutable, so a different module means a
+fresh store under a fresh path and never a rehome. The one asymmetry is that the built-in engine is
+spelled by ABSENCE: there is no default module URL to resolve to, so an incoming declaration with no
+`engine` is "no opinion" (as an unset `backend` is) and never an assertion that the store is built-in.
+Malformed values are refused at the same two gates the other fields use — `defineSyncRegistry` at
+module-eval, and the declaration message at the handshake — and an unloadable module or one exporting
+no factory fails the mint loudly, never by falling back to the built-in store. Nothing in the toolkit
+knows, names or imports any particular engine; the module URL is the entire surface.
+
 ### Teardown
 
 7. **Add `quiesceStoreWorker(worker, opts?)` — a path-addressed teardown, separate from destroy.**

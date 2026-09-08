@@ -231,6 +231,15 @@ export {
   type StoreBootResolution,
 } from "./store-boot";
 export {
+  // The DECLARED store engine (ADR-0050 addendum): loading a `storage.engine.module` and taking its
+  // `createPglite`. The worker uses it for every declared mint; an app whose in-process fallback must
+  // honour the same declaration uses it there.
+  createStoreEngineResolver,
+  loadStoreEngineFactory,
+  type StoreEngineFactory,
+  type StoreEngineModuleLoader,
+} from "./store-engine";
+export {
   InvalidStorePathError,
   NonPersistentStoreError,
   resolveStoreDataDir,

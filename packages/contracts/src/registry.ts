@@ -31,6 +31,7 @@ import {
   isRetention,
   isStorageBackend,
   isStorageDurability,
+  isStorageEngineDeclaration,
   isSubscriptionTiming,
   isWriteMode,
   assertShapeFilterIsEnforceable,
@@ -451,9 +452,11 @@ export interface SyncRegistryDefinition<TRegistry extends SyncTableRegistry> {
   /**
    * The storage contract for every store this registry mints (ADR-0049 decision 1, ADR-0047). Part of the
    * DATA contract, not a per-open knob: `durability` binds every toolkit-minted open (relaxed default),
-   * and `backend` scopes the BROWSER store only (`opfs` default; Node/`file` and `memory` clones
-   * unaffected). Validated at {@link defineSyncRegistry} (fail-closed at module-eval); carried through on
-   * the returned registry and read back with {@link getSyncRegistryStorage}. See {@link SyncStorageDeclaration}.
+   * `backend` scopes the BROWSER store only (`opfs` default; Node/`file` and `memory` clones
+   * unaffected), and `engine` names the store-factory module that mints the store at all (absent default —
+   * the toolkit's own). Validated at {@link defineSyncRegistry} (fail-closed at module-eval); carried
+   * through on the returned registry and read back with {@link getSyncRegistryStorage}. See
+   * {@link SyncStorageDeclaration}.
    */
   storage?: SyncStorageDeclaration;
   /**
@@ -1514,11 +1517,15 @@ export function attachSyncRegistryStorage<TRegistry extends SyncTableRegistry>(
   }
   // Idempotent for an EQUAL declaration (a registry value reused across constructions may be re-stamped with
   // the same contract) but fail-closed on a CONFLICT — two different storage contracts over one registry is a
-  // definition error, never silently resolved. `backend`/`durability` are the only fields, so a shallow
-  // compare is exhaustive.
+  // definition error, never silently resolved. `backend`/`durability`/`engine` are the only fields, and
+  // `engine`'s identity is its module URL, so comparing those three is exhaustive.
   const existing = getSyncRegistryStorage(registry);
   if (existing != null) {
-    if (existing.backend !== storage.backend || existing.durability !== storage.durability) {
+    if (
+      existing.backend !== storage.backend ||
+      existing.durability !== storage.durability ||
+      existing.engine?.module !== storage.engine?.module
+    ) {
       throw new Error(
         `conflicting storage declaration for registry: already ${JSON.stringify(existing)}, cannot re-declare ` +
           `${JSON.stringify(storage)}`,
@@ -1812,9 +1819,10 @@ function validateRowClassification(registry: SyncTableRegistry, rowClasses: read
 }
 
 /**
- * Fail-closed at module-eval (ADR-0049 decision 1): a declared `storage.backend` / `storage.durability` must
- * be a known value, matching how the other registry axes reject bad input at `defineSyncRegistry`. An absent
- * declaration or absent field is fine — it resolves to the ADR-0047 defaults (`opfs` / `relaxed`).
+ * Fail-closed at module-eval (ADR-0049 decision 1): a declared `storage.backend` / `storage.durability` /
+ * `storage.engine` must be a known value, matching how the other registry axes reject bad input at
+ * `defineSyncRegistry`. An absent declaration or absent field is fine — it resolves to the ADR-0047
+ * defaults (`opfs` / `relaxed`) and, for `engine`, to the toolkit's own store.
  */
 function validateStorageDeclaration(storage: SyncStorageDeclaration | undefined) {
   if (storage == null) {
@@ -1828,6 +1836,13 @@ function validateStorageDeclaration(storage: SyncStorageDeclaration | undefined)
   if (storage.durability !== undefined && !isStorageDurability(storage.durability)) {
     throw new Error(
       `invalid storage.durability "${String(storage.durability)}": must be one of ${STORAGE_DURABILITIES.join(", ")}`,
+    );
+  }
+  if (storage.engine !== undefined && !isStorageEngineDeclaration(storage.engine)) {
+    throw new Error(
+      `invalid storage.engine ${JSON.stringify(storage.engine)}: must be { module } naming an ABSOLUTE ` +
+        `("https://host/factory.js") or ORIGIN-RELATIVE ("/store-engine/factory.js") module URL the engine ` +
+        `home can import — a document-relative specifier resolves differently in a worker scope`,
     );
   }
 }

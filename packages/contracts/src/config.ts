@@ -138,6 +138,52 @@ export function isStorageDurability(value: unknown): value is StorageDurability 
 }
 
 /**
+ * The declared store ENGINE (ADR-0050 addendum 2026-09-08): the module URL of a store factory that answers
+ * for the store instead of the toolkit's own `createClientPGlite`.
+ *
+ * `module` is an **absolute or origin-relative module URL** the engine home can `import()`. Its default
+ * export — or a named `createPglite` — is the toolkit's own `createPglite` seam (ADR-0036), unchanged:
+ * `(storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>`. The module owns everything
+ * this declaration does not carry: its own assets (derivable from `import.meta.url`; there is no asset
+ * base and there will not be one), its own storage layout under the store path, and its own environment
+ * requirements (a threaded engine that needs a cross-origin-isolated page refuses to construct without
+ * one, loudly, from inside the module).
+ *
+ * Nothing in the toolkit knows, names or imports any particular engine — this field is the whole surface.
+ */
+export interface StorageEngineDeclaration {
+  module: string;
+}
+
+/**
+ * Type guard: is `value` a usable {@link StorageEngineDeclaration.module} — a non-blank string that parses
+ * as an ABSOLUTE URL (`https://…/factory.js`) or an ORIGIN-RELATIVE one (`/store-engine/factory.js`)?
+ *
+ * A document-relative specifier (`./factory.js`, `factory.js`) is deliberately rejected: the declaration
+ * crosses a bridge into a worker scope whose base URL is the worker chunk's, not the tab's, so a relative
+ * URL would resolve differently on either side of the wire. Source of truth for
+ * {@link SyncStorageDeclaration} validation.
+ */
+export function isStorageEngineModule(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim() === "") return false;
+  try {
+    // The base is only consulted for the origin-relative form; an absolute URL ignores it entirely.
+    const url = new URL(value, "https://storage-engine.invalid/");
+    return value.startsWith("/") || url.href === new URL(value).href;
+  } catch {
+    // Not parseable as either form — a hand-typed specifier gone wrong, refused rather than guessed at.
+    return false;
+  }
+}
+
+/** Type guard: is `value` a well-formed {@link StorageEngineDeclaration}? */
+export function isStorageEngineDeclaration(value: unknown): value is StorageEngineDeclaration {
+  return (
+    typeof value === "object" && value !== null && isStorageEngineModule((value as StorageEngineDeclaration).module)
+  );
+}
+
+/**
  * The registry's storage contract (ADR-0049 decision 1, ADR-0047). Storage is PART OF THE DATA CONTRACT:
  * whether losing the last not-yet-flushed action is acceptable, and whether OPFS may be used at all, is
  * decided by what the data IS — so it is declared once on the registry, not at any minting/open site.
@@ -147,20 +193,30 @@ export function isStorageDurability(value: unknown): value is StorageDurability 
  *   to contradict it; a capability fallback keeps the declared mode. A no-op on `memory` clones.
  * - {@link StorageBackend backend} defaults to `"opfs"` and scopes the BROWSER store only; Node/`file` and
  *   `memory` clones are unaffected. `"idbfs"` opts the store out of the capability/election machinery.
+ * - {@link StorageEngineDeclaration engine} defaults to ABSENT — the toolkit's own store. Present, its
+ *   `module` URL is the store factory that mints this store instead (ADR-0050 addendum 2026-09-08). It is
+ *   part of the declaration for the same reason the other two are: a store's datadir belongs to the engine
+ *   that wrote it, so a different `module` is a DIFFERENT store, minted fresh under a fresh path, never a
+ *   rehome of an existing one.
  */
 export interface SyncStorageDeclaration {
   backend?: StorageBackend;
   durability?: StorageDurability;
+  engine?: StorageEngineDeclaration;
 }
 
 /**
  * A {@link SyncStorageDeclaration} with every field resolved (ADR-0050) — the store's BOUND declaration.
  * Produced once per store by {@link resolveStorageDeclaration} and immutable for the store's lifetime: a
  * preference change mints a fresh store under a fresh path, never rebinds an existing one.
+ *
+ * `engine` is the one field that stays OPTIONAL after resolution, because the toolkit's own store has no
+ * module URL to name: absent IS the resolved value of "the built-in engine".
  */
 export interface ResolvedStorageDeclaration {
   backend: StorageBackend;
   durability: StorageDurability;
+  engine?: StorageEngineDeclaration;
 }
 
 /**
@@ -199,12 +255,21 @@ function resolveDeclarationField<TValue>(
  * declaration (authoritative) and the tab's WIRE declaration (honoured only where the registry is silent).
  * Per field: an unset field is "no opinion" and can never conflict; both explicit and disagreeing is a
  * {@link StorageDeclarationRefusedError}; unresolved fields take the capability defaults
- * (`backend: "opfs"`, `durability: "relaxed"`).
+ * (`backend: "opfs"`, `durability: "relaxed"`, and NO engine module — the toolkit's own store).
+ *
+ * The `engine` field resolves on its `module` URL, which is the identity that matters: two declarations
+ * naming the same module are the same engine, and a disagreement refuses exactly as the other fields do.
  */
 export function resolveStorageDeclaration(
   staticDeclaration: SyncStorageDeclaration | undefined,
   wireDeclaration: SyncStorageDeclaration | undefined,
 ): ResolvedStorageDeclaration {
+  const engineModule = resolveDeclarationField<string | undefined>(
+    "engine",
+    staticDeclaration?.engine?.module,
+    wireDeclaration?.engine?.module,
+    undefined,
+  );
   return {
     backend: resolveDeclarationField("backend", staticDeclaration?.backend, wireDeclaration?.backend, "opfs"),
     durability: resolveDeclarationField(
@@ -213,6 +278,7 @@ export function resolveStorageDeclaration(
       wireDeclaration?.durability,
       "relaxed",
     ),
+    ...(engineModule === undefined ? {} : { engine: { module: engineModule } }),
   };
 }
 
@@ -220,6 +286,11 @@ export function resolveStorageDeclaration(
  * Check a LATER declaration against a store's bound resolution (ADR-0050): an unset or equal field is
  * idempotent; an explicit field disagreeing with the bound value is a {@link StorageDeclarationRefusedError}.
  * The bound declaration is immutable — first arrival binds, later arrivals only confirm.
+ *
+ * `engine` is checked on its `module` URL, and only when the incoming declaration names one: an incoming
+ * declaration with NO engine is "no opinion" exactly like an unset `backend`, never an assertion that the
+ * store is on the built-in engine. (Absence is how the built-in engine is spelled, so it cannot double as
+ * an explicit contradiction; a consumer switching back mints a fresh store rather than redeclaring one.)
  */
 export function assertStorageDeclarationCompatible(
   bound: ResolvedStorageDeclaration,
@@ -235,6 +306,15 @@ export function assertStorageDeclarationCompatible(
           `fresh store under a fresh path`,
       );
     }
+  }
+  const incomingEngine = incoming.engine?.module;
+  if (incomingEngine !== undefined && incomingEngine !== bound.engine?.module) {
+    throw new StorageDeclarationRefusedError(
+      `storage declaration disagreement on "engine": the store is bound to ` +
+        `${bound.engine === undefined ? "the built-in store engine" : `"${bound.engine.module}"`} but a later ` +
+        `declaration says "${incomingEngine}" — a store's declaration is immutable; a store's datadir belongs ` +
+        `to the engine that wrote it, so an engine change mints a fresh store under a fresh path`,
+    );
   }
 }
 

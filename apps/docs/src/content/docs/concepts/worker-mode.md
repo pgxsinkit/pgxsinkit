@@ -187,7 +187,7 @@ elected engine worker and is not part of the OPFS durability guarantee.
 ### The storage declaration on the wire (ADR-0050)
 
 The worker **name carries the store path and nothing else** — never configuration. The store's
-storage declaration (`SyncStorageDeclaration`: `backend`, `durability`) normally lives statically on
+storage declaration (`SyncStorageDeclaration`: `backend`, `durability`, `engine`) normally lives statically on
 the registry (`attachSyncRegistryStorage`), and that remains authoritative. For a consumer whose declaration is
 **dynamic** (a runtime storage toggle, like the board demo's), the declaration travels on the wire
 instead: pass `storage` to `attachSyncClient`/`provisionSyncWorker`, and the library posts a
@@ -208,6 +208,37 @@ while an `extendedLifetime` predecessor may still hold it. Each obsolete (or wip
 **quiesced** — `quiesceStoreWorker` tears the store's SharedWorker host down by path so an
 `extendedLifetime` idbfs predecessor releases the IndexedDB connection it holds across the reload
 (else `deleteDatabase` blocks forever); OPFS releases on idle and needs no teardown (ADR-0050).
+
+### Declaring a different store engine
+
+The declaration's third field names the **engine** that mints the store:
+
+```ts
+storage: {
+  engine: {
+    module: "/store-engine/factory.js";
+  }
+}
+```
+
+`module` is an absolute or origin-relative module URL. pgxsinkit `import()`s it in whichever scope is
+minting and takes its **default export** — or, failing that, a named `createPglite` — as the store
+factory: `(storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>`, the same signature
+`createPglite` has always had. That module then answers for the store instead of the built-in
+`createClientPGlite`, so a different PostgreSQL-shaped engine can back the local store with no
+engine-specific code in your app or in the toolkit. Absent (the default) is the built-in store.
+
+Everything the seam does not pass, the module owns: its own assets (derive them from `import.meta.url`
+— there is no asset base), its own storage layout under the store path, and its own environment
+requirements (an engine that needs cross-origin isolation, or a worker scope, refuses to construct
+without one — from inside the module, loudly). Serve it **same-origin** unless you are prepared to add
+CORS _and_ `Cross-Origin-Resource-Policy: cross-origin` to it.
+
+The engine is part of the store's **identity**, not a rendering preference over one store: a datadir
+belongs to the engine that wrote it, so changing `module` means minting a fresh store under a fresh
+path exactly as a `backend` change does — never reopening an existing one. A module that will not load,
+or that exports no factory, fails the mint with a loud error naming the module; it never falls back to
+the built-in store, because a green boot on the wrong engine is the one outcome worse than a failure.
 
 ## Relocation and the execution limit
 

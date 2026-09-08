@@ -981,3 +981,121 @@ describe("Offline toggle over the bridge (ADR-0032 S3, set-online)", () => {
     expect(online).toContain(true);
   });
 });
+
+describe("the DECLARED store engine (ADR-0050 addendum 2026-09-08)", () => {
+  const MODULE = "/store-engine/factory.js";
+
+  it("mints through the module the declaration names, never the built-in factory", async () => {
+    const storePath = "declared-engine-provision";
+    const order: string[] = [];
+    installDeniedScope(new FakeAuthorityIdb(order), new FakeOpfsDir(order));
+
+    const imported: string[] = [];
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+      ...testStoreAcknowledgment(),
+      // The BUILT-IN factory. Once the declaration names an engine this must not run at all: a store the
+      // toolkit minted while an engine was declared is the silent-wrong-engine failure the seam exists to
+      // prevent.
+      createPglite: async () => {
+        order.push("built-in");
+        return makePglite();
+      },
+      loadStoreEngineModule: async (url) => {
+        imported.push(url);
+        return {
+          default: async (path: string) => {
+            order.push(`declared:${path}`);
+            return makePglite();
+          },
+        };
+      },
+    });
+    hosts.push(host);
+
+    const { port2 } = connectRaw(host);
+    await provisionSyncWorker({
+      port: port2 as unknown as never,
+      storePath,
+      storage: { engine: { module: MODULE } },
+    });
+
+    expect(imported).toEqual([MODULE]);
+    expect(order).toEqual([`declared:${storePath}`]);
+  });
+
+  it("a declared module with no callable export fails the provision LOUDLY (no built-in fallback)", async () => {
+    const order: string[] = [];
+    installDeniedScope(new FakeAuthorityIdb(order), new FakeOpfsDir(order));
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+      ...testStoreAcknowledgment(),
+      createPglite: async () => {
+        order.push("built-in");
+        return makePglite();
+      },
+      loadStoreEngineModule: async () => ({ notAFactory: 1 }),
+    });
+    hosts.push(host);
+
+    const { port2 } = connectRaw(host);
+    let failure: unknown;
+    try {
+      await provisionSyncWorker({
+        port: port2 as unknown as never,
+        storePath: "declared-engine-broken",
+        storage: { engine: { module: MODULE } },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect((failure as Error | undefined)?.message).toMatch(/exports no store factory/);
+    expect(order).toEqual([]);
+  });
+
+  it("leaves the built-in factory in charge when the declaration names no engine", async () => {
+    const order: string[] = [];
+    installDeniedScope(new FakeAuthorityIdb(order), new FakeOpfsDir(order));
+
+    const host = defineSyncWorker({
+      registry: todosRegistry,
+      controlPlaneUrl: "http://127.0.0.1:1",
+      streamBaseUrl: "http://127.0.0.1:1/v1/stream",
+      batchWriteUrl: "http://127.0.0.1:1/api/mutations",
+      syncEnabled: false,
+      installGlobal: false,
+      convergenceIntervalMs: 10_000_000,
+      ...testStoreAcknowledgment(),
+      createPglite: async () => {
+        order.push("built-in");
+        return makePglite();
+      },
+      loadStoreEngineModule: async () => {
+        throw new Error("the loader must not run for an undeclared engine");
+      },
+    });
+    hosts.push(host);
+
+    const { port2 } = connectRaw(host);
+    await provisionSyncWorker({
+      port: port2 as unknown as never,
+      storePath: "undeclared-engine-provision",
+      storage: { durability: "strict" },
+    });
+
+    expect(order).toEqual(["built-in"]);
+  });
+});
