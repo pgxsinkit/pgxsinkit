@@ -126,7 +126,7 @@
         "@pgxsinkit/pglite-opfs-repacked": "workspace:*",
       },
       "peerDependencies": {
-        "@electric-sql/pglite": ">=0.5.5-pgx.3",
+        "@electric-sql/pglite": ">=0.5.5-pgx.4",
         "drizzle-orm": "1.0.0-rc.4",
         "zod": "^4.5.4",
       },
@@ -143,7 +143,7 @@
       "name": "@pgxsinkit/pglite-opfs-repacked",
       "version": "0.0.0",
       "peerDependencies": {
-        "@electric-sql/pglite": ">=0.5.5-pgx.3",
+        "@electric-sql/pglite": ">=0.5.5-pgx.4",
       },
     },
     "packages/react": {
@@ -154,7 +154,7 @@
         "@pgxsinkit/contracts": "workspace:*",
       },
       "peerDependencies": {
-        "@electric-sql/pglite": ">=0.5.5-pgx.3",
+        "@electric-sql/pglite": ">=0.5.5-pgx.4",
         "drizzle-orm": "1.0.0-rc.4",
         "react": ">=19.2.8",
       },
