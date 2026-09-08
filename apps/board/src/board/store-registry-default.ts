@@ -2,6 +2,7 @@ import {
   type BridgePort,
   type ClientPGlite,
   createClientPGlite,
+  createStoreEngineResolver,
   destroyStoreArtifacts,
   provisionSyncWorker,
   quiesceStoreWorker,
@@ -10,7 +11,12 @@ import {
 import { boardWorkerMode } from "./engine-host";
 import { warmPgliteBootAssets } from "./pglite-warm";
 import { type QuiesceThenDestroyOptions, quiesceThenDestroyStoreWith } from "./quiesce-destroy-core";
-import { boardStorageDeclaration, readBackendPreference, readDurabilityPreference } from "./storage-preference";
+import {
+  boardStorageDeclaration,
+  readBackendPreference,
+  readDurabilityPreference,
+  readStoreEnginePreference,
+} from "./storage-preference";
 import { resolveBoardStoreFactory } from "./store-factory";
 import {
   createStoreRegistry,
@@ -45,7 +51,7 @@ const workersByStorePath = new Map<string, SharedWorker>();
 
 /** The board's current wire storage declaration (ADR-0050) — read fresh from localStorage per send. */
 function currentStorageDeclaration() {
-  return boardStorageDeclaration(readDurabilityPreference(), readBackendPreference());
+  return boardStorageDeclaration(readDurabilityPreference(), readBackendPreference(), readStoreEnginePreference());
 }
 
 /** The per-store SharedWorker, lazily constructed + cached (the inline `new URL` is Vite's worker-bundling cue). */
@@ -182,6 +188,14 @@ const WORKER_STORE_PLACEHOLDER = {} as unknown as ClientPGlite;
 // (board-sync.worker.ts) resolves the same seam for the SharedWorker engine home.
 const boardStoreFactory = resolveBoardStoreFactory(import.meta.env, (url) => import(/* @vite-ignore */ url));
 
+// The RUN-TIME engine preference's twin for this scope (ADR-0050 addendum 2026-09-08). In worker mode the
+// declared engine is resolved by the worker off the declaration, generically, inside the toolkit; the
+// in-process fallback has no worker to do that, so it resolves the same declaration here with the toolkit's
+// own generic loader. Same module, same contract, same loud failures — and the main-thread refusal a
+// threaded engine owes belongs to the MODULE, not to the board: this passes it the store path and lets it
+// answer for its own environment.
+const declaredStoreEngine = createStoreEngineResolver();
+
 /**
  * The in-process fallback's store (ADR-0032 decision 2 — no `SharedWorker`), tab-side.
  *
@@ -193,10 +207,17 @@ const boardStoreFactory = resolveBoardStoreFactory(import.meta.env, (url) => imp
  * does, and the `opfs` default cannot make it opfs here (the board is idb-only in-process, see the module
  * header). Only the durability axis is un-derivable, so only it is threaded in. An external factory takes the
  * store PATH alone (see ./store-factory): both axes are then that module's own business.
+ *
+ * Resolution order matches the worker's: the DECLARED engine (the run-time preference) first, then the
+ * build-time seam, then the toolkit's own store. A declared engine outranks the baked one because it is the
+ * choice made most recently and most explicitly — and because the store it opens was minted under that
+ * declaration, so nothing else may open it.
  */
-function createInProcessStore(storePath: string): Promise<ClientPGlite> {
-  if (boardStoreFactory) return boardStoreFactory(storePath);
-  return createClientPGlite(storePath, {
+async function createInProcessStore(storePath: string): Promise<ClientPGlite> {
+  const declaredEngine = readStoreEnginePreference();
+  if (declaredEngine !== undefined) return await (await declaredStoreEngine(declaredEngine))(storePath);
+  if (boardStoreFactory) return await boardStoreFactory(storePath);
+  return await createClientPGlite(storePath, {
     bootAssets: warmPgliteBootAssets(),
     durability: readDurabilityPreference(),
   });

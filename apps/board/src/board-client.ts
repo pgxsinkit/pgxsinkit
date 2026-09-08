@@ -16,7 +16,12 @@ import { createSyncClientHooks } from "@pgxsinkit/react";
 
 import { createOfflineControl, createWorkerOfflineControl, type OfflineControl } from "./board/offline";
 import { warmPgliteBootAssets } from "./board/pglite-warm";
-import { boardStorageDeclaration, readBackendPreference, readDurabilityPreference } from "./board/storage-preference";
+import {
+  boardStorageDeclaration,
+  readBackendPreference,
+  readDurabilityPreference,
+  readStoreEnginePreference,
+} from "./board/storage-preference";
 import type { OpenUserStoreResult } from "./board/store-registry";
 import { boardEngineWorkerFactory, boardStoreRegistry, boardWorkerMode } from "./board/store-registry-default";
 import { boardConfig } from "./config";
@@ -175,8 +180,13 @@ export async function createBoardSyncClient(
         storePath: target.storePath,
         // The wire storage declaration (ADR-0050): posted pre-placement on the port and bound by the engine.
         // The board's registries are storage-silent (the preferences are a dynamic demo toggle), so this wire
-        // declaration is what decides backend (probe vs declared idbfs) and durability.
-        storage: boardStorageDeclaration(readDurabilityPreference(), readBackendPreference()),
+        // declaration is what decides backend (probe vs declared idbfs), durability, and — when the demo's
+        // engine preference names a drop-in module — which engine mints the store at all.
+        storage: boardStorageDeclaration(
+          readDurabilityPreference(),
+          readBackendPreference(),
+          readStoreEnginePreference(),
+        ),
         // The worker bakes both registries and selects by role at boot (the spare was provisioned before
         // the role was known); the tab additionally builds its OWN write handles from `registry` above.
         role,
@@ -230,10 +240,14 @@ export async function createBoardSyncClient(
   // In-process there is no worker port and therefore no wire declaration (ADR-0050) — the registry object
   // lives in this one scope, so stamping the boot-read demo preferences onto it IS the static declaration
   // `createSyncClient`'s single mint seam resolves. Same shape as the wire declaration
-  // (`boardStorageDeclaration`: `durability` always, `backend: "idbfs"` only when forced). The precreate the
-  // store registry baked is already idb-only (createClientPGlite runs no opfs probe), so the backend stamp
-  // only records the declared contract here — it does not re-home this already-created store.
-  attachSyncRegistryStorage(registry, boardStorageDeclaration(readDurabilityPreference(), readBackendPreference()));
+  // (`boardStorageDeclaration`: `durability` always, `backend: "idbfs"` only when forced, `engine` only when
+  // a drop-in is preferred). The precreate the store registry baked is already idb-only (createClientPGlite
+  // runs no opfs probe) and was minted by whatever engine the preference names (store-registry-default's
+  // `createInProcessStore`), so this stamp only RECORDS the declared contract — it re-homes nothing.
+  attachSyncRegistryStorage(
+    registry,
+    boardStorageDeclaration(readDurabilityPreference(), readBackendPreference(), readStoreEnginePreference()),
+  );
   const offline = createOfflineControl();
   const client = await createSyncClient({
     registry,

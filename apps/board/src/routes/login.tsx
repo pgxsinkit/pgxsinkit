@@ -16,7 +16,10 @@ import {
   type DurabilityPreference,
   readBackendPreference,
   readDurabilityPreference,
+  readStoreEnginePreference,
+  type StoreEnginePreference,
 } from "../board/storage-preference";
+import { probeStoreEngineDropIn, type StoreEngineDropIn, storeEngineModuleLabel } from "../board/store-engine-dropin";
 import { boardStoreRegistry } from "../board/store-registry-default";
 import { SignInConnectionError } from "../connection-needed";
 
@@ -44,19 +47,52 @@ export function LoginRoute() {
   // other failure. `signInAs` decides this (it owns supabase's error vocabulary); this only renders it.
   const [connectionNeeded, setConnectionNeeded] = useState(false);
 
-  // The storage preferences (durability + backend). The PERSISTED values are read exactly once at mount; the
-  // `selected*` values are the pending UI choices. A store's declaration is immutable (ADR-0050), so Apply
-  // never re-homes an existing store: it first OBSOLETES every current binding (paths recorded for
-  // best-effort background destruction at later boots), then writes localStorage and reloads — the fresh
-  // boot mints new stores under the new declaration. That order is interruption-safe: a crash between the
-  // two leaves dropped bindings under the OLD preferences, never old paths bound under NEW ones. One
-  // "Apply & reload" button covers BOTH axes.
+  // The storage preferences (durability + backend + store engine). The PERSISTED values are read exactly once
+  // at mount; the `selected*` values are the pending UI choices. A store's declaration is immutable
+  // (ADR-0050), so Apply never re-homes an existing store: it first OBSOLETES every current binding (paths
+  // recorded for best-effort background destruction at later boots), then writes localStorage and reloads —
+  // the fresh boot mints new stores under the new declaration. That order is interruption-safe: a crash
+  // between the two leaves dropped bindings under the OLD preferences, never old paths bound under NEW ones.
+  // One "Apply & reload" button covers ALL THREE axes.
   const [persistedDurability] = useState<DurabilityPreference>(() => readDurabilityPreference());
   const [selectedDurability, setSelectedDurability] = useState<DurabilityPreference>(persistedDurability);
   const [persistedBackend] = useState<BackendPreference>(() => readBackendPreference());
   const [selectedBackend, setSelectedBackend] = useState<BackendPreference>(persistedBackend);
+  const [persistedEngine] = useState<StoreEnginePreference>(() => readStoreEnginePreference());
+  const [selectedEngine, setSelectedEngine] = useState<StoreEnginePreference>(persistedEngine);
   const [applyingPreferences, setApplyingPreferences] = useState(false);
-  const preferencesChanged = selectedDurability !== persistedDurability || selectedBackend !== persistedBackend;
+  const preferencesChanged =
+    selectedDurability !== persistedDurability ||
+    selectedBackend !== persistedBackend ||
+    selectedEngine !== persistedEngine;
+
+  // The store-engine DROP-IN (apps/board/docs/local-store-seam.md): an engine laid down as static files under
+  // this origin, discovered at RUN time from its manifest. Probed once per mount, off the critical path, and
+  // silent about every failure — a board with no drop-in must behave exactly like one that never had one.
+  // The probe answers `undefined` on a page that is not cross-origin isolated, because isolation is a
+  // property of the SERVED HEADERS (`VITE_BOARD_ISOLATED=1`): offering a threaded engine there would be a
+  // promise the page cannot keep.
+  const [dropIn, setDropIn] = useState<StoreEngineDropIn | null>(null);
+  useEffect(() => {
+    let live = true;
+    void probeStoreEngineDropIn({
+      base: import.meta.env.BASE_URL,
+      isolated: globalThis.crossOriginIsolated === true,
+      fetch: (url) => globalThis.fetch(url),
+    }).then((found) => {
+      if (live && found !== undefined) setDropIn(found);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // The engine control is shown when there is something to CHOOSE: a discovered drop-in, or a preference
+  // already persisted. The second case is the escape hatch — a preference set on an isolated build and
+  // reopened on a plain one would otherwise be unswitchable, since the drop-in is not offered there. Its
+  // label falls back to the module's file name, which is enough to recognise and enough to leave.
+  const engineModule = dropIn?.module ?? persistedEngine;
+  const engineLabel = dropIn?.name ?? (persistedEngine === undefined ? null : storeEngineModuleLabel(persistedEngine));
 
   const handleApplyPreferences = async () => {
     setApplyingPreferences(true);
@@ -64,7 +100,7 @@ export function LoginRoute() {
     setConnectionNeeded(false);
     try {
       await boardStoreRegistry.obsoleteAllStores();
-      applyStoragePreferences(selectedDurability, selectedBackend);
+      applyStoragePreferences(selectedDurability, selectedBackend, selectedEngine);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       setApplyingPreferences(false);
@@ -132,7 +168,8 @@ export function LoginRoute() {
   };
 
   return (
-    // `mih` (not `h`): the sign-in card is tall (nine identities + the durability + backend + local-data panels), so a fixed
+    // `mih` (not `h`): the sign-in card is tall (nine identities + the durability, backend, store-engine and local-data
+    // panels), so a fixed
     // 70vh would center it and OVERFLOW upward under the 56px AppShell header, covering the top identity button.
     // A min-height lets the container grow with the card (the page scrolls) instead, keeping every control clickable.
     <Center mih="70vh">
@@ -225,6 +262,33 @@ export function LoginRoute() {
               on a browser that would otherwise pick OPFS.
             </Text>
           </Stack>
+
+          {engineModule != null && engineLabel != null && (
+            <>
+              <Divider label="Store engine" labelPosition="center" />
+
+              <Stack gap="xs" aria-label="Store engine preference">
+                <SegmentedControl
+                  fullWidth
+                  size="xs"
+                  value={selectedEngine ?? "built-in"}
+                  onChange={(value) => setSelectedEngine(value === "built-in" ? undefined : engineModule)}
+                  data={[
+                    { value: "built-in", label: "Built-in" },
+                    { value: engineModule, label: `External (${engineLabel})` },
+                  ]}
+                />
+                <Text size="xs" c="dimmed">
+                  <strong>Built-in</strong> (the default) is the toolkit's own store. <strong>External</strong> hands
+                  every store this browser opens to <code>{engineModule}</code> — a PostgreSQL-shaped engine dropped
+                  into this app's origin, which the board discovered from its manifest and knows nothing else about. The
+                  two engines do not share a datadir, so switching mints a <em>fresh</em> store either way; the option
+                  only appears on a cross-origin-isolated page, because that is what such an engine needs to construct
+                  at all.
+                </Text>
+              </Stack>
+            </>
+          )}
 
           {preferencesChanged && (
             <Button
