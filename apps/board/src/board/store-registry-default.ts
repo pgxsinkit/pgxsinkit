@@ -11,6 +11,7 @@ import { boardWorkerMode } from "./engine-host";
 import { warmPgliteBootAssets } from "./pglite-warm";
 import { type QuiesceThenDestroyOptions, quiesceThenDestroyStoreWith } from "./quiesce-destroy-core";
 import { boardStorageDeclaration, readBackendPreference, readDurabilityPreference } from "./storage-preference";
+import { resolveBoardStoreFactory } from "./store-factory";
 import {
   createStoreRegistry,
   REGISTRY_KEY,
@@ -173,6 +174,34 @@ export function boardEngineWorkerFactory(storePath: string): () => SharedWorker 
 // reject = corrupt → recover); board-client IGNORES the value and attaches by store name instead.
 const WORKER_STORE_PLACEHOLDER = {} as unknown as ClientPGlite;
 
+// The local-store seam (./store-factory), resolved once for THIS scope: with `VITE_BOARD_STORE_FACTORY` set
+// to a module URL, that module mints the store here too, so the seam is the board's — not just the worker's
+// — and a browser without `SharedWorker` can never silently open a PGlite store while the configured engine
+// sits unused. Unset ⇒ `undefined` ⇒ the create below is untouched. The `import()` stays opaque to the
+// bundler (`@vite-ignore`): the URL is a runtime value naming a module OUTSIDE this repo. The worker entry
+// (board-sync.worker.ts) resolves the same seam for the SharedWorker engine home.
+const boardStoreFactory = resolveBoardStoreFactory(import.meta.env, (url) => import(/* @vite-ignore */ url));
+
+/**
+ * The in-process fallback's store (ADR-0032 decision 2 — no `SharedWorker`), tab-side.
+ *
+ * The durability preference is baked into the store at CREATE time (board-client later adopts this store via
+ * `precreatedPglite`, so the create must carry it). The BACKEND preference needs NO equivalent here:
+ * `createClientPGlite` takes no backend/idbfs knob (only the internal capability flag `hasOpfsSyncAccess`,
+ * which DEFAULTS to false → the store resolves to `idb://`, ADR-0049 step 10a). This precreate never runs the
+ * opfs probe/election, so it already opens on idbfs — forcing idbfs is a no-op relative to what it already
+ * does, and the `opfs` default cannot make it opfs here (the board is idb-only in-process, see the module
+ * header). Only the durability axis is un-derivable, so only it is threaded in. An external factory takes the
+ * store PATH alone (see ./store-factory): both axes are then that module's own business.
+ */
+function createInProcessStore(storePath: string): Promise<ClientPGlite> {
+  if (boardStoreFactory) return boardStoreFactory(storePath);
+  return createClientPGlite(storePath, {
+    bootAssets: warmPgliteBootAssets(),
+    durability: readDurabilityPreference(),
+  });
+}
+
 /** The registry adapters bound to real localStorage / IndexedDB / navigator.locks / (worker provision | `createClientPGlite`). */
 export function createBoardStoreAdapters(): StoreRegistryAdapters {
   return {
@@ -203,7 +232,7 @@ export function createBoardStoreAdapters(): StoreRegistryAdapters {
     // off every thread that matters), resolving when the worker acks — a rejected provision (initdb failed)
     // propagates so the pure logic's corrupt-spare recovery deletes the idb and re-provisions under a fresh
     // id, exactly as it recovers a corrupt tab-side create. In the in-process fallback: create the tab-side
-    // PGlite, consuming the login-screen WASM warm (optimisation A).
+    // store (`createInProcessStore` above — PGlite consuming the login-screen WASM warm, optimisation A).
     createStore: (storePath) =>
       boardWorkerMode
         ? getBoardEnginePort(storePath)
@@ -211,18 +240,7 @@ export function createBoardStoreAdapters(): StoreRegistryAdapters {
             // placement decision (idbfs must skip the probe) and binds the mint's durability.
             .then((port) => provisionSyncWorker({ port, storePath, storage: currentStorageDeclaration() }))
             .then(() => WORKER_STORE_PLACEHOLDER)
-        : // In-process fallback: the durability preference is baked into the store at CREATE time (board-client
-          // later adopts this store via `precreatedPglite`, so the create must carry it). The BACKEND preference
-          // needs NO equivalent here: `createClientPGlite` takes no backend/idbfs knob (only the internal
-          // capability flag `hasOpfsSyncAccess`, which DEFAULTS to false → the store resolves to `idb://`, ADR-0049
-          // step 10a). This precreate never runs the opfs probe/election, so it already opens on idbfs — forcing
-          // idbfs is a no-op relative to what it already does, and the `opfs` default cannot make it opfs here (the
-          // board is idb-only in-process, see the module header). Only the durability axis is un-derivable, so only
-          // it is threaded in.
-          createClientPGlite(storePath, {
-            bootAssets: warmPgliteBootAssets(),
-            durability: readDurabilityPreference(),
-          }),
+        : createInProcessStore(storePath),
     // Full artifact destruction for a store (ADR-0050): first TEAR DOWN its SharedWorker host so an
     // extendedLifetime idbfs worker surviving a reload releases its IndexedDB connection (else the delete
     // blocks forever), then destroy every artifact (OPFS directory + sentinel + meta + idb) via the library's

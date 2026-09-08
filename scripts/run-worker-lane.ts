@@ -42,6 +42,11 @@ const laneEnv: Record<string, string | undefined> = {
   VITE_BOARD_FUNCTIONS_REGION: "",
   VITE_BOARD_SEED_PASSWORD: "board-demo-password",
   VITE_BOARD_HASH_ROUTING: "",
+  // The local-store seam + its isolation headers (apps/board/docs/local-store-seam.md). This lane asserts the
+  // DEFAULT engine, so both are pinned "unset": a .env pointing the board's store at an external factory
+  // module must never silently become what these scenarios certify.
+  VITE_BOARD_STORE_FACTORY: "",
+  VITE_BOARD_ISOLATED: "",
 };
 
 function run(command: string, args: string[]): void {
