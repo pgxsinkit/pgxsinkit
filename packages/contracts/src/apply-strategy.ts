@@ -109,6 +109,25 @@ function isJsonSafe(column: SyncColumnType): boolean {
 }
 
 /**
+ * The Postgres `udt_name` of a `json`/`jsonb` column — `json`/`jsonb` for a scalar one, `_json`/`_jsonb`
+ * for an array one — and `undefined` for every other column. The single classifier for "is this a JSON
+ * column, and is it an array of them?", shared by the read path's wire decode (which parses the cell of a
+ * SCALAR json column — see `envelopeToChange`) and the COPY serializer's `udtName` map, so the two cannot
+ * disagree about which columns carry JSON.
+ *
+ * The array forms are reported but deliberately NOT decoded: an array column arrives (and stays) in
+ * Postgres's own `array_out` text, which every apply tier hands straight back to `array_in` — the element
+ * JSON inside it is Postgres's business, not ours.
+ */
+export function jsonUdtName(column: SyncColumnType): "json" | "jsonb" | "_json" | "_jsonb" | undefined {
+  const base = normalizeBaseType(column.sqlType);
+  if (base !== "json" && base !== "jsonb") {
+    return undefined;
+  }
+  return column.isArray ? (`_${base}` as const) : base;
+}
+
+/**
  * Chooses the bulk-insert strategy for a table from its column types (ADR-0009 decision 3):
  * - every column COPY-safe → `copy`;
  * - else every column COPY-safe ∪ array/json/jsonb → `json`;

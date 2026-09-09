@@ -4,7 +4,7 @@ import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { and, eq, fillPlaceholders, type SQL, sql } from "drizzle-orm";
 import { getTableConfig, type PgColumn } from "drizzle-orm/pg-core";
 
-import { quoteIdentifier, type SyncChange, type SyncColumnType, type SyncRow } from "@pgxsinkit/contracts";
+import { jsonUdtName, quoteIdentifier, type SyncChange, type SyncColumnType, type SyncRow } from "@pgxsinkit/contracts";
 
 import type { ApplyTarget } from "../local-tables";
 import { generateCopyData } from "./copy";
@@ -505,19 +505,17 @@ export async function applyUpsertsToTableWithJson(options: BulkApplyMessagesToTa
 
 /**
  * Each column mapped to its Postgres `udt_name` for the COPY serializer, which needs it only to
- * disambiguate `json`/`jsonb` (whose parsed values are indistinguishable from SQL arrays/objects by
- * runtime type alone). Derived from the model ({@link ApplyTarget.columnTypes}), never introspected
- * (ADR-0029 D2).
+ * disambiguate `json`/`jsonb` (whose decoded values are indistinguishable from SQL arrays/objects by
+ * runtime type alone). Derived from the model ({@link ApplyTarget.columnTypes}) through the contracts'
+ * `jsonUdtName` — the same classifier the read path's json decode uses, so the serializer and the decode
+ * cannot disagree about which columns carry JSON — never introspected (ADR-0029 D2).
  */
 function copyColumnUdts(target: ApplyTarget): Record<string, string> {
   const map: Record<string, string> = {};
   for (const column of target.columnTypes) {
-    const base = column.sqlType
-      .replace(/\(.*\)/g, "")
-      .trim()
-      .toLowerCase();
-    if (base === "json" || base === "jsonb") {
-      map[column.name] = column.isArray ? `_${base}` : base;
+    const udt = jsonUdtName(column);
+    if (udt !== undefined) {
+      map[column.name] = udt;
     }
   }
   return map;

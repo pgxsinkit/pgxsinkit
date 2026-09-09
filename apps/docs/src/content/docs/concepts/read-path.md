@@ -101,6 +101,16 @@ PostgreSQL  →  Circuits engine  →  durable-streams  →  the edge  →  PGli
 5. **PGlite** subscribes through `@pgxsinkit/client`'s own reader (`readShapeStream`, over
    `@durable-streams/client`) and applies the stream into local tables. The app reads from there.
 
+**Cell values on the wire are Postgres output text.** The engine's cell model is `null`, integer,
+float, boolean and **text**, so every other type — `json`/`jsonb`, arrays, timestamps, `uuid`,
+`numeric`, `bytea` — arrives as the exact text Postgres would print, which is what makes a backfilled
+row and its first replicated update compare equal. The client decodes exactly one family of that on the
+way in: a **scalar `json`/`jsonb` column is parsed once**, at the wire boundary, so it reaches every
+apply tier (and your local table) as a value rather than as text that would be JSON-encoded a second
+time. Array columns — json arrays included — stay in Postgres's own array literal, which each apply tier
+hands straight back to Postgres. You never see either form: what you read back out of PGlite is a
+`jsonb` object, not a string.
+
 ## The edge is the gate
 
 Clients address neither the engine nor durable-streams directly in a deployed system, and read

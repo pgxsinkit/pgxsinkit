@@ -5,14 +5,22 @@
  * Serialization of JavaScript values into a PostgreSQL `COPY ... WITH (FORMAT
  * text)` stream.
  *
- * Values reach this module already decoded — the read path hands the applier
- * JSON cell values, never Postgres wire text — so the runtime types it accepts
- * are the decoded ones: `int2`/`int4`/`float4`/`float8` as `number`, `bool` as
- * `boolean`, `json`/`jsonb` as parsed objects/arrays, array columns as
- * (possibly nested) JS arrays, `int8` as `bigint`, and every other type as its
- * raw Postgres text representation (a `string`). To feed those values back into
+ * Values reach this module already decoded, so the runtime types it accepts are
+ * the decoded ones: `int2`/`int4`/`float4`/`float8` as `number`, `bool` as
+ * `boolean`, `json`/`jsonb` as parsed objects/arrays/scalars, `int8` as
+ * `bigint`, and every other type — **array columns included** — as its raw
+ * Postgres text representation (a `string`). To feed those values back into
  * `COPY` we have to reverse that: turn each value into the exact text Postgres'
  * input functions expect, then apply the COPY framing.
+ *
+ * Only the json ones are decoded on the way in, and by exactly one step:
+ * `envelopeToChange`'s `decodeJsonColumns` (`../circuits/envelope-to-change`).
+ * The wire itself carries EVERY non-int/float/bool cell as Postgres output text
+ * — a `jsonb` column included — so without that step the `JSON.stringify` below
+ * would encode already-encoded JSON a second time and the column would land as a
+ * JSON string scalar. An array column's `array_out` text is deliberately left
+ * alone: it passes through {@link valueToText} unchanged and `COPY`'s `array_in`
+ * parses it, which is why a `json[]` value here is a `string`, not a JS array.
  *
  * Rather than invent an escaping scheme (the previous CSV-based approach broke
  * on arrays, JSON, embedded delimiters, etc.) this is a faithful port of the
@@ -153,10 +161,10 @@ function jsonArrayToText(arr: ReadonlyArray<unknown>): string {
 
 /**
  * Re-serialize a parsed `json`/`jsonb` value to its JSON text form. These columns
- * arrive already run through `JSON.parse`, so the value is the
- * decoded JS value (object, array, string, number, boolean or null) and always
- * needs `JSON.stringify` to become valid JSON input again — including scalars
- * (the string `hi` must be written as `"hi"`).
+ * arrive already run through `JSON.parse` (the read path's `decodeJsonColumns`),
+ * so the value is the decoded JS value (object, array, string, number, boolean or
+ * null) and always needs `JSON.stringify` to become valid JSON input again —
+ * including scalars (the string `hi` must be written as `"hi"`).
  */
 function jsonToText(value: unknown): string {
   return JSON.stringify(value);

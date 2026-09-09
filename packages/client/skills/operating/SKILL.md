@@ -43,11 +43,14 @@ latency** (latency is bounded by the read-path echo). Do **not** shorten it to "
 `@durable-streams/client` holds **one live long-poll connection open per subscribed stream** (a subject in K
 scopes of a shared shape holds K streams), and browsers cap **HTTP/1.1 at ~6 connections per origin** — so over
 plain HTTP six streams' long-polls consume every slot and the same-origin **write** request is **Stalled in the
-browser's connection queue** for a whole long-poll cycle before it is even dispatched. This presents as
-multi-second writes invisible to `curl`/Node (no per-host cap); only a real browser shows it (DevTools → Network
-→ a stuck `write` with a long **Stalled** time). Fix: serve the gateway over **HTTP/2** (or HTTP/3), which
-multiplexes every request over one connection. Any production ingress already does; it only bites a local stack
-on plain `http://` (browsers only negotiate HTTP/2 over TLS).
+browser's connection queue** for a whole long-poll cycle before it is dispatched. This presents as multi-second
+writes invisible to `curl`/Node (no per-host cap); only a real browser shows it (DevTools → Network → a stuck
+`write` with a long **Stalled** time). Fix: serve the gateway over **HTTP/2** (or HTTP/3), which multiplexes
+every request over one connection — any production ingress already does, so it only bites a local stack on
+plain `http://` (browsers negotiate HTTP/2 only over TLS).
+
+**Bun has the same budget elsewhere:** a Bun process caps concurrent `fetch` at **256**
+(`BUN_CONFIG_MAX_HTTP_REQUESTS`, ignored by `bun test` on 1.4.2), so a test running the sync edge **in-process** with many clients starves its own long-polls — run the edge as a separate process.
 
 ## Serverless edge cold starts
 
@@ -415,9 +418,9 @@ entitlement-propagation latency.
 **Every `createStreamGate` mount must set `Access-Control-Expose-Headers` from the exported
 `STREAM_READ_EXPOSED_HEADERS`.** CORS lets script read only a short safelist, and every header durable-streams
 answers with is outside it, so a cross-origin browser gets a response whose stream headers are simply not there:
-`@durable-streams/client` steers its read loop off them, never learns an offset, and re-requests from the
-start in a hot loop, with no error raised on either side. It presents as "sync does nothing, and the console
-is clean". Mount details: the `deploying` skill.
+`@durable-streams/client` steers its read loop off them, never learns an offset, and re-requests from the start
+in a hot loop, with no error raised on either side. It presents as "sync does nothing, and the console is clean".
+Mount details: the `deploying` skill.
 
 ## Debugging latency: `globalThis.__pgxsinkitDebug`
 
@@ -433,34 +436,32 @@ sent/acked lines); `convergence pass requested (event-driven, …)` → `converg
 reconcile`; `flushBatch sending to board-write`; `board-write auth token resolved {ms}` (a stalling token
 fetch); `board-write responded {status, ms}` (a cold worker or a connection stall); `board-write acks`; and
 `live-query register|dedup-hit|retained|evicted|teardown-complete` (digests only). **The read path emits no rail
-lines** — its cost is routing latency rather than phases, so read it off the `BootReport`'s per-group rows
-(below) and off `status` / `status.lastError` (`degraded`/stream = subscribe failing or the stream silent;
-`auth-needed` = the control plane refused this credential), and inspect the real requests in the worker's own
-DevTools. Server-side, `createSyncServer({ logTimings: true })` emits matching `[pgxsinkit-timing]` lines (the
-`deploying` skill); client-observed minus server `totalMs` isolates routing + network. Boot too: `boot
-pglite.create` → `boot client ready` (store open, schema apply, journal recovery, store-version reconcile, sync
-start) attributes a slow first paint to a phase; `boot pglite assets warm` times the optional pre-warm.
+lines** — its cost is routing latency rather than phases, so read it off the `BootReport`'s per-group rows (below)
+and off `status` / `status.lastError` (`degraded`/stream = subscribe failing or the stream silent; `auth-needed` =
+the control plane refused this credential), and inspect the real requests in the worker's own DevTools. Server-side, `createSyncServer({ logTimings: true })` emits matching `[pgxsinkit-timing]` lines (the
+`deploying` skill); client-observed minus server `totalMs` isolates routing + network. Boot too: `boot pglite.create` → `boot client
+ready` (store open, schema apply, journal recovery, store-version reconcile, sync start) attributes a slow first
+paint to a phase; `boot pglite assets warm` times the optional pre-warm.
 
 **Structured boot numbers — the `BootReport`.** The rail is for a human reading a console; for
 machine-keepable numbers (dashboards, CI budget gates) every boot ALSO builds a versioned `BootReport`,
 independently of the rail so it exists whether or not the flag is on (ADR-0034). Read it by push
 (`onBootReport?: (report) => void`, fires once at boot completion) or pull (`await client.bootReport()` → the
-most recent completed boot, `null` before the first sync; in worker mode it round-trips to the worker's
-stored report, so a late tab reads a boot that predates it). It carries `totalMs`, decomposed `phases`, and a
-per-group `groups[]`. Two reading caveats: groups catch up CONCURRENTLY on one WASM thread, so a group's
+most recent completed boot, `null` before the first sync; in worker mode it round-trips to the worker's stored
+report, so a late tab reads a boot that predates it). It carries `totalMs`, decomposed `phases`, and a per-group
+`groups[]`. Two reading caveats: groups catch up CONCURRENTLY on one WASM thread, so a group's
 `fetchMs` is an UPPER BOUND on network wait and concurrent `applyMs` can overlap — never sum them into a
 `totalMs` partition; and a non-null `provision` block is a spare's off-thread `initdb` made visible (then
 `phases.pgliteCreateMs` is `null`).
 
-**How a group decides to commit (ADR-0056), and the one state that is terminal.** There is **no commit floor**
-and no cross-shape position comparison — offsets are per-stream and comparable only within one — so a group
-commits when **every** one of its shapes' most recent responses asserted up-to-date (a quiet shape re-asserts
-freshness on every `204` long-poll timeout). Atomic at boot/catch-up alignment; LIVE deliveries commit per
-response, so two halves of one transaction can land milliseconds apart (backlog 0014). The **first**
-commit of each alignment generation (boot, and after any must-refetch) also reads the engine's convergence
-barrier through the control plane's `/sync/v1/barrier`, aligning only with `pendingFlips` at zero — no computed
-membership revocation still undelivered. A barrier the client cannot READ is a delay: the group stays on the
-pre-alignment gate and retries. `flipFailures > 0` is **terminal**: the engine abandoned membership-flip
+**How a group decides to commit (ADR-0056), and the one state that is terminal.** There is **no commit floor** and
+no cross-shape position comparison — offsets are per-stream and comparable only within one — so a group commits
+when **every** one of its shapes' most recent responses asserted up-to-date (a quiet shape re-asserts freshness on
+every `204` long-poll timeout). Atomic at boot/catch-up alignment; LIVE deliveries commit per response, so two
+halves of one transaction can land milliseconds apart (backlog 0014). The **first** commit of each alignment
+generation (boot, and after any must-refetch) also reads the engine's convergence barrier through the control
+plane's `/sync/v1/barrier`, aligning only with `pendingFlips` at zero — no computed membership revocation still
+undelivered. A barrier the client cannot READ is a delay: the group stays on the pre-alignment gate and retries. `flipFailures > 0` is **terminal**: the engine abandoned membership-flip
 batches, those effects are lost, and the client refuses to align and goes `degraded` rather than waiting —
 restart the engine and re-subscribe. Full prose: <https://pgxsinkit.github.io/start/operating-in-production/>.
 
@@ -487,12 +488,11 @@ a real rollback, route a permanent policy denial to `quarantined` — never mis-
 
 - Shortening the convergence interval to chase write latency (no effect; wastes CPU).
 - Serving many-stream sync over plain HTTP/1.1 and blaming the server for stalled writes.
-- Mounting the stream edge on the control plane's origin (one cache key for both read surfaces), or
-  omitting `Access-Control-Expose-Headers` on it — that one hot-loops the client, silently on both sides.
-- Treating an edge cold start as a toolkit/sync-rail problem.
-- Measuring latency by polling PGlite in a loop instead of at the network boundary.
-- Treating `deferred` as a failure and "cleaning up" the Outbox — it is rollout skew, and those rows drain
-  themselves once the server deploy lands.
+- Mounting the stream edge on the control plane's origin (one cache key for both read surfaces), or omitting
+  `Access-Control-Expose-Headers` on it — that one hot-loops the client, silently on both sides.
+- Treating an edge cold start as a toolkit problem, or measuring latency by polling PGlite in a loop
+  instead of at the network boundary.
+- Treating `deferred` as a failure and "cleaning up" the Outbox — it is rollout skew; those rows self-drain.
 - Subscribing to `onEventLaneReport` per-screen (verdicts are ephemeral), or expecting `acked` on it.
 - Assuming `appendEvent` resolving means delivered — it means durably staged locally; delivery is the flush.
 

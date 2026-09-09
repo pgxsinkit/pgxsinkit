@@ -142,6 +142,33 @@ describe("asReadonly carries the column factory (ADR-0029 P1 member-boot)", () =
     expect(columnNames).toEqual(new Set(["id", "offering_id", "person_id", "issued_by", "reason", "updated_at_us"]));
   });
 
+  // The same keep-list hazard one level down: `asReadonly` rebuilds `clientProjection` field by field, so a
+  // sub-field it forgets is dropped just as silently. A local index serves the CLIENT's reads, which a
+  // readonly projection performs identically — dropping it would leave that store scanning where the
+  // authoritative one seeks.
+  it("carries clientProjection.localIndexes onto the readonly projection", () => {
+    const indexed = defineSyncTable({
+      tableName: "indexed_restriction",
+      makeColumns: () => ({
+        id: uuid("id").primaryKey(),
+        personId: uuid("person_id").notNull(),
+        updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull().default(0n),
+      }),
+      mode: "readwrite",
+      conflictPolicy: "last-write-wins",
+      governance: {
+        managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+      },
+      clientProjection: {
+        localIndexes: [{ name: "indexed_restriction_person_idx", columns: ["personId"] }],
+      },
+    });
+
+    expect(asReadonly(indexed).clientProjection?.localIndexes).toEqual([
+      { name: "indexed_restriction_person_idx", columns: ["personId"] },
+    ]);
+  });
+
   // Keep-list completeness guard: asReadonly builds by listing what to KEEP, so a newly-added
   // read-relevant field is silently dropped unless carried. Enumerate a maximally-featured writable
   // entry's own keys and assert asReadonly drops ONLY the documented write-machinery set — so the NEXT

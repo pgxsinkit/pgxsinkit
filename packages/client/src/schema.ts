@@ -219,11 +219,13 @@ function buildEntryClusterStatements(entry: SyncTableEntry, tableKey: string, lo
   const temp = ephemeral ? "TEMP " : "";
 
   const projection = getClientProjection(entry, tableKey, objectSchema);
-  const columns = getProjectedColumns(entry).map(({ column }) => column);
+  const projectedColumns = getProjectedColumns(entry);
+  const columns = projectedColumns.map(({ column }) => column);
   const syncedTablePrimaryKeyColumns = getLocalSyncPrimaryKeyColumns(entry);
   const baseColumnsSql = buildTableColumnSql(columns, syncedTablePrimaryKeyColumns, localSchema);
 
   statements.push(`CREATE ${temp}TABLE IF NOT EXISTS ${projection.syncedTable} (\n  ${baseColumnsSql}\n);`);
+  statements.push(...buildLocalIndexStatements(entry, projection.syncedTable, projectedColumns));
 
   if (entry.mode === "readonly") {
     return statements;
@@ -569,7 +571,6 @@ function buildReadModelViewSql(
     throw new Error(`overlay table is required for writable table ${projection.syncedTable}`);
   }
 
-  const pkMatch = buildPrimaryKeyMatch(entry.primaryKey.columns);
   const syncedLocalUpdatedExpression = columnNames.includes("updated_at_us") ? "t.updated_at_us" : "CAST(0 AS BIGINT)";
 
   return [
@@ -585,12 +586,96 @@ function buildReadModelViewSql(
     `  'synced' AS overlay_kind,`,
     `  ${syncedLocalUpdatedExpression} AS local_updated_at_us`,
     `FROM ${projection.syncedTable} AS t`,
-    "WHERE NOT EXISTS (",
-    "  SELECT 1",
-    `  FROM ${projection.overlayTable} AS o`,
-    `  WHERE ${pkMatch}`,
-    ")",
+    ...buildOverlayNonMembershipTest(entry.primaryKey.columns, projection.overlayTable),
   ].join("\n");
+}
+
+/**
+ * Render the entry's OPT-IN `clientProjection.localIndexes` on its synced table (never on the overlay,
+ * never on the journal) through the same {@link renderCreateIndexStatement} core the journal indexes use,
+ * so every index this generator emits has one statement shape.
+ *
+ * Only what a consumer declared: a synced table's SERVER indexes are deliberately not mirrored (they serve
+ * server loads and routinely cover columns the client projection omits), so the local store carries the
+ * primary key plus exactly these. A column may be named by DB column name or by Drizzle property key — the
+ * either/or the primary-key specs accept — and is resolved to the DB column name here; the registry has
+ * already refused an unknown column, an omitted one, and a duplicate index name, so a name that fails to
+ * resolve at this point is a generator bug, not a consumer error.
+ */
+function buildLocalIndexStatements(
+  entry: SyncTableEntry,
+  syncedTable: string,
+  projectedColumns: ReturnType<typeof getProjectedColumns>,
+): string[] {
+  const localIndexes = entry.clientProjection?.localIndexes ?? [];
+  if (localIndexes.length === 0) {
+    return [];
+  }
+
+  const columnNameByKey = new Map<string, string>();
+  for (const { propertyKey, columnName } of projectedColumns) {
+    columnNameByKey.set(propertyKey, columnName);
+    columnNameByKey.set(columnName, columnName);
+  }
+
+  return localIndexes.map((index) => {
+    const columnExpressions = index.columns.map((column) => {
+      const columnName = columnNameByKey.get(column);
+      if (!columnName) {
+        throw new Error(
+          `local index ${index.name} on ${syncedTable} names column ${column}, which is not a projected column`,
+        );
+      }
+      return maybeQuoteIdentifier(columnName);
+    });
+    return renderCreateIndexStatement(syncedTable, maybeQuoteIdentifier(index.name), columnExpressions, {
+      ...(index.unique === true ? { unique: true } : {}),
+    });
+  });
+}
+
+/**
+ * The synced branch's "this row is not shadowed by the overlay" test, as a NOT IN over the overlay's
+ * primary key — **a plan choice, not a style one**, and the one place the read model's cost is decided.
+ *
+ * The obvious form (`NOT EXISTS (SELECT 1 FROM overlay o WHERE o.pk = t.pk)`, and its `LEFT JOIN … IS
+ * NULL` twin) leaves the shape to the planner, and the planner gets it wrong in the overlay's NORMAL
+ * state. An overlay that is physically empty AND has been analysed reports `relpages = 0, reltuples = 0`,
+ * so `estimate_rel_size` skips its never-vacuumed 10-page floor and costs a scan of it at **0.00** — a
+ * free inner relation, which makes a `Nested Loop Anti Join` look cheapest. The executor then RESCANS the
+ * empty overlay once per synced row (`loops = <rowcount>`), and the rescan is not free: on 100k synced rows
+ * read through the view, that form measures ~180-260 ms against ~95-145 ms for a hash anti join
+ * (`tests/unit/read-model-overlay-plan` logs both per run), and a consumer measured 224 ms of a 270 ms
+ * selection sitting in that node. No index fixes it — the
+ * overlay's PRIMARY KEY already IS an index, and an index scan cannot beat a 0.00-cost seq scan; an
+ * `ANALYZE` does not fix it either, it is what CAUSES it (a never-analysed overlay gets the 10-page floor
+ * and plans as a hash anti join).
+ *
+ * `NOT IN` takes the choice away: the subquery is uncorrelated, so Postgres evaluates it ONCE into a
+ * hashed SubPlan and each synced row is a hash probe — measured ~95-215 ms in that same pathological state
+ * (roughly half the nested loop, machine-load dependent), 106 ms with no statistics at all, and 60 ms (vs
+ * 196 ms) for a composite key. The one cost is the tail:
+ * above roughly `hash_mem / (pk width + 24)` rows — order 150k pending overlay rows at the default 4 MB —
+ * the planner stops hashing and the SubPlan becomes a per-row rescan, which IS quadratic. That trade is
+ * taken deliberately: the overlay holds only rows with an unflushed local mutation, so tens of thousands
+ * is already an app in trouble, while "empty and analysed" is the steady state of every read-mostly table.
+ * (`EXPLAIN` tells the two apart: `hashed SubPlan` vs a bare `SubPlan`.)
+ *
+ * The NULL trap that normally disqualifies `NOT IN` cannot fire here: both sides are PRIMARY KEY columns
+ * of tables this generator emits (the overlay carries the same key as the synced table), so neither side
+ * can be NULL and `NOT IN` is exactly equivalent to the `NOT EXISTS` it replaces.
+ */
+function buildOverlayNonMembershipTest(primaryKeyColumns: string[], overlayTable: string): string[] {
+  const key =
+    primaryKeyColumns.length === 1
+      ? `t.${primaryKeyColumns[0]}`
+      : `(${primaryKeyColumns.map((column) => `t.${column}`).join(", ")})`;
+  return [
+    `WHERE ${key} NOT IN (`,
+    `  SELECT ${primaryKeyColumns.map((column) => `o.${column}`).join(", ")}`,
+    `  FROM ${overlayTable} AS o`,
+    ")",
+  ];
 }
 
 function buildTableColumnSql(columns: TableColumn[], primaryKeyColumns: string[], localSchema: string) {
@@ -980,10 +1065,6 @@ function readEnumColumnDefinition(column: TableColumn, localSchema: string): Enu
 function readArrayDimensions(column: TableColumn) {
   const arrayColumn = column as TableColumn & { dimensions?: number };
   return arrayColumn.dimensions ?? 0;
-}
-
-function buildPrimaryKeyMatch(primaryKeyColumns: string[]) {
-  return primaryKeyColumns.map((column) => `o.${column} = t.${column}`).join(" AND ");
 }
 
 function getClientProjection(entry: SyncTableEntry, tableKey: string, localSchema: string): ResolvedProjection {

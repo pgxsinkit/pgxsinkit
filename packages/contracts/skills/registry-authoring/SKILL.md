@@ -56,14 +56,13 @@ widgets: defineSyncTable({
 }),
 ```
 
-**Column types don't constrain sync.** The read-path backfill picks a bulk-insert tier (COPY / JSON /
-per-row `INSERT`) statically from a table's Drizzle column types; enum columns and `GENERATED ALWAYS AS
-IDENTITY` primary keys are fully supported (labels round-trip through COPY/JSON, a synced identity PK keeps
-the server's value via `OVERRIDING SYSTEM VALUE`), so never avoid them for sync's sake. **Array columns are
-supported at ONE dimension** (`uuid("source_ids").array()`) on both paths: a write sends a JSON array, `[]`
-stores an empty array and JSON `null` stores NULL, element order preserved. Everything else about arrays
-fails at GENERATE time, named — `.array("[][]")` (multi-dimensional), an array PK column, and an array
-`managedFields` target (both strategies stamp one scalar).
+**Column types don't constrain sync.** The read-path backfill picks a bulk-insert tier (COPY / JSON / per-row
+`INSERT`) statically from a table's Drizzle column types; enum columns and `GENERATED ALWAYS AS IDENTITY` primary
+keys are fully supported (labels round-trip through COPY/JSON, a synced identity PK keeps the server's value via
+`OVERRIDING SYSTEM VALUE`), so never avoid them for sync's sake. **Array columns are supported at ONE dimension**
+(`uuid("source_ids").array()`) on both paths: a write sends a JSON array, `[]` stores an empty array and JSON `null`
+stores NULL, element order preserved. Everything else about arrays fails at GENERATE time, named — `.array("[][]")`
+(multi-dimensional), an array PK column, and an array `managedFields` target (both strategies stamp one scalar).
 
 ## The `primaryKey` spec emits the physical PRIMARY KEY — it is the single source of truth
 
@@ -83,16 +82,15 @@ produce), so pgxsinkit DDL matches plain-Postgres inline-PK DDL and drizzle-kit 
 
 `applyMode` no longer chooses how steady-state changes apply (ADR-0058). The engine's wire vocabulary is
 `upsert | delete` — an `upsert` states a row's value without claiming it is new — so **every** streamed change
-applies as `INSERT … ON CONFLICT (pk) DO UPDATE`, whatever this says. What survives is the **initial load**: a
-fresh subscription or a post-must-refetch re-snapshot lands on a table assumed empty, which is what lets it
-use COPY or a plain multi-row INSERT, neither of which can express `ON CONFLICT`.
+applies as `INSERT … ON CONFLICT (pk) DO UPDATE`, whatever this says. What survives is the **initial load**: a fresh
+subscription or a post-must-refetch re-snapshot lands on a table assumed empty, which is what lets it use COPY or a
+plain multi-row INSERT, neither of which can express `ON CONFLICT`.
 
 **`"insert"` (default)** keeps that fast path, so a row already sitting there surfaces as a real precondition
-failure. **Use `"upsert"` only** when the emptiness assumption does not hold — this table legitimately
-receives locally-**derived** provisional rows (a local trigger on another synced table writes a row here that
-the server independently creates too) that a backfill could land on top of. It then takes the
-conflict-tolerant applier, at the cost of the faster path. Declare the exception where it lives; never weaken
-the default repo-wide.
+failure. **Use `"upsert"` only** when the emptiness assumption does not hold — this table legitimately receives
+locally-**derived** provisional rows (a local trigger on another synced table writes a row here that the server
+independently creates too) that a backfill could land on top of. It then takes the conflict-tolerant applier, at the
+cost of the faster path. Declare the exception where it lives; never weaken the default repo-wide.
 
 ## Managed fields are server-assigned — never send them
 
@@ -129,6 +127,14 @@ that is not a writable (projected) column splits into exactly two cases:
 The rule that follows: **write a server-only (omitted) column outside the sync rail** — a server-side
 `UPDATE`, a trigger, or a managed field (`governance.managedFields`); the route rejects it in a payload.
 
+## Local indexes are opt-in — your server's indexes are NOT mirrored
+
+The local store renders a synced table's primary key and nothing else: server indexes serve server loads and many
+cover projected-away columns. A client read that needs one declares it — `clientProjection: { localIndexes: [{ name:
+"cards_due_at_idx", columns: ["dueAt"] }] }`, an ascending btree over projected columns (`unique?` optional), refused
+at registry-build time if a column is unknown or omitted or a name repeats. Index only what the **client** scans (a
+due window over 100k PGlite rows: ~13 ms sequential vs ~0.1 ms indexed); each index costs write time per batch.
+
 ## Read-path filtering: `customPredicate` compiles to a predicate AST, not SQL
 
 A table's `shape.rowFilter.customPredicate` is compiled by the **control plane** at shape creation — once per
@@ -145,11 +151,10 @@ function widgetsReadFilter(claims: JwtClaims): Predicate | null {
 ```
 
 The builders are `p.eq`/`p.ne`/`p.lt`/`p.lte`/`p.gt`/`p.gte`, `p.like`/`p.notLike`, `p.isNull`/`p.isNotNull`,
-`p.and`/`p.or`/`p.not`, and `p.in`/`p.notIn` over a `p.subquery` (below) — namespaced so they never collide
-with `drizzle-orm`'s `eq`/`and`/`or`. Every comparison is checked against the column's own TypeScript type, so
-a mistyped enum label, a `null` against a NOT NULL column, or a `jsonb`/`Date` column with no scalar wire form
-is a **compile error**. **No `::text` casts** — values are typed JSON scalars; render a `Date` as the column
-stores it and pass the string.
+`p.and`/`p.or`/`p.not`, and `p.in`/`p.notIn` over a `p.subquery` (below) — namespaced so they never collide with
+`drizzle-orm`'s `eq`/`and`/`or`. Every comparison is checked against the column's own TypeScript type, so a mistyped
+enum label, a `null` against a NOT NULL column, or a `jsonb`/`Date` column with no scalar wire form is a **compile
+error**. **No `::text` casts** — values are typed JSON scalars; render a `Date` as the column stores it, as a string.
 
 **Inline (all-in-one `defineSyncTable`) — `rowFilter` as a function of the columns.** The example above
 assumes the table is built _elsewhere_. Declaring a table and its filter in **one** call, the table object
@@ -168,20 +173,19 @@ defineSyncTable({
 });
 ```
 
-The column callback is the only authoring form. **Say deny explicitly:** a `customPredicate` returning `null`
-means _no filter — every row visible_, so an owner filter returning `null` for "no claim" exposes every row.
-`DENY_ALL_PREDICATE` is the deny, recognised by reference: the control plane declines to create the shape at
-all, so a denied subject holds no stream. It must also be **pure** (called per shape creation, and probed with
-empty claims to detect claims-dependence), and a `rowFilter` restricting nothing — no `customPredicate`, no
-`columns` allow-list — **throws at definition time** rather than compiling to a shape with no subject test.
+The column callback is the only authoring form. **Say deny explicitly:** a `customPredicate` returning `null` means
+_no filter — every row visible_, so an owner filter returning `null` for "no claim" exposes every row.
+`DENY_ALL_PREDICATE` is the deny, recognised by reference: the control plane declines to create the shape at all, so
+a denied subject holds no stream. It must also be **pure** (called per shape creation, and probed with empty claims
+to detect claims-dependence), and a `rowFilter` restricting nothing — no `customPredicate`, no `columns` allow-list
+— **throws at definition time** rather than compiling to a shape with no subject test.
 
 ## Cross-table filters: `p.subquery` over another table's column
 
-A **membership fan-out** — "sync a row only if the subject belongs to its container" — is a `customPredicate`
-whose test is a **subquery over another table**. `p.subquery(projectedColumn, where?)` names the inner set by
-the column it projects, so there is no table name to get wrong and no way to project a column that table does
-not have. Factor it into a helper the read filter and any narrower variant share (the read-path twin of the
-membership RLS predicate):
+A **membership fan-out** — "sync a row only if the subject belongs to its container" — is a `customPredicate` whose
+test is a **subquery over another table**. `p.subquery(projectedColumn, where?)` names the inner set by the column it
+projects, so there is no table name to get wrong and no way to project a column that table does not have. Factor it
+into a helper the read filter and any narrower variant share (the read-path twin of the membership RLS predicate):
 
 ```ts
 // Uncorrelated by construction: the inner `where` reads the membership table's own columns only.
@@ -195,13 +199,12 @@ function widgetsReadFilter(claims: JwtClaims): Predicate {
 }
 ```
 
-What the AST form buys: columns stay rename-safe and existence-checked, the projected column's type rides on
-the `SubqueryRef` so `p.in` refuses an outer column it cannot be compared with, and the engine maintains the
-inner set **incrementally and shares it across every shape referencing the same subquery** — an
-entitlement-shaped membership costs one index, not one per shape. Two constraints: `IN` is **single-column**
-(no composite `(a, b) IN (…)`), and the subquery stays **uncorrelated** — its `where` never references the
-outer row. Combine with the function form when the table is defined all-in-one: the row's own column comes
-from `(columns) => …`, the foreign table is imported built.
+What the AST form buys: columns stay rename-safe and existence-checked, the projected column's type rides on the
+`SubqueryRef` so `p.in` refuses an outer column it cannot be compared with, and the engine maintains the inner set
+**incrementally and shares it across every shape referencing the same subquery** — an entitlement-shaped membership
+costs one index, not one per shape. Two constraints: `IN` is **single-column** (no composite `(a, b) IN (…)`), and the
+subquery stays **uncorrelated** — its `where` never references the outer row. Combine with the function form when the
+table is defined all-in-one: the row's own column comes from `(columns) => …`, the foreign table is imported built.
 
 ## RLS: derive read and write from the same Drizzle columns
 
@@ -221,14 +224,13 @@ row readable-but-unwritable (or vice versa):
   SECURITY DEFINER membership helper, a `current_setting('request.jwt.claims')` admin check), and inline that
   predicate rather than referencing a not-yet-created function. For "compare OLD vs NEW" rules RLS cannot
   help (`WITH CHECK` sees only NEW, `USING` only OLD) — use a `BEFORE UPDATE` trigger.
-- **Do not hand-write the read half — every policy family ships its read-path mirror.** The sync engine
-  cannot read RLS, so the shape predicate re-derives the same visible set in JS from the same declaration:
-  `buildOwnershipShapePredicate`, `buildOwnerOrAdminShapePredicate` (admin → `null`, mirroring the policy's
-  bypass branch), `buildMembershipShapePredicate` (pass the **same** options object you gave the policy
-  builder), and `buildGrantScopeAccessShapePredicate` (bypass grant → `null` too; bare
-  `resolveGrantScopeIds` + `buildGrantScopeShapePredicate` cannot see it). Each takes the column plus the
-  claims; return it straight from `customPredicate` — they deny with `DENY_ALL_PREDICATE`, so the filter
-  probes claims-dependent.
+- **Do not hand-write the read half — every policy family ships its read-path mirror.** The sync engine cannot read
+  RLS, so the shape predicate re-derives the same visible set in JS from the same declaration:
+  `buildOwnershipShapePredicate`, `buildOwnerOrAdminShapePredicate` (admin → `null`, mirroring the policy's bypass
+  branch), `buildMembershipShapePredicate` (pass the **same** options object you gave the policy builder), and
+  `buildGrantScopeAccessShapePredicate` (bypass grant → `null` too; bare `resolveGrantScopeIds` +
+  `buildGrantScopeShapePredicate` cannot see it). Each takes the column plus the claims; return it straight from
+  `customPredicate` — they deny with `DENY_ALL_PREDICATE`, so the filter probes claims-dependent.
 - Two mirror properties: they cover **SELECT only** (write-gate branches stay with the
   INSERT/UPDATE/DELETE policies), and the two surfaces express containment in **different forms on
   purpose** — RLS emits `= ANY(ARRAY(select …))` for the InitPlan/index-scan discipline, the read half a
@@ -241,12 +243,12 @@ never created or dropped.
 
 ## Composition obligations: two correct policies can still break an invariant
 
-The registry keeps ONE table's read filter and write policy from drifting. A domain invariant usually spans
-several tables and rails, and no registry feature can see that composition. Worked example: an invite table's
-RLS grants an offering-scoped teacher INSERT; an acceptance worker then mints a membership row. Each policy
-is correct alone; together they violate "this offering only ever has one member". The worker's semantics are
-invisible to per-table declarations, so the obligation is permanently the consumer's. When you add a worker,
-route, or trigger that writes rows as a CONSEQUENCE of other rows:
+The registry keeps ONE table's read filter and write policy from drifting. A domain invariant usually spans several
+tables and rails, and no registry feature can see that composition. Worked example: an invite table's RLS grants an
+offering-scoped teacher INSERT; an acceptance worker then mints a membership row. Each policy is correct alone;
+together they violate "this offering only ever has one member". The worker's semantics are invisible to per-table
+declarations, so the obligation is permanently the consumer's. When you add a worker, route, or trigger that writes
+rows as a CONSEQUENCE of other rows:
 
 - List the invariants the OUTPUT table participates in, not just the input's — the output is where the
   violation lands — and for each ask whether the composed path enforces it or merely assumes the input row's
@@ -261,10 +263,10 @@ route, or trigger that writes rows as a CONSEQUENCE of other rows:
 ## Provision the apply function from the registry
 
 The write path applies through one in-database PL/pgSQL function, `pgxsinkit_apply_mutations`. Generate its
-drizzle-kit migration with the `pgxsinkit-generate` CLI (a `bin` of `@pgxsinkit/server`) and apply it through
-your normal migration flow; it is **deny-by-default** (see `deploying` for `--grant-execute-to`). It and the
-audit/version column DEFAULTs both **call** `public.pgxsinkit_clock_us()`, so the `--utilities` migration
-installing that clock must be **first in the chain** (hence the early-sorting name):
+drizzle-kit migration with the `pgxsinkit-generate` CLI (a `bin` of `@pgxsinkit/server`) and apply it through your
+normal migration flow; it is **deny-by-default** (see `deploying` for `--grant-execute-to`). It and the audit/version
+column DEFAULTs both **call** `public.pgxsinkit_clock_us()`, so the `--utilities` migration installing that clock
+must be **first in the chain** (hence the early-sorting name):
 
 ```bash
 bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
@@ -275,13 +277,13 @@ bun run pgxsinkit-generate --utilities \
 
 ## Multi-client: one authoritative registry, readonly projections (ADR-0025)
 
-When the same table is `readwrite` for one client and `readonly` for another, `mode` is **per-client**, not
-a property of the table: define it **once** in an authoritative registry at its writable capability and
-project it per client. `mode` is baked at `defineSyncTable` time and drives the overlay/journal machinery +
-the `_read_model` view, so a hand-spread `{ ...entry, mode: "readonly" }` is **broken** (it keeps a view over
-overlay state the readonly client never creates). `asReadonly` re-derives a true readonly entry — dropping
-the overlay/journal projection, the view, and `conflictPolicy`/`governance`/`writeMode`, keeping columns,
-primary key, synced table, shape/row filter and `rowClass`.
+When the same table is `readwrite` for one client and `readonly` for another, `mode` is **per-client**, not a
+property of the table: define it **once** in an authoritative registry at its writable capability and project it per
+client. `mode` is baked at `defineSyncTable` time and drives the overlay/journal machinery + the `_read_model` view,
+so a hand-spread `{ ...entry, mode: "readonly" }` is **broken** (it keeps a view over overlay state the readonly
+client never creates). `asReadonly` re-derives a true readonly entry — dropping the overlay/journal projection, the
+view, and `conflictPolicy`/`governance`/`writeMode`, keeping columns, primary key, synced table, shape/row filter
+and `rowClass`.
 
 ```ts
 const authoritativeRegistry = defineSyncRegistry({ posting_restriction: postingRestrictionEntry }); // readwrite
@@ -395,11 +397,10 @@ The registry carries the browser store's storage contract — `SyncRegistryDefin
 minting surface, worker entry, or attach site, because both properties follow the DATA: one declaration
 binds every open of every store minted from that registry, so no tab can disagree with another.
 
-- **`backend`** (default `"opfs"`) — the normal boot everywhere: the toolkit probes OPFS sync-access at boot
-  and runs the `opfs-repacked` engine wherever handles are granted, falling back automatically to
-  in-SharedWorker idbfs (declared durability kept) only where the platform grants them nowhere.
-  `backend: "idbfs"` is the one opt-out (no probe, no election). Where the engine runs is never a knob; the
-  only decision you declare is whether to force idb.
+- **`backend`** (default `"opfs"`) — the normal boot everywhere: the toolkit probes OPFS sync-access at boot and
+  runs the `opfs-repacked` engine wherever handles are granted, falling back automatically to in-SharedWorker idbfs
+  (declared durability kept) only where the platform grants them nowhere. `backend: "idbfs"` is the one opt-out (no
+  probe, no election). Where the engine runs is never a knob; the only decision you declare is whether to force idb.
 - **`durability`** (default `"relaxed"`) — relaxed returns the local write before the physical flush and
   schedules it asynchronously; `"strict"` awaits the flush per commit. Relaxed is right for a sync toolkit
   (the server is the source of truth, and the loss window is one recent action); declare `"strict"` only for
@@ -477,9 +478,8 @@ export const registry = defineSyncRegistry({
 - Trying to write an `omitColumns` (server-only) column from a client payload — the write route
   **400-rejects** it (an unknown typo is instead silently dropped, surfaced by a per-process `console.warn`);
   write them outside the sync rail (a server `UPDATE`, a trigger, or a managed field).
-- In a `customPredicate`: returning `null` for "no claim" (that is _every row_ — return `DENY_ALL_PREDICATE`),
-  a `rowFilter` that restricts nothing (throws), a correlated `p.subquery`, or SQL text where a `p.*` builder
-  exists.
+- In a `customPredicate`: returning `null` for "no claim" (that is _every row_ — return `DENY_ALL_PREDICATE`), a
+  `rowFilter` that restricts nothing (throws), a correlated `p.subquery`, or SQL text where a `p.*` builder exists.
 - A multi-dimensional array column, an array PK, or a managed field on an array column — each fails at
   generate time; single-dimension arrays are fully supported on both paths.
 - Letting the read filter and RLS policy diverge instead of building both from the same Drizzle columns.

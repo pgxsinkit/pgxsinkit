@@ -472,12 +472,51 @@ export interface RowTransformContext {
  */
 export type RowTransform = (row: Record<string, unknown>, context: RowTransformContext) => Record<string, unknown>;
 
+/**
+ * One index the LOCAL store should carry on a synced table (see {@link ClientProjectionSpec.localIndexes}).
+ * A plain ascending btree over projected columns — deliberately the same expressiveness the local schema
+ * generator's shared `CREATE INDEX` core has for the journal indexes, and no more.
+ */
+export interface LocalIndexSpec {
+  /** The index's name. Unique within the entry, and a plain identifier — it is emitted into DDL. */
+  name: string;
+  /**
+   * The indexed columns, in order. Each names a column of the entry's table by DB column name or by
+   * Drizzle property key (the same either/or the primary-key specs accept), and must survive the client
+   * projection: naming an `omitColumns` column is a registry error, because the local table has no such
+   * column to index.
+   */
+  columns: readonly string[];
+  /**
+   * Emit `CREATE UNIQUE INDEX`. Note what that means for a synced cache: uniqueness is the SERVER's
+   * guarantee, and a local unique index turns a violation into a failed apply rather than a rejected
+   * write. Declare it only where the server constraint genuinely holds for the projected rows.
+   */
+  unique?: boolean;
+}
+
 export interface ClientProjectionSpec {
   syncedTable?: string;
   overlayTable?: string;
   journalTable?: string;
   omitColumns?: readonly string[];
   localPrimaryKey?: PrimaryKeySpec;
+  /**
+   * OPT-IN local indexes for this entry's synced table (ADR-0029 D3's renderer, consumer-declared).
+   *
+   * The local store renders a table's PRIMARY KEY and nothing else — a synced table's server-side indexes
+   * are NOT mirrored, deliberately: they serve server loads, and half of them cover columns a client
+   * projection omits. So a local read path that needs an index has to say so here, and only here.
+   *
+   * Declare what the CLIENT's queries need, not what the server has: a scan the app runs on every render
+   * over a large synced table (the motivating case: a `due_at` window over 100k rows — ~13 ms sequential
+   * vs ~0.1 ms indexed on PGlite, logged by `tests/unit/read-model-overlay-plan`). Each index costs write
+   * time on every applied batch and space in the user's store, so an index nothing queries is a straight loss.
+   *
+   * Rendered on the synced table ONLY — never on the overlay, whose primary key is already its index and
+   * whose plan problem is not an index problem (see the read model's non-membership test).
+   */
+  localIndexes?: readonly LocalIndexSpec[];
 }
 
 /**

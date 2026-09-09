@@ -1180,6 +1180,7 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
     }
     validateRegistryTableUniqueness(input.tables);
     validateRegistryShapeKeyUniqueness(input.tables);
+    validateRegistryLocalIndexNames(input.tables);
     validateRegistryLifecycleGroups(input.tables);
     validateStorageDeclaration(input.storage);
     validateRowClassification(input.tables, input.rowClasses);
@@ -1206,6 +1207,7 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
   }
   validateRegistryTableUniqueness(input);
   validateRegistryShapeKeyUniqueness(input);
+  validateRegistryLocalIndexNames(input);
   validateRegistryLifecycleGroups(input);
 
   return input;
@@ -1244,6 +1246,32 @@ function validateRegistryTableUniqueness(registry: SyncTableRegistry) {
     }
 
     declaredBy.set(identity, key);
+  }
+}
+
+/**
+ * A local index NAME is a SCHEMA-level object name, so two entries declaring the same
+ * `clientProjection.localIndexes` name collide across tables — and the collision is SILENT: the generator
+ * emits `CREATE INDEX IF NOT EXISTS`, which matches on the name alone, so the second table simply never
+ * gets its index and the read it was declared for quietly scans. Per-entry uniqueness (checked with the
+ * rest of the declaration in `validateSyncTableEntry`) cannot see that, so it is checked here, once per
+ * registry, at module eval.
+ */
+function validateRegistryLocalIndexNames(registry: SyncTableRegistry) {
+  const declaredBy = new Map<string, string>();
+
+  for (const [key, entry] of Object.entries(registry)) {
+    for (const index of (entry as SyncTableEntry<AnyPgTable>).clientProjection?.localIndexes ?? []) {
+      const firstKey = declaredBy.get(index.name);
+      if (firstKey !== undefined) {
+        throw new Error(
+          `local index "${index.name}" is declared by two registry entries ("${firstKey}" and "${key}"): ` +
+            `an index name is a schema-level object name, and the generator's CREATE INDEX IF NOT EXISTS ` +
+            `would silently skip the second one. Name each local index after its own table.`,
+        );
+      }
+      declaredBy.set(index.name, key);
+    }
   }
 }
 
@@ -2019,6 +2047,8 @@ function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
   const omitColumns = entry.clientProjection?.omitColumns ?? [];
   const localPrimaryKeyColumns = entry.clientProjection?.localPrimaryKey?.columns ?? [];
 
+  validateLocalIndexes(entry, tableName, columnsByPropertyKey, columnsByColumnName, omitColumns);
+
   if (omitColumns.length === 0 && localPrimaryKeyColumns.length === 0) {
     return;
   }
@@ -2097,5 +2127,73 @@ function validateSyncTableEntry(entry: SyncTableEntry<AnyPgTable>) {
     throw new Error(
       `clientProjection.omitColumns must only omit create-safe columns for writable table ${tableName}: ${createRequiredOmissions.join(", ")}`,
     );
+  }
+}
+
+/**
+ * Refuse a `clientProjection.localIndexes` declaration the local schema generator could not render
+ * faithfully — at REGISTRY-BUILD time (module eval), never at boot: a store that has already been created
+ * cannot report a typo in a column name in any useful way, and a half-rendered index set is worse than a
+ * refused registry.
+ *
+ * Four refusals, each with the thing the author has to change in the message: an unknown column, a column
+ * the client projection omits (the local table has no such column — the index would target a column that
+ * exists only on the server), a duplicate index name within the entry, and a name that is not a plain
+ * identifier (it is emitted into DDL). An empty column list is refused for the same reason.
+ */
+function validateLocalIndexes(
+  entry: SyncTableEntry<AnyPgTable>,
+  tableName: string,
+  columnsByPropertyKey: Map<string, { propertyKey: string; columnName: string }>,
+  columnsByColumnName: Map<string, { propertyKey: string; columnName: string }>,
+  omitColumns: readonly string[],
+): void {
+  const localIndexes = entry.clientProjection?.localIndexes ?? [];
+  if (localIndexes.length === 0) {
+    return;
+  }
+
+  // Omission is declared by property key; a column may be named either way in an index, so both keys of
+  // an omitted column are refused.
+  const omitted = new Set<string>();
+  for (const propertyKey of omitColumns) {
+    omitted.add(propertyKey);
+    const column = columnsByPropertyKey.get(propertyKey);
+    if (column) omitted.add(column.columnName);
+  }
+
+  const seenNames = new Set<string>();
+  for (const index of localIndexes) {
+    if (typeof index.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(index.name)) {
+      throw new Error(
+        `clientProjection.localIndexes on ${tableName} declares an invalid index name ${JSON.stringify(index.name)}: ` +
+          `it is emitted into DDL, so it must be a plain identifier ([A-Za-z_][A-Za-z0-9_]*)`,
+      );
+    }
+    if (seenNames.has(index.name)) {
+      throw new Error(
+        `clientProjection.localIndexes on ${tableName} declares the index name "${index.name}" twice: ` +
+          `an index name must be unique (it is a schema-level object name)`,
+      );
+    }
+    seenNames.add(index.name);
+
+    if (index.columns.length === 0) {
+      throw new Error(`clientProjection.localIndexes on ${tableName}: index "${index.name}" declares no columns`);
+    }
+
+    for (const column of index.columns) {
+      if (omitted.has(column)) {
+        throw new Error(
+          `clientProjection.localIndexes on ${tableName}: index "${index.name}" names column "${column}", which ` +
+            `clientProjection.omitColumns removes from the local table — index only projected columns`,
+        );
+      }
+      if (!columnsByPropertyKey.has(column) && !columnsByColumnName.has(column)) {
+        throw new Error(
+          `clientProjection.localIndexes on ${tableName}: index "${index.name}" names unknown column "${column}"`,
+        );
+      }
+    }
   }
 }

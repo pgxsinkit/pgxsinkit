@@ -43,6 +43,10 @@ export function asReadonly<TTable extends AnyPgTable, TLocalTable extends AnyPgT
           ...(clientProjection.syncedTable != null ? { syncedTable: clientProjection.syncedTable } : {}),
           ...(clientProjection.omitColumns != null ? { omitColumns: clientProjection.omitColumns } : {}),
           ...(clientProjection.localPrimaryKey != null ? { localPrimaryKey: clientProjection.localPrimaryKey } : {}),
+          // Read-relevant: a local index serves the CLIENT's reads, and a readonly client reads the same
+          // rows through the same columns. Dropping it would leave the projected store scanning where the
+          // authoritative one seeks — silently, since nothing else would differ.
+          ...(clientProjection.localIndexes != null ? { localIndexes: clientProjection.localIndexes } : {}),
         }
       : undefined;
 

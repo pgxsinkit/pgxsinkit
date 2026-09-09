@@ -23,6 +23,7 @@ import {
   deriveSyncColumnTypes,
   getLocalSyncedTablePrimaryKeyColumns,
   getSyncRegistrySchema,
+  jsonUdtName,
   type SyncColumnType,
   type SyncTableEntry,
   type SyncTableRegistry,
@@ -542,11 +543,37 @@ export interface ApplyTarget {
   /** Model-derived column types (`deriveSyncColumnTypes`), keyed by DB column name via `.name`. */
   columnTypes: SyncColumnType[];
   /**
+   * DB column names of the SCALAR `json`/`jsonb` columns — the columns whose wire cell is decoded from
+   * JSON text to a JS value on the way in (see `envelopeToChange`). Derived from {@link columnTypes} via
+   * the contracts' `jsonUdtName`, once per shape at resolve time rather than per row: the decode runs on
+   * every cell of every backfill row, so re-deriving it there would be a per-row string normalisation.
+   *
+   * Array json columns (`json[]`/`jsonb[]`) are NOT listed — like every array column they stay in
+   * Postgres's `array_out` text, which every apply tier feeds back to `array_in`.
+   */
+  jsonColumns: string[];
+  /**
    * Per-shape render-once cache for the batched-INSERT family (ADR-0029 D5): a rendered `{sqlText,
    * params}` per distinct (column-set, row-count), reused across batches with per-value codecs applied
    * at execution. Empty at resolution; populated lazily by the applier.
    */
   insertRenderCache: Map<string, { sqlText: string; params: unknown[] }>;
+}
+
+/**
+ * The DB column names of the SCALAR `json`/`jsonb` columns in a resolved column-type list — the
+ * {@link ApplyTarget.jsonColumns} derivation, exported so the test-support target builder and any other
+ * ApplyTarget producer derive it the one way (through the contracts' `jsonUdtName`).
+ */
+export function scalarJsonColumnNames(columnTypes: readonly SyncColumnType[]): string[] {
+  const names: string[] = [];
+  for (const column of columnTypes) {
+    const udt = jsonUdtName(column);
+    if (udt === "json" || udt === "jsonb") {
+      names.push(column.name);
+    }
+  }
+  return names;
 }
 
 /**
@@ -578,6 +605,7 @@ export function resolveApplyTarget<TRegistry extends SyncTableRegistry, TKey ext
   const serverPrimaryKey = entry.primaryKey.columns.map((declared) =>
     serverColumns[declared] ? serverColumns[declared].name : declared,
   );
+  const columnTypes = deriveSyncColumnTypes(entry);
   return {
     table: table as AnyPgTable,
     columnByName,
@@ -591,7 +619,8 @@ export function resolveApplyTarget<TRegistry extends SyncTableRegistry, TKey ext
     serverPrimaryKey,
     droppedKeyColumns: serverPrimaryKey.filter((name) => !localPrimaryKeySet.has(name)),
     applyMode: entry.applyMode,
-    columnTypes: deriveSyncColumnTypes(entry),
+    columnTypes,
+    jsonColumns: scalarJsonColumnNames(columnTypes),
     insertRenderCache: new Map(),
   };
 }

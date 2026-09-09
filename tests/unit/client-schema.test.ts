@@ -236,6 +236,103 @@ describe("client local schema generation", () => {
 
   // Slice 3 (durable-schema fingerprint fast path): the generator is partitioned on the `retention`
   // axis. The full `generateLocalSchemaSql` output must equal the durable + ephemeral concatenation.
+  // OPT-IN local indexes (`clientProjection.localIndexes`). A synced table's SERVER indexes are NOT
+  // mirrored — they serve server loads and routinely cover columns the client projection omits — so a
+  // local read path that needs one declares it, and the registry refuses a declaration the generator
+  // could not render faithfully AT REGISTRY-BUILD TIME (a store that already exists cannot report a
+  // typo usefully).
+  describe("clientProjection.localIndexes", () => {
+    const makeIndexedTable = (localIndexes: readonly { name: string; columns: readonly string[] }[]) =>
+      defineSyncTable({
+        tableName: "indexed_cards",
+        makeColumns: () => ({
+          id: uuid("id").primaryKey(),
+          dueAt: bigint("due_at", { mode: "bigint" }),
+          hiddenNote: varchar("hidden_note", { length: 40 }),
+        }),
+        mode: "readonly",
+        clientProjection: { omitColumns: ["hiddenNote"], localIndexes },
+      });
+
+    it("renders each declared index on the synced table only, never on the overlay", () => {
+      const registry = defineSyncRegistry({
+        cards: defineSyncTable({
+          tableName: "indexed_cards",
+          makeColumns: () => ({
+            id: uuid("id").primaryKey(),
+            dueAt: bigint("due_at", { mode: "bigint" }),
+            slot: varchar("slot", { length: 40 }),
+            updatedAtUs: bigint("updated_at_us", { mode: "bigint" }).notNull(),
+          }),
+          mode: "readwrite",
+          conflictPolicy: "last-write-wins",
+          governance: {
+            managedFields: [{ column: "updatedAtUs", applyOn: ["create", "update"], strategy: "nowMicroseconds" }],
+          },
+          clientProjection: {
+            localIndexes: [
+              // Declared by property key and by column name — both forms resolve to the column name.
+              { name: "indexed_cards_due_at_idx", columns: ["dueAt"] },
+              { name: "indexed_cards_slot_uniq", columns: ["slot"], unique: true },
+            ],
+          },
+        }),
+      });
+      const sql = generateLocalSchemaSql(registry);
+
+      expect(sql).toContain("CREATE INDEX IF NOT EXISTS indexed_cards_due_at_idx ON indexed_cards (due_at);");
+      expect(sql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS indexed_cards_slot_uniq ON indexed_cards (slot);");
+      expect(sql).not.toContain("ON indexed_cards_overlay (due_at)");
+    });
+
+    it("renders nothing when no index is declared", () => {
+      const registry = defineSyncRegistry({ cards: makeIndexedTable([]) });
+      expect(generateLocalSchemaSql(registry)).not.toContain("CREATE INDEX IF NOT EXISTS indexed_cards");
+    });
+
+    it("refuses an index over a column the client projection omits", () => {
+      expect(() => makeIndexedTable([{ name: "indexed_cards_hidden_idx", columns: ["hiddenNote"] }])).toThrow(
+        /names column "hiddenNote", which clientProjection.omitColumns removes/,
+      );
+    });
+
+    it("refuses an index over a column that does not exist", () => {
+      expect(() => makeIndexedTable([{ name: "indexed_cards_ghost_idx", columns: ["nope"] }])).toThrow(
+        /names unknown column "nope"/,
+      );
+    });
+
+    it("refuses two indexes with the same name", () => {
+      expect(() =>
+        makeIndexedTable([
+          { name: "indexed_cards_due_at_idx", columns: ["dueAt"] },
+          { name: "indexed_cards_due_at_idx", columns: ["id"] },
+        ]),
+      ).toThrow(/declares the index name "indexed_cards_due_at_idx" twice/);
+    });
+
+    it("refuses an index with no columns and one whose name is not a plain identifier", () => {
+      expect(() => makeIndexedTable([{ name: "indexed_cards_empty_idx", columns: [] }])).toThrow(/declares no columns/);
+      expect(() => makeIndexedTable([{ name: "drop table; --", columns: ["dueAt"] }])).toThrow(/invalid index name/);
+    });
+
+    // An index name is schema-level, and the generator emits `CREATE INDEX IF NOT EXISTS` (which matches on
+    // the name alone), so a cross-table name collision would silently leave the second table unindexed.
+    it("refuses the same index name on two entries of one registry", () => {
+      const named = (tableName: string) =>
+        defineSyncTable({
+          tableName,
+          makeColumns: () => ({ id: uuid("id").primaryKey(), dueAt: bigint("due_at", { mode: "bigint" }) }),
+          mode: "readonly",
+          clientProjection: { localIndexes: [{ name: "shared_due_at_idx", columns: ["dueAt"] }] },
+        });
+
+      expect(() => defineSyncRegistry({ a: named("indexed_a"), b: named("indexed_b") })).toThrow(
+        /local index "shared_due_at_idx" is declared by two registry entries/,
+      );
+    });
+  });
+
   describe("durable/ephemeral generator split (slice 3)", () => {
     const mixedRegistry = defineSyncRegistry({
       // Persistent writable entry.

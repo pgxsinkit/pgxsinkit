@@ -6,7 +6,7 @@ import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { normalizeCastPositionType } from "@pgxsinkit/contracts";
 import { renderPgxsinkitUtilitiesMigration } from "@pgxsinkit/server";
 
-import type { ApplyTarget } from "../../packages/client/src/local-tables";
+import { scalarJsonColumnNames, type ApplyTarget } from "../../packages/client/src/local-tables";
 
 // One drizzle handle per PGlite instance, so every converted call site in a file shares a builder
 // without re-wrapping. Wrapping is cheap, but a single identity also keeps `.toSQL()`-rendered
@@ -70,6 +70,7 @@ export function makeApplyTarget(
     droppedKeyColumns: [],
     applyMode,
     columnTypes,
+    jsonColumns: scalarJsonColumnNames(columnTypes),
     insertRenderCache: new Map(),
   };
 }

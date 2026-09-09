@@ -282,6 +282,9 @@ migration, since the local schema is a runtime-derived projection.
 clientProjection: {
   omitColumns: ["internal_flag"],      // never lands on the client
   localPrimaryKey: { columns: ["id"] },// readonly-only: local PK override
+  localIndexes: [                      // opt-in local indexes on the synced table
+    { name: "cards_due_at_idx", columns: ["dueAt"] },
+  ],
 },
 ```
 
@@ -306,6 +309,17 @@ Sub-fields:
   (default `${tableName}`, `${tableName}_overlay`, `${tableName}_mutations`). Rarely needed.
 - **`localPrimaryKey`** — a different local primary key (e.g. when a readonly client keys rows by a
   natural key). **Readonly tables only.**
+- **`localIndexes`** — indexes to create on the **local synced table**. The local store renders the
+  primary key and nothing else: your server's indexes are **not** mirrored, deliberately (they serve
+  server loads, and many cover columns a client projection omits). So declare what the **client's**
+  queries need — the motivating case is a `due_at` window over a large synced table, which goes from a
+  sequential scan to an index scan (measured on PGlite over 100k rows: ~13 ms → ~0.1 ms). Each entry is
+  `{ name, columns, unique? }`: a plain ascending btree over projected columns, named by DB column name
+  or Drizzle property key. The registry **refuses** an unknown column, a column `omitColumns` removes, a
+  duplicate index name, or an empty column list — at registry-build time, not at boot. Every index costs
+  write time on each applied batch and space in the user's store, so an index nothing queries is a loss.
+  Adding or removing one changes the local-schema fingerprint, so an existing store picks it up by replaying
+  its (idempotent) local DDL on the next boot — no resync, no data loss.
 
 **When to use.** `omitColumns` to keep server-only control columns (or PII) off the client — pair with
 [`serverProjection.rowTransform`](#serverprojection) when the decision is per-row, not whole-column.

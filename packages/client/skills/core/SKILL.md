@@ -262,6 +262,23 @@ RLS, arbitrary triggers/functions, or managed-field defaults, and it does not en
 UNIQUE the way Postgres does. Treat Postgres as the source of truth for integrity; do not assume a
 constraint that holds server-side also holds in PGlite.
 
+**Indexes are opt-in too.** A synced table gets its primary key's index and nothing else — the server's
+indexes are deliberately not mirrored (they serve server loads and often cover projected-away columns).
+A client read that needs an index declares it on the entry as
+`clientProjection.localIndexes: [{ name, columns, unique? }]` (plain btree over projected columns,
+validated at registry-build time). Index what the app actually scans — a due-window over a large synced
+table is the usual first case — and nothing else; every index costs write time on each applied batch.
+
+## What a synced value looks like on the way in
+
+The wire carries every non-int/float/bool cell as **Postgres output text** (json, arrays, timestamps,
+uuid, numeric, bytea). The client parses exactly one family of it, once, at the wire boundary: a scalar
+`json`/`jsonb` column becomes a JS value before any apply tier sees it, so the local column holds the
+document — `jsonb_typeof` = `object`, not `string`. Array columns (json arrays included) stay in
+Postgres's array literal and are handed straight back to Postgres. You read objects back out of PGlite
+either way; if you ever see a JSON **string** in a `jsonb` column, that is a double-encode bug, not the
+shape of the data.
+
 ## Common mistakes
 
 - Expecting an optimistic write to echo back on the write channel — it returns down the read path.

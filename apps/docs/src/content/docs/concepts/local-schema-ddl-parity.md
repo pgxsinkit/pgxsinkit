@@ -20,13 +20,21 @@ From the registry, `generateLocalSchemaSql` emits:
   hand-provide enums; they are automatic. The `prepareLocalDbBeforeSchema` hook is only for
   _non-enum_ prerequisite objects.)
 - **The synced table** — its projected columns, their types (including arrays), `NOT NULL`, and the
-  primary key (single or composite).
+  primary key (single or composite), plus any index you declared in
+  [`clientProjection.localIndexes`](/concepts/registry-entry-options/#clientprojection).
 - **For writable tables:** the [overlay](/concepts/write-path/) table, the mutation journal + its
   sequence and indexes, a **reconcile trigger + function** that clears overlay/journal rows when the
   sync echo arrives, and a **read-model view** that unions the overlay over the synced row.
 
 That is the whole of it. In particular, the synced table carries **no defaults, no constraints
 beyond the primary key, and no foreign keys** today.
+
+**Indexes are opt-in, and your server's are not mirrored.** A synced table gets the primary key's index
+and exactly the indexes the entry declares in `clientProjection.localIndexes` — nothing is inferred from
+the server table. That is deliberate: server indexes serve server loads, and many of them cover columns a
+client projection omits. Index what the **client** reads (a `due_at` window over a large synced table is
+the usual first case), and nothing else — each index is paid for on every applied batch and in the user's
+storage.
 
 ## Never local — server authority, by nature
 

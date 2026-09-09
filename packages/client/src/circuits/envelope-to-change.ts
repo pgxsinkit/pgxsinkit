@@ -112,6 +112,56 @@ export function primaryKeyFromStreamKey(target: ApplyTarget, key: string): Recor
 }
 
 /**
+ * Decode the cells of the SCALAR `json`/`jsonb` columns in a streamed row — **the one place the wire's
+ * text becomes a JS value**, and the invariant every apply tier below depends on.
+ *
+ * THE WIRE CARRIES A JSON COLUMN AS TEXT. The engine's cell model is five scalars (`value.rs`:
+ * `Null | Int | Text | Bool | Float`), and its Postgres type map (`pg.rs` `map_pg_type`) sends everything
+ * that is not int/float/bool through `Text` — so a `jsonb` column is emitted as a JSON **string** holding
+ * Postgres's own output text (`t.col::text` on the backfill path, `test_decoding`'s text on the live path;
+ * that is deliberate upstream, so a backfilled row and its first replicated update compare equal). Hence
+ * `{"lang.v1": {"levelOrdinal": 1}}` — `jsonb_out` spacing, which `JSON.stringify` never emits.
+ *
+ * Left as text, every apply tier then encodes that text a SECOND time and the local column ends up holding
+ * a JSON *string scalar* (`jsonb_typeof` = `'string'`) instead of the document: `json_to_recordset` escapes
+ * a JSON string into a JSON literal when the target column is json/jsonb (`populate_scalar`), the COPY
+ * serializer runs `JSON.stringify` over it (`copy.ts` `jsonToText`), and drizzle's `jsonb` codec does the
+ * same on the param-bound tiers. All three were measured doing exactly that. Decoding here — once, at the
+ * boundary — fixes all of them at their shared root, and matches what the appliers have always documented
+ * they receive ("json/jsonb as parsed objects/arrays").
+ *
+ * ARRAY columns (json arrays included) are deliberately NOT decoded: they arrive as Postgres `array_out`
+ * text, which every tier hands back to `array_in` — the recordset cast, COPY's field text, and drizzle's
+ * array codec all accept the literal verbatim (measured), so parsing it here would only mean re-rendering
+ * it below.
+ *
+ * A cell that is not a string (a wire that already sent a parsed value) is passed through untouched, so
+ * the decode is idempotent. A string that is not valid JSON cannot come from Postgres — the server column
+ * validated it — so it throws rather than being stored as text.
+ */
+function decodeJsonColumns(target: ApplyTarget, value: Record<string, unknown>): Record<string, unknown> {
+  let decoded: Record<string, unknown> | undefined;
+  for (const column of target.jsonColumns) {
+    const cell = value[column];
+    if (typeof cell !== "string") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cell);
+    } catch (error) {
+      throw new Error(
+        `[pgxsinkit] json column "${column}" carried a value that is not JSON text: ${JSON.stringify(
+          cell.slice(0, 120),
+        )}`,
+        { cause: error },
+      );
+    }
+    decoded ??= { ...value };
+    decoded[column] = parsed;
+  }
+  return decoded ?? value;
+}
+
+/**
  * Translate a Circuits envelope into the message the applier consumes.
  *
  * There is no operation mapping to do — {@link SyncOperation} is the wire's own vocabulary. What
@@ -147,7 +197,7 @@ export function envelopeToChange(target: ApplyTarget, envelope: StreamEnvelope):
   // keeps them "so the client can identify rows"), so under a localPrimaryKey narrowing the pinned,
   // projected-away components arrive anyway. Project exactly those off; any other column the local
   // table lacks still fails loudly in the applier's re-keying.
-  let value = envelope.value;
+  let value: Record<string, unknown> = envelope.value;
   if (target.droppedKeyColumns.length > 0) {
     value = { ...value };
     for (const column of target.droppedKeyColumns) {
@@ -155,5 +205,7 @@ export function envelopeToChange(target: ApplyTarget, envelope: StreamEnvelope):
     }
   }
 
-  return { key: envelope.key, value, headers: { operation: "upsert" } };
+  // The wire→JS decode: a json column's text becomes its value here and stays a value all the way to the
+  // store (see {@link decodeJsonColumns}).
+  return { key: envelope.key, value: decodeJsonColumns(target, value), headers: { operation: "upsert" } };
 }
