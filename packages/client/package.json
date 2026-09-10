@@ -34,13 +34,13 @@
   },
   "dependencies": {
     "@durable-streams/client": "0.2.6",
-    "@electric-sql/pglite-tools": "0.4.5",
+    "@electric-sql/pglite-tools": "0.4.8",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/pglite-opfs-repacked": "workspace:*"
   },
   "peerDependencies": {
     "@electric-sql/pglite": ">=0.5.5-pgx.4",
     "drizzle-orm": "1.0.0-rc.4",
-    "zod": "^4.5.4"
+    "zod": "^4.6.1"
   }
 }

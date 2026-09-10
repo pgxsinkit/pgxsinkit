@@ -9,21 +9,21 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.5-pgx.2",
-    "@electric-sql/pglite-repl": "0.4.5",
-    "@mantine/core": "9.6.0",
-    "@mantine/hooks": "9.6.0",
+    "@electric-sql/pglite-repl": "0.4.8",
+    "@mantine/core": "9.6.1",
+    "@mantine/hooks": "9.6.1",
     "@pgxsinkit/board-schema": "workspace:*",
     "@pgxsinkit/client": "workspace:*",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/react": "workspace:*",
     "@supabase/supabase-js": "2.116.0",
-    "@tanstack/react-router": "1.170.33",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
+    "@tanstack/react-router": "1.170.34",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "uuid": "14.0.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "6.1.1",
-    "vite": "8.2.2"
+    "vite": "8.3.0"
   }
 }
