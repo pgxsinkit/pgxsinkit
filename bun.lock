@@ -1,5 +1,5 @@
 {
-  "lockfileVersion": 1,
+  "lockfileVersion": 2,
   "configVersion": 1,
   "workspaces": {
     "": {
@@ -8,8 +8,8 @@
         "jose": "6.2.12",
       },
       "devDependencies": {
-        "@electric-sql/pglite": "0.5.5-pgx.2",
-        "@electric-sql/pglite-prepopulatedfs": "0.5.8",
+        "@electric-sql/pglite": "0.5.5-pgx.5",
+        "@electric-sql/pglite-prepopulatedfs": "0.5.5",
         "@pgxsinkit/board-schema": "workspace:*",
         "@playwright/test": "^1.63.0",
         "@tanstack/intent": "^0.4.0",
@@ -126,7 +126,7 @@
         "@pgxsinkit/pglite-opfs-repacked": "workspace:*",
       },
       "peerDependencies": {
-        "@electric-sql/pglite": "^0.5.5-pgx.2",
+        "@electric-sql/pglite": ">=0.5.5-pgx.4",
         "drizzle-orm": "1.0.0-rc.4",
         "zod": "^4.6.1",
       },
@@ -143,7 +143,7 @@
       "name": "@pgxsinkit/pglite-opfs-repacked",
       "version": "0.0.0",
       "peerDependencies": {
-        "@electric-sql/pglite": "^0.5.5-pgx.2",
+        "@electric-sql/pglite": ">=0.5.5-pgx.4",
       },
     },
     "packages/react": {
@@ -154,9 +154,9 @@
         "@pgxsinkit/contracts": "workspace:*",
       },
       "peerDependencies": {
-        "@electric-sql/pglite": "^0.5.5-pgx.2",
+        "@electric-sql/pglite": ">=0.5.5-pgx.4",
         "drizzle-orm": "1.0.0-rc.4",
-        "react": "^19.3.0",
+        "react": ">=19.3.0",
       },
     },
     "packages/schema": {
@@ -188,7 +188,7 @@
     },
   },
   "overrides": {
-    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.2",
+    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.5",
   },
   "packages": {
     "@astrojs/compiler-binding": ["@astrojs/compiler-binding@0.4.0", "", { "optionalDependencies": { "@astrojs/compiler-binding-darwin-arm64": "0.4.0", "@astrojs/compiler-binding-darwin-x64": "0.4.0", "@astrojs/compiler-binding-linux-arm64-gnu": "0.4.0", "@astrojs/compiler-binding-linux-arm64-musl": "0.4.0", "@astrojs/compiler-binding-linux-x64-gnu": "0.4.0", "@astrojs/compiler-binding-linux-x64-musl": "0.4.0", "@astrojs/compiler-binding-wasm32-wasi": "0.4.0", "@astrojs/compiler-binding-win32-arm64-msvc": "0.4.0", "@astrojs/compiler-binding-win32-x64-msvc": "0.4.0" } }, "sha512-x2RjDUuWfwLNtc3mjAdSRInwqh/rqbLar9cm/5FOMbHvmYZB7yfKewzSclAxWjIZsypJDXv1lhaP2WG+P8TK3g=="],
@@ -287,9 +287,9 @@
 
     "@durable-streams/client": ["@durable-streams/client@0.2.6", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1", "fastq": "^1.19.1" }, "bin": { "intent": "bin/intent.js" } }, "sha512-uHKKbWpsKLhFMeGjG0PgM6LXE3oEIi7FHKlJZkmYGxcqd4Yjjd/QEvnQnDzteRP4Av1uJVM8qjTL7kfKsgeS/w=="],
 
-    "@electric-sql/pglite": ["@pgxsinkit/pglite@0.5.5-pgx.2", "", {}, "sha512-K9piqBQpcsTo87BqnvOOy901umYpDQPcq/rtZQCvDfn6LfLCuzvLbvKYB0LnBfF/FRBVnmVZpL4B/RX7wwVsYg=="],
+    "@electric-sql/pglite": ["@pgxsinkit/pglite@0.5.5-pgx.5", "", {}, "sha512-zk3y+QrbL+Z3Dc6lvL+ccTej3lzfVEuBaoyDY0/JYwo5NYJqTsgKrCyNVlPv2nbNI1CRmgqRByJim4xdKPklBQ=="],
 
-    "@electric-sql/pglite-prepopulatedfs": ["@electric-sql/pglite-prepopulatedfs@0.5.8", "", { "peerDependencies": { "@electric-sql/pglite": "0.5.8" } }, "sha512-VQsIpJjTRcyEdsoU84UGhGc67Dq+N/P5k9NPPHrvMgGTptHYIxpPcEbzxpFnLL56ThvZ/mJecC+0IbNhRN1zrg=="],
+    "@electric-sql/pglite-prepopulatedfs": ["@electric-sql/pglite-prepopulatedfs@0.5.5", "", { "peerDependencies": { "@electric-sql/pglite": "0.5.5" } }, "sha512-XYM0SPq+cPPqme37DzKOcSPlwoXTqrGt+Jod/BRCrRfXWk6HU/i7M9NAkxN+JYbXE+s5QsQSf0MzEp+u3Rws1A=="],
 
     "@electric-sql/pglite-react": ["@electric-sql/pglite-react@0.4.8", "", { "peerDependencies": { "@electric-sql/pglite": "0.5.8", "react": "^18.0.0 || ^19.0.0 || ^19.0.0-rc" } }, "sha512-OGK36wVFy/OwTEb3M1+swJfxlu7og21YPOL7qUzz65ylcK9V/xA2CMnNubq5jfWmh08nNyDSFHFij4ttc98+ow=="],
 
@@ -451,7 +451,7 @@
 
     "@microsoft/fetch-event-source": ["@microsoft/fetch-event-source@2.0.1", "", {}, "sha512-W6CLUJ2eBMw3Rec70qrsEW0jOm/3twwJv21mrmj2yORiaVmVYGS4sSS5yUwvQc1ZlDLYGPnClVWmUUMagKNsfA=="],
 
-    "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.3", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.4", "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.4" } }, "sha512-UMduMbqO5s5zF2NkNacMT/yK5Y5QiKvWr2+50bzIIxFDwVJ2h49b+oyjaCGPhJxd2/gC2x39EHv/gHVuu36x2Q=="],
+    "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.4", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.4", "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.4" } }, "sha512-AJxoUD2/15ESHbvpcyjU274nsAPLuOtPHCk0vKJM5pj//Fg/B1FXNWjPnXTT9PymCYYiHo4zPj0ZomXBKhoy7g=="],
 
     "@oslojs/encoding": ["@oslojs/encoding@1.1.0", "", {}, "sha512-70wQhgYmndg4GCPxPPxPGevRKqTIJ2Nh4OkiMWmDAVYsTQ+Ta7Sq+rPevXyXGdzr30/qZBnyOalCszoMxlyldQ=="],
 
@@ -1063,7 +1063,7 @@
 
     "magic-string": ["magic-string@1.3.1", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.6.0" } }, "sha512-rm91zr2Ou+XueDTohjQQjdQEcYM6zVi8KVUCG8Ec3vHwUEKrhSdCNyfuIywkA6hcCAteIn0ZOtAHA6eGpiX+Pg=="],
 
-    "magicast": ["magicast@0.5.4", "", { "dependencies": { "@babel/parser": "^7.29.7", "@babel/types": "^7.29.7", "source-map-js": "^1.2.1" } }, "sha512-llBEhWm1SacoRwgHUoQJYtwp4PBLF4faQi5TCpIGyGs9n4y5+juI0tDgyKIfpqxckRHaHzouUEph3THklWh03w=="],
+    "magicast": ["magicast@0.5.5", "", { "dependencies": { "@babel/parser": "^7.29.7", "@babel/types": "^7.29.7", "source-map-js": "^1.2.1" } }, "sha512-UicdXN8zQ3JHlxVq+28afMXPr1z7WNY6+7EJnzTdQWkTAlMLF5fNCCKxJHBQwGaNGR11581EiQmQzx73+MvszA=="],
 
     "markdown-extensions": ["markdown-extensions@2.0.0", "", {}, "sha512-o5vL7aDWatOTX8LzaS1WMoaoxIiLRQJuIKKe2wAw6IeULDHaqbiqiggmx+pKvZDb1Sj+pE46Sn1T7lCqfFtg1Q=="],
 
@@ -1191,7 +1191,7 @@
 
     "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
 
-    "nanoid": ["nanoid@3.3.18", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w=="],
+    "nanoid": ["nanoid@3.3.19", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-Y2tUNy4ouw6tq5oDSKeQYGOyhkUBhNOcGV/02KC+6kd9eDGqdZd++mjMiIDilrBYvjEnCYvVtsuHCuP+okSfug=="],
 
     "neotraverse": ["neotraverse@1.0.1", "", {}, "sha512-WmmLty1YWwJl9yZi77v2dVIV6X2kuYV8YYBI/G3LWGKdGHmHUvL1z7FW0iDvEvGAwNEoc5x1tOOOyDnf5jJw/w=="],
 
