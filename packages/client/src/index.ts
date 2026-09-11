@@ -1685,8 +1685,19 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    */
   ensureSynced: (keys: readonly SyncTableName<TRegistry>[]) => Promise<void>;
   /**
-   * Whether a relation's group has started and hydrated (ADR-0021). False for a still-dormant `lazy`
-   * relation; true for eager relations once boot completes (and always when sync is disabled).
+   * Whether a relation's consistency group is STARTED (ADR-0021) — a durable subscription for it exists,
+   * so reads of it are meaningful. The synchronous peek, for guards and render paths that cannot await.
+   *
+   * For an ordinary group that coincides with caught up: it reads `false` while the group is activated but
+   * still catching up, and `true` once its catch-up lands. A **promoted** `lazy + persistent` group (one a
+   * previous session activated, so boot starts it) reads `true` from boot — including offline, while its
+   * subscribe is still retrying — because its local table is durable and populated, which is what "started"
+   * asks. A dormant `lazy` relation reads `false`, as does every relation while sync is PENDING (enabled but
+   * not yet wired, ADR-0041); every key reads `true` when sync is DISABLED (local-only — nothing is dormant).
+   *
+   * Catch-up COMPLETION is the separate, strictly stronger question {@link groupReady} answers. A
+   * worker-attached client answers this from a snapshot the worker computes with this same method on its own
+   * client (ADR-0059), so the two modes cannot diverge.
    */
   isSynced: (key: SyncTableName<TRegistry>) => boolean;
   /**

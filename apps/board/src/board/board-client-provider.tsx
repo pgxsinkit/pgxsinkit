@@ -113,9 +113,10 @@ function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmi
             __pgxsinkitE2eClient?: BoardSyncClient;
           };
           dev.__boardClient = next;
-          // The full live client for the worker e2e lane's one-shot-read probes (board-worker.e2e.test.ts) —
-          // `query` / a bare `drizzle` read / `isSynced`. A dedicated handle beside `__boardClient` (which the
-          // scenarios type down to just `mutate`) following the boot-report stash precedent in board-client.ts.
+          // The full live client for the worker lane to introspect — the read family (`query`, a bare `drizzle`
+          // read) and the synchronous `isSynced` peek, which on an attached client answers from the
+          // worker-pushed snapshot (ADR-0059). A dedicated handle beside `__boardClient` (which the scenarios
+          // type down to just `mutate`), following the boot-report stash precedent in board-client.ts.
           dev.__pgxsinkitE2eClient = next;
           if (mode === "in-process") dev.__boardProfiler = createPgliteProfiler(next.pglite);
         }

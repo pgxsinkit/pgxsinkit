@@ -150,10 +150,10 @@ One-shot reads (`query`/`queryRow`/`queryRaw`/`queryRawRow`) compile on the tab 
 guarded round trip — the worker runs the read gate + lazy-group guard, then Drizzle's own mapping runs back
 on the tab, so results match the in-process client exactly. A bare awaited `client.drizzle` builder is ALSO
 guarded here, and `client.drizzle.transaction()` throws (no tab-local store). `ensureSynced` is proxied
-(additive, idempotent); `isSynced` throws — it is a SYNCHRONOUS activation-started peek the tab's cached
-catch-up readiness cannot answer (use `groupReady` for catch-up, `ensureSynced` to activate). Local `pglite`
-and `dropReadCache` are NOT proxied (no tab-local store; a cache rebuild is engine-wide). `destroy()` IS
-proxied through a tab-side supervisor: it refuses peers with `StoreDestroyRefusedError`, refuses owed journal
+(additive, idempotent); `isSynced` — SYNCHRONOUS, so never an RPC — reads a snapshot the WORKER computes by calling its OWN `isSynced` per
+registry key, ack-folded and re-broadcast on change: identical to the in-process answer (promoted lazy groups and sync-disabled included),
+`false` before the first one, never catch-up completion (`groupReady`). Local `pglite` and `dropReadCache` are NOT proxied (no tab-local
+store; a cache rebuild is engine-wide). `destroy()` IS proxied through a tab-side supervisor: it refuses peers with `StoreDestroyRefusedError`, refuses owed journal
 rows unless `{ force: true }`, retires/closes the engine, then runs a resumable deletion. The lazy lifecycle
 methods ARE proxied, but the engine is SHARED: `desync(tableKey)` from one tab reverts the consistency group for
 EVERY attached tab (the footgun). For an ephemeral delivery window use `discardEphemeral(tableKey)` instead —

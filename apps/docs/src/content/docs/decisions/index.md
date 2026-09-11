@@ -71,5 +71,6 @@ complete as ADRs are added.
 - [ADR-0056 — Catch-up alignment on stream offsets and the engine convergence barrier](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0056-catchup-alignment-on-stream-offsets.md)
 - [ADR-0057 — Retiring tagged-subquery reconciliation](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0057-retiring-tagged-subquery-reconciliation.md)
 - [ADR-0058 — A two-verb wire, and what replaces primary-key collision surfacing](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0058-two-verb-wire-and-the-upsert-apply-path.md)
+- [ADR-0059 — The attach client answers isSynced from a worker-pushed started-state snapshot](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0059-attach-client-started-state-snapshot.md)
 
 <!-- adr:list:end -->

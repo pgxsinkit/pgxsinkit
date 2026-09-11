@@ -36,3 +36,4 @@ Rules:
 - [0016 — Runtime `params` are declared end to end and wired nowhere](0016-runtime-params-wired-nowhere.md) — candidate
 - [0017 — `shapeKey` uniqueness is checked before schema qualification](0017-shapekey-uniqueness-after-qualification.md) — candidate
 - [0018 — The subscribe route answers 503 and drops the engine's reason](0018-subscribe-503-drops-engine-error.md) — candidate
+- [0019 — Group catch-up readiness never clears on revert](0019-group-readiness-never-clears-on-revert.md) — candidate

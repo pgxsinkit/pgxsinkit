@@ -19,7 +19,7 @@ import { live } from "@electric-sql/pglite/live";
 import { eq } from "drizzle-orm";
 import { bigint, boolean, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 
-import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { defineSyncRegistry, defineSyncTable, type SyncTableName } from "@pgxsinkit/contracts";
 
 import type { ClientPGlite, SyncClient } from "../../packages/client/src/index";
 import type { SyncWorkerHost } from "../../packages/client/src/worker/define-sync-worker";
@@ -80,25 +80,59 @@ type Registry = typeof registry;
 // ─── Controllable sync stub (only `startCircuitsSync` is mocked) ───────────────────────────────────
 // 1 group per table (`<key>-shape`); `ensureGroupStarted` records activation so `isTableStarted` reflects it,
 // mirroring the in-process `client-lazy-facade` stub. `onInitialSync` fires so the engine reaches phase
-// "ready" without any network. Reset per test.
+// "ready" without any network. An activated group's catch-up lands at once (`onGroupReady`) UNLESS its key is
+// in `catchUpHeld` — the started-but-not-caught-up shape (a promoted group whose subscribe is still retrying),
+// where `isTableStarted` is true while `isGroupReady`/`groupReady` stay pending. Reset per test.
 const startedGroups = new Set<string>();
 const ensureGroupStartedCalls: string[] = [];
-const startCircuitsSyncMock = mock(async (_pg: unknown, opts: { onInitialSync?: () => void }) => {
-  opts.onInitialSync?.();
-  return {
-    unsubscribe: () => undefined,
-    tables: {},
-    ensureGroupStarted: async (groupKey: string) => {
-      ensureGroupStartedCalls.push(groupKey);
-      startedGroups.add(groupKey);
-    },
-    stopGroup: (groupKey: string) => startedGroups.delete(groupKey),
-    groupKeyForTable: (tableKey: string) => `${tableKey}-shape`,
-    isTableStarted: (tableKey: string) => startedGroups.has(`${tableKey}-shape`),
-    groupReady: () => Promise.resolve(),
-    isGroupReady: () => true,
-  };
-});
+/** Group keys whose CATCH-UP is deliberately withheld — activated, not yet caught up. */
+const catchUpHeld = new Set<string>();
+/** Group keys that count as STARTED while their catch-up is still in flight (the real promoted branch). */
+const promotedGroups = new Set<string>();
+const catchUpWaiters = new Map<string, Array<() => void>>();
+let reportGroupReady: ((groupKey: string) => void) | undefined;
+/** Land a held group's catch-up, exactly as the runtime reports it — no RPC involved. */
+function releaseCatchUp(groupKey: string): void {
+  catchUpHeld.delete(groupKey);
+  const waiters = catchUpWaiters.get(groupKey) ?? [];
+  catchUpWaiters.delete(groupKey);
+  for (const resolve of waiters) resolve();
+  reportGroupReady?.(groupKey);
+}
+const startCircuitsSyncMock = mock(
+  async (_pg: unknown, opts: { onInitialSync?: () => void; onGroupReady?: (groupKey: string) => void }) => {
+    reportGroupReady = opts.onGroupReady;
+    opts.onInitialSync?.();
+    return {
+      unsubscribe: () => undefined,
+      tables: {},
+      ensureGroupStarted: async (groupKey: string) => {
+        ensureGroupStartedCalls.push(groupKey);
+        startedGroups.add(groupKey);
+        // Catch-up lands with the start unless this group is held — the runtime reports it separately.
+        if (!catchUpHeld.has(groupKey)) opts.onGroupReady?.(groupKey);
+      },
+      stopGroup: (groupKey: string) => startedGroups.delete(groupKey),
+      groupKeyForTable: (tableKey: string) => `${tableKey}-shape`,
+      // The real `isTableStarted` (group-sync.ts): an ordinary group counts as started once its catch-up
+      // has landed; a PROMOTED one counts from the moment its start was kicked off, catch-up or not.
+      isTableStarted: (tableKey: string) => {
+        const groupKey = `${tableKey}-shape`;
+        if (!startedGroups.has(groupKey)) return false;
+        return promotedGroups.has(groupKey) || !catchUpHeld.has(groupKey);
+      },
+      groupReady: (groupKey: string) =>
+        catchUpHeld.has(groupKey)
+          ? new Promise<void>((resolve) => {
+              const waiters = catchUpWaiters.get(groupKey) ?? [];
+              waiters.push(resolve);
+              catchUpWaiters.set(groupKey, waiters);
+            })
+          : Promise.resolve(),
+      isGroupReady: (groupKey: string) => !catchUpHeld.has(groupKey),
+    };
+  },
+);
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -205,6 +239,10 @@ afterAll(() => mock.restore());
 beforeEach(() => {
   startedGroups.clear();
   ensureGroupStartedCalls.length = 0;
+  catchUpHeld.clear();
+  promotedGroups.clear();
+  catchUpWaiters.clear();
+  reportGroupReady = undefined;
   startCircuitsSyncMock.mockClear();
 });
 
@@ -432,15 +470,7 @@ describe("guarded one-shot reads over the worker bridge (ADR-0032 decision 4)", 
     expect(workerClient.isSynced("archive")).toBe(true);
   });
 
-  it("10. isSynced throws a clear not-supported error (a sync activation-started peek the tab cannot answer)", async () => {
-    const host = await makeHost(false);
-    const client = await attach(host);
-    await client.ready;
-
-    expect(() => client.isSynced("archive")).toThrow(/isSynced is not available/);
-  });
-
-  it("11. queryRow returns the first row, and null for an empty result", async () => {
+  it("10. queryRow returns the first row, and null for an empty result", async () => {
     const host = await makeHost(false);
     const client = await attach(host);
     await client.ready;
@@ -460,7 +490,7 @@ describe("guarded one-shot reads over the worker bridge (ADR-0032 decision 4)", 
     expect(none).toBeNull();
   });
 
-  it("12. queryRawRow with a `use`-carrying raw fragment activates the lazy group and returns the row", async () => {
+  it("11. queryRawRow with a `use`-carrying raw fragment activates the lazy group and returns the row", async () => {
     const host = await makeHost(true);
     const client = await attach(host);
     await client.ready;
@@ -479,7 +509,7 @@ describe("guarded one-shot reads over the worker bridge (ADR-0032 decision 4)", 
     expect(workerClient.isSynced("archive")).toBe(true);
   });
 
-  it("13. a bare awaited client.drizzle read over attach IS guarded (activates the lazy group)", async () => {
+  it("12. a bare awaited client.drizzle read over attach IS guarded (activates the lazy group)", async () => {
     const host = await makeHost(true);
     const client = await attach(host);
     await client.ready;
@@ -499,7 +529,7 @@ describe("guarded one-shot reads over the worker bridge (ADR-0032 decision 4)", 
     expect(workerClient.isSynced("archive")).toBe(true);
   });
 
-  it("14. client.drizzle.transaction() rejects — no tab-local PGlite for a read transaction", async () => {
+  it("13. client.drizzle.transaction() rejects — no tab-local PGlite for a read transaction", async () => {
     const host = await makeHost(false);
     const client = await attach(host);
     await client.ready;
@@ -512,5 +542,164 @@ describe("guarded one-shot reads over the worker bridge (ADR-0032 decision 4)", 
       message = (error as Error).message;
     }
     expect(message).toMatch(/not available on a worker-attached client/);
+  });
+});
+
+describe("isSynced from the worker-pushed started-state snapshot (ADR-0059)", () => {
+  // Every case asserts BOTH the attached answer and full parity with the worker's own in-process client:
+  // the snapshot is computed by asking that client `isSynced(key)` for every registry key, so any divergence
+  // is a bridge bug, not a semantic one. A catch-up-readiness implementation would fail case 7.
+  const registryKeys = Object.keys(registry) as SyncTableName<Registry>[];
+  const syncedMap = (client: SyncClient<Registry>): Record<string, boolean> =>
+    Object.fromEntries(registryKeys.map((key) => [key, client.isSynced(key)]));
+
+  it("1. answers a boolean for eager and lazy keys right after attach (it no longer throws)", async () => {
+    const host = await makeHost(true);
+    const attached = await attach(host);
+    await attached.ready;
+    const workerClient = await host.whenBooted();
+
+    expect(typeof attached.isSynced("authors")).toBe("boolean"); // eager
+    expect(typeof attached.isSynced("archive")).toBe("boolean"); // lazy
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+  });
+
+  it("2. a dormant lazy key reads false, then true in the statement after `await ensureSynced` (no tick)", async () => {
+    // A promoted group with its catch-up held: it reads STARTED the moment its start is kicked off, and no
+    // status/group-ready transition accompanies the activation — so the snapshot the assertion below reads
+    // can only have come from the publish the worker makes before the RPC's result.
+    catchUpHeld.add("archive-shape");
+    promotedGroups.add("archive-shape");
+    const host = await makeHost(true);
+    const attached = await attach(host);
+    await attached.ready;
+    const workerClient = await host.whenBooted();
+
+    expect(attached.isSynced("archive")).toBe(false);
+    await attached.ensureSynced(["archive"]);
+    // The ordering guarantee: the worker broadcasts the new snapshot BEFORE the RPC's result, and both ride
+    // the same port (FIFO delivery), so the next SYNCHRONOUS statement already sees it — no tick, no await.
+    expect(attached.isSynced("archive")).toBe(true);
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+  });
+
+  it("3. a lazy group activated through the guard (one-shot read, live subscription) updates the snapshot", async () => {
+    const host = await makeHost(true);
+    const attached = await attach(host);
+    await attached.ready;
+    const workerClient = await host.whenBooted();
+    const { archive } = await tables();
+
+    // No `ensureSynced` anywhere: the worker's guard starts the archive group inside the guarded read.
+    await attached.query((c) => c.drizzle.select({ id: archive.id }).from(archive));
+    expect(attached.isSynced("archive")).toBe(true);
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+
+    // The live path activates through the same guard (the worker's `prepareQuery` inside `subscribe`). Its
+    // group is promoted with catch-up held, so no status transition accompanies the activation either: the
+    // snapshot can only have come from the publish the subscribe path makes before the initial snapshot.
+    catchUpHeld.add("vault-shape");
+    promotedGroups.add("vault-shape");
+    expect(attached.isSynced("vault")).toBe(false);
+    const subscription = await attached.subscribeLiveRows(
+      { sql: "select id from vault", params: [], use: ["vault"] },
+      () => undefined,
+    );
+    expect(attached.isSynced("vault")).toBe(true);
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+    subscription.unsubscribe();
+  });
+
+  it("4. desync reverts the key to false; re-activation reads true again", async () => {
+    const host = await makeHost(true);
+    const attached = await attach(host);
+    await attached.ready;
+    const workerClient = await host.whenBooted();
+
+    await attached.ensureSynced(["archive"]);
+    expect(attached.isSynced("archive")).toBe(true);
+
+    await attached.desync("archive");
+    expect(attached.isSynced("archive")).toBe(false);
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+
+    await attached.ensureSynced(["archive"]);
+    expect(attached.isSynced("archive")).toBe(true);
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+  });
+
+  it("5. sync disabled: every key reads true the moment `attachSyncClient` resolves (the ack snapshot)", async () => {
+    const host = await makeHost(false);
+    const attached = await attach(host);
+    // Read BEFORE any further await: only the snapshot folded off the `attach-ack` can answer this, because
+    // the worker's first `status` event is posted after the ack and is still undelivered here.
+    const immediate = syncedMap(attached);
+    expect(immediate).toEqual({ todos: true, authors: true, books: true, archive: true, vault: true });
+
+    const workerClient = await host.whenBooted();
+    expect(immediate).toEqual(syncedMap(workerClient));
+  });
+
+  it("6. a tab attaching after activation reads true immediately, with no await of its own", async () => {
+    const host = await makeHost(true);
+    const first = await attach(host);
+    await first.ready;
+    await first.ensureSynced(["archive"]);
+
+    // The late tab missed every broadcast; its ack carries the current snapshot.
+    const second = await attach(host);
+    expect(second.isSynced("archive")).toBe(true);
+
+    const workerClient = await host.whenBooted();
+    expect(syncedMap(second)).toEqual(syncedMap(workerClient));
+  });
+
+  it("7. a STARTED but not caught-up group reads true while `groupReady` is still pending", async () => {
+    // The discriminating case — the promoted-group shape: started, durable and readable, catch-up still in
+    // flight. An implementation answering from the tab's catch-up cache would read false here.
+    catchUpHeld.add("archive-shape");
+    promotedGroups.add("archive-shape");
+    const host = await makeHost(true);
+    const attached = await attach(host);
+    await attached.ready;
+    const workerClient = await host.whenBooted();
+
+    await attached.ensureSynced(["archive", "vault"]);
+    // Both groups are started; only `vault` has caught up. The tab reads BOTH as synced — it is answering
+    // the started question, not the catch-up one, and a catch-up-cache implementation would read `archive`
+    // false (no group-ready edge for it has ever crossed the bridge).
+    expect(attached.isSynced("archive")).toBe(true);
+    expect(attached.isSynced("vault")).toBe(true);
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+
+    // Catch-up readiness — the strictly weaker question — is still unanswered for `archive` and settled for
+    // `vault`. Asserted on the worker's own client: the stub's synthetic group keys (`<key>-shape`) are not
+    // the registry-derived keys the TAB maps a table to, so tab-side `groupReady` is not a signal here.
+    const settled = await Promise.race([
+      workerClient.groupReady("archive").then(() => "ready"),
+      tick().then(() => "pending"),
+    ]);
+    expect(settled).toBe("pending");
+    await workerClient.groupReady("vault");
+  });
+
+  it("8. a catch-up landing with no RPC in flight refreshes the tab (the status-edge publish)", async () => {
+    // An ordinary (unpromoted) group is STARTED only once its catch-up lands, and that edge arrives on the
+    // engine's own schedule — no RPC, no subscribe. The status transition carrying it is the only place the
+    // new snapshot can be published from.
+    catchUpHeld.add("archive-shape");
+    const host = await makeHost(true);
+    const attached = await attach(host);
+    await attached.ready;
+    const workerClient = await host.whenBooted();
+
+    await attached.ensureSynced(["archive"]);
+    expect(attached.isSynced("archive")).toBe(false); // activated, not yet caught up → not started
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
+
+    releaseCatchUp("archive-shape");
+    await tick();
+    expect(attached.isSynced("archive")).toBe(true);
+    expect(syncedMap(attached)).toEqual(syncedMap(workerClient));
   });
 });

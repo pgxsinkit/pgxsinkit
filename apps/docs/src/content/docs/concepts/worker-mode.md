@@ -310,11 +310,17 @@ here, since every bridge read routes through the guarded seam (attach is strictl
 less); and `client.drizzle.transaction()` throws — a read transaction needs a local store the tab does not
 have.
 
-What remains unproxied is structural, not a slice gap: `pglite` (the tab holds no local store),
-`dropReadCache` (an engine-wide cache rebuild), and `isSynced` (a **synchronous** activation-started peek — it cannot be an RPC, and the tab's
-cached per-group state is catch-up readiness, which reads an activated-but-still-catching-up lazy group as
-not-ready, the very case `isSynced` distinguishes; use `groupReady` for catch-up and `ensureSynced` to
-activate).
+`isSynced` — the **synchronous** activation-started peek — is answered here too, and it cannot be an RPC
+(its signature returns a boolean). The worker instead asks its OWN client `isSynced(key)` for every
+registry key and pushes the result: the snapshot rides the attach acknowledgement (so the first read after
+`await attachSyncClient(…)` is already correct) and is re-broadcast whenever the answer changes. The tab
+therefore answers exactly what an in-process client would, promoted lazy groups and the sync-disabled case
+included — nothing is re-derived from per-group catch-up readiness, which is the weaker question
+`groupReady` answers. Before the first snapshot, and for an unknown key, it reads `false`; a detached
+client keeps its last snapshot.
+
+What remains unproxied is structural, not a slice gap: `pglite` (the tab holds no local store) and
+`dropReadCache` (an engine-wide cache rebuild).
 
 `destroy()` **is** proxied under a supervisor that survives engine shutdown. It refuses with
 `StoreDestroyRefusedError` while another tab is attached and refuses while journal mutations are owed

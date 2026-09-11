@@ -79,6 +79,7 @@ import {
   type BridgeEvent,
   type BridgeErrorWire,
   type BridgePort,
+  type BridgeTransferable,
   type ExportArtefactWire,
   type GuardedQueryWireArgs,
   identityCodec,
@@ -87,6 +88,7 @@ import {
   type ProvisionPayload,
   type RpcOp,
   type RpcPayload,
+  type RpcResultPayload,
   type SetOnlinePayload,
   type SubscribePayload,
   type TokenResponsePayload,
@@ -522,6 +524,38 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     }
   };
 
+  // ─── The started-state snapshot (ADR-0059) ───────────────────────────────────────────────────────
+  // `client.isSynced` is a SYNCHRONOUS peek, so a tab cannot RPC for it. The worker therefore asks ITS OWN
+  // CLIENT — `isSynced(key)` for every key of the booted registry — and pushes the result; the tab answers
+  // out of that cache, so its answer is whatever the in-process client would have said. Faithful by
+  // construction: the promoted-group case (started from boot while its subscribe still retries), the
+  // sync-pending window and ADR-0021's sync-disabled clause all come along for free, and none of it is
+  // re-derived from the strictly weaker per-group catch-up readiness. Keyed by TABLE, so the tab needs no
+  // table→group mapping. `lastSyncedSnapshot` dedupes the broadcast — a recompute is cheap (the registry is
+  // small), an event for an unchanged answer is not.
+  let lastSyncedSnapshot: Record<string, boolean> | null = null;
+  const computeSyncedSnapshot = (active: SyncClient<TRegistry>): Record<string, boolean> => {
+    const snapshot: Record<string, boolean> = {};
+    for (const key of Object.keys(bootedRegistry ?? options.registry)) {
+      snapshot[key] = active.isSynced(key as SyncTableName<TRegistry>);
+    }
+    return snapshot;
+  };
+  const sameSnapshot = (a: Record<string, boolean>, b: Record<string, boolean>): boolean => {
+    const keys = Object.keys(a);
+    if (keys.length !== Object.keys(b).length) return false;
+    return keys.every((key) => a[key] === b[key]);
+  };
+  /** Recompute and broadcast the snapshot when (and only when) the answer changed. A no-op before boot. */
+  const publishSyncedIfChanged = (): void => {
+    const active = client;
+    if (active == null) return;
+    const snapshot = computeSyncedSnapshot(active);
+    if (lastSyncedSnapshot != null && sameSnapshot(lastSyncedSnapshot, snapshot)) return;
+    lastSyncedSnapshot = snapshot;
+    broadcastEvent({ kind: "synced", tables: snapshot });
+  };
+
   const emitStatus = (status: SyncRuntimeStatus) => {
     broadcastEvent({ kind: "status", status });
     // Derive a per-group `groupReady` event for each group that newly reached ready, so a tab gets both the
@@ -532,6 +566,9 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         broadcastEvent({ kind: "groupReady", groupKey });
       }
     }
+    // A status transition accompanies every group-readiness edge and the sync-pending→wired crossing, so the
+    // started state can have moved (ADR-0059). Deduped, so a status change that moved nothing posts nothing.
+    publishSyncedIfChanged();
   };
 
   // ─── Engine boot — reuse createSyncClient verbatim (ADR-0032 decision 1/4) ────────────────────────
@@ -540,6 +577,10 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   // The role the engine actually booted with (from the FIRST attach's config). Later attaches compare
   // their requested role against this and get a warning on mismatch (ADR-0032 FIX 5) — never a reject.
   let bootedRole: string | undefined;
+  // The registry the engine actually booted with — `options.registry`, or the role variant `resolveRegistry`
+  // picked (ADR-0032 S3). The started-state snapshot (ADR-0059) enumerates THIS registry's keys, so a
+  // role-selected variant reports its own relations rather than the default's.
+  let bootedRegistry: TRegistry | null = null;
   // The engine's `ready` is monotonic: once its initial sync lands it stays resolved even if the phase
   // later degrades. A tab attaching AFTER that moment must still get a resolved `ready`, so track whether
   // it has fired and tell the ack (ADR-0032 FIX 3).
@@ -565,6 +606,11 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     if (milestones[stage]) return;
     milestones[stage] = true;
     broadcastEvent({ kind: "milestone", stage });
+    // `bootSettled` is the background tail's completion — sync START done, so a promoted lazy-persistent
+    // group is now started and every buffered activation has been replayed (ADR-0041/ADR-0021). That is a
+    // started-state edge no status transition is guaranteed to carry, so publish here too (ADR-0059).
+    // `failMilestone` needs no counterpart: a tail that failed never wired sync, so nothing started.
+    publishSyncedIfChanged();
   };
   const failMilestone = (stage: BootMilestone, error: unknown) => {
     if (stageErrors[stage]) return;
@@ -639,6 +685,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     // Resolve the registry from the attach's role (ADR-0032 S3): a single worker file bakes both variants
     // and the claim/attach settles which one boots — the spare was provisioned before the role was known.
     const registry = options.resolveRegistry?.(attach.config?.role) ?? options.registry;
+    bootedRegistry = registry;
     // ADR-0050: placement and engine binding were resolved against `options.registry`'s static declaration —
     // the spare was placed before any role existed, so a role-selected registry cannot re-home the store. A
     // role registry whose static declaration EXPLICITLY conflicts with that bound resolution is refused typed
@@ -987,6 +1034,10 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     // state / sync disabled) → no `hydrated` gating at all; otherwise it drives both the `live-initial`
     // `hydratingTables` field (the tab's `hydrating` source) and the `live-hydrated` block below.
     const hydratingTables = active.hydratingTablesFor({ sql, ...(use ? { use: use as string[] } : {}) });
+    // The guard above starts any lazy relation this subscription reads, exactly as a one-shot read's does —
+    // so publish the new started state (ADR-0059) BEFORE the initial snapshot is posted below, keeping the
+    // same ordering the RPC path has: when the tab's `subscribeLiveRows` resolves, `isSynced` already agrees.
+    publishSyncedIfChanged();
 
     // Render the query safe to materialise: a JOIN with same-named columns fails BOTH live APIs' temp-view
     // creation (`column "title" specified more than once`) unless every output column has a unique alias.
@@ -1360,6 +1411,10 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
               alreadyBooted,
               ...(engineReadyFired ? { engineReady: true } : {}),
               ...milestoneAckFields(),
+              // The started-state snapshot (ADR-0059). `attachSyncClient` resolves at THIS ack, and the
+              // `status` event below is posted after it — so without this field the first synchronous
+              // `isSynced` after attach (a microtask later) would answer from an empty cache.
+              synced: computeSyncedSnapshot(booted),
             });
             postBridgeMessage(port, codec, "event", { kind: "status", status: booted.status });
           },
@@ -1392,21 +1447,32 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         const { op, args } = payload as RpcPayload;
         const id = envelope.id;
         void (async () => {
+          let result: RpcResultPayload;
+          // An export artefact (backup tarball or diagnostic SQL) crosses zero-copy: transfer its
+          // `ArrayBuffer` (rebuilt into a `File` tab-side, ADR-0035). Every other op's value
+          // structured-clones in place with no transfer list.
+          let transfer: BridgeTransferable[] | undefined;
           try {
             const active = client ?? (await bootPromise);
             if (!active) throw new Error("rpc before attach");
             const value = await dispatchRpc(active, op, args);
-            // An export artefact (backup tarball or diagnostic SQL) crosses zero-copy: transfer its
-            // `ArrayBuffer` (rebuilt into a `File` tab-side, ADR-0035). Every other op's value
-            // structured-clones in place with no transfer list.
-            const transfer =
+            transfer =
               op === "exportStore" || op === "exportDiagnostics" || op === "exportData"
                 ? [(value as ExportArtefactWire).buffer]
                 : undefined;
-            postBridgeMessage(port, codec, "rpc-result", { ok: true, value }, id, transfer);
+            result = { ok: true, value };
           } catch (error) {
-            postBridgeMessage(port, codec, "rpc-result", { ok: false, error: serializeError(error) }, id);
+            result = { ok: false, error: serializeError(error) };
           }
+          // ADR-0059's ordering guarantee, for EVERY op rather than a curated list: several ops move the
+          // started state (`ensureSynced`/`desync`/`discardEphemeral` explicitly, a `guardedQuery` or an
+          // ordinary write implicitly, through the guard) and a rejected one may have moved it before it
+          // failed — so publish here, after the dispatch settled either way and BEFORE the result is posted.
+          // Events and results share one port and `MessagePort` delivery is FIFO, so on the tab
+          // `await client.ensureSynced(["x"]); client.isSynced("x")` is already true. Deduped: an op that
+          // changed nothing posts no event.
+          publishSyncedIfChanged();
+          postBridgeMessage(port, codec, "rpc-result", result, id, transfer);
         })();
         break;
       }

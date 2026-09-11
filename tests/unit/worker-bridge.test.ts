@@ -301,7 +301,12 @@ describe("attach handshake (ADR-0032 decision 4)", () => {
     const { seen: seenA, client: clientA } = await attach(host);
     await clientA.ready;
     const ackA = seenA.find((e) => e.type === "attach-ack");
-    expect(identityCodec.decode(ackA!.payload)).toEqual({ alreadyBooted: false });
+    // Every ack carries the started-state snapshot (ADR-0059) — `isSynced` per registry key, computed on the
+    // worker's own client. This host runs `syncEnabled: false`, so every relation is trivially started.
+    expect(identityCodec.decode(ackA!.payload)).toEqual({
+      alreadyBooted: false,
+      synced: { todos: true, archive: true },
+    });
 
     const { seen: seenB, client: clientB } = await attach(host);
     await clientB.ready;
@@ -316,6 +321,7 @@ describe("attach handshake (ADR-0032 decision 4)", () => {
       engineReady: true,
       writeReady: true,
       bootSettled: true,
+      synced: { todos: true, archive: true },
     });
   });
 });

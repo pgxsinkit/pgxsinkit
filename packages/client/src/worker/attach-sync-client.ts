@@ -8,10 +8,10 @@
 // `drizzle`/`views` here are a real Drizzle database over a bridge executor whose `query` routes each read to
 // the worker's `guardedQuery` RPC, so awaiting a builder runs the ADR-0041 read gate + the ADR-0021
 // lazy-group guard worker-side and Drizzle's own result mapping (relational/nested included) runs on the tab.
-// `ensureSynced` (async lazy-activation) is a plain RPC to the shared engine. The only members that stay
-// unsupported are the genuinely tab-local ones — `pglite` (no local store), `destroy`/`dropReadCache` (store
-// lifecycle the worker owns), and `isSynced` (a SYNCHRONOUS activation-STARTED peek the tab's cached per-group
-// catch-up readiness cannot answer, and a sync method cannot be an RPC) — each throwing a clear error saying why.
+// `ensureSynced` (async lazy-activation) is a plain RPC to the shared engine, and `isSynced` — a SYNCHRONOUS
+// peek, so never an RPC — is answered from the started-state snapshot the worker computes on its own client
+// and pushes (ADR-0059). The only members that stay unsupported are the genuinely tab-local ones — `pglite`
+// (no local store) and `dropReadCache` (an engine-wide cache rebuild) — each throwing a clear error saying why.
 
 import type { Results } from "@electric-sql/pglite";
 
@@ -759,9 +759,9 @@ export interface AttachSyncClientOptions<TRegistry extends SyncTableRegistry> {
 /**
  * The worker-attached client: `SyncClient`'s shape, worker-proxied, plus `notifyAuthChanged` (re-push the
  * token after an app auth-state change, ADR-0032 decision 3). One-shot Drizzle reads
- * (`query`/`queryRow`/`queryRaw`/`queryRawRow`) and `ensureSynced` ARE proxied to the worker; the members
- * that throw are the structurally unproxiable ones — `pglite`, `destroy`, `dropReadCache`, `isSynced`, and
- * `drizzle.transaction()`.
+ * (`query`/`queryRow`/`queryRaw`/`queryRawRow`) and `ensureSynced` ARE proxied to the worker, and `isSynced`
+ * is answered from the worker-pushed started-state snapshot (ADR-0059); the members that throw are the
+ * structurally unproxiable ones — `pglite`, `dropReadCache`, and `drizzle.transaction()`.
  */
 export type AttachedSyncClient<TRegistry extends SyncTableRegistry> = SyncClient<TRegistry> & {
   notifyAuthChanged: () => void;
@@ -1137,6 +1137,11 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   let readyResolved = false;
   const readyGroups = new Set<string>();
   const groupWaiters = new Map<string, Array<() => void>>();
+  // The started-state snapshot `isSynced` answers from (ADR-0059) — per registry key, computed by the WORKER
+  // by asking its own in-process client, folded off the `attach-ack` and refreshed by every `synced` event.
+  // Nothing is derived here: `readyGroups` beside it is per-group CATCH-UP readiness, the strictly weaker
+  // question, which reads a promoted-but-still-catching-up group as not started.
+  let syncedTables: Record<string, boolean> = {};
 
   // ─── Auth: push at attach + on notifyAuthChanged, answer pull-requests ────────────────────────────
   const pushToken = async () => {
@@ -1182,6 +1187,12 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
       }
       case "groupReady": {
         markGroupReady(event.groupKey);
+        break;
+      }
+      case "synced": {
+        // The worker recomputed its own `isSynced` for every registry key and the answer changed. Replace
+        // the cache wholesale — it is a full snapshot, never a delta (ADR-0059).
+        syncedTables = event.tables;
         break;
       }
       case "milestone": {
@@ -1289,6 +1300,10 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
           if (ack.writeReadyError) failWriteReady(rebuildError(ack.writeReadyError));
           if (ack.bootSettled) settleBootSettled();
           if (ack.bootSettledError) failBootSettled(rebuildError(ack.bootSettledError));
+          // The started-state snapshot (ADR-0059) — folded BEFORE the handshake resolves, so the first
+          // synchronous `isSynced` a caller runs after `await attachSyncClient(…)` is already faithful
+          // (the worker's `status` event is posted after this ack and has not been delivered yet).
+          if (ack.synced) syncedTables = ack.synced;
           const settle = pendingAttachAck;
           pendingAttachAck = null;
           settle?.resolve(ack);
@@ -2399,20 +2414,15 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     // it never reverts or truncates, so there is no cross-tab footgun. Resolves once the group's stream is
     // started (catch-up may still be in flight — await `groupReady` for that), exactly as in-process.
     ensureSynced: (keys) => rpc<void>("ensureSynced", [keys]),
-    // `isSynced` is the SYNCHRONOUS peek in-process (`isTableStarted` — is the group's stream STARTED). It
-    // cannot be an RPC (its signature returns a boolean, not a promise), and the tab's cached state cannot
-    // answer it: the bridge delivers per-group CATCH-UP readiness (`status.groups` / `groupReady`), which is
-    // strictly weaker than activation-started — an activated-but-not-yet-caught-up lazy group reads as
-    // not-ready, the very case `isSynced` exists to distinguish. So no faithful synchronous answer is derivable.
-    isSynced: () => {
-      throw new Error(
-        "[pgxsinkit] client.isSynced is not available on a worker-attached client: it is a SYNCHRONOUS " +
-          "activation-STARTED peek (in-process: isTableStarted), but the tab caches only per-group CATCH-UP " +
-          "readiness (status.groups / groupReady) — an activated-but-not-caught-up group reads as not-ready — " +
-          "so a faithful synchronous answer cannot be derived, and a synchronous method cannot be an RPC. Use " +
-          "client.groupReady(table) for catch-up completion, and client.ensureSynced([...]) to activate a lazy relation.",
-      );
-    },
+    // The SYNCHRONOUS activation-STARTED peek (ADR-0059), answered from the worker-pushed snapshot: the
+    // worker asks ITS OWN client `isSynced(key)` for every registry key and pushes the result (folded off
+    // the `attach-ack`, refreshed by the `synced` broadcast), so this returns exactly what the in-process
+    // client would — promoted groups, the sync-pending window and the sync-disabled clause included. An
+    // unknown key, or any key before the first snapshot, reads `false`, matching the in-process sync-pending
+    // answer. A DETACHED client keeps its last snapshot rather than throwing: this is a peek, not an
+    // operation (detach rejects those), it is read from render paths that cannot handle a throw, and the
+    // in-process client leaves the same started state readable after `stop()`.
+    isSynced: (key) => syncedTables[key as string] === true,
     // In SharedWorker mode the engine is SHARED, so a desync from one tab reverts the consistency group for
     // EVERY attached tab — inherent to desync's group-wide semantics (that footgun is why the narrower
     // `discardEphemeral` exists). The RPC runs the worker's real `desync` (same refusals as in-process).

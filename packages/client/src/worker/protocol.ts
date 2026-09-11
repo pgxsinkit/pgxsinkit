@@ -253,6 +253,15 @@ export interface AttachAckPayload {
   writeReadyError?: BridgeErrorWire;
   bootSettledError?: BridgeErrorWire;
   /**
+   * The started-state snapshot at ack time (ADR-0059): `isSynced` per registry key, computed on the
+   * worker's OWN client. It rides the ack because `attachSyncClient` RESOLVES here — the worker's first
+   * `status` event is posted after the ack, so `const c = await attachSyncClient(…); c.isSynced(k)` runs
+   * before any broadcast is delivered, and only an ack field makes that first synchronous read faithful.
+   * A late attach folds the current snapshot the same way it folds the milestones above. Absent on an
+   * error ack (there is no engine to ask).
+   */
+  synced?: Record<string, boolean>;
+  /**
    * Present when the engine boot REJECTED for this attach: the tab rejects `attachSyncClient` with this
    * message instead of hanging forever on the ack (ADR-0032 FIX 1). A later attach retries the boot. This
    * is a LOCAL-READ-CORE failure (the engine never reached `localReadReady`); a tail failure after
@@ -478,6 +487,13 @@ export type BridgeEvent =
   // the tab's matching `writeReady` / `bootSettled` promise so an awaiter fails loudly rather than hanging;
   // `localReadReady` (and the resolved attach) are unaffected — the engine reached local-read readiness.
   | { kind: "milestone-error"; stage: BootMilestone; error: BridgeErrorWire }
+  // The started-state snapshot (ADR-0059): what the WORKER's own client answers for `isSynced(key)`, one
+  // entry per registry key. `isSynced` is a SYNCHRONOUS peek, so it can never be an RPC; the worker pushes
+  // the answer instead and the tab reads it out of a cache. Computed by asking the in-process client, never
+  // re-derived tab-side — per-group catch-up readiness (`status`/`groupReady`) is the strictly weaker
+  // question and reads a promoted-but-still-catching-up group as not started. Broadcast whenever the answer
+  // changes (deduped against the last one sent); a tab attaching later folds {@link AttachAckPayload.synced}.
+  | { kind: "synced"; tables: Record<string, boolean> }
   | { kind: "conflict"; details: unknown }
   | { kind: "quarantine"; details: unknown }
   | { kind: "reject"; details: unknown }
