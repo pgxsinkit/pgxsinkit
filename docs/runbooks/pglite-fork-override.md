@@ -12,7 +12,7 @@ still allowed to depend on; see the policy section below.
 
 The fork tracks upstream's version with a hand-bumped `-pgx.N` suffix, is published as
 `@pgxsinkit/pglite` (dist-tag `pgx`), and is consumed from **public npm** (`registry.npmjs.org`).
-**`0.5.5-pgx.2` is the version to pin.**
+**`0.5.8-pgx.1` is the version to pin.**
 
 The override's original reason no longer applies: an OPFS `options.fs` lane opens PGlite via
 `PGlite.create({ fs })`, and plain upstream `0.5.4` leaked the user-provided `fs` into the inner
@@ -53,21 +53,34 @@ masking it by calling `_emscripten_force_exit(0)` (an explicit `0`); once #1059 
 faithful restore, the engine's `proc_exit(99)` boot sentinel survived and force-exited every green
 bun lane with code 99 (six pgxsinkit unit shards "failed" with zero failing tests). All three restore
 sites now write an explicit `0` when the saved value was `undefined`. Upstream PR candidate.
+**`0.5.5-pgx.3`** exports `BasePGlite` for transport subclasses; **`0.5.5-pgx.4`** fixes a live-query
+`refresh` invoked before it is initialised (TDZ); **`0.5.5-pgx.5`** quotes the key column in the live
+incremental-diff joins (a camelCase key column failed with `column curr.lexemeid does not exist`).
+**`0.5.8-pgx.1`** (2026-09-12) rebases the stack onto upstream 0.5.8. The base moved for one reason:
+`@electric-sql/pglite-tools` pins its PGlite peer to an **exact** upstream version (0.4.5 → `0.5.5`,
+0.4.8 → `0.5.8`), so the fork's base must track the pglite-tools release the client pins. The
+explicit-zero exit-code restore (`-pgx.2`) is **dropped**: upstream #1087 and #1100 removed every
+`process.exitCode` save/restore site — the engine now reports exit status through
+`_pgl_setPGliteExitStatus` and `close()` clears the module reference instead — so the helper had nothing
+left to restore. One conflict was re-applied: the hardened `close()` keeps its structure with upstream's
+new exit tail. The 0.5.8 engine is mandatory for that source (it calls the new export); see the rebase
+section for where the artifacts come from.
 
 The root `package.json` therefore aliases the dependency for the whole workspace:
 
 ```jsonc
 "overrides": {
-  "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.2"
+  "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.8-pgx.1"
 }
 ```
 
 **Every publishable package requires the fork, and its peer range says so.** All three
 (`@pgxsinkit/client`, `@pgxsinkit/react`, `@pgxsinkit/pglite-opfs-repacked`) pin
-`"@electric-sql/pglite": ">=0.5.5-pgx.0 <0.5.5"`. That range is not a typo: a prerelease sorts
-_below_ its release, so `<0.5.5` admits `0.5.5-pgx.N` while excluding plain `0.5.5`. It therefore
-matches fork builds only, and a consumer who installs a released upstream build gets a loud peer
-violation instead of silent breakage.
+`"@electric-sql/pglite": ">=0.5.8-pgx.1"` — the current fork build as the lower bound. Semver only lets
+a prerelease satisfy a comparator that carries the same `major.minor.patch` tuple, so an older fork build
+(`0.5.5-pgx.5`) is refused; a plain upstream release at or above the base is admitted by the range, which
+is why the override — not the range — is what keeps consumers on the fork, and why the override must be
+set by every consumer (a peer range cannot force the `npm:@pgxsinkit/pglite@…` alias).
 
 **pgxsinkit does not run on any released upstream.** Until every fix it needs ships upstream — today
 that is the transaction-end sync fix — plain upstream is a broken configuration, not a supported
@@ -75,11 +88,11 @@ fallback, and **nothing may be tested against it**. That includes the packed dow
 smoke (`scripts/fixture-smoke.ts`), which applies this repo's `@electric-sql/pglite` alias to the
 fixture so the published-install-path check runs on the same host we support. A peer range can
 constrain the version but cannot force the `npm:@pgxsinkit/pglite@…` alias, so consumers must set
-that override themselves — the range exists to make its absence fail loudly.
+that override themselves — and check that `bun.lock` resolves `@electric-sql/pglite` to `@pgxsinkit/pglite@…`,
+because the lower-bound-only range admits a plain upstream release and will not fail on its own.
 
-**Both bounds move on every upstream rebase**: semver only lets a prerelease satisfy a comparator
-carrying the same `major.minor.patch` tuple, so `">=0.5.4-pgx.0 <0.5.4"` does _not_ admit
-`0.5.5-pgx.1`. When the base becomes `0.5.6`, the range becomes `">=0.5.6-pgx.0 <0.5.6"`.
+**The bound moves on every fork publish**: a `>=0.5.5-pgx.N` bound does _not_ admit `0.5.8-pgx.1` (different
+tuple), so each publish raises the three peer bounds to the new version alongside the override.
 
 Note that "needs no fork-_only_ behaviour" and "runs on current upstream" are different claims.
 `pglite-opfs-repacked` requires no fork-specific hooks (no `#fsSyncFailure` latch, no
@@ -152,9 +165,9 @@ Steps, from `packages/pglite` on `pgx-publish`:
    registries. bun is load-bearing here: `pnpm publish <tarball>` ignores the tarball and re-packs
    the source directory (observed on `-pgx.7`: unrewritten manifest, dropped LICENSE — that npm
    version is content-safe but non-canonical; never pin it).
-4. Consume: bump the alias in this repo's root `package.json` `overrides` to the new version, widen
-   the `@pgxsinkit/client` + `@pgxsinkit/react` peer ranges to the new `major.minor.patch` tuple
-   (see the peer-range note above — an unchanged range will _not_ admit the new prerelease), bump
+4. Consume: bump the alias in this repo's root `package.json` `overrides` to the new version, raise
+   the `@pgxsinkit/client`, `@pgxsinkit/react` and `@pgxsinkit/pglite-opfs-repacked` peer lower bounds to
+   the new version (an unchanged bound on the old tuple will _not_ admit the new prerelease), bump
    the `@electric-sql/pglite` + `@electric-sql/pglite-prepopulatedfs` devDependencies to the new
    upstream base, then `bun install` and `bun run validate:full`.
 
@@ -176,7 +189,10 @@ Steps, from `packages/pglite` on `pgx-publish`:
      --name pglite-interim-build-files-node-v20.x --dir <tmp>
    ```
 
-   Then replace `packages/pglite/release/` with the download and re-run `pnpm build:js`.
+   Then replace `packages/pglite/release/` with the download and re-run `pnpm build:js`. (Still the
+   artifact name at 0.5.8, run 32999547423; the `pglite-dist-node-*` artifacts are the bundled `dist/`,
+   not the engine.) The engine and the source move together: 0.5.8's source calls
+   `_pgl_setPGliteExitStatus`, which the 0.5.5 engine does not export — a stale `release/` fails at boot.
 
 3. Verify before publishing: `pnpm typecheck` and `pnpm test:basic` from `packages/pglite`. **The
    tests import `../dist/…`, not `src/`**, so a stale `dist/` (or stale `release/`) fails loudly and
@@ -184,6 +200,13 @@ Steps, from `packages/pglite` on `pgx-publish`:
    breakage but were purely an unrebuilt bundle missing upstream's new `rowCount`/`command` fields.
    The fork's husky pre-commit hook runs `pnpm -r stylecheck`, so `pnpm` must be on PATH
    (`mise use -g pnpm@<version in the root package.json packageManager field>`).
+   Two bun-lane traps (2026-09-12): `pnpm test:bun` resolves upstream's devDependency `bun@^1.1.30` from
+   `node_modules/.bin` ahead of the machine's bun, and that bun crashes on the 0.5.8 engine with
+   "Out of bounds memory access" — run the lane with the machine's bun (`"$(which bun)" test …`). And
+   `bun test` exits **42** after upstream's own `restores process.exitCode on close` test even when every
+   test passes: a three-line probe that sets `process.exitCode = 42` and restores `undefined` reproduces
+   it with no PGlite involved, and plain upstream 0.5.8 in the same tree behaves identically. It is an
+   upstream test/runner artifact, not a fork regression — read the pass/fail tallies for that lane.
 4. After bumping this repo, run `bun run validate:full` and read the **exit code**, not just the test
    tallies. A shard reported as `FAILED` with `0 fail` means the bun process exited non-zero while
    every test passed — the signature of a leaked engine exit code (see `-pgx.2` above), not a test

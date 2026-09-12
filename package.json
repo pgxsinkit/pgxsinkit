@@ -96,8 +96,8 @@
     "jose": "6.2.12"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.5-pgx.5",
-    "@electric-sql/pglite-prepopulatedfs": "0.5.5",
+    "@electric-sql/pglite": "0.5.8-pgx.1",
+    "@electric-sql/pglite-prepopulatedfs": "0.5.8",
     "@pgxsinkit/board-schema": "workspace:*",
     "@playwright/test": "^1.63.0",
     "@tanstack/intent": "^0.4.0",
@@ -122,9 +122,9 @@
     "zod": "4.6.1"
   },
   "overrides": {
-    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.5-pgx.5"
+    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.8-pgx.1"
   },
   "packageManager": "bun@1.4.0",
   "// @types/node": "Use the newest Node 26 release (mise.toml): the registry's latest tag points to 22.20.2, whose MessagePort declarations lack onmessage and typed message events required by Bun tests. Verified 26.5.1 via bun info @types/node@26 version.",
-  "//overrides": "TEMPORARY: alias @electric-sql/pglite to the @pgxsinkit fork, rebased onto upstream 0.5.5. Upstream shipped the initdb-fs-leak (#1060) and formatQuery positional-params (#1056) fixes, so the sole load-bearing reason left is the transaction-end sync fix — transaction() resolves without performing or scheduling a filesystem sync for its terminal COMMIT/ROLLBACK, which pglite-opfs-repacked's durability contract depends on (upstream PR pending). The fork also carries internal IDBFS/opfs-ahp reliability work that no package may depend on. Remove once upstream ships the transaction-end sync fix. See docs/runbooks/pglite-fork-override.md."
+  "//overrides": "TEMPORARY: alias @electric-sql/pglite to the @pgxsinkit fork, rebased onto upstream 0.5.8 (the base must match @electric-sql/pglite-tools' exact peer). Upstream shipped the initdb-fs-leak (#1060) and formatQuery positional-params (#1056) fixes, so the sole load-bearing reason left is the transaction-end sync fix — transaction() resolves without performing or scheduling a filesystem sync for its terminal COMMIT/ROLLBACK, which pglite-opfs-repacked's durability contract depends on (upstream PR pending). The fork also carries internal IDBFS/opfs-ahp reliability work that no package may depend on. Remove once upstream ships the transaction-end sync fix. See docs/runbooks/pglite-fork-override.md."
 }

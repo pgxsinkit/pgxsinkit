@@ -8,7 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@electric-sql/pglite": "0.5.5-pgx.2",
+    "@electric-sql/pglite": "0.5.8-pgx.1",
     "@electric-sql/pglite-repl": "0.4.8",
     "@mantine/core": "9.6.1",
     "@mantine/hooks": "9.6.1",
