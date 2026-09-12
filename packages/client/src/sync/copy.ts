@@ -34,6 +34,12 @@
  * every built-in type.
  */
 
+import { type AnyPgTable, getTableConfig } from "drizzle-orm/pg-core";
+
+import { quoteIdentifier } from "@pgxsinkit/contracts";
+
+import type { RawStatement } from "../index";
+
 // Defaults for COPY ... WITH (FORMAT text), matching the Postgres backend.
 const DELIMITER = "\t";
 const NULL_MARKER = "\\N";
@@ -185,6 +191,14 @@ const JSON_ARRAY_UDT_NAMES = new Set(["_json", "_jsonb"]);
  * `udtName` is the column's Postgres `udt_name`. When supplied it disambiguates
  * `json`/`jsonb` columns; when omitted the value's runtime type is used (which
  * cannot tell a `jsonb` array from a SQL array).
+ *
+ * PUBLIC (re-exported from the package root) so an app that bulk-loads a table
+ * pgxsinkit does not manage writes the SAME COPY TEXT the applier does. The
+ * value contract is the one this module's header states: numbers/booleans/
+ * bigints as JS primitives, `json`/`jsonb` as **parsed** values (an object, an
+ * array, or a scalar — never pre-stringified JSON, which would land as a JSON
+ * string), a `Date` or its text for the temporal types, a JS array (or the
+ * Postgres array text) for an array column, and every other type as a `string`.
  */
 export function serializeCopyValue(value: unknown, udtName?: string): string {
   if (value === null || value === undefined) return NULL_MARKER;
@@ -202,6 +216,21 @@ export function serializeCopyValue(value: unknown, udtName?: string): string {
  *
  * `columnTypes` optionally maps a column name to its Postgres `udt_name`; pass
  * it so `json`/`jsonb` columns serialize correctly.
+ *
+ * PUBLIC (re-exported from the package root) for an app-owned, pgxsinkit-unmanaged
+ * table. Two contracts bind the caller:
+ *
+ *   - **`columns` IS the column list of the COPY statement.** The fields are
+ *     emitted in exactly this order, so the same array must be named — in the
+ *     same order — in the `COPY <table> (...)` that ingests the bytes.
+ *     {@link buildCopyFromBlobStatement} renders both from one array so they
+ *     cannot drift.
+ *   - **`columnTypes` keys are DB column names, values are Postgres `udt_name`s**
+ *     (`text`, `int4`, `jsonb`, `timestamptz`, `_text` for `text[]`, …). Only the
+ *     json ones (`json`/`jsonb`/`_json`/`_jsonb`) change behaviour — everything
+ *     else dispatches on the value's runtime type — but passing the full map is
+ *     harmless. A `json`/`jsonb` value MUST be the parsed value, per
+ *     {@link serializeCopyValue}.
  */
 export function generateCopyData(
   rows: ReadonlyArray<Record<string, unknown>>,
@@ -211,4 +240,63 @@ export function generateCopyData(
   return rows
     .map((row) => columns.map((column) => serializeCopyValue(row[column], columnTypes?.[column])).join(DELIMITER))
     .join(ROW_SEPARATOR);
+}
+
+/** One shared UTF-8 encoder for the COPY TEXT body — `TextEncoder` is stateless, so module-level. */
+const COPY_TEXT_ENCODER = new TextEncoder();
+
+/** The inputs {@link buildCopyFromBlobStatement} renders a COPY-from-blob statement from. */
+export interface CopyFromBlobStatementOptions {
+  /**
+   * The REAL Drizzle table object to load into — the identifier is read off it with `getTableConfig`,
+   * never taken as a hand-written string, so a rename can never leave a stale name in the SQL. A bare
+   * (schemaless) table renders unqualified and resolves through `search_path` (that is how the applier
+   * reaches an ephemeral relation in `pg_temp`).
+   */
+  table: AnyPgTable;
+  /**
+   * The DB column names to load, in order. ONE array drives both halves of the statement: the COPY
+   * column list and the field order of the serialized body, so they cannot drift.
+   */
+  columns: readonly string[];
+  /** The rows to load, keyed by DB column name (a key missing from a row is loaded as NULL). */
+  rows: ReadonlyArray<Record<string, unknown>>;
+  /**
+   * DB column name → Postgres `udt_name`, per {@link generateCopyData}. Needed for `json`/`jsonb`
+   * (and `_json`/`_jsonb`) columns; ignored for every other type.
+   */
+  udtNames?: Readonly<Record<string, string | undefined>>;
+}
+
+/**
+ * Render the `COPY <table> (<columns>) FROM '/dev/blob' WITH (FORMAT text)` statement for `rows`,
+ * together with the COPY TEXT bytes PGlite must read for it — a {@link RawStatement} whose `blob`
+ * carries the body (narrowed to a non-optional `blob`: this builder ALWAYS produces one).
+ *
+ * This is the ONE implementation of the COPY-from-blob load: the sync applier's bulk path
+ * (`applyMessagesToTableWithCopy`) and the public raw seam both call it, so an app-owned table
+ * bulk-loads on exactly the contract the applier is tested against.
+ *
+ * Hand it to `rawTransaction` (to bulk-load inside one local transaction, e.g. delete-then-COPY) or
+ * to `rawQuery`'s `blob` option for a single statement. On a worker-attached client the bytes are
+ * TRANSFERRED, not copied — see {@link RawStatement.blob}: the buffer is detached after the call.
+ *
+ * Tier ③ (ADR-0028 allow-list), exactly as the applier's copy of this statement was: `COPY … FROM
+ * '/dev/blob'` is PGlite's blob-ingest grammar and has NO Drizzle builder form, so the statement text
+ * stays a raw string. Every identifier in it is still derived — the table from `getTableConfig`, each
+ * column through `quoteIdentifier` — so nothing in the string is a hand-written identifier.
+ */
+export function buildCopyFromBlobStatement({
+  table,
+  columns,
+  rows,
+  udtNames,
+}: CopyFromBlobStatementOptions): RawStatement & { blob: Uint8Array<ArrayBuffer> } {
+  const { name: tableName, schema } = getTableConfig(table);
+  const copyTarget = schema ? `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}` : quoteIdentifier(tableName);
+  const columnList = columns.map((column) => quoteIdentifier(column)).join(", ");
+  // TEXT is the default COPY format; its default delimiter is a tab and NULL marker is `\N`, both of
+  // which generateCopyData emits.
+  const sql = `COPY ${copyTarget} (${columnList}) FROM '/dev/blob' WITH (FORMAT text)`;
+  return { sql, params: [], blob: COPY_TEXT_ENCODER.encode(generateCopyData(rows, columns, udtNames)) };
 }

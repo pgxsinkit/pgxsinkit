@@ -285,6 +285,11 @@ export interface TokenResponsePayload {
  * The RPC ops the attach facade proxies to the worker's booted client — the write API (mirrors
  * `client.mutate`/flush), mutation-state reads, and the raw inspection surface (the one-shot `rawQuery`/
  * `rawExec`, plus the atomic `rawTransaction`).
+ *
+ * Most dispatches are pure structured clone. The exception is a raw statement's COPY body (ADR-0061): the
+ * tab lists each `blob`'s `ArrayBuffer` on the dispatch's transfer list, so the bytes cross ZERO-COPY and
+ * the tab's buffers are detached. No wire type changes for it — a `Uint8Array` survives structured clone
+ * as a `Uint8Array` over the transferred buffer, so the worker reads `RawStatement.blob` unchanged.
  */
 export type RpcOp =
   | "create"
@@ -314,12 +319,15 @@ export type RpcOp =
   | "ensureSynced"
   | "readMutationDetails"
   | "diagnostics"
+  // Carries `[sql, params?, options?]`. `options.blob` (ADR-0061) is the single-statement COPY bulk load:
+  // the COPY TEXT body of a `COPY … FROM '/dev/blob'`, TRANSFERRED (not cloned) with the dispatch.
   | "rawQuery"
   | "rawExec"
   // The ATOMIC raw seam: carries `[statements, options?]` — the whole `RawStatement[]` in ONE round trip, so
   // the transaction opens and closes inside the worker. It cannot be composed tab-side out of `rawQuery`
   // calls (each would be its own implicit transaction, and a relocation between two of them would tear the
-  // write), which is exactly why it is its own op.
+  // write), which is exactly why it is its own op. Any statement may carry a COPY `blob` (ADR-0061); every
+  // such buffer rides this ONE dispatch's transfer list, so a chunked bulk load crosses zero-copy.
   | "rawTransaction"
   // Guarded one-shot Drizzle read (ADR-0032 decision 4): the attach client's Drizzle-over-bridge compiles a
   // read to SQL on the tab and routes it here as the {@link GuardedQueryWireArgs} tuple
@@ -578,9 +586,10 @@ export function isBridgeEnvelope(data: unknown): data is BridgeEnvelope {
 
 /**
  * Send a typed message over a port: encode → post (with any transferables). The one write choke point.
- * `transfer` lets a caller declare payload-specific transferables (e.g. a store-backup's `ArrayBuffer`,
- * ADR-0035) WITHOUT teaching the shared codec about that op — they are merged after any the codec itself
- * produces, so both the codec's future zero-copy path and per-message transfers coexist.
+ * `transfer` lets a caller declare payload-specific transferables (a store-backup's `ArrayBuffer`,
+ * ADR-0035; a raw statement's COPY body, ADR-0061) WITHOUT teaching the shared codec about that op — they
+ * are merged after any the codec itself produces, so both the codec's future zero-copy path and
+ * per-message transfers coexist. Every listed buffer is DETACHED in the sending realm once this returns.
  */
 export function postBridgeMessage(
   port: BridgePort,

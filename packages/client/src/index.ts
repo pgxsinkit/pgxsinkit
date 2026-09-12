@@ -315,6 +315,19 @@ export {
 // surfaces (the board's schema map, debug tooling) need them without re-deriving DDL internals.
 export { OUTBOX_SEQUENCE, OUTBOX_TABLE } from "./schema";
 
+// The COPY TEXT bulk-load seam (ADR-0061). PUBLIC because a consumer's LOCAL-ONLY table — one pgxsinkit
+// does not manage, so `mutate`/`tables.*` do not apply to it — has no other way to load 10k rows without
+// paying an INSERT per row: `buildCopyFromBlobStatement` renders the tier-③ `COPY … FROM '/dev/blob'`
+// statement from the REAL Drizzle table object and serializes the rows with the SAME serializer the sync
+// applier uses, and the resulting {@link RawStatement} goes straight to `rawTransaction`/`rawQuery`.
+// `generateCopyData`/`serializeCopyValue` are exported under it for a caller that renders its own COPY.
+export {
+  buildCopyFromBlobStatement,
+  type CopyFromBlobStatementOptions,
+  generateCopyData,
+  serializeCopyValue,
+} from "./sync/copy";
+
 // The Circuits-native read transport (ADR-0055 decision 10). Reads terminate on durable-streams
 // through the edge; everything above the transport stays ours.
 export { createTokenRecovery, readShapeStream, STREAM_START } from "./circuits/stream-source";
@@ -1614,9 +1627,14 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * issues stays local and will NOT converge. For app data reads prefer the live-rows hooks /
    * {@link subscribeLiveRows} (or the guarded {@link query} family); reach for this only to look at the
    * store, not to read app state or mutate it.
+   *
+   * `options.blob` makes it the single-statement BULK-LOAD seam too: pass a `COPY … FROM '/dev/blob'`
+   * statement plus its COPY TEXT bytes ({@link buildCopyFromBlobStatement}) to load a chunk of rows into a
+   * LOCAL-ONLY table the app owns without a transaction around it. Use {@link rawTransaction} when the load
+   * must land together with other statements.
    */
   rawQuery: (sql: string, params?: unknown[], options?: RawQueryOptions) => Promise<Results>;
-  /** {@link rawQuery} for multi-statement SQL, returning one {@link Results} per statement. */
+  /** {@link rawQuery} for multi-statement SQL, returning one {@link Results} per statement. Takes no `blob`. */
   rawExec: (sql: string, options?: RawQueryOptions) => Promise<Results[]>;
   /**
    * {@link rawQuery}'s ATOMIC form: run the given statements, in order, inside ONE local transaction and
@@ -1633,6 +1651,12 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * store, BYPASSING the mutation journal and optimistic overlay, so a write through here stays local and
    * will NEVER converge. Use it for the tables the consumer owns — never for a synced table, whose only
    * write path is `mutate` / `tables.*`.
+   *
+   * A statement may carry {@link RawStatement.blob}: the bytes of a `COPY … FROM '/dev/blob'` BULK load
+   * ({@link buildCopyFromBlobStatement} renders the pair). That is how a chunk of thousands of rows lands
+   * in one statement instead of one INSERT per row — and, in a list, atomically alongside whatever must
+   * land with it. On a worker-attached client those bytes are TRANSFERRED, never copied, so the caller's
+   * buffer is detached when the call dispatches.
    */
   rawTransaction: (statements: readonly RawStatement[], options?: RawQueryOptions) => Promise<Results[]>;
   /**
@@ -1856,19 +1880,81 @@ export type { MutationBatchItem, MutationDetail, MutationDiagnostics, MutationKi
  * narrow ON PURPOSE: on a worker-attached client the options object crosses the bridge via
  * `postMessage`, so function-valued options (`parsers`, `serializers`, `onNotice`) can never be part
  * of this contract. `rowMode: "array"` is what `@electric-sql/pglite-repl` asks for on every exec.
+ *
+ * `blob` diverges from PGlite's own type for the same reason: PGlite takes a `Blob`, which is neither
+ * transferable nor (usefully) clonable, so this contract carries BYTES and wraps them into the `Blob` at
+ * the PGlite call (ADR-0061).
  */
 export interface RawQueryOptions {
   rowMode?: "object" | "array";
+  /**
+   * The bytes PGlite reads when the statement is a `COPY … FROM '/dev/blob'` — the single-statement form
+   * of {@link RawStatement.blob}, for a bulk load that needs no surrounding transaction. Build the
+   * statement AND these bytes together with {@link buildCopyFromBlobStatement}; any other statement
+   * ignores this option.
+   *
+   * On a worker-attached client the buffer is **TRANSFERRED**, not copied: it is detached the moment the
+   * call dispatches, so the caller must NOT read or reuse it afterwards (build a fresh one per chunk).
+   *
+   * Typed over a real `ArrayBuffer` (not the default `ArrayBufferLike`) because that IS the contract: a
+   * `SharedArrayBuffer`-backed view can neither be transferred nor read as a `Blob` part.
+   */
+  blob?: Uint8Array<ArrayBuffer>;
 }
 
 /**
- * One statement of a {@link SyncClient.rawTransaction} list: the SQL plus its bound params. Structured-clone
- * safe by construction (a string and plain values), because on a worker-attached client the whole list
- * crosses the bridge in a single RPC.
+ * One statement of a {@link SyncClient.rawTransaction} list: the SQL plus its bound params, and optionally
+ * the `blob` bytes a `COPY` statement ingests. Structured-clone safe by construction (a string, plain
+ * values and a `Uint8Array`), because on a worker-attached client the whole list crosses the bridge in a
+ * single RPC.
  */
 export interface RawStatement {
   readonly sql: string;
   readonly params?: readonly unknown[];
+  /**
+   * The bytes PGlite reads for this statement's `/dev/blob` — how a LOCAL-ONLY table an app owns is
+   * BULK-LOADED with `COPY` instead of one INSERT per row. It rides ONLY with a `COPY … FROM '/dev/blob'`
+   * statement; any other statement ignores it. Build the pair with {@link buildCopyFromBlobStatement},
+   * which renders the statement and serializes the rows from ONE column list (and with the same COPY TEXT
+   * serializer the sync applier uses), so the SQL and the bytes cannot disagree.
+   *
+   * **On a worker-attached client the buffer is TRANSFERRED, not copied.** It is listed on the RPC's
+   * `postMessage` transfer list, so it is DETACHED (`byteLength === 0`) the moment the call dispatches:
+   * the caller must not read, reuse or re-send it afterwards — serialize a fresh chunk for each call.
+   * Zero-copy is the point: a 1000-row chunk crosses the bridge without a structured-clone copy.
+   *
+   * Typed over a real `ArrayBuffer` (not the default `ArrayBufferLike`) because that IS the contract: a
+   * `SharedArrayBuffer`-backed view can neither be transferred nor read as a `Blob` part.
+   */
+  readonly blob?: Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * Translate the raw seam's structured-clone-safe options into the PGlite `QueryOptions` the store takes:
+ * the COPY body travels as BYTES (a `Uint8Array` — transferable across the worker bridge, unlike a `Blob`)
+ * and PGlite reads `/dev/blob` from a `Blob`, so it is wrapped HERE, at the one place the two meet.
+ * A statement's own `blob` ({@link RawStatement.blob}) wins over the call-level {@link RawQueryOptions.blob}.
+ */
+function toPgliteQueryOptions(
+  options?: RawQueryOptions,
+  statementBlob?: Uint8Array<ArrayBuffer>,
+): QueryOptions | undefined {
+  const bytes = statementBlob ?? options?.blob;
+  const rest = withoutCopyBlob(options);
+  if (bytes === undefined) return rest;
+  return { ...rest, blob: new Blob([bytes]) };
+}
+
+/**
+ * The same options WITHOUT the COPY bytes — for `rawExec`, whose PGlite counterpart runs a multi-statement
+ * script through the simple protocol and has no `/dev/blob` hook at all. Dropping the field keeps the raw
+ * trio on ONE options type (a caller can pass the same object to all three) while the COPY body reaches
+ * only the two seams that can actually ingest it.
+ */
+function withoutCopyBlob(options?: RawQueryOptions): QueryOptions | undefined {
+  if (options === undefined) return undefined;
+  const { blob: _blobBytes, ...rest } = options;
+  return rest;
 }
 
 /** The `{ query, exec }` duck `@electric-sql/pglite-repl` drives, backed by a client's inspection surface. */
@@ -3463,8 +3549,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     mutations: undefined as unknown as MutationsApi<TRegistry>,
     // Inspection surface (see the interface doc): straight through to the underlying store, no journal /
     // overlay involvement. The worker facade runs the identical call inside the worker's own client.
-    rawQuery: (sql, params, options) => pglite.query(sql, params as unknown[] | undefined, options),
-    rawExec: (sql, options) => pglite.exec(sql, options),
+    // `options.blob` is the single-statement COPY form: the bytes are wrapped into the `Blob` PGlite reads
+    // from `/dev/blob` (see {@link toPgliteQueryOptions}) — a bulk load that needs no transaction around it.
+    rawQuery: (sql, params, options) =>
+      pglite.query(sql, params as unknown[] | undefined, toPgliteQueryOptions(options)),
+    // `rawExec` takes no blob: PGlite's `exec` runs a multi-statement script through the simple protocol,
+    // which has no `/dev/blob` hook — a COPY-from-blob load goes through `rawQuery`/`rawTransaction`.
+    rawExec: (sql, options) => pglite.exec(sql, withoutCopyBlob(options)),
     // The atomic form of the same surface. `pglite.transaction` opens ONE transaction and rolls it back on a
     // throw, so the all-or-nothing guarantee is the store's, not a re-implementation here. An empty list is
     // answered without touching the store at all — an empty transaction would be pure overhead on the single
@@ -3476,7 +3567,15 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       return pglite.transaction(async (tx) => {
         const results: Results[] = [];
         for (const statement of statements) {
-          results.push(await tx.query(statement.sql, statement.params as unknown[] | undefined, options));
+          // A statement carrying `blob` is a `COPY … FROM '/dev/blob'` bulk load: its bytes become the
+          // `Blob` PGlite reads, for THAT statement only. Every other statement is unaffected.
+          results.push(
+            await tx.query(
+              statement.sql,
+              statement.params as unknown[] | undefined,
+              toPgliteQueryOptions(options, statement.blob),
+            ),
+          );
         }
         return results;
       });

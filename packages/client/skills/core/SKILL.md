@@ -78,6 +78,26 @@ const [, inserted] = await client.rawTransaction([
 ]);
 ```
 
+**Bulk-load a chunk with COPY, not an INSERT per row.** A statement may carry the COPY TEXT bytes of a
+`COPY … FROM '/dev/blob'` — the same loader the sync applier uses on synced tables. Build the pair with
+`buildCopyFromBlobStatement` (it renders the statement from the REAL Drizzle table object and serializes the
+rows from ONE column list, so they cannot drift); `json`/`jsonb` values go in **parsed**, with the column's
+`udt_name` in `udtNames`:
+
+```ts
+// 1000 fetched rows → ONE statement, atomically replacing the chunk. `rawQuery(sql, [], { blob })` is the
+// same load with no transaction around it.
+const copy = buildCopyFromBlobStatement({
+  table: definitionCache, // a real drizzle pgTable your app owns — never a hand-written name
+  columns: ["id", "headword", "entry"],
+  rows: chunk, // keyed by DB column name; `entry` is a parsed object, not JSON text
+  udtNames: { entry: "jsonb" },
+});
+await client.rawTransaction([{ sql: "delete from definition_cache where id = any($1)", params: [ids] }, copy]);
+// On a worker-attached client `copy.blob` is now DETACHED (transferred, not copied) — serialize a fresh
+// chunk per call; never reuse the buffer.
+```
+
 It is identical on the in-process and worker-attached client — the whole list crosses the bridge in ONE RPC
 and the transaction opens and closes inside the worker — so a tab with no PGlite of its own gets the same
 atomicity, rather than atomicity depending on where the engine happens to live. What it writes stays local

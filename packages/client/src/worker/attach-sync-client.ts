@@ -595,6 +595,25 @@ const MUTATION_RPC_OPS: ReadonlySet<RpcOp> = new Set<RpcOp>([
   "rawTransaction",
 ]);
 
+/**
+ * The DISTINCT `ArrayBuffer`s a raw-seam dispatch must transfer (ADR-0061): the COPY body of every
+ * statement (and of the call-level options) that carries one. Zero-copy is the whole point — a 1000-row
+ * chunk crosses the bridge without a structured-clone copy of its bytes — and the buffers are detached on
+ * the tab afterwards, which {@link RawStatement.blob} documents as the caller's contract.
+ *
+ * De-duplicated: `postMessage` throws on the same transferable listed twice, which two statements
+ * serialized into views over ONE buffer would otherwise produce.
+ */
+function copyBlobTransfers(
+  blobs: ReadonlyArray<Uint8Array<ArrayBuffer> | undefined>,
+): BridgeTransferable[] | undefined {
+  const buffers = new Set<ArrayBuffer>();
+  for (const blob of blobs) {
+    if (blob !== undefined) buffers.add(blob.buffer);
+  }
+  return buffers.size > 0 ? [...buffers] : undefined;
+}
+
 export interface AttachSyncClientOptions<TRegistry extends SyncTableRegistry> {
   registry: TRegistry;
   /**
@@ -1783,16 +1802,24 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   };
 
   // ─── RPC helper ──────────────────────────────────────────────────────────────────────────────────
-  const rpc = <T>(op: RpcOp, args: unknown[]): Promise<T> => {
+  // `transfer` (ADR-0061) declares payload-specific transferables for THIS dispatch — the `ArrayBuffer`s
+  // behind a raw statement's COPY body — exactly as the restore handshake declares the backup's buffer.
+  // They are TRANSFERRED, not cloned: zero-copy on the way in, and detached on the tab afterwards.
+  const rpc = <T>(op: RpcOp, args: unknown[], transfer?: BridgeTransferable[]): Promise<T> => {
     // A detached client has no live port listener, so a worker reply could never resolve this — reject at
     // once rather than register a forever-pending waiter (ADR-0040 P2).
     if (detached) return Promise.reject(detachError());
-    const kind: "read" | "mutation" = MUTATION_RPC_OPS.has(op) ? "mutation" : "read";
+    // A dispatch that TRANSFERRED bytes is a mutation regardless of op: its buffers are detached on the
+    // tab, so "not-dispatched" (the read verdict, meaning "safe to repeat") would be a lie — the caller
+    // has nothing left to repeat with. Only a DISPATCHED op is stamped this way; a queued op that never
+    // left the tab still fails "not-dispatched" through the handoff queue, and its buffers are intact.
+    const kind: "read" | "mutation" =
+      MUTATION_RPC_OPS.has(op) || (transfer !== undefined && transfer.length > 0) ? "mutation" : "read";
     return new Promise<T>((resolve, reject) => {
       const dispatch = () => {
         const id = newId("rpc");
         rpcPending.set(id, { resolve: resolve as (value: unknown) => void, reject, kind });
-        postBridgeMessage(currentDataPort(), codec, "rpc", { op, args }, id);
+        postBridgeMessage(currentDataPort(), codec, "rpc", { op, args }, id, transfer);
         armSilence();
         armOverdue(id);
       };
@@ -2363,14 +2390,24 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     readMutationDetails: (table) => rpc<MutationDetail[]>("readMutationDetails", [table]),
     // Inspection reads run in the worker (ADR-0032 S2) — the same surface as the in-process client. `pglite`
     // itself stays blocked (below); these route the raw statement over the RPC round-trip instead.
-    rawQuery: (sql, params, options) => rpc<Results>("rawQuery", [sql, params, options]),
+    // `options.blob` (ADR-0061) makes this the single-statement COPY bulk load too: the bytes ride the SAME
+    // RPC and are TRANSFERRED (detached tab-side), never cloned.
+    rawQuery: (sql, params, options) =>
+      rpc<Results>("rawQuery", [sql, params, options], copyBlobTransfers([options?.blob])),
     rawExec: (sql, options) => rpc<Results[]>("rawExec", [sql, options]),
     // The ATOMIC raw seam: the whole list crosses in ONE round trip, so the transaction lives entirely inside
     // the worker — a tab can never hold one open across the bridge (and a relocation mid-list is impossible).
     // An empty list is NOT short-circuited here: the engine's own `rawTransaction` already opens no
     // transaction for it, and dispatching anyway keeps every lifecycle rule (detach refusal, relocation
     // settlement) uniform across the surface. A lost response settles `"unknown"` — see MUTATION_RPC_OPS.
-    rawTransaction: (statements, options) => rpc<Results[]>("rawTransaction", [statements, options]),
+    // Each statement's COPY body (ADR-0061) is listed on the SAME postMessage's transfer list, so a chunked
+    // bulk load crosses zero-copy; the caller's buffers are detached when this dispatches.
+    rawTransaction: (statements, options) =>
+      rpc<Results[]>(
+        "rawTransaction",
+        [statements, options],
+        copyBlobTransfers([...statements.map((statement) => statement.blob), options?.blob]),
+      ),
     // The GUARDED raw-SQL read (ADR-0032 decision 4) — the seam the worker host dispatches `guardedQuery` to.
     // Unlike `rawQuery` (raw inspection, no guard), this routes to the worker's `guardedRawQuery`, so the read
     // gate + lazy-group guard run worker-side. Only `rowMode` crosses in the options (see the bridge executor).

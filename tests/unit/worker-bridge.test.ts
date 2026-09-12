@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
 import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
 import { live } from "@electric-sql/pglite/live";
-import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, boolean, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 
 import {
   attachSyncRegistryStorage,
@@ -20,6 +20,7 @@ import {
 import {
   attachSyncClient,
   type BridgeEnvelope,
+  buildCopyFromBlobStatement,
   type BridgePort,
   type ClientPGlite,
   CommittedStoreUnreachableError,
@@ -65,6 +66,17 @@ const todosRegistry = defineSyncRegistry({
   }),
 });
 type TodosRegistry = typeof todosRegistry;
+
+// LOCAL-ONLY tables the "consumer" owns — absent from the registry above, so pgxsinkit models nothing about
+// them. Real Drizzle objects so `buildCopyFromBlobStatement` (ADR-0061) reads their identifiers off the
+// object rather than a hand-written string.
+const definitionCacheTable = pgTable("definition_cache", {
+  id: integer("id").primaryKey(),
+  headword: text("headword").notNull(),
+  entry: jsonb("entry").notNull(),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true, mode: "string" }).notNull(),
+});
+const localDefsTable = pgTable("local_defs", { id: integer("id").primaryKey(), body: jsonb("body").notNull() });
 
 // A registry that DECLARES `backend: "idbfs"` (ADR-0049 D1) — the one opt-out that forces the in-SharedWorker
 // engine home with NO placement probe. Used where a test needs a deterministic `shared-worker` home (e.g. the
@@ -650,6 +662,71 @@ describe("raw inspection RPC round trip (ADR-0032 S2)", () => {
 
     // An empty list never reaches a transaction — it settles tab-side-observably as `[]`.
     expect(await client.rawTransaction([])).toEqual([]);
+  });
+
+  // ADR-0061: the COPY body of a bulk load crosses the bridge as TRANSFERRED bytes on the SAME dispatch as
+  // the statement list. The tab's buffer is detached by that transfer — the contract `RawStatement.blob`
+  // states — and the rows land in the worker's store.
+  it("rawTransaction TRANSFERS a statement's COPY blob and bulk-loads it worker-side", async () => {
+    const host = await makeHost();
+    const { client } = await attach(host);
+    await client.ready;
+
+    await client.rawExec(
+      "create table definition_cache (id int primary key, headword text not null, " +
+        "entry jsonb not null, fetched_at timestamptz not null);",
+    );
+
+    const copy = buildCopyFromBlobStatement({
+      table: definitionCacheTable,
+      columns: ["id", "headword", "entry", "fetched_at"],
+      rows: [
+        { id: 1, headword: "one", entry: { senses: ["first"] }, fetched_at: "2026-09-12 01:02:03+00" },
+        { id: 2, headword: "two\twith\ttabs", entry: { senses: [] }, fetched_at: "2026-01-01 00:00:00+00" },
+      ],
+      udtNames: { entry: "jsonb", fetched_at: "timestamptz" },
+    });
+    const bytesBefore = copy.blob.byteLength;
+    expect(bytesBefore).toBeGreaterThan(0);
+
+    const results = await client.rawTransaction([copy, { sql: "select count(*)::int as n from definition_cache" }]);
+    expect((results[1]?.rows[0] as { n?: number })?.n).toBe(2);
+
+    // TRANSFERRED, not cloned: the tab's buffer is detached (this is why a caller must not reuse it).
+    expect(copy.blob.byteLength).toBe(0);
+    expect(copy.blob.buffer.byteLength).toBe(0);
+
+    // The jsonb landed parsed and the tab-escaping survived the COPY TEXT framing.
+    const read = await client.rawQuery("select headword, entry, fetched_at from definition_cache order by id");
+    expect((read.rows[0] as { entry?: { senses?: string[] } })?.entry?.senses).toEqual(["first"]);
+    expect((read.rows[1] as { headword?: string })?.headword).toBe("two\twith\ttabs");
+    expect((read.rows[0] as { fetched_at?: Date })?.fetched_at?.toISOString()).toBe("2026-09-12T01:02:03.000Z");
+  });
+
+  // The single-statement form over the bridge: the bytes ride `rawQuery`'s options, transferred the same way.
+  it("rawQuery TRANSFERS options.blob and bulk-loads it worker-side", async () => {
+    const host = await makeHost();
+    const { client } = await attach(host);
+    await client.ready;
+    await client.rawExec("create table local_defs (id int primary key, body jsonb not null);");
+
+    const copy = buildCopyFromBlobStatement({
+      table: localDefsTable,
+      columns: ["id", "body"],
+      rows: [
+        { id: 7, body: { a: 1 } },
+        { id: 8, body: [1, "two", null] },
+      ],
+      udtNames: { body: "jsonb" },
+    });
+    await client.rawQuery(copy.sql, [], { blob: copy.blob });
+    expect(copy.blob.byteLength).toBe(0);
+
+    const read = await client.rawQuery("select id, body from local_defs order by id");
+    expect(read.rows).toEqual([
+      { id: 7, body: { a: 1 } },
+      { id: 8, body: [1, "two", null] },
+    ]);
   });
 
   it("rawTransaction ROLLS BACK across the bridge when a statement fails, and rejects tab-side", async () => {

@@ -6,6 +6,8 @@ now capability-probed — in the SharedWorker where its scope grants OPFS sync-a
 in a Web-Locks-elected tab worker where it does not (Chromium/Firefox). The rejection of leader
 election below is narrowed accordingly: election exists on handle-denied platforms only, with
 structural (Web Locks) liveness, never heartbeats.
+Decision 4's raw inspection surface is amended by [ADR-0061](0061-raw-statements-carry-a-copy-blob.md)
+(2026-09-12): a raw statement may carry a `COPY` blob, transferred (not cloned) across the bridge.
 
 Cold-boot measurement of the board demo established that PGlite executes **on the main thread** —
 there is no worker anywhere in the stack. The costs measured: initdb + IDBFS open ≈ 1.9–2.8s of

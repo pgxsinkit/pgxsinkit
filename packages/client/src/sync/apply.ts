@@ -7,7 +7,7 @@ import { getTableConfig, type PgColumn } from "drizzle-orm/pg-core";
 import { jsonUdtName, quoteIdentifier, type SyncChange, type SyncColumnType, type SyncRow } from "@pgxsinkit/contracts";
 
 import type { ApplyTarget } from "../local-tables";
-import { generateCopyData } from "./copy";
+import { buildCopyFromBlobStatement } from "./copy";
 import { drizzleOverPg } from "./drizzle-executor";
 import type { UpsertChangeMessage } from "./types";
 
@@ -532,33 +532,21 @@ export async function applyMessagesToTableWithCopy({ pg, target, messages, debug
   const columns = Object.keys(firstRow);
   assertUniformColumnSet(target, columns, data, "applyMessagesToTableWithCopy");
 
-  // Serialize rows using Postgres' own COPY TEXT format — a faithful port of the backend's
-  // CopyAttributeOutText / array_out routines (see ./copy) — so arrays (incl. multi-dimensional),
-  // json/jsonb, bytea, timestamps and strings with embedded delimiters/newlines all round-trip,
-  // unlike the previous hand-rolled CSV encoder.
-  const columnUdts = copyColumnUdts(target);
-  const copyData = generateCopyData(data, columns, columnUdts);
-  const copyBlob = new Blob([copyData], { type: "text/plain" });
-
-  // TEXT is the default COPY format; its default delimiter is a tab and NULL marker is `\N`, both of
-  // which generateCopyData emits.
-  //
-  // Tier ③ (ADR-0028 allow-list): `COPY … FROM '/dev/blob'` is PGlite's blob-ingest grammar — it has no
-  // Drizzle builder form, so the statement stays a raw string. The table reference is taken from the real
-  // synced table object: a bare name (ephemeral → `pg_temp` via search_path) or a schema-qualified one.
-  const { name: tableName, schema } = getTableConfig(target.table);
-  const copyTarget = schema ? `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}` : quoteIdentifier(tableName);
-  await pg.query(
-    `
-      COPY ${copyTarget} (${columns.map((column) => quoteIdentifier(column)).join(", ")})
-      FROM '/dev/blob'
-      WITH (FORMAT text)
-    `,
-    [],
-    {
-      blob: copyBlob,
-    },
-  );
+  // ONE implementation of the COPY-from-blob load, shared with the public raw seam
+  // ({@link buildCopyFromBlobStatement}): it renders the tier-③ statement from the REAL table object
+  // (`getTableConfig` — a bare name for an ephemeral relation, schema-qualified otherwise) and serializes
+  // the rows with Postgres' own COPY TEXT format — a faithful port of the backend's CopyAttributeOutText /
+  // array_out routines (see ./copy) — so arrays (incl. multi-dimensional), json/jsonb, bytea, timestamps
+  // and strings with embedded delimiters/newlines all round-trip.
+  const statement = buildCopyFromBlobStatement({
+    table: target.table,
+    columns,
+    rows: data,
+    udtNames: copyColumnUdts(target),
+  });
+  // The statement carries its body as BYTES (that is what crosses the worker bridge as a transferable on
+  // the raw seam); PGlite reads `/dev/blob` from a `Blob`, so wrap them here.
+  await pg.query(statement.sql, [], { blob: new Blob([statement.blob], { type: "text/plain" }) });
 
   if (debug) console.log(`Inserted ${messages.length} rows using COPY`);
 }

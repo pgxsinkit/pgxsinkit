@@ -924,15 +924,21 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         // Inspection read (ADR-0032 S2): run straight against the worker's own store — `active.pglite`
         // exists worker-side (it's the in-process client). `Results` rows/fields structured-clone across
         // the wire (Dates survive postMessage), so the tab receives the same shape it would in-process.
-        // The options arg is the clonable RawQueryOptions subset (rowMode) — the REPL's array mode.
+        // The options arg is the clonable RawQueryOptions subset (rowMode, plus the ADR-0061 COPY `blob`).
         return active.rawQuery(args[0] as string, args[1] as unknown[] | undefined, args[2] as RawQueryOptions);
       case "rawExec":
         return active.rawExec(args[0] as string, args[1] as RawQueryOptions);
       case "rawTransaction":
         // The atomic raw seam: the whole statement list crossed in ONE dispatch, so the transaction begins
         // and ends inside this call on the worker's own store — the tab can never hold one open. Statements
-        // are `{ sql, params }` plain objects (structured-clone safe), and the `Results[]` returns the same
-        // way `rawExec`'s does.
+        // are `{ sql, params, blob? }` plain objects (structured-clone safe), and the `Results[]` returns
+        // the same way `rawExec`'s does.
+        //
+        // NOTHING is rebuilt here for a COPY statement's `blob` (ADR-0061). The tab listed each body's
+        // `ArrayBuffer` on the dispatch's transfer list, and a `Uint8Array` survives structured clone AS a
+        // `Uint8Array` view over the transferred (zero-copy) buffer — so `args[0]` is already exactly the
+        // `RawStatement[]` the in-process client takes, and the single `Uint8Array → Blob` wrap lives where
+        // it does in-process: inside that client, at the PGlite call. The tab's buffers are now detached.
         return active.rawTransaction(args[0] as readonly RawStatement[], args[1] as RawQueryOptions);
       case "guardedQuery":
         // Guarded one-shot Drizzle read (ADR-0032 decision 4): the ADR-0041 read gate + the ADR-0021

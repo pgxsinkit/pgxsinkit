@@ -2,11 +2,16 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 
 import type { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
-import { pgTable, text, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
-import { createClientPGlite, createSyncClient, type SyncClient } from "../../packages/client/src/index";
+import {
+  buildCopyFromBlobStatement,
+  createClientPGlite,
+  createSyncClient,
+  type SyncClient,
+} from "../../packages/client/src/index";
 import { getLocalMetaTable } from "../../packages/client/src/local-tables";
 import { REGISTRY_FINGERPRINT_KEY } from "../../packages/client/src/schema";
 import { memoryStoreForTests, testStoreAcknowledgment } from "../../packages/client/src/testing";
@@ -18,6 +23,40 @@ import { drizzleOver } from "../support/drizzle";
 // no network is needed, and reads back through Drizzle (tier-①/②) rather than raw SQL strings.
 
 const profileTable = pgTable("profile", { id: uuid("id").primaryKey(), name: text("name") });
+
+// A LOCAL-ONLY table the "consumer" owns — pgxsinkit models no such relation (it is absent from the
+// registry below), which is exactly the audience of the raw seam's COPY bulk load (ADR-0061). Declared as a
+// real Drizzle table (bare, no schema) so `buildCopyFromBlobStatement` reads its identifier off the object;
+// created TEMP, so the bare name resolves through `search_path` to `pg_temp` — the applier's ephemeral case.
+const definitionCacheTable = pgTable("definition_cache", {
+  id: integer("id").primaryKey(),
+  headword: text("headword").notNull(),
+  entry: jsonb("entry").notNull(),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true, mode: "string" }).notNull(),
+});
+const DEFINITION_CACHE_COLUMNS = ["id", "headword", "entry", "fetched_at"] as const;
+const DEFINITION_CACHE_UDTS = { entry: "jsonb", fetched_at: "timestamptz" } as const;
+const CREATE_DEFINITION_CACHE =
+  "create temp table definition_cache (id int primary key, headword text not null, " +
+  "entry jsonb not null, fetched_at timestamptz not null)";
+
+/** Two rows whose jsonb is a real object and whose text carries a tab + a newline (COPY TEXT escaping). */
+function definitionCacheRows(): Record<string, unknown>[] {
+  return [
+    {
+      id: 1,
+      headword: "\u4e2d\u6587",
+      entry: { pinyin: "zh\u014dngw\u00e9n", senses: ["Chinese"], nested: { note: "tab\there" } },
+      fetched_at: "2026-09-12 01:02:03+00",
+    },
+    {
+      id: 2,
+      headword: "line\nbreak\tand\\slash",
+      entry: { pinyin: null, senses: [] },
+      fetched_at: "2026-01-01 00:00:00+00",
+    },
+  ];
+}
 
 function bootRegistry(): SyncTableRegistry {
   return {
@@ -199,5 +238,76 @@ describe("createSyncClient rawTransaction", () => {
     } finally {
       transaction.mockRestore();
     }
+  });
+
+  // ADR-0061: a statement may carry the COPY TEXT body of a `COPY … FROM '/dev/blob'`, so a chunk of rows
+  // lands in ONE statement instead of one INSERT per row — inside the same all-or-nothing list as whatever
+  // must land with it (here the CREATE). jsonb and timestamptz are in the table on purpose: they are the
+  // two types the serializer has to be told about / has to format, and the ones an app-owned cache carries.
+  it("BULK-LOADS a local-only table from a statement blob, inside the transaction", async () => {
+    client = await bootClient("raw-transaction-copy-blob");
+    const rows = definitionCacheRows();
+    const copy = buildCopyFromBlobStatement({
+      table: definitionCacheTable,
+      columns: DEFINITION_CACHE_COLUMNS,
+      rows,
+      udtNames: DEFINITION_CACHE_UDTS,
+    });
+    // The renderer names the table + columns off the REAL Drizzle objects — never a hand-written string.
+    expect(copy.sql).toBe(
+      `COPY "definition_cache" ("id", "headword", "entry", "fetched_at") FROM '/dev/blob' WITH (FORMAT text)`,
+    );
+    expect(copy.blob.byteLength).toBeGreaterThan(0);
+
+    const results = await client.rawTransaction([
+      { sql: CREATE_DEFINITION_CACHE },
+      copy,
+      { sql: "select id, headword, entry, fetched_at from definition_cache order by id" },
+    ]);
+    expect(results.length).toBe(3);
+
+    const loaded = results[2]?.rows as {
+      id: number;
+      headword: string;
+      entry: unknown;
+      fetched_at: Date;
+    }[];
+    expect(loaded.length).toBe(2);
+    // jsonb round-trips as a PARSED object (it was given parsed, per the serializer contract).
+    expect(loaded[0]).toMatchObject({ id: 1, headword: "\u4e2d\u6587" });
+    expect(loaded[0]?.entry).toEqual({
+      pinyin: "zh\u014dngw\u00e9n",
+      senses: ["Chinese"],
+      nested: { note: "tab\there" },
+    });
+    const fetchedAt = loaded[0]?.fetched_at;
+    expect(fetchedAt instanceof Date).toBe(true);
+    expect((fetchedAt as Date).toISOString()).toBe("2026-09-12T01:02:03.000Z");
+    // Tabs, newlines and backslashes survive COPY TEXT framing rather than tearing the row.
+    expect(loaded[1]?.headword).toBe("line\nbreak\tand\\slash");
+    expect(loaded[1]?.entry).toEqual({ pinyin: null, senses: [] });
+
+    // In-process, nothing is transferred: the caller's buffer is still intact after the call.
+    expect(copy.blob.byteLength).toBeGreaterThan(0);
+  });
+
+  // The same bulk load with NO surrounding transaction — the single-statement form, on `rawQuery`'s options.
+  it("BULK-LOADS through rawQuery's options.blob (no transaction)", async () => {
+    client = await bootClient("raw-query-copy-blob");
+    await client.rawExec(`${CREATE_DEFINITION_CACHE};`);
+
+    const rows = definitionCacheRows();
+    const copy = buildCopyFromBlobStatement({
+      table: definitionCacheTable,
+      columns: DEFINITION_CACHE_COLUMNS,
+      rows,
+      udtNames: DEFINITION_CACHE_UDTS,
+    });
+    await client.rawQuery(copy.sql, [], { blob: copy.blob });
+
+    const counted = await client.rawQuery("select count(*)::int as n from definition_cache");
+    expect((counted.rows[0] as { n?: number })?.n).toBe(2);
+    const read = await client.rawQuery("select entry from definition_cache where id = 1");
+    expect((read.rows[0] as { entry?: { senses?: string[] } })?.entry?.senses).toEqual(["Chinese"]);
   });
 });

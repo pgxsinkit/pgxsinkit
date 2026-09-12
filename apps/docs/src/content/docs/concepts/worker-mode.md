@@ -378,6 +378,19 @@ path for a synced table — that remains `mutate` / `tables.*`. Like the write o
 worker relocation settles `outcome: "unknown"`: atomicity means the store is in exactly one of two states,
 not that a tab which lost the answer can tell which.
 
+A statement may also carry a **`COPY` blob** (ADR-0061), which is how such a table is BULK-loaded — a chunk
+of thousands of rows in one statement instead of an INSERT per row. `buildCopyFromBlobStatement({ table,
+columns, rows, udtNames })` renders `COPY <table> (…) FROM '/dev/blob' WITH (FORMAT text)` from the real
+Drizzle table object and serializes the rows with the **same** COPY TEXT serializer the sync applier uses on
+synced tables (`generateCopyData` / `serializeCopyValue` are exported too), so the statement and its bytes
+come from one column list and cannot drift; `json`/`jsonb` values are passed **parsed**, with the column's
+`udt_name` in `udtNames`. The same bytes ride `rawQuery`'s `options.blob` when the load needs no transaction
+around it. In worker mode those bytes are **transferred, not copied** — the buffer is listed on the RPC's
+`postMessage` transfer list, so a megabyte chunk crosses zero-copy and the tab's buffer is **detached**
+(`byteLength === 0`) once the call dispatches: serialize a fresh chunk per call and never reuse it. A
+transferred dispatch is settled as a mutation for that reason — there is nothing left tab-side to repeat
+with, so a lost response is `"unknown"`, never `"not-dispatched"`.
+
 Everything the engine emits crosses on **one broadcast event channel**: status, per-group readiness,
 conflict, quarantine, reject, schema-change, and the debug rail — re-exposed by `attachSyncClient` as the
 same `onStatusChange`/`onConflict`/… callbacks the in-process client takes. The bridge serializes through

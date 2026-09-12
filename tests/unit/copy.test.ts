@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 
 import { eq } from "drizzle-orm";
+import { integer, jsonb, pgSchema, pgTable, text } from "drizzle-orm/pg-core";
 
-import { generateCopyData, serializeCopyValue } from "../../packages/client/src/sync/copy";
+import { buildCopyFromBlobStatement, generateCopyData, serializeCopyValue } from "../../packages/client/src/sync/copy";
 import { informationSchemaColumns } from "../support/catalog-tables";
 import { drizzleOver } from "../support/drizzle";
 import { createFreshTestPGlite } from "../support/pglite";
@@ -96,6 +97,75 @@ describe("COPY TEXT serializer", () => {
         { id: 2, name: "b", done: false },
       ];
       expect(generateCopyData(rows, ["id", "name", "done"])).toBe("1\ta\tt\n2\tb\tf");
+    });
+  });
+
+  // The PUBLIC statement builder (ADR-0061): the ONE renderer the sync applier and the raw seam share, so an
+  // app-owned table bulk-loads on the same contract. Identifiers come off the REAL Drizzle table object.
+  describe("buildCopyFromBlobStatement", () => {
+    const bare = pgTable("definition_cache", {
+      id: integer("id").primaryKey(),
+      entry: jsonb("entry").notNull(),
+    });
+    const qualified = pgSchema("app").table("cache", { id: integer("id").primaryKey(), note: text("note") });
+
+    it("renders the COPY statement from the table object, in the given column order", () => {
+      const statement = buildCopyFromBlobStatement({ table: bare, columns: ["entry", "id"], rows: [] });
+      expect(statement.sql).toBe(`COPY "definition_cache" ("entry", "id") FROM '/dev/blob' WITH (FORMAT text)`);
+      expect(statement.params).toEqual([]);
+    });
+
+    it("schema-qualifies a table that declares a schema (a bare one resolves via search_path)", () => {
+      const statement = buildCopyFromBlobStatement({ table: qualified, columns: ["id", "note"], rows: [] });
+      expect(statement.sql).toBe(`COPY "app"."cache" ("id", "note") FROM '/dev/blob' WITH (FORMAT text)`);
+    });
+
+    it("serializes the body with generateCopyData, honouring the udt map", () => {
+      const rows = [{ id: 1, entry: { a: [1, 2] } }];
+      const columns = ["id", "entry"];
+      const udtNames = { entry: "jsonb" };
+      const statement = buildCopyFromBlobStatement({ table: bare, columns, rows, udtNames });
+      expect(new TextDecoder().decode(statement.blob)).toBe(generateCopyData(rows, columns, udtNames));
+      // Without the udt the JS object would still stringify, but a jsonb ARRAY would become a SQL array —
+      // which is precisely why the map is part of the contract.
+      expect(new TextDecoder().decode(statement.blob)).toBe('1\t{"a":[1,2]}');
+    });
+
+    it("loads its own bytes through a real PGlite COPY", async () => {
+      const pg = await createFreshTestPGlite();
+      await pg.exec(`CREATE TABLE definition_cache (id int primary key, entry jsonb not null);`);
+      const statement = buildCopyFromBlobStatement({
+        table: bare,
+        columns: ["id", "entry"],
+        rows: [
+          { id: 1, entry: { senses: ["a\tb"] } },
+          { id: 2, entry: null },
+        ],
+        udtNames: { entry: "jsonb" },
+      });
+      let failed = "";
+      try {
+        await pg.query(statement.sql, [], { blob: new Blob([statement.blob]) });
+      } catch (error) {
+        failed = (error as Error).message;
+      }
+      // Row 2's NULL violates NOT NULL — the load is one statement, so nothing lands.
+      expect(failed).toContain("null value");
+      const empty = await pg.query<{ n: number }>(`SELECT count(*)::int AS n FROM definition_cache`);
+      expect(empty.rows[0]?.n).toBe(0);
+
+      const ok = buildCopyFromBlobStatement({
+        table: bare,
+        columns: ["id", "entry"],
+        rows: [{ id: 1, entry: { senses: ["a\tb"] } }],
+        udtNames: { entry: "jsonb" },
+      });
+      await pg.query(ok.sql, [], { blob: new Blob([ok.blob]) });
+      const loaded = await pg.query<{ id: number; entry: { senses: string[] } }>(
+        `SELECT id, entry FROM definition_cache`,
+      );
+      expect(loaded.rows).toEqual([{ id: 1, entry: { senses: ["a\tb"] } }]);
+      await pg.close();
     });
   });
 

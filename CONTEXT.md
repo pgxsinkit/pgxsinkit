@@ -208,6 +208,11 @@ and never the write path for a synced table.
 all-or-nothing — and the one with a non-debug audience: the LOCAL-ONLY tables a consumer owns and
 pgxsinkit does not manage (a definition cache, a personal dictionary), which have no other way to
 be written atomically on a worker-attached client.
+A statement (or `rawQuery`'s options) may carry a **COPY blob** — the COPY TEXT bytes of a
+`COPY … FROM '/dev/blob'` bulk load, built with `buildCopyFromBlobStatement` from the same
+serializer the sync applier uses — so such a table loads a chunk of thousands of rows in ONE
+statement instead of an INSERT per row; the bytes are TRANSFERRED across the bridge, so the
+caller's buffer is detached afterwards (ADR-0061).
 _Avoid_: "raw reads" as a synonym for one-shot reads — a Guarded read is the app path; the
 inspection surface is for humans looking at the store (or, for `rawTransaction`, for a consumer's
 own unmanaged tables).
