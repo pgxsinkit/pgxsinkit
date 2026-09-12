@@ -101,8 +101,12 @@ function runShard(files: string[]): Promise<ShardResult> {
     child.stdout.on("data", (d) => (output += d));
     child.stderr.on("data", (d) => (output += d));
     child.on("close", (code) => {
-      const pass = [...output.matchAll(/^\s*(\d+)\s+pass$/gm)].reduce((s, m) => s + Number(m[1]), 0);
-      const fail = [...output.matchAll(/^\s*(\d+)\s+fail$/gm)].reduce((s, m) => s + Number(m[1]), 0);
+      // bun 1.4.2 colours the summary even when piped, so strip SGR sequences before the tally match —
+      // otherwise every shard reads "0 pass" while the exit code alone gates the lane.
+      // oxlint-disable-next-line no-control-regex -- the ESC byte is the thing being matched
+      const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
+      const pass = [...plain.matchAll(/^\s*(\d+)\s+pass$/gm)].reduce((s, m) => s + Number(m[1]), 0);
+      const fail = [...plain.matchAll(/^\s*(\d+)\s+fail$/gm)].reduce((s, m) => s + Number(m[1]), 0);
       resolve({ files, code: code ?? 1, pass, fail, output, ms: Date.now() - startedAt });
     });
   });
