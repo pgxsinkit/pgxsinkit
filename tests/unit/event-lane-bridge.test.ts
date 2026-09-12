@@ -54,7 +54,7 @@ const ISSUE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 let hosts: SyncWorkerHost<Registry>[] = [];
 let channels: MessageChannel[] = [];
 
-async function makeHost(): Promise<SyncWorkerHost<Registry>> {
+async function makeHost(eventOptions: { ackedRetentionMs?: number } = {}): Promise<SyncWorkerHost<Registry>> {
   const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker<Registry>({
     registry,
@@ -68,7 +68,7 @@ async function makeHost(): Promise<SyncWorkerHost<Registry>> {
     convergenceIntervalMs: 10_000_000,
     // The Event lane's fallback interval is separate from convergence's; park it too so only the explicit
     // `flushEvents` (and the append nudge) drive a pass during a test.
-    events: { intervalMs: 10_000_000 },
+    events: { intervalMs: 10_000_000, ...eventOptions },
   });
   hosts.push(host);
   return host;
@@ -214,5 +214,35 @@ describe("the observation surfaces over the bridge (ADR-0053 decision 2)", () =>
     // already takes for the owed-mutations check (the destroy sequence itself — peer verdict, teardown
     // handshake, destruction effects — is exercised in `destroy-supervision.test.ts`).
     expect((await client.diagnostics()).outbox).toEqual({ empty: false });
+  });
+
+  it("reports a LEDGER-retained row as empty on `diagnostics`, so it cannot block the attached destroy", async () => {
+    // ADR-0060: with a retention the acked row stays in the worker's Outbox. It has had its verdict, so
+    // every "pending" surface — including the field the attached destroy refuses on — must ignore it.
+    const host = await makeHost({ ackedRetentionMs: 60_000 });
+    const client = await attach(host);
+    await client.ready;
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: { body?: unknown }) => {
+      const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { events: { eventId: string }[] };
+      return new Response(
+        JSON.stringify({ acks: body.events.map((event) => ({ eventId: event.eventId, status: "acked" })) }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      await client.appendEvent("board_issue_viewed", { issueId: ISSUE });
+      await client.flushEvents();
+      await tick();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const worker = await host.whenBooted();
+    const rows = await worker.rawQuery("SELECT acked_at_us IS NOT NULL AS acked FROM pgxsinkit_outbox");
+    expect(rows.rows).toEqual([{ acked: true }]);
+    expect((await client.diagnostics()).outbox).toEqual({ empty: true });
+    expect(await client.outboxStatus()).toEqual({ empty: true });
   });
 });

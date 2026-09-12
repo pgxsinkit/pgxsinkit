@@ -4,14 +4,14 @@ description: >-
   Load when deploying or operating a pgxsinkit app, when a sync/write "feels slow" in a browser
   but the server is fast, or when wiring backups/export/restore. Covers the runtime/deployment
   properties (not toolkit bugs) deciding whether an app feels fast: convergence cadence (writes
-  flush on enqueue; the interval is a fallback), serverless edge cold starts, the read path's cache
+  flush on enqueue; interval is a fallback), serverless edge cold starts, the read path's cache
   split (no-store control plane, cacheable edge on its own origin, token out of the cache key), the
   browser HTTP/2 connection budget, the edge worker timeout vs the durable-streams long-poll hold,
-  globalThis.__pgxsinkitDebug + the BootReport, worker mode (defineSyncWorker/attachSyncClient —
+  globalThis.__pgxsinkitDebug + BootReport, worker mode (defineSyncWorker/attachSyncClient —
   capability-driven engine placement, relocation outcomes, the forwarded rail), the store lifecycle
   surface (storePath naming, durability, backend permanence, destruction, the three exports,
-  restoreFrom), and Event-lane observability: onOutboxStatus, onEventLaneReport verdicts including
-  deferred-on-skew, and the Outbox across destroy/restore/backup.
+  restoreFrom), and Event-lane observability: onOutboxStatus, onEventLaneReport verdicts incl.
+  deferred-on-skew, the acked ledger, and the Outbox across destroy/restore/backup.
 metadata:
   type: task
   library: "@pgxsinkit/client"
@@ -356,47 +356,46 @@ retry wins. Dynamic declarations travel as the wire `storage` option on
 `attachSyncClient`/`provisionSyncWorker`; a registry-attached static declaration stays authoritative.
 Consumer docs: <https://pgxsinkit.github.io/concepts/local-store-lifecycle/>.
 
-## Event lane: observing the Outbox (ADR-0053)
+## Event lane: observing the Outbox (ADR-0053, ADR-0060)
 
-If your registry declares `streams`, `client.appendEvent(stream, payload)` stages a fire-and-forget fact in
-the **Outbox** — a durable, local-only table, never synced, overlaid or conflict-resolved. It resolves on
-**durable local enqueue, not on delivery**, so it never blocks on the network and an append made offline
-survives a reload. Two observation surfaces, identical on both client forms:
+If your registry declares `streams`, `client.appendEvent(stream, payload)` stages a fire-and-forget fact in the **Outbox** — a durable, local-only
+table, never synced, overlaid or conflict-resolved. It resolves on **durable local enqueue, not on delivery**, so it never blocks on the network and
+an append made offline survives a reload. Two observation surfaces, identical on both client forms:
 
-- **`onOutboxStatus(cb)` — the drain signal.** `{ empty }`, fired on the empty ↔ non-empty **transitions**,
-  current state delivered on subscribe (`await client.outboxStatus()` is the one-shot pull twin). It is the
-  invalidation hook for a best-guess view composing pending events with down-synced aggregates: when the
-  Outbox drains, the aggregate is authoritative again. It carries **no count** deliberately (one updated only
-  on transitions is stale by construction) — query `getOutboxTable(registry)` when you need one.
-- **`onEventLaneReport(cb)` — the verdicts.** Per flush pass: terminal non-`acked` verdicts, `deferred` ones,
-  and batch-level backoff transitions. `acked` is never reported (a high-volume lane would drown you), and it
-  is **EPHEMERAL** — with **nothing subscribed the library warn-logs each report**. Subscribe for the app's
-  lifetime: once a row is deleted the Outbox cannot answer for it.
+- **`onOutboxStatus(cb)` — the drain signal.** `{ empty }`, fired on the empty ↔ non-empty **transitions**, current state delivered on subscribe
+  (`await client.outboxStatus()` is the one-shot pull twin). "Empty" is **nothing awaiting a server VERDICT** — the invalidation hook for a best-guess
+  view composing pending events with down-synced aggregates. **No count**, deliberately (one updated only on transitions is stale by construction) —
+  query `getOutboxTable(registry)` when you need one.
+- **`onEventLaneReport(cb)` — the verdicts.** Per flush pass: terminal non-`acked` verdicts, `deferred` ones, and batch-level backoff transitions.
+  `acked` is never reported (a high-volume lane would drown you), and it is **EPHEMERAL** — with **nothing subscribed the library warn-logs each
+  report**. Subscribe for the app's lifetime: once a row is deleted the Outbox cannot answer for it.
 
-**Read the verdicts correctly — one of the four is not a failure.** `acked` is enqueued server-side. `refused`
-(your `eventGate` said no) and `rejected` are **terminal**: the row is deleted, and `refused` is expected, not
-an error. `rejected` has THREE causes on a KNOWN stream — a payload the schema refuses (or a parse output JSON
-cannot carry), an oversized payload, and an **identity claim the stream declares that the verified claims
-cannot resolve** (absent/null/object/array/empty — fail-closed, no partial stamp). The first two mean a
-non-library caller or a broken deployment (the library validates at append) — a **bug**; the third means the
-ISSUER stopped minting that claim, or moved its path. `deferred` is **NOT terminal**: the server does not
-(yet) know that stream — rollout skew — so the rows stay, retry with backoff, and drain once the deploy lands.
-A burst after a release is deploy order; one that never clears means the registry LACKS it.
+**`acked` means ENQUEUED, not folded** — the consumer has not handled the event and its result has not synced back down, so a best-guess view that
+drops the row at the ack **dips** for that window, online and on a healthy deployment. `events.ackedRetentionMs > 0` (default `0` = delete on ack, the
+pre-ledger behaviour) keeps the acked row STAMPED with `acked_at_us` for that long, then sweeps it. **Pending is `acked_at_us IS NULL`**, never "a row
+exists": a retained row never keeps the drain signal non-empty, is never re-sent, is absent from `diagnostics().outbox`, and never blocks `destroy()`.
+Count it until your own synced aggregate accounts for it — the retention is the backstop, sized to ack→fold→sync latency plus margin (the Outbox is a
+queue, not an archive). The library cannot retire it on the FOLD: it knows the envelope was accepted and nothing about your consumer's data model.
 
-**There is no attempt cap and no client-side quarantine, by design.** Retry has two classes: retryable
-(network, 5xx, 408/425/429 — jittered backoff with a ceiling, honouring `Retry-After`, paused offline) and
-auth (refresh once, then retryable). A row leaves the Outbox **only** on a server-issued per-event verdict,
-so a stuck lane is a growing Outbox with backoff transitions on the report, never silent loss. A persistent
-**503 / batch backoff** is the OTHER diagnosis — the server KNOWS the stream but could not enqueue the whole
-batch: check the `--events` migration is applied (no queue, no enqueue), then DB reachability. Cadence/batch
-caps are client config (`events`, validated at construction — a bad `batchSize` throws instead of wedging a
-stream), clamped by the contracts limits; `flushEvents()` is the manual hatch without `autoSync`.
+**Read the verdicts correctly — one of the four is not a failure.** `acked` is enqueued server-side. `refused` (your `eventGate` said no) and
+`rejected` are **terminal**: the row is deleted, and `refused` is expected, not an error. `rejected` has THREE causes on a KNOWN stream — a payload
+the schema refuses (or a parse output JSON cannot carry), an oversized payload, and an **identity claim the stream declares that the verified claims
+cannot resolve** (absent/null/object/array/empty — fail-closed, no partial stamp). The first two mean a non-library caller or a broken deployment (the
+library validates at append) — a **bug**; the third means the ISSUER stopped minting that claim, or moved its path. `deferred` is **NOT terminal**:
+the server does not (yet) know that stream — rollout skew — so the rows stay, retry with backoff, and drain once the deploy lands. A burst after a
+release is deploy order; one that never clears means the registry LACKS it.
 
-**The Outbox on every lifecycle surface** (durable owned state): `destroy()` **refuses** while it is
-non-empty, exactly as on owed mutations — the refusal names which of the two blocked it, and `{ force: true }`
-is the escape hatch. `dropReadCache()` never touches it (not read cache). `exportStore()` and
-`exportDiagnostics()` include it; `exportData()` (synced tables only) excludes it. And **restore does NOT
-quarantine restored Outbox rows** — the deliberate asymmetry with the mutation journal: they resume flushing
+**There is no attempt cap and no client-side quarantine, by design.** Retry has two classes: retryable (network, 5xx, 408/425/429 — jittered backoff
+with a ceiling, honouring `Retry-After`, paused offline) and auth (refresh once, then retryable). A row leaves the Outbox **only** on a server-issued
+per-event verdict, so a stuck lane is a growing Outbox with backoff transitions on the report, never silent loss. A persistent **503 / batch backoff**
+is the OTHER diagnosis — the server KNOWS the stream but could not enqueue the whole batch: check the `--events` migration is applied (no queue, no
+enqueue), then DB reachability. Cadence/batch caps are client config (`events`, validated at construction — a bad `batchSize` throws instead of
+wedging a stream), clamped by the contracts limits; `flushEvents()` is the manual hatch without `autoSync`.
+
+**The Outbox on every lifecycle surface** (durable owned state): `destroy()` **refuses** while a row still awaits a verdict (a ledger-retained one
+does not count), exactly as on owed mutations — the refusal names which of the two blocked it, and `{ force: true }` is the escape hatch.
+`dropReadCache()` never touches it (not read cache). `exportStore()` and `exportDiagnostics()` include it; `exportData()` (synced tables only)
+excludes it. And **restore does NOT quarantine restored Outbox rows** — the deliberate asymmetry with the mutation journal: they resume flushing
 normally, because event delivery is idempotent end-to-end (`eventId` dedupe), which mutation replay is not.
 
 ## The read path's cache split: uncacheable control plane, cacheable edge
@@ -493,6 +492,7 @@ a real rollback, route a permanent policy denial to `quarantined` — never mis-
 - Treating an edge cold start as a toolkit problem, or measuring latency by polling PGlite in a loop
   instead of at the network boundary.
 - Treating `deferred` as a failure and "cleaning up" the Outbox — it is rollout skew; those rows self-drain.
+- Composing a best-guess view on row PRESENCE instead of `acked_at_us IS NULL` (with a retention configured, that counts rows the server already took).
 - Subscribing to `onEventLaneReport` per-screen (verdicts are ephemeral), or expecting `acked` on it.
 - Assuming `appendEvent` resolving means delivered — it means durably staged locally; delivery is the flush.
 

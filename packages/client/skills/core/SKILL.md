@@ -112,6 +112,12 @@ appendEvent() → Outbox (durable, local-only) → flush → POST /api/events �
 - The client-side surfaces are `onOutboxStatus` (drain signal) and `onEventLaneReport` (per-pass verdicts:
   `acked` / `refused` / `rejected` / `deferred`, of which only `deferred` is non-terminal). Flush cadence
   and batch caps are client config (`events`), never registry.
+- **Composing a best-guess view? Pending is `acked_at_us IS NULL`, not "the row exists".** `acked` means
+  ENQUEUED, not folded — the consumer has not handled it and its result has not synced back down — so a
+  composition that drops the event at the ack dips for that whole window. `events.ackedRetentionMs > 0`
+  (default `0` = delete on ack) keeps an acked row, stamped, as a grace ledger you count until your own
+  synced aggregate accounts for it. A retained row is NOT pending anywhere: not on the drain signal, not
+  re-sent, not on `diagnostics()`, not blocking `destroy()`.
 
 ## Reading the local store: base table vs overlay view
 

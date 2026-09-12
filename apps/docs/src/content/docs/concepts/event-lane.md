@@ -136,7 +136,8 @@ surfaces as an unhandled rejection instead of at your call site.
 
 The Outbox's shape is public contract, not an internal detail — get the typed table with
 `getOutboxTable(registry)` — because apps legitimately compose pending events with down-synced aggregates
-into best-guess views.
+into best-guess views. **A row is pending when `acked_at_us IS NULL`**, which is not the same as "the row is
+there": see [the acked ledger](#the-acked-ledger-keeping-an-acked-row-a-little-longer) below.
 
 ### Watching it drain
 
@@ -145,8 +146,10 @@ const stop = client.onOutboxStatus(({ empty }) => setPending(!empty));
 ```
 
 `onOutboxStatus` fires on the empty ↔ non-empty **transitions**, delivering the current state on subscribe
-(`await client.outboxStatus()` is the one-shot pull). It is the invalidation hook for those best-guess
-views: when the Outbox drains, the down-synced aggregate is authoritative again. It carries no count on
+(`await client.outboxStatus()` is the one-shot pull). "Empty" means **nothing is awaiting a server verdict**,
+which is the invalidation hook for those best-guess views: when the Outbox drains, the server has ruled on
+everything you staged (though a row it accepted may still be in flight to your consumer — see the acked
+ledger below). It carries no count on
 purpose — a count that updates only on transitions is stale by construction, and a count that updates per
 append is a worse live query than the one you can write yourself against the Outbox table.
 
@@ -162,7 +165,7 @@ Every well-formed event comes back with its own verdict:
 
 | Verdict    | Terminal? | What it means                                                                          |
 | ---------- | --------- | -------------------------------------------------------------------------------------- |
-| `acked`    | yes       | Enqueued. The Outbox row is deleted.                                                   |
+| `acked`    | yes       | Enqueued. The Outbox row is deleted — or stamped and kept, if you set a retention.     |
 | `refused`  | yes       | Your server-side gate declined it (consent, entitlement). Row deleted.                 |
 | `rejected` | yes       | The server refused this event on a **known** stream (three causes below). Row deleted. |
 | `deferred` | **no**    | The server does not (yet) know this stream. The row stays and retries.                 |
@@ -210,6 +213,44 @@ There is **no attempt cap and no client-side quarantine**. A row leaves the Outb
 verdict — that is what at-least-once means on this edge. The Outbox is designed to hold offline weeks, so a
 failing lane presents as a growing Outbox backing off observably, never as silently discarded events.
 
+### The acked ledger: keeping an acked row a little longer
+
+`acked` means **enqueued**, not handled. Your consumer has not folded the event yet, and whatever it writes
+has not synced back down yet. So a best-guess view that counts "rows in the Outbox" plus "the synced
+aggregate" **dips** for the length of that gap: the row is deleted at the ack, the aggregate does not include
+it, and the value jumps back up when the down-sync lands. Online, on a healthy deployment.
+
+`events.ackedRetentionMs` closes the gap. Above `0`, an acked row is **stamped with `acked_at_us` and kept**
+for that long instead of being deleted, and a sweep retires it when the window passes:
+
+```ts
+const client = await createSyncClient({
+  registry,
+  // …
+  events: { ackedRetentionMs: 30_000 },
+});
+```
+
+A retained row is **not pending**. It has had its verdict, so it does not keep `onOutboxStatus` non-empty, it
+is never re-sent, it does not show on `diagnostics().outbox`, and it does not block a `destroy()`. Your
+composition reads the difference explicitly:
+
+```ts
+// pending: still owed to the server
+where(isNull(outbox.ackedAtUs));
+// the grace ledger: accepted, not yet visible in your synced aggregate
+where(and(isNotNull(outbox.ackedAtUs), gt(outbox.ackedAtUs, aggregate.updatedAtUs)));
+```
+
+Keep counting an acked row until your own synced row accounts for it — the retention is the backstop, not the
+rule. Size it to your deployment's ack→fold→sync latency plus margin: the Outbox is a queue, not an archive.
+
+**The default is `0`, which is "delete on ack"** — the behaviour this section opens with, and no cost at all
+for an app that composes nothing. The library cannot do better than a retention automatically: it knows the
+server accepted the envelope and nothing whatsoever about what your consumer folds it into, so only your own
+view can know when an acked row has stopped mattering. The rationale is in ADR-0060 (see
+[Design decisions](/decisions/)).
+
 ### Tuning the flush (client config, never the registry)
 
 Cadence and batching live on the client (`createSyncClient` / `defineSyncWorker`), deliberately not on the
@@ -223,6 +264,7 @@ const client = await createSyncClient({
     batchSize: 200, // default 200, clamped to the wire limit of 1000
     intervalMs: 5_000, // default: the FALLBACK trigger (appends nudge a pass; boot/reconnect run one)
     backoff: { baseMs: 1_000, ceilingMs: 300_000 }, // defaults: 1s first retry, 5min ceiling
+    ackedRetentionMs: 0, // default 0 = delete on ack; above 0 keeps the acked row (see the acked ledger)
     streams: {
       issue_viewed: { batchSize: 50 }, // fairness: this stream may take at most 50 slots of any batch
     },
@@ -237,6 +279,9 @@ const client = await createSyncClient({
   default than the convergence driver's.
 - **`backoff`** is jittered exponential (equal jitter around the doubling ceiling, so a recovering fleet does
   not stampede) and applies both to rows the server `deferred` and to batch-level faults.
+- **`ackedRetentionMs`** turns on the [acked ledger](#the-acked-ledger-keeping-an-acked-row-a-little-longer).
+  It must be a finite number ≥ 0, and `0` (the default) is meaningful: delete on ack, exactly as the lane
+  behaved before the option existed.
 - **A per-stream `batchSize` is a fairness knob, and it is applied in SQL.** One batch is a mixed slice
   ordered by append sequence across every stream, so without a cap a chatty stream's backlog occupies every
   slot and a quieter stream stays invisible until that backlog drains. The cap ranks each stream's eligible
@@ -328,8 +373,9 @@ A batch-count or body violation is a `413`; a single oversized payload is a per-
 
 The Outbox is durable, library-owned state, so every lifecycle surface takes a position on it:
 
-- **`destroy()` refuses** while the Outbox is non-empty, exactly as it refuses on owed mutations. The
-  refusal names which of the two blocked it; `{ force: true }` remains the escape hatch.
+- **`destroy()` refuses** while the Outbox holds a row still awaiting a verdict, exactly as it refuses on
+  owed mutations (an acked row the ledger is retaining has had its verdict, so it never blocks). The refusal
+  names which of the two blocked it; `{ force: true }` remains the escape hatch.
 - **`dropReadCache()` never touches it** — it is not read cache.
 - **Backups and diagnostic dumps include it**; the portable data export (synced tables only) excludes it.
 - **A restore does NOT quarantine restored Outbox rows** — the deliberate asymmetry with the mutation

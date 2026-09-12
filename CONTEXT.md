@@ -385,7 +385,8 @@ disclaims; "channel" collides with the Board demo's chat Channels).
 
 **Outbox**:
 The local-only, append-only durable table where client events are staged until a
-flush is acknowledged. Fire-and-forget: acked rows are deleted, never echoed back,
+flush is acknowledged. Fire-and-forget: acked rows are deleted — or, with an acked
+retention configured, stamped and kept for it (see Acked ledger) — never echoed back,
 never overlaid, never conflict-resolved — the Outbox is not the Mutation journal
 (no overlay, no echo, no convergence). Queryable by the app (best-guess views may
 compose pending events with down-synced aggregates), so its shape is public
@@ -394,13 +395,23 @@ _Avoid_: "outbox" for the Mutation journal (retired informal alias), "event
 journal", "event buffer" (it is durable, not an in-memory buffer).
 
 **Drain signal**:
-The observable client surface reporting whether the Outbox is empty, firing on
-the empty ↔ non-empty transitions (with the current state delivered on
-subscribe) — the invalidation hook for best-guess views composing pending events
-with down-synced aggregates. Deliberately not a per-append or per-flush progress
-feed: apps know their own appends, and richer detail is a query against the
-Outbox table.
-_Avoid_: "flush event" (it reports Outbox state transitions, not flush attempts).
+The observable client surface reporting whether the Outbox holds anything still
+awaiting a server verdict, firing on the empty ↔ non-empty transitions (with the
+current state delivered on subscribe) — the invalidation hook for best-guess views
+composing pending events with down-synced aggregates. Deliberately not a per-append
+or per-flush progress feed: apps know their own appends, and richer detail is a
+query against the Outbox table.
+_Avoid_: "flush event" (it reports Outbox state transitions, not flush attempts);
+reading `empty` as "the table has no rows" (a retained acked row is not pending).
+
+**Acked ledger**:
+The Outbox rows an acked verdict STAMPED (`acked_at_us`) instead of deleting, kept
+for the client's configured `ackedRetentionMs` and then swept (ADR-0060). It exists
+so a best-guess view can keep counting an event across the gap between the server's
+ack and the down-sync of whatever its consumer folded it into. A ledger row is not
+pending anywhere: pending is `acked_at_us IS NULL`.
+_Avoid_: "event history"/"event archive" (the retention is a grace window, not
+storage), "acked queue".
 
 ## Language — engine placement
 

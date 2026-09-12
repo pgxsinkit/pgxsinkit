@@ -2299,7 +2299,8 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
         // ADR-0053 decision 8, the Event lane's half of the same refusal. It rides the diagnostics round
         // trip already taken above rather than a second one: the tab has no local Outbox (exactly as it has
         // no local journal), and a destroy must not add a network-shaped hop it can avoid. Absent `outbox`
-        // means the engine has no Event lane, which is not a reason to block a destroy.
+        // means the engine has no Event lane, which is not a reason to block a destroy — and neither is an
+        // acked row the ledger is retaining (ADR-0060): it has had its verdict, so it reads as empty.
         if (outbox?.empty === false) {
           throw new Error(
             "destroy() refused: the Outbox still holds staged event(s) awaiting a server verdict. " +

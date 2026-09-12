@@ -208,11 +208,16 @@ client's `events` option, documented under
 [Tuning the flush](/concepts/event-lane/#tuning-the-flush-client-config-never-the-registry).
 
 **The drain signal** is `client.onOutboxStatus(({ empty }) => …)` — the empty ↔ non-empty transitions, with
-the current state delivered on subscribe (`await client.outboxStatus()` is the one-shot pull). Use it to
-invalidate a view that composes pending events with down-synced aggregates: when the Outbox drains, the
-aggregate is authoritative again. It carries no count deliberately — a count that updates only on
-transitions is stale by construction — so query the Outbox table (`getOutboxTable(registry)`) if you want
-one.
+the current state delivered on subscribe (`await client.outboxStatus()` is the one-shot pull). "Empty" means
+nothing is awaiting a server verdict. Use it to invalidate a view that composes pending events with
+down-synced aggregates. It carries no count deliberately — a count that updates only on transitions is stale
+by construction — so query the Outbox table (`getOutboxTable(registry)`) if you want one.
+
+If that composed view **dips** between the ack and your consumer's fold, that is the gap
+[the acked ledger](/concepts/event-lane/#the-acked-ledger-keeping-an-acked-row-a-little-longer) closes:
+`events.ackedRetentionMs` keeps an acked row, stamped, instead of deleting it at the ack. A retained row is
+not pending — it does not hold the drain signal, is never re-sent, and never blocks a `destroy()` — so a
+composition reads `acked_at_us IS NULL` for "still owed" and treats the rest as its grace window.
 
 **The verdicts** are `client.onEventLaneReport(cb)`: per flush pass, the terminal non-`acked` verdicts, the
 `deferred` ones, and the lane's batch-level backoff transitions. Subscribe for the **app's lifetime**, not
@@ -241,8 +246,8 @@ the **`--events` migration**, and without it the endpoint enqueues onto a pgmq q
   There is no attempt cap and no client-side quarantine on this lane: a row leaves the Outbox only on a server-issued
   per-event verdict, which is what at-least-once means on this edge. So a lane that cannot reach its server presents as
   a growing Outbox backing off observably (with `Retry-After` honoured), never as silently discarded events — the Outbox
-  is designed to absorb offline weeks. Note also that `destroy()` refuses while it is non-empty, exactly as it refuses
-  on owed mutations.
+  is designed to absorb offline weeks. Note also that `destroy()` refuses while a row still awaits a verdict, exactly as
+  it refuses on owed mutations (a row the acked ledger is retaining has had its verdict, so it never blocks).
 </Aside>
 
 ## `operations_log` records user content

@@ -32,7 +32,8 @@ import { closeOpenTestPGlites, createSchemaTestPGlite } from "../support/pglite"
 // (Phase C builds the real one). What is pinned: batch assembly ordered by the `seq` append ordinal across
 // every Event stream, the deferred-backoff skip, all three clamps, the four verdicts (three terminal, one
 // not), the TWO retry classes with no attempt cap and no client-side quarantine, the drain signal's
-// transitions, and the report surface.
+// transitions, and the report surface. ADR-0060's acked ledger rides here too: at the default retention an
+// ack still deletes, and with one configured it stamps, keeps the row out of every pending read, and sweeps.
 
 const todos = defineSyncTable({
   tableName: "todos",
@@ -386,6 +387,20 @@ describe("lane tuning is validated at construction (fail-closed, every offender 
     ).not.toThrow();
     expect(() => construct({})).not.toThrow();
   });
+
+  it("refuses a nonsense acked retention, and accepts BOTH zero and a positive one (ADR-0060)", () => {
+    // A negative retention would make the sweep's cutoff sit in the FUTURE (retiring rows the server acked
+    // seconds ago), and a NaN one would retire nothing at all — silently, which is the failure mode this
+    // whole gate exists for.
+    expect(() => construct({ ackedRetentionMs: -1 })).toThrow(/`events.ackedRetentionMs` must be a finite number >= 0/);
+    expect(() => construct({ ackedRetentionMs: Number.NaN })).toThrow(/`events.ackedRetentionMs`/);
+    expect(() => construct({ ackedRetentionMs: Number.POSITIVE_INFINITY })).toThrow(/`events.ackedRetentionMs`/);
+    // `0` is the DEFAULT and it is meaningful ("delete on ack"), so the floor is 0, not 1.
+    expect(() => construct({ ackedRetentionMs: 0 })).not.toThrow();
+    expect(() => construct({ ackedRetentionMs: 30_000 })).not.toThrow();
+    // Non-integer ms is fine — it is a duration, not a count.
+    expect(() => construct({ ackedRetentionMs: 1.5 })).not.toThrow();
+  });
 });
 
 describe("verdict handling (ADR-0053 decision 3)", () => {
@@ -476,6 +491,159 @@ describe("verdict handling (ADR-0053 decision 3)", () => {
     await withFetch(fetchMock, () => runtime.flush());
 
     expect(bodies).toHaveLength(1);
+  });
+});
+
+describe("the acked ledger (ADR-0060)", () => {
+  /** Every Outbox row with its ledger stamp, in append order — the shape a best-guess view reads. */
+  async function ledgerRows(db: LaneHarness["db"]) {
+    const rows = await db.query<{ stream: string; acked_at_us: string | null }>(
+      // `::text` so the stamp arrives as the exact decimal string the column holds, never a JS number.
+      `SELECT stream, acked_at_us::text AS acked_at_us FROM pgxsinkit_outbox ORDER BY seq`,
+    );
+    return rows.rows;
+  }
+
+  it("DELETES on ack at the default retention of 0 — the pre-ledger behaviour, unchanged", async () => {
+    const { db, runtime } = await makeLane();
+    const { fetchMock } = verdictFetch(acked);
+
+    await runtime.appendEvent("review_graded", { cardId: "c-0" });
+    await withFetch(fetchMock, () => runtime.flush());
+
+    // No stamp, no sweep round trip: the row is simply gone, exactly as it was before the ledger existed.
+    expect(await ledgerRows(db)).toEqual([]);
+  });
+
+  it("STAMPS and KEEPS an acked row when a retention is configured", async () => {
+    const { db, runtime, clock } = await makeLane({ events: { ackedRetentionMs: 60_000 } });
+    const { fetchMock } = verdictFetch(acked);
+
+    await runtime.appendEvent("review_graded", { cardId: "c-0" });
+    await withFetch(fetchMock, () => runtime.flush());
+
+    // The row survives its own ack, stamped with when the server took it — the window a best-guess view
+    // composes across while the server's consumer folds the event and the folded row syncs back down.
+    expect(await ledgerRows(db)).toEqual([{ stream: "review_graded", acked_at_us: String(clock.now() * 1000) }]);
+  });
+
+  it("does not count a retained row as PENDING — the drain signal, the pull, and assembly all ignore it", async () => {
+    const { runtime, clock } = await makeLane({ events: { ackedRetentionMs: 60_000 } });
+    const { fetchMock, bodies } = verdictFetch(acked);
+    const seen: OutboxStatus[] = [];
+    runtime.onOutboxStatus((status) => seen.push(status));
+    await waitUntil(() => seen.length > 0);
+
+    await runtime.appendEvent("review_graded", { cardId: "c-0" });
+    await withFetch(fetchMock, () => runtime.flush());
+
+    // `{ empty }` means "nothing awaits a server VERDICT" — this row has had its verdict, so the lane is
+    // drained even though the row is still there. Anything else would keep a destroy refused and a "pending
+    // events" indicator lit for the whole retention.
+    expect(seen).toEqual([{ empty: true }, { empty: false }, { empty: true }]);
+    expect(await runtime.outboxStatus()).toEqual({ empty: true });
+
+    // ...and a later pass never re-posts it: a second delivery the `eventId` dedupe would have to absorb is
+    // exactly the traffic the ledger must not create.
+    clock.advance(1_000);
+    await withFetch(fetchMock, () => runtime.flush());
+    expect(bodies).toHaveLength(1);
+  });
+
+  it("sweeps only the rows whose retention has ELAPSED, oldest first", async () => {
+    const { db, runtime, clock } = await makeLane({ events: { ackedRetentionMs: 10_000 } });
+    const { fetchMock } = verdictFetch(acked);
+
+    await runtime.appendEvent("review_graded", { cardId: "old" });
+    await withFetch(fetchMock, () => runtime.flush());
+
+    clock.advance(5_000);
+    await runtime.appendEvent("board_issue_viewed", { issueId: "young" });
+    await withFetch(fetchMock, () => runtime.flush());
+    expect((await ledgerRows(db)).map((row) => row.stream)).toEqual(["review_graded", "board_issue_viewed"]);
+
+    // 11s after the first ack and 6s after the second: the cutoff falls between them.
+    clock.advance(6_000);
+    await withFetch(fetchMock, () => runtime.flush());
+    expect(await ledgerRows(db)).toEqual([
+      { stream: "board_issue_viewed", acked_at_us: String((clock.now() - 6_000) * 1000) },
+    ]);
+
+    // Past the second one's retention too, and the ledger is empty again.
+    clock.advance(5_000);
+    await withFetch(fetchMock, () => runtime.flush());
+    expect(await ledgerRows(db)).toEqual([]);
+  });
+
+  it("sweeps from a pass that posts NOTHING, including one sitting in batch backoff", async () => {
+    // The sweep is store-local bookkeeping that owes the network nothing, so it runs at the TOP of the pass:
+    // a lane held off by a failing server must still make the retention true.
+    const { db, runtime, clock } = await makeLane({
+      events: { ackedRetentionMs: 10_000, backoff: { baseMs: 60_000, ceilingMs: 120_000 } },
+    });
+    const { fetchMock: okMock } = verdictFetch(acked);
+    const { fetchMock: failMock } = failingFetch(503);
+
+    await runtime.appendEvent("review_graded", { cardId: "c-0" });
+    await withFetch(okMock, () => runtime.flush());
+    // A second event fails its batch, so the lane is now in a 60s backoff with a pending row held.
+    await runtime.appendEvent("review_graded", { cardId: "c-1" });
+    await withFetch(failMock, () => runtime.flush());
+    expect((await ledgerRows(db)).map((row) => row.stream)).toHaveLength(2);
+
+    clock.advance(11_000);
+    await withFetch(failMock, () => runtime.flush());
+    // The pass returned at the backoff gate without posting, and the acked row was still retired; the
+    // pending one is untouched (only a server verdict may retire it).
+    expect(await ledgerRows(db)).toEqual([{ stream: "review_graded", acked_at_us: null }]);
+    expect(failMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never retains `refused` or `rejected` — the ledger bridges an ack to a FOLD, and those never fold", async () => {
+    const { db, runtime, reports } = await makeLane({ events: { ackedRetentionMs: 60_000 } });
+    const { fetchMock } = verdictFetch((_eventId, index) =>
+      index === 0
+        ? { status: "acked" }
+        : index === 1
+          ? { status: "refused", reason: "consent withdrawn" }
+          : { status: "rejected", reason: "schema" },
+    );
+
+    await runtime.appendEvent("review_graded", { cardId: "c-0" });
+    await runtime.appendEvent("review_graded", { cardId: "c-1" });
+    await runtime.appendEvent("review_graded", { cardId: "c-2" });
+    await withFetch(fetchMock, () => runtime.flush());
+
+    // Only the acked row survives; both terminal-failure rows are deleted and reported, unchanged.
+    expect((await ledgerRows(db)).map((row) => row.acked_at_us !== null)).toEqual([true]);
+    expect(
+      reports
+        .flatMap((report) => report.terminal)
+        .map((verdict) => verdict.status)
+        .sort(),
+    ).toEqual(["refused", "rejected"]);
+  });
+
+  it("retires rows a PREVIOUS run stamped when the lane is constructed with no retention", async () => {
+    // Turning the ledger off must not strand its rows: they are non-pending, so nothing else would ever
+    // look at them. A retention-0 runtime cannot produce a stamped row, which is exactly why one sweep at
+    // construction is sufficient — and why its flush passes can skip the sweep entirely.
+    const { db, runtime, clock } = await makeLane({ events: { ackedRetentionMs: 60_000 } });
+    const { fetchMock } = verdictFetch(acked);
+    await runtime.appendEvent("review_graded", { cardId: "c-0" });
+    await withFetch(fetchMock, () => runtime.flush());
+    expect(await ledgerRows(db)).toHaveLength(1);
+
+    createEventLaneRuntime({ db, registry, batchEventUrl: EVENT_URL, now: clock.now, random: () => 1 });
+
+    // The construction sweep is a fire-and-forget store read (the drain-signal probe's twin), so poll for it
+    // rather than sleeping on a guess.
+    let remaining = 1;
+    for (let attempt = 0; attempt < 200 && remaining > 0; attempt += 1) {
+      remaining = (await db.query(`SELECT 1 FROM pgxsinkit_outbox`)).rows.length;
+      if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(remaining).toBe(0);
   });
 });
 

@@ -173,9 +173,10 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    */
   batchEventUrl?: string;
   /**
-   * The Event lane's client-level flush policy (ADR-0053): batch caps, the fallback interval, backoff, and
-   * per-Event-stream overrides. A worker-ENTRY option, never an attach option — flush cadence is one
-   * engine-wide policy, and the Outbox it drains is shared by every attached tab.
+   * The Event lane's client-level flush policy (ADR-0053): batch caps, the fallback interval, backoff, the
+   * acked ledger's retention (ADR-0060), and per-Event-stream overrides. A worker-ENTRY option, never an
+   * attach option — flush cadence is one engine-wide policy, and the Outbox it drains is shared by every
+   * attached tab.
    */
   events?: EventLaneOptions;
   /**

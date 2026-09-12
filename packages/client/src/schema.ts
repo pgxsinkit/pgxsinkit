@@ -71,6 +71,17 @@ export const LOCAL_META_TABLE = "pgxsinkit_local_meta";
  *   `next_retry_at_us` is in the future is skipped by batch assembly. NULL = eligible now.
  * - `last_reason` — the most recent server `deferred` reason, kept on the row it belongs to (never a
  *   second, retention-bearing verdict table — ADR-0053 rejects that).
+ * - `acked_at_us` — the **acked ledger** stamp (ADR-0060): when the server accepted the event, or NULL
+ *   while it is still PENDING a verdict. NULL is the pending predicate — everything the library means by
+ *   "pending" reads `acked_at_us IS NULL` (the drain signal, batch assembly, `diagnostics().outbox`, the
+ *   non-forced `destroy()` refusal), so a stamped row is never re-posted and never keeps the lane
+ *   "non-empty". It is stamped instead of deleted only when the client configures
+ *   `events.ackedRetentionMs > 0`; at the default `0` an `acked` verdict deletes the row immediately and
+ *   this column is never non-NULL. **For a best-guess view it is the grace ledger**: an `acked` row has
+ *   been accepted but NOT yet folded by the server's consumer, and the folded aggregate has not yet synced
+ *   back down — so a composition may keep counting an acked row until its own synced row's stamp passes
+ *   `acked_at_us`, or until the retention elapses and the sweep deletes it. That dip is the whole reason
+ *   the column exists.
  */
 export const OUTBOX_TABLE = "pgxsinkit_outbox";
 
@@ -159,15 +170,27 @@ function localMetaBootstrapStatements(localSchema: string): string[] {
 }
 
 /**
- * The **Outbox** DDL (ADR-0053 decision 2) — its sequence, table, and the two indexes that serve it. Emitted
- * unconditionally in the durable stream (never gated on `registry.streams`): the shape is stream-independent
- * and the table must exist before the first `appendEvent`, which may be the first thing an app does after a
- * registry gains its first Event stream. See {@link OUTBOX_TABLE} for the column contract.
+ * The **Outbox** DDL (ADR-0053 decision 2) — its sequence, table, and the three indexes that serve it.
+ * Emitted unconditionally in the durable stream (never gated on `registry.streams`): the shape is
+ * stream-independent and the table must exist before the first `appendEvent`, which may be the first thing
+ * an app does after a registry gains its first Event stream. See {@link OUTBOX_TABLE} for the column
+ * contract.
  *
- * Two indexes, one per access pattern:
+ * **CREATE-only, deliberately** (ADR-0060): these are `IF NOT EXISTS` statements, so a store provisioned
+ * before a column existed does NOT gain it — there is no ALTER path and no adoption. A store predating
+ * `acked_at_us` is reset at the consumer's cutover, per this library's greenfield rule.
+ *
+ * Three indexes, one per access pattern:
  * - `(stream, seq)` serves the APP's `WHERE stream = ?` best-guess-view queries in append order;
  * - `(next_retry_at_us, seq)` serves BATCH ASSEMBLY — ordered by `seq` across all streams, skipping rows
- *   whose deferred backoff has not elapsed.
+ *   whose deferred backoff has not elapsed;
+ * - `(acked_at_us, seq)` serves BOTH halves of the acked ledger (ADR-0060) with one index: the pending
+ *   predicate `acked_at_us IS NULL ORDER BY seq` that every "pending" read now carries (assembly, the
+ *   drain signal), and the retention sweep's `acked_at_us <= now - retention`. A partial index on `seq`
+ *   `WHERE acked_at_us IS NULL` would serve the pending side slightly more tightly and leave the SWEEP
+ *   with no index at all — it targets exactly the rows such an index excludes, which in a ledger-enabled
+ *   store are most of the table. Leading on `acked_at_us` keeps both as range scans, and `seq` second
+ *   keeps assembly's ordering free of a sort.
  */
 function outboxStatements(localSchema: string): string[] {
   const outboxTable = qualifyIdentifier(localSchema, OUTBOX_TABLE);
@@ -185,9 +208,11 @@ function outboxStatements(localSchema: string): string[] {
       "attempt_count INTEGER NOT NULL DEFAULT 0",
       "next_retry_at_us BIGINT",
       "last_reason TEXT",
+      "acked_at_us BIGINT",
     ].join(",\n  ")}\n);`,
     renderCreateIndexStatement(outboxTable, `${OUTBOX_TABLE}_stream_seq_idx`, ["stream", "seq"]),
     renderCreateIndexStatement(outboxTable, `${OUTBOX_TABLE}_retry_seq_idx`, ["next_retry_at_us", "seq"]),
+    renderCreateIndexStatement(outboxTable, `${OUTBOX_TABLE}_acked_seq_idx`, ["acked_at_us", "seq"]),
   ];
 }
 

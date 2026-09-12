@@ -76,6 +76,23 @@ async function outboxCount(client: SyncClient<Registry>): Promise<number> {
   return (rows.rows[0] as { n: number } | undefined)?.n ?? 0;
 }
 
+/** Run `fn` with every event-ingestion POST answered `acked` — these clients otherwise post at a dead URL. */
+async function withAckingFetch<T>(fn: () => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input: unknown, init?: { body?: unknown }) => {
+    const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { events?: { eventId: string }[] };
+    return new Response(
+      JSON.stringify({ acks: (body.events ?? []).map((event) => ({ eventId: event.eventId, status: "acked" })) }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 describe("appendEvent on the client (ADR-0053 decision 2)", () => {
   it("derives the ingestion endpoint from the write endpoint and stages durably", async () => {
     const client = await makeClient("event-lifecycle-append");
@@ -159,6 +176,26 @@ describe("destroy (ADR-0053 decision 8 — the same refusal the owed mutations g
 
   it("does not refuse when the Outbox is empty", async () => {
     const client = await makeClient("event-lifecycle-destroy-empty");
+    await client.destroy();
+    clients.splice(clients.indexOf(client), 1);
+  });
+
+  it("does not refuse on rows the acked LEDGER is retaining — they have had their verdict (ADR-0060)", async () => {
+    const client = await makeClient("event-lifecycle-destroy-acked", {
+      events: { ackedRetentionMs: 60_000, intervalMs: 10_000_000 },
+    });
+    await withAckingFetch(async () => {
+      await client.appendEvent("board_issue_viewed", { issueId: "issue-1" });
+      await client.flushEvents();
+    });
+
+    // The row is still physically there — that is the ledger — but nothing is owed to the server, so the
+    // drain signal reads empty and a non-forced destroy proceeds. "Pending" is `acked_at_us IS NULL`, never
+    // "a row exists".
+    expect(await outboxCount(client)).toBe(1);
+    expect(await client.outboxStatus()).toEqual({ empty: true });
+    expect((await client.diagnostics()).outbox).toEqual({ empty: true });
+
     await client.destroy();
     clients.splice(clients.indexOf(client), 1);
   });

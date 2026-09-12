@@ -18,6 +18,12 @@
  *    client-side quarantine (ADR-0053 decision 4): terminal deletion happens only on `acked`/`refused`/
  *    `rejected`. A batch that keeps failing backs off at a ceiling, observably, while the Outbox keeps
  *    absorbing appends — it is designed to hold offline weeks.
+ *
+ * ADR-0060 adds one wrinkle to that second invariant's `acked` half: with `events.ackedRetentionMs > 0` an
+ * acked row is STAMPED (`acked_at_us`) and retained for the retention rather than deleted at once, so a
+ * best-guess view can keep counting it across the ack→fold→sync window. It is a delayed delete, not a
+ * changed verdict — a stamped row is no longer PENDING anywhere in this file (assembly skips it, the drain
+ * signal ignores it), and the sweep retires it.
  */
 
 import { and, asc, eq, inArray, isNull, lte, notInArray, or, sql } from "drizzle-orm";
@@ -104,6 +110,28 @@ export interface EventLaneOptions {
   intervalMs?: number;
   /** Backoff tuning for deferred rows and for batch-level faults. */
   backoff?: EventBackoffOptions;
+  /**
+   * How long an **acked** row is RETAINED in the Outbox after the server accepts it, in ms (ADR-0060).
+   * Defaults to `0`.
+   *
+   * `0` is exactly the lane's original behaviour: an `acked` verdict DELETES the row on the spot, in the
+   * same statement that retires the terminal `refused`/`rejected` ones — no stamp, no sweep, no added cost
+   * on the default path. Anything greater turns on the **acked ledger**: the row stays, stamped with
+   * `acked_at_us`, until a sweep retires it that many ms later.
+   *
+   * It exists for ONE consumer shape — a best-guess view composing pending Outbox rows with down-synced
+   * aggregates. The server accepts an event well BEFORE its consumer folds it, and the folded row syncs
+   * back down later still, so a composition that drops the event at the ack dips for the whole ack→fold→sync
+   * window. With a retention the acked row is still there to be counted during it. The library takes no
+   * position on when the fold landed (it cannot know); the view keeps the row until its own synced value
+   * accounts for it, and the retention is the backstop.
+   *
+   * Retained rows are NOT pending: they are invisible to batch assembly (never re-posted), to the drain
+   * signal `{ empty }`, to `diagnostics().outbox`, and to the non-forced `destroy()` refusal. Size it to
+   * the deployment's ack→fold→sync latency plus margin, not to "how long I want the history" — the Outbox
+   * is not an archive.
+   */
+  ackedRetentionMs?: number;
   /** Per-Event-stream overrides, keyed by Event-stream name. */
   streams?: Record<string, EventStreamFlushOptions>;
 }
@@ -122,6 +150,9 @@ export interface EventAppendResult {
  * The **drain signal** (ADR-0053 decision 2): whether the Outbox is empty. Deliberately no count — a count
  * that updates only on transitions is stale by construction, and a count updated per append is a worse live
  * query. Richer detail is a query against the Outbox table.
+ *
+ * "Empty" is "nothing AWAITS A SERVER VERDICT", so acked rows the ledger is retaining (ADR-0060) do not
+ * hold it `false` — they have had their verdict.
  */
 export interface OutboxStatus {
   empty: boolean;
@@ -488,6 +519,10 @@ export function validateEventLaneOptions(options: EventLaneOptions): void {
 
   requireCount("events.batchSize", options.batchSize);
   requireMs("events.intervalMs", options.intervalMs, 1);
+  // The acked ledger's retention (ADR-0060). `0` is meaningful — it IS the default, "delete on ack" — so
+  // the floor is 0, not 1; a negative or NaN retention would make the sweep's cutoff nonsense (a negative
+  // one would retire rows the server acked in the FUTURE, a NaN one would retire nothing, silently).
+  requireMs("events.ackedRetentionMs", options.ackedRetentionMs, 0);
   const globalBackoff = requireBackoff("events.backoff", options.backoff, defaults);
 
   for (const [stream, streamOptions] of Object.entries(options.streams ?? {})) {
@@ -531,6 +566,13 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
   // Clamp to the contracts-level cap: the server enforces it independently of any client tuning, so a
   // client configured above it would only ever produce 413s.
   const batchSize = Math.max(1, Math.min(laneOptions.batchSize ?? DEFAULT_EVENT_BATCH_SIZE, MAX_EVENTS_PER_BATCH));
+  /**
+   * The acked ledger's retention (ADR-0060). The default `0` keeps the lane's original semantics EXACTLY:
+   * an `acked` verdict deletes the row in the same statement as the other terminal verdicts, so no row is
+   * ever stamped while this runtime runs and the per-pass sweep is not needed at all.
+   */
+  const ackedRetentionMs = laneOptions.ackedRetentionMs ?? 0;
+  const retainsAcked = ackedRetentionMs > 0;
 
   const nowUs = (): string => (BigInt(clockMs()) * 1000n).toString();
   const backoffFor = (stream?: string): EventBackoffOptions => ({
@@ -560,11 +602,17 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
    * The drain signal's read. Deliberately `LIMIT 1`, never `count(*)`: the signal is a BOOLEAN, and an
    * Outbox designed to hold offline weeks would make a counting scan the expensive part of every flush pass
    * and every lifecycle check. (An app that genuinely wants a count queries the table itself.)
+   *
+   * "Empty" means NO ROW AWAITS A SERVER VERDICT (ADR-0060) — `acked_at_us IS NULL` — not "no row at all".
+   * An acked row being held for the ledger's retention has already had its verdict, so it must not keep the
+   * signal `{ empty: false }`: this boolean is what the export drain polls, what `diagnostics().outbox`
+   * answers, and what a non-forced `destroy()` refuses on, and every one of those means "still owed".
    */
   const isOutboxEmpty = async (): Promise<boolean> => {
     const query = queryBuilder()
       .select({ one: sql<number>`1`.as("one") })
       .from(outbox)
+      .where(isNull(outbox.ackedAtUs))
       .limit(1)
       .toSQL();
     const result = await options.db.query<{ one: number }>(query.sql, query.params as unknown[]);
@@ -577,13 +625,38 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
     return empty;
   };
 
+  /**
+   * The acked ledger's sweep (ADR-0060): retire every row whose `acked_at_us` is older than the configured
+   * retention. One statement, served by the `(acked_at_us, seq)` index; pending rows are excluded by SQL's
+   * own NULL semantics (`NULL <= x` is never true), so no `IS NOT NULL` is needed to keep them.
+   *
+   * A retention of `0` makes the cutoff `now`, which retires every stamped row — the correct cleanup when a
+   * deployment turns the ledger OFF again, and the reason this runs once at construction unconditionally.
+   */
+  const sweepAckedLedger = async (): Promise<void> => {
+    const cutoffUs = (BigInt(nowUs()) - BigInt(Math.round(ackedRetentionMs)) * 1000n).toString();
+    const query = queryBuilder().delete(outbox).where(lte(outbox.ackedAtUs, cutoffUs)).toSQL();
+    await options.db.query(query.sql, query.params as unknown[]);
+  };
+
   // The first read of the drain signal, kicked off eagerly so a subscriber that arrives before any append
   // or flush still gets the CURRENT state delivered (never a silent subscription). Failures are swallowed:
   // an unreadable Outbox at boot is a store problem the boot path itself reports.
-  const initialProbe = refreshDrainSignal().catch((error: unknown) => {
-    syncDebug("event lane: initial drain-signal probe failed", { error });
-    return false;
-  });
+  //
+  // The ledger sweep runs FIRST, and at construction it runs whatever the retention is: rows stamped by a
+  // PREVIOUS run under a different (or since-removed) retention are the only stamped rows a retention-0
+  // runtime can ever meet, and this is where they are retired. Afterwards a retention-0 lane can produce no
+  // stamped row at all, which is why its flush passes skip the sweep entirely and stay exactly as cheap as
+  // they were before the ledger existed.
+  const initialProbe = sweepAckedLedger()
+    .catch((error: unknown) => {
+      syncDebug("event lane: initial acked-ledger sweep failed", { error });
+    })
+    .then(() => refreshDrainSignal())
+    .catch((error: unknown) => {
+      syncDebug("event lane: initial drain-signal probe failed", { error });
+      return false;
+    });
 
   const emitReport = (report: EventLaneReport): void => {
     if (report.terminal.length === 0 && report.deferred.length === 0 && report.backoff == null) {
@@ -683,9 +756,14 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
   );
 
   /**
-   * A row deferred by the server waits out its own backoff; every other row is eligible.
+   * A row deferred by the server waits out its own backoff; every other PENDING row is eligible.
+   *
+   * `acked_at_us IS NULL` is the pending half (ADR-0060) and it is not optional: a row the server has
+   * already acked is being held for the ledger's retention, and re-posting it would be a duplicate delivery
+   * the `eventId` dedupe would have to absorb — exactly the traffic the ledger is not for.
    */
-  const eligibleNow = () => or(isNull(outbox.nextRetryAtUs), lte(outbox.nextRetryAtUs, nowUs()));
+  const eligibleNow = () =>
+    and(isNull(outbox.ackedAtUs), or(isNull(outbox.nextRetryAtUs), lte(outbox.nextRetryAtUs, nowUs())));
 
   const readEligibleRows = async (limit: number): Promise<OutboxRow[]> => {
     // Rows come back through the RAW seam (no drizzle result mapping), so every column is aliased to its
@@ -810,6 +888,23 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
     await options.db.query(query.sql, query.params as unknown[]);
   };
 
+  /**
+   * Stamp acked rows instead of deleting them (ADR-0060, the ledger's `ackedRetentionMs > 0` path). The
+   * stamp is what makes the row non-pending everywhere while leaving it readable by a best-guess view for
+   * the retention window; the sweep is what eventually retires it.
+   */
+  const stampAcked = async (eventIds: readonly string[]): Promise<void> => {
+    if (eventIds.length === 0) {
+      return;
+    }
+    const query = queryBuilder()
+      .update(outbox)
+      .set({ ackedAtUs: nowUs() })
+      .where(inArray(outbox.eventId, [...eventIds]))
+      .toSQL();
+    await options.db.query(query.sql, query.params as unknown[]);
+  };
+
   /** Park one deferred row: bump its attempt count and push its next retry out by the jittered backoff. */
   const deferEvent = async (row: OutboxRow, reason: string | undefined): Promise<void> => {
     const attempt = row.attemptCount + 1;
@@ -910,6 +1005,8 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
     const terminal: EventLaneVerdict[] = [];
     const deferred: EventLaneVerdict[] = [];
     const deletable: string[] = [];
+    /** Acked rows the ledger RETAINS (empty unless `ackedRetentionMs > 0` — see {@link stampAcked}). */
+    const stampable: string[] = [];
 
     for (const ack of acks) {
       const row = batch.rowsByEventId.get(ack.eventId);
@@ -933,19 +1030,29 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
         continue;
       }
 
-      deletable.push(ack.eventId);
-      if (ack.status !== "acked") {
-        // `refused` (gating) and `rejected` (schema-invalid/oversized for a KNOWN stream) are terminal and
-        // reported: once the row is deleted the Outbox can no longer answer what happened to it.
-        terminal.push(verdict);
+      if (ack.status === "acked") {
+        // The acked ledger (ADR-0060). With a retention the row is STAMPED and kept — the server has
+        // accepted the event, but its consumer has not folded it and the folded aggregate has not synced
+        // back down, so a best-guess view still needs the row. At the default retention of `0` it joins the
+        // terminal deletes below, which is the pre-ledger behaviour byte for byte.
+        (retainsAcked ? stampable : deletable).push(ack.eventId);
+        continue;
       }
+
+      // `refused` (gating) and `rejected` (schema-invalid/oversized for a KNOWN stream) are terminal and
+      // reported: once the row is deleted the Outbox can no longer answer what happened to it. They are
+      // never retained — the ledger exists to bridge an ack to its fold, and neither of these will ever be
+      // folded.
+      deletable.push(ack.eventId);
+      terminal.push(verdict);
     }
 
     // An envelope the server answered for at all is settled; one it did not answer for stays put and rides
     // the next batch (the server owes a verdict per well-formed envelope, so this is a server bug, not a
     // reason to discard).
     await deleteEvents(deletable);
-    return { terminal, deferred, settledCount: deletable.length + deferred.length };
+    await stampAcked(stampable);
+    return { terminal, deferred, settledCount: deletable.length + stampable.length + deferred.length };
   };
 
   let flushChain: Promise<void> = Promise.resolve();
@@ -953,6 +1060,17 @@ export function createEventLaneRuntime<TRegistry extends SyncTableRegistry>(
   const runFlush = async (): Promise<void> => {
     if (!hasStreams) {
       return;
+    }
+    // The ledger's sweep (ADR-0060), at the TOP of the pass and BEFORE the backoff gate: retiring rows the
+    // server already acked is store-local bookkeeping that owes the network nothing, so a lane sitting in
+    // batch backoff must still make the retention true. Skipped entirely at the default retention of `0`,
+    // where nothing can be stamped (the construction-time sweep already retired anything a previous run
+    // left behind), so the default path costs exactly what it did before.
+    if (retainsAcked) {
+      await sweepAckedLedger().catch((error: unknown) => {
+        // The sweep is bookkeeping: a failure delays a delete, it never costs an event. Never fail a pass.
+        syncDebug("event lane: acked-ledger sweep failed", { error });
+      });
     }
     if (batchAttempt > 0 && clockMs() < batchRetryAtMs) {
       syncDebug("event lane: flush skipped (batch-level backoff)", {

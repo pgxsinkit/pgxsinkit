@@ -1193,9 +1193,10 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   batchEventUrl?: string;
   /**
    * The Event lane's client-level flush policy (ADR-0053): batch caps, the fallback interval, backoff
-   * tuning, and per-Event-stream overrides. NEVER on the registry — the registry is the contract, cadence is
-   * deployment tuning, and a batch-size tweak must not surface as a registry diff. Client batching is
-   * additionally clamped by the contracts-level request-shape limits the server enforces independently.
+   * tuning, the acked ledger's retention (ADR-0060), and per-Event-stream overrides. NEVER on the registry —
+   * the registry is the contract, cadence is deployment tuning, and a batch-size tweak must not surface as a
+   * registry diff. Client batching is additionally clamped by the contracts-level request-shape limits the
+   * server enforces independently.
    */
   events?: EventLaneOptions;
   /**
@@ -1591,7 +1592,8 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * The store's owed-state diagnostics: the mutation journal's per-status counts, plus — when this client has
    * an Event lane — the Outbox's drain signal (ADR-0053 decision 8: the Event lane's durable state takes a
    * position on every lifecycle surface). `outbox` is the boolean signal rather than a count, for the reason
-   * {@link onOutboxStatus} carries none; it is absent on a client with no lane.
+   * {@link onOutboxStatus} carries none; it is absent on a client with no lane. It reports what is OWED, so
+   * acked rows held by the ledger's retention (ADR-0060) read as empty.
    */
   diagnostics: (table?: SyncTableName<TRegistry>) => Promise<{
     mutation: MutationDiagnostics;
@@ -3320,7 +3322,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
           // ADR-0053 decision 8: the same refusal, for the Event lane's durable state. A non-empty Outbox
           // holds events the SERVER has not yet ruled on, and "never discard without a server verdict" is
           // exactly what at-least-once means on this edge — so a non-forced destroy refuses here too,
-          // naming the Outbox so the two causes are never confused.
+          // naming the Outbox so the two causes are never confused. Rows the acked ledger is retaining
+          // (ADR-0060) have HAD their verdict, so they are not "empty: false" and never block a destroy.
           if (eventLane && !(await eventLane.outboxStatus()).empty) {
             throw new Error(
               "destroy() refused: the Outbox still holds staged event(s) awaiting a server verdict. " +

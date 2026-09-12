@@ -91,6 +91,7 @@ describe("Outbox DDL (ADR-0053 decision 2 — the shape is public contract)", ()
       "attempt_count",
       "next_retry_at_us",
       "last_reason",
+      "acked_at_us",
     ]);
     // The ordering key is a bigint, the payload is queryable jsonb (best-guess views read it), and the
     // deferred-backoff columns are the only nullable ones besides the reason.
@@ -99,15 +100,28 @@ describe("Outbox DDL (ADR-0053 decision 2 — the shape is public contract)", ()
     expect(byName.get("payload")?.data_type).toBe("jsonb");
     expect(byName.get("next_retry_at_us")?.is_nullable).toBe("YES");
     expect(byName.get("stream")?.is_nullable).toBe("NO");
+    // The acked ledger's stamp (ADR-0060) is a nullable `_us` bigint like every other clock column, and
+    // NULL is the PENDING predicate a best-guess view reads — so it cannot be NOT NULL.
+    expect(byName.get("acked_at_us")?.data_type).toBe("bigint");
+    expect(byName.get("acked_at_us")?.is_nullable).toBe("YES");
   });
 
-  it("indexes both access patterns: `WHERE stream = ?` app queries and ordered batch assembly", async () => {
+  it("indexes all three access patterns, including the acked ledger's (ADR-0060)", async () => {
     const db = await createSchemaTestPGlite(schemaSql);
-    const indexes = await db.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE tablename = 'pgxsinkit_outbox' ORDER BY indexname`,
+    const indexes = await db.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'pgxsinkit_outbox' ORDER BY indexname`,
     );
-    expect(indexes.rows.map((row) => row.indexname)).toContain("pgxsinkit_outbox_stream_seq_idx");
-    expect(indexes.rows.map((row) => row.indexname)).toContain("pgxsinkit_outbox_retry_seq_idx");
+    const names = indexes.rows.map((row) => row.indexname);
+    expect(names).toContain("pgxsinkit_outbox_stream_seq_idx");
+    expect(names).toContain("pgxsinkit_outbox_retry_seq_idx");
+    // ONE index serves BOTH halves of the ledger: the `acked_at_us IS NULL` pending predicate every
+    // "pending" read now carries, and the sweep's `acked_at_us <= cutoff`. Leading on `acked_at_us` (rather
+    // than a partial index on `seq`, which would leave the sweep unindexed) is what makes that possible.
+    expect(names).toContain("pgxsinkit_outbox_acked_seq_idx");
+    const acked = indexes.rows.find((row) => row.indexname === "pgxsinkit_outbox_acked_seq_idx");
+    expect(acked?.indexdef).toContain("acked_at_us");
+    expect(acked?.indexdef).toContain("seq");
+    expect(acked?.indexdef).not.toContain("WHERE");
   });
 
   it("is emitted for a STREAMLESS registry too — the DDL is stream-independent", () => {
@@ -132,7 +146,8 @@ describe("appendEvent (ADR-0053 decision 2)", () => {
       payload: { issueId: string; dwellMs: number };
       attempt_count: number;
       next_retry_at_us: string | null;
-    }>(`SELECT event_id, stream, payload, attempt_count, next_retry_at_us FROM pgxsinkit_outbox`);
+      acked_at_us: string | null;
+    }>(`SELECT event_id, stream, payload, attempt_count, next_retry_at_us, acked_at_us FROM pgxsinkit_outbox`);
     expect(rows.rows).toHaveLength(1);
     expect(rows.rows[0]!.event_id).toBe(result.eventId);
     expect(rows.rows[0]!.stream).toBe("board_issue_viewed");
@@ -141,6 +156,9 @@ describe("appendEvent (ADR-0053 decision 2)", () => {
     // A fresh row is eligible NOW: the deferred backoff exists only after a server verdict.
     expect(rows.rows[0]!.attempt_count).toBe(0);
     expect(rows.rows[0]!.next_retry_at_us).toBeNull();
+    // ...and it is PENDING: `acked_at_us IS NULL` is what every pending read and every best-guess view
+    // keys on (ADR-0060), so an append must never stamp it.
+    expect(rows.rows[0]!.acked_at_us).toBeNull();
   });
 
   it("assigns a strictly increasing `seq` across DIFFERENT Event streams (the one ordering key)", async () => {

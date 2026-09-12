@@ -166,6 +166,7 @@ function buildOutboxColumns() {
     attemptCount: integer("attempt_count").notNull().default(0),
     nextRetryAtUs: bigintText("next_retry_at_us"),
     lastReason: text("last_reason"),
+    ackedAtUs: bigintText("acked_at_us"),
   };
 }
 
@@ -681,6 +682,15 @@ export function getAllMutationsView(_registry: SyncTableRegistry): AllMutationsV
  * Public on purpose: the table's shape is contract, so an app composing a best-guess view (pending events
  * over down-synced aggregates) authors it as tier-① Drizzle instead of hand-written SQL —
  * `client.query((c) => c.drizzle.select().from(getOutboxTable(registry)).where(eq(outbox.stream, "…")))`.
+ *
+ * **A best-guess view's pending predicate is `acked_at_us IS NULL`** (ADR-0060), not "the row is present":
+ * with `events.ackedRetentionMs > 0` an accepted event is STAMPED and RETAINED rather than deleted, because
+ * the server has only accepted it — its consumer has not folded it yet, and the folded aggregate has not
+ * synced back down. That retention window is the composition's **grace ledger**: keep counting an acked row
+ * until your own synced row's stamp passes its `acked_at_us` (or until the retention elapses and the lane's
+ * sweep deletes it), and the composed value stops dipping between the ack and the fold. At the default
+ * retention of `0` an acked row is deleted on the spot, so `acked_at_us` is never non-NULL and the predicate
+ * costs nothing.
  */
 export function getOutboxTable(registry: SyncTableRegistry): OutboxTable {
   const localSchema = getSyncRegistrySchema(registry);

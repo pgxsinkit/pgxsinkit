@@ -248,6 +248,14 @@ intact; documented future refinement). No server-side buffering when the queue i
   polling's short statements deliberately avoid. Pacing is internal, so this can be revisited
   without contract change if the constraints move.
 
+## Amendment (2026-09-12): the acked ledger
+
+Decision 2's Outbox deletes a row on the `acked` verdict. Amended by
+[ADR-0060](0060-outbox-acked-ledger.md) (2026-09-12): with `events.ackedRetentionMs > 0` an acked row is
+stamped and RETAINED for that window instead — non-pending everywhere (drain signal, assembly, diagnostics,
+destroy), swept when it expires — so a best-guess view can compose across the ack→fold→sync gap. The default
+`0` is this decision's behaviour unchanged; see there.
+
 ## Amendment (2026-08-02): serverless drain hosting
 
 Decision 7 hosts the consumer in a long-lived process the app runs. Managed Supabase — the
