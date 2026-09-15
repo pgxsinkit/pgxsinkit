@@ -33,7 +33,7 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@durable-streams/client": "0.2.6",
+    "@durable-streams/client": "0.2.7",
     "@electric-sql/pglite-tools": "0.4.8",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/pglite-opfs-repacked": "workspace:*"
@@ -41,6 +41,6 @@
   "peerDependencies": {
     "@electric-sql/pglite": ">=0.5.8-pgx.1",
     "drizzle-orm": "1.0.0-rc.4",
-    "zod": "^4.6.1"
+    "zod": "^4.6.5"
   }
 }
