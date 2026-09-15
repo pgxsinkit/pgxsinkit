@@ -15,8 +15,8 @@ This page gets you from zero to a working read + write path. For what each packa
   its own replication slot. Supabase's images already ship it; verify with `postgres -C wal_level`.
 - **The read path's two services**: ElectricSQL's **Circuits engine**
   (`ghcr.io/pgxsinkit/electric-circuits/engine`, pinned by sha tag) and a **durable-streams** server
-  (`docker.io/electricax/durable-streams-server-rust:0.1.5`). The engine is configured entirely through
-  four environment variables:
+  (`ghcr.io/pgxsinkit/durable-streams-rust`, the pgxsinkit fork, also pinned by sha tag). The engine is
+  configured entirely through four environment variables:
 
   ```bash
   ELECTRIC_CIRCUITS_PG_URL=postgres://…      # the database it replicates from

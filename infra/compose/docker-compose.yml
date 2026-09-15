@@ -26,11 +26,13 @@ services:
   # The log the client actually READS from. Published image, pinned — as is every image in this
   # stack, the engine included: nothing here is built from a checkout.
   #
-  # Override with PGXSINKIT_DS_IMAGE to run a different build (e.g. the pgxsinkit fork's own image,
-  # ghcr.io/pgxsinkit/durable-streams-rust:sha-<short>, which is what staging will pin — upstream's
-  # Docker Hub namespace belongs to an acquired company and has no second publisher).
+  # The pgxsinkit fork's own image (ghcr.io/pgxsinkit/durable-streams-rust), pinned by sha tag —
+  # never `main` or `develop`, which move. Upstream's Docker Hub image
+  # (electricax/durable-streams-server-rust) is not used: that namespace belongs to an acquired
+  # company with no second publisher (see the fork's PROVENANCE.md). Override with PGXSINKIT_DS_IMAGE
+  # to run a different build.
   ds:
-    image: ${PGXSINKIT_DS_IMAGE:-docker.io/electricax/durable-streams-server-rust:0.1.5}
+    image: ${PGXSINKIT_DS_IMAGE:-ghcr.io/pgxsinkit/durable-streams-rust:sha-c269d9b}
     # FLAGS, not environment. This binary reads no env vars at all — `DS_PORT`/`DS_DATA_DIR`/`DS_MEMORY`
     # were invented here and silently ignored, leaving it on its own default (4437) while the engine
     # dialled ds:8791 and got ECONNREFUSED. Nothing caught it: podman's rootlessport accepts the HOST
