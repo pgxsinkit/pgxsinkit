@@ -32,7 +32,7 @@ class Harness {
 
   async start(
     storeName: string,
-    options: { durability: "relaxed" | "strict"; faultable?: boolean },
+    options: { durability: "relaxed" | "strict"; faultable?: boolean; countFlushes?: boolean },
   ): Promise<WorkerResponse> {
     this.terminate();
     const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });

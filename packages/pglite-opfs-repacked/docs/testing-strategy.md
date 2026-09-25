@@ -5,17 +5,18 @@ substrings; a renamed or removed test must update this map in the same change.
 
 ## Coverage layers
 
-| Contract area                                                                                                  | Primary coverage                                                                                           |
-| -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Pure planning, replay, validation, path bounds, and allocator partition                                        | `pglite-opfs-repacked-state.test.ts`, including the multi-seed reference-filesystem command sequences      |
-| Canonical formats, bounded readers, writer/reader closure, and projected-base sizing                           | `pglite-opfs-repacked-codec.test.ts`                                                                       |
-| Bootstrap, exact activation authority, longest-valid-log-prefix recovery, and recreate-only identity rejection | `pglite-opfs-repacked-recovery.test.ts`                                                                    |
-| Data-before-metadata operations, zero barriers, strict ordering, and poison                                    | `pglite-opfs-repacked-operations.test.ts`                                                                  |
-| Two-repack quarantine, projected replacement, forced-strict activation, and quota retry                        | `pglite-opfs-repacked-repack.test.ts`                                                                      |
-| Port operation labels and browser-failure persistence outcomes                                                 | `pglite-opfs-repacked-port.test.ts` and `pglite-opfs-repacked-fault-campaign.test.ts`                      |
-| PGlite construction, awaited host sync, cleanup, and poison delivery                                           | `pglite-opfs-repacked-adapter.test.ts` and `pglite-opfs-repacked-workload.test.ts`                         |
-| Actual OPFS handles and worker, tab, and browser termination                                                   | `tests/e2e/opfs-repacked/opfs-repacked.browser.test.ts`                                                    |
-| Synchronous broker wire protocol, chunking, errno pass-through, per-client fd ownership, and detach            | `pglite-opfs-repacked-broker-operations.test.ts`, `-broker-transport.test.ts`, `-broker-lifecycle.test.ts` |
+| Contract area                                                                                                  | Primary coverage                                                                                            |
+| -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Pure planning, replay, validation, path bounds, and allocator partition                                        | `pglite-opfs-repacked-state.test.ts`, including the multi-seed reference-filesystem command sequences       |
+| Canonical formats, bounded readers, writer/reader closure, and projected-base sizing                           | `pglite-opfs-repacked-codec.test.ts`                                                                        |
+| Bootstrap, exact activation authority, longest-valid-log-prefix recovery, and recreate-only identity rejection | `pglite-opfs-repacked-recovery.test.ts`                                                                     |
+| Data-before-metadata operations, zero barriers, strict ordering, and poison                                    | `pglite-opfs-repacked-operations.test.ts`                                                                   |
+| Two-repack quarantine, projected replacement, forced-strict activation, and quota retry                        | `pglite-opfs-repacked-repack.test.ts`                                                                       |
+| Port operation labels and browser-failure persistence outcomes                                                 | `pglite-opfs-repacked-port.test.ts` and `pglite-opfs-repacked-fault-campaign.test.ts`                       |
+| PGlite construction, awaited host sync, cleanup, and poison delivery                                           | `pglite-opfs-repacked-adapter.test.ts` and `pglite-opfs-repacked-workload.test.ts`                          |
+| Actual OPFS handles and worker, tab, and browser termination                                                   | `tests/e2e/opfs-repacked/opfs-repacked.browser.test.ts`                                                     |
+| Synchronous broker wire protocol, chunking, errno pass-through, per-client fd ownership, and detach            | `pglite-opfs-repacked-broker-operations.test.ts`, `-broker-transport.test.ts`, `-broker-lifecycle.test.ts`  |
+| Commit durability across a crash at a chosen store call, through the PGlite factory, both durability modes     | `pglite-opfs-repacked-crash-reopen.test.ts` (see [Crash and reopen](#crash-and-reopen-through-the-factory)) |
 
 The broker suites run both thread arrangements deliberately. `-broker-operations` and
 `-broker-transport` put the store and the blocking `serveForever()` loop in a Worker and block the
@@ -94,9 +95,89 @@ profile browser close/restart, relaxed-prefix recovery, and an injected real-han
 followed by a cache-only query. The structural wrapper used for the last case delegates all storage
 operations to real OPFS handles and exists only in the browser test bundle.
 
+`relaxed worker termination after N commits and before the next sync reopens every returned commit on
+disk` runs in a persistent profile, so the handles write real files: eight relaxed commits, the last
+seven past any metadata flush, then `worker.terminate()`, and a fresh worker finds all eight, intact,
+with an index scan agreeing with a sequential scan.
+
 The PGlite workload test exercises transactions, updates, deletes, concurrent submitted reads,
 constant four-handle ownership, strict close, and exact reopen through the package factory. No test in
 this package claims completed-flush protection from power loss, media failure, or external edits.
+
+## Crash and reopen through the factory
+
+`pglite-opfs-repacked-crash-reopen.test.ts` answers what a client finds after the worker dies between a
+commit and the store's next sync. `test/support/crash-opfs.ts` is the platform: the directory the
+factory's `OpfsRepackedPort` talks to, numbering every call the store makes. A kill at call `k` freezes
+the platform's persistent state there (a write at `k` may tear) while the process runs on, so the
+engine closes instead of leaking. Each frozen state is materialized four ways: **applied** (everything
+the platform accepted — a terminated worker), **flushed** (nothing unflushed survived — the most
+pessimistic image the contract admits), and the two mixes (**arena-applied**, **metadata-applied**).
+Each distinct image is reopened by the store alone (recovery must replay exactly the complete metadata
+frames the image holds) and through the factory (the table must be a commit prefix, an index scan must
+equal a sequential scan, every payload must be the one written, `verify_heapam` and
+`bt_index_check(heapallindexed)` must be clean, and the store must take a new commit and a clean close).
+
+The workload is PGlite on a strict-closed seed, 64 KiB extents: commits c1–c8 insert a row each, commit
+9 inserts 2,000 rows in one statement (8 MB of arena writes, over the 4 MiB amortization threshold), an
+explicit `strictSync()`, then c10–c12. The promise asserted first is the floor — strict: every commit
+that returned before the power died; relaxed: every commit the last strict boundary covered (a
+`strictSync()`, a repack activation, a close). Every image met it. What each image showed (commits
+visible: applied / flushed / arena-applied / metadata-applied) is then asserted exactly, as
+documentation:
+
+| Power dies in                                  | strict: dying step, images       | relaxed: dying step, images                 |
+| ---------------------------------------------- | -------------------------------- | ------------------------------------------- |
+| c5's WAL write, torn in half                   | c5 — 4 / 4 / 4 / 4               | c5 — 4 / 4 / 4 / 4                          |
+| c5's metadata append naming its heap extension | c5 — 5 / 4 / 5 / 4               | c5 — 5 / 4 / 5 / 4                          |
+| c5's metadata append, torn in half             | c5 — 5 / 4 / 5 / 4               | c5 — 5 / 4 / 5 / 4                          |
+| after the append, before the flush             | c5 (arena flush) — 5 / 4 / 5 / 4 | c6 (c5 returned, unflushed) — 5 / 4 / 5 / 4 |
+| between c5's arena flush and metadata flush    | c5 — 5 / 5 / 5 / 5               | —                                           |
+| after the flush: c5 returned                   | c6 — 5 / 5 / 5 / 5               | —                                           |
+| c8 returned, before the next sync              | bulk — 8 / 8 / 8 / 8             | bulk — 8 / 4 / 8 / 4                        |
+| the bulk's middle arena write, torn in half    | bulk — 8 / 8 / 8 / 8             | bulk — 8 / 8 / 8 / 8                        |
+| after the bulk's last append, before its flush | bulk — 9 / 8 / 9 / 8             | bulk (amortization flush) — 9 / 8 / 9 / 8   |
+| after that flush: the bulk returned            | c10 — 9 / 9 / 9 / 9              | strictSync (metadata flush) — 9 / 9 / 9 / 9 |
+| `strictSync()` returned                        | —                                | c10 — 9 / 9 / 9 / 9                         |
+| c12 returned, before close                     | close — 12 / 12 / 12 / 12        | close — 12 / 9 / 12 / 9                     |
+
+No image was unrecoverable, torn frames were never replayed, and no image showed a partially applied
+page (`data_checksums=on` verifies every page the scans and `amcheck` read). What the table documents
+beyond the promise:
+
+- **The arena alone decides.** In every row applied = arena-applied and flushed = metadata-applied.
+  PGlite's WAL segment is preallocated and written in place, so no WAL record needs a metadata frame to
+  be found, and redo re-extends any relation whose growth the metadata log lost. Unflushed metadata
+  lost no commit here. (Not covered: a WAL segment switch, which creates and renames a segment file
+  through the metadata log.)
+- **A terminated worker keeps every commit that returned**, in both modes, plus a dying commit whose WAL
+  write completed (c5 at its append; the bulk before its flush) — visible, never acknowledged.
+- **Relaxed without unflushed writes keeps every commit written before the last arena flush of any
+  kind**, not only the last strict boundary: a zero barrier (allocating a reused extent flushes the
+  arena) made c2–c4 durable during c5 and c5–c8 durable during the bulk; the arena-only amortization
+  flush alone made the bulk recoverable. Its loss window is the commits since the last arena flush
+  (c5–c8 at "c8 returned"; c10–c12 at "c12 returned").
+- **`fsync=off` changes nothing for PGlite**, which always boots Postgres with `-F` and never forwards a
+  guest fsync to the store: both columns are its only behaviour. A pgrust host that stops forwarding
+  guest fsyncs as store-wide strict syncs moves its relaxed stores from the strict column's boundaries
+  (one per WAL flush) to the relaxed column's.
+
+A rejected store lever (arena growth in 4 MiB chunks, coalesced extent writes, skipping zero writes
+past the high-water mark, holding metadata appends until the next sync) must pass this file: the
+structural locators fail loudly if a commit's WAL-write/append/flush shape changes, and the images must
+still meet the floor; a changed observation must be re-recorded here deliberately.
+
+**FINDING (2026-09-25): a transient platform write failure without an errno code is acknowledged as a
+commit.** When an arena write makes no progress the store rethrows the platform's own error without
+poisoning. PGlite's filesystem bridge maps a thrown error to an errno only if it has a truthy numeric
+`code`, and its main loop (`execProtocolRawSync`) runs `_PostgresMainLoopOnce()` inside a bare
+`catch {}`. So a plain `Error`, or a `DOMException` whose legacy code is 0 (`UnknownError`), thrown by
+the commit's WAL write unwinds Postgres out of `XLogWrite` and vanishes: the statement resolves, strict's
+sync flushes a store that never received the WAL, and a reopen does not have the commit. The engine
+then never returns from its next statement (a busy loop with no platform call; observed after a coded
+failure too). A coded error (`QuotaExceededError`, code 22) fails the commit correctly. `strict: FINDING
+— a transient platform write failure without an errno code acknowledges a commit the store never
+received` asserts the defect as observed; a fix must flip it to the contract.
 
 ## Conformance record — 2026-07-21
 

@@ -31,6 +31,8 @@ interface BrowserSyncAccessHandle {
 
 let pg: RepackedPGlite | undefined;
 let flushController: FlushController | undefined;
+/** Completed `flush()` calls per owned file, when the store was opened with `countFlushes`. */
+let flushCounts: Record<string, number> | undefined;
 
 globalThis.addEventListener("message", (event: MessageEvent<RequestMessage>) => {
   void respond(event.data);
@@ -47,12 +49,22 @@ async function respond(request: RequestMessage): Promise<void> {
 
 async function execute(command: string, value: unknown): Promise<unknown> {
   if (command === "open") {
-    const options = value as { storeName: string; durability: "relaxed" | "strict"; faultable?: boolean };
+    const options = value as {
+      storeName: string;
+      durability: "relaxed" | "strict";
+      faultable?: boolean;
+      countFlushes?: boolean;
+    };
     const root = await navigator.storage.getDirectory();
     const directory = await root.getDirectoryHandle(options.storeName, { create: true });
     flushController = options.faultable ? { failNext: false } : undefined;
+    flushCounts = options.countFlushes ? {} : undefined;
     pg = await openWithOwnershipRetry(
-      flushController === undefined ? asRepackedDirectory(directory) : faultableDirectory(directory, flushController),
+      flushController !== undefined
+        ? faultableDirectory(directory, flushController)
+        : flushCounts !== undefined
+          ? flushCountingDirectory(directory, flushCounts)
+          : asRepackedDirectory(directory),
       options.durability,
     );
     return "opened";
@@ -61,6 +73,13 @@ async function execute(command: string, value: unknown): Promise<unknown> {
   if (command === "exec") {
     await pg.exec(String(value));
     return "executed";
+  }
+  if (command === "query") {
+    return (await pg.query(String(value))).rows;
+  }
+  if (command === "flushes") {
+    if (flushCounts === undefined) throw new Error("flush counting was not enabled");
+    return { ...flushCounts };
   }
   if (command === "count") {
     const result = await pg.query<{ count: string }>("SELECT count(*)::text AS count FROM browser_values");
@@ -123,6 +142,41 @@ function faultableDirectory(directory: FileSystemDirectoryHandle, controller: Fl
                 throw new Error("forced browser OPFS flush failure");
               }
               handle.flush();
+            },
+            close: () => handle.close(),
+          };
+        },
+      };
+    },
+  };
+}
+
+/** Real OPFS handles, with every completed `flush()` counted per file and nothing else changed. */
+function flushCountingDirectory(
+  directory: FileSystemDirectoryHandle,
+  counts: Record<string, number>,
+): RepackedDirectory {
+  return {
+    async *values() {
+      for await (const entry of directory.values()) yield entry;
+    },
+    async getFileHandle(name, options) {
+      const file = await directory.getFileHandle(name, options);
+      return {
+        async createSyncAccessHandle() {
+          const handle = await (
+            file as FileSystemFileHandle & {
+              createSyncAccessHandle(): Promise<BrowserSyncAccessHandle>;
+            }
+          ).createSyncAccessHandle();
+          return {
+            getSize: () => handle.getSize(),
+            read: (target, readOptions) => handle.read(target, readOptions),
+            write: (source, writeOptions) => handle.write(source, writeOptions),
+            truncate: (size) => handle.truncate(size),
+            flush: () => {
+              handle.flush();
+              counts[name] = (counts[name] ?? 0) + 1;
             },
             close: () => handle.close(),
           };
