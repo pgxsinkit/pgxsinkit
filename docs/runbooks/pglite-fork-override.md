@@ -12,7 +12,7 @@ still allowed to depend on; see the policy section below.
 
 The fork tracks upstream's version with a hand-bumped `-pgx.N` suffix, is published as
 `@pgxsinkit/pglite` (dist-tag `pgx`), and is consumed from **public npm** (`registry.npmjs.org`).
-**`0.5.8-pgx.1` is the version to pin.**
+**`0.5.8-pgx.2` is the version to pin.**
 
 The override's original reason no longer applies: an OPFS `options.fs` lane opens PGlite via
 `PGlite.create({ fs })`, and plain upstream `0.5.4` leaked the user-provided `fs` into the inner
@@ -64,19 +64,29 @@ explicit-zero exit-code restore (`-pgx.2`) is **dropped**: upstream #1087 and #1
 `_pgl_setPGliteExitStatus` and `close()` clears the module reference instead — so the helper had nothing
 left to restore. One conflict was re-applied: the hardened `close()` keeps its structure with upstream's
 new exit tail. The 0.5.8 engine is mandatory for that source (it calls the new export); see the rebase
-section for where the artifacts come from.
+section for where the artifacts come from. **`0.5.8-pgx.2`** (2026-09-25) fails the instance on an
+engine exception instead of swallowing it. The main loop (`execProtocolRawSync`) caught everything
+`_PostgresMainLoopOnce()` threw and acted only on the status-100 longjmp path (`POSTGRES_MAIN_LONGJMP`,
+Postgres's own error recovery), so any other exception — a filesystem error the bridge did not turn
+into an errno, a throwing protocol callback, the `abort()` a PANIC ends in — acknowledged a statement
+that never completed and left the next one spinning synchronously in the loop (`pglite-opfs-repacked`'s
+crash-reopen suite found it as a strict commit acknowledged whose WAL write never reached the store).
+Now any exception other than Emscripten's own unwind rejects the statement with the cause, poisons the
+instance so every later statement throws that failure at once, and `close()` releases everything
+without running the aborted engine's shutdown, then rejects. `tryFSOperation` maps an uncoded platform
+error (a plain `Error`, a `DOMException` whose legacy code is 0) to `EIO` instead of rethrowing it.
 
 The root `package.json` therefore aliases the dependency for the whole workspace:
 
 ```jsonc
 "overrides": {
-  "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.8-pgx.1"
+  "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.8-pgx.2"
 }
 ```
 
 **Every publishable package requires the fork, and its peer range says so.** All three
 (`@pgxsinkit/client`, `@pgxsinkit/react`, `@pgxsinkit/pglite-opfs-repacked`) pin
-`"@electric-sql/pglite": ">=0.5.8-pgx.1"` — the current fork build as the lower bound. Semver only lets
+`"@electric-sql/pglite": ">=0.5.8-pgx.2"` — the current fork build as the lower bound. Semver only lets
 a prerelease satisfy a comparator that carries the same `major.minor.patch` tuple, so an older fork build
 (`0.5.5-pgx.5`) is refused; a plain upstream release at or above the base is admitted by the range, which
 is why the override — not the range — is what keeps consumers on the fork, and why the override must be
@@ -209,7 +219,7 @@ Steps, from `packages/pglite` on `pgx-publish`:
    upstream test/runner artifact, not a fork regression — read the pass/fail tallies for that lane.
 4. After bumping this repo, run `bun run validate:full` and read the **exit code**, not just the test
    tallies. A shard reported as `FAILED` with `0 fail` means the bun process exited non-zero while
-   every test passed — the signature of a leaked engine exit code (see `-pgx.2` above), not a test
+   every test passed — the signature of a leaked engine exit code (see `0.5.5-pgx.2` above), not a test
    regression. `bun run validate:full | tail` hides this: a pipeline's status is the last command's,
    so the script's failure is masked.
 

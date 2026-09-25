@@ -654,8 +654,8 @@ describe("opfs-repacked crash and reopen through the PGlite factory", () => {
          * the platform threw (README "Durability"). PGlite maps it to an I/O error, Postgres PANICs in
          * `XLogWrite` and reports it, and the commit fails; every later store call fails the same way, so
          * nothing reaches the platform after the failed write and no later host sync can acknowledge
-         * anything. The PGlite side (the next statement throwing instead of spinning) is the pending test
-         * below.
+         * anything. The PGlite side (the next statement throwing instead of spinning, fixed in
+         * `@pgxsinkit/pglite` 0.5.8-pgx.2) is the second test below.
          */
         const PLATFORM_WRITE_FAILURES = [
           ["uncoded DOMException", () => new DOMException("transient OPFS write failure", "UnknownError")],
@@ -719,8 +719,8 @@ describe("opfs-repacked crash and reopen through the PGlite factory", () => {
           async () => {
             for (const [, makeError] of PLATFORM_WRITE_FAILURES) {
               const error = makeError();
-              // The instance is abandoned, not closed: until the PGlite fix below ships, a statement after
-              // the PANIC never returns, and close() would run the aborted engine's shutdown.
+              // The instance is abandoned, not closed: what a statement after the PANIC and close() do is the
+              // next test's subject.
               await expectCommitRefused(error, await commitSixWithFailure(error));
             }
           },
@@ -728,14 +728,13 @@ describe("opfs-repacked crash and reopen through the PGlite factory", () => {
         );
 
         /**
-         * PENDING the PGlite fork fix (2026-09-25): `execProtocolRawSync` fails the instance on any exception
-         * that is not the Emscripten unwind/longjmp it uses for Postgres errors, so a statement after the
-         * PANIC throws the failure at once instead of spinning, and `close()` releases everything without
-         * running the aborted engine's shutdown. The installed `@electric-sql/pglite` (0.5.8-pgx.1) predates
-         * it and spins synchronously — no test timeout can interrupt that — so this stays `test.todo` until
-         * the pin moves past 0.5.8-pgx.1; then make it a `test`.
+         * The PGlite half, passing since `@pgxsinkit/pglite` 0.5.8-pgx.2: `execProtocolRawSync` fails the
+         * instance on any exception that is not the Emscripten unwind/longjmp it uses for Postgres errors, so a
+         * statement after the PANIC throws the failure at once, and `close()` releases everything without
+         * running the aborted engine's shutdown, then rejects with that failure. On 0.5.8-pgx.1 the next
+         * statement spun synchronously in that loop, where no test timeout can interrupt it.
          */
-        test.todo(
+        test(
           "strict: after a failed WAL write the next statement throws the same failure and close releases every handle",
           async () => {
             for (const [, makeError] of PLATFORM_WRITE_FAILURES) {

@@ -194,19 +194,20 @@ cache-only queries, and still closes every handle`: a query that reaches a poiso
 with Postgres's own I/O error (SQLSTATE 58030), where the store's exception used to be swallowed and
 the failure surfaced only at the host sync.
 
-The PGlite half is a fix in the `@pgxsinkit/pglite` fork after 0.5.8-pgx.1. The main loop fails the
+The PGlite half shipped in the `@pgxsinkit/pglite` fork at 0.5.8-pgx.2. The main loop fails the
 instance on any exception that is not the Emscripten unwind or longjmp it uses for Postgres errors, so
 the failing statement rejects naming the cause, every later statement throws that failure at once, and
-`close()` releases the filesystem without running the aborted engine's shutdown; `tryFSOperation`
-maps an error without a code to `EIO`. Until the pin moves past 0.5.8-pgx.1 the statement after such a
-failure still spins, synchronously, so no test timeout can catch it: `strict: after a failed WAL write
-the next statement throws the same failure and close releases every handle` stays `test.todo` until
-then.
+`close()` releases the filesystem without running the aborted engine's shutdown, then rejects with the
+failure; `tryFSOperation` maps an error without a code to `EIO`. On 0.5.8-pgx.1 the statement after
+such a failure spun, synchronously, where no test timeout could catch it. `strict: after a failed WAL
+write the next statement throws the same failure and close releases every handle` asserts the fixed
+behaviour for all three errors: the next `query` and `exec` reject with the commit's own error,
+`close()` rejects, and the store closes every handle it opened.
 
-Still open on 0.5.8-pgx.1: the store's retryable platform failures (zero barriers, arena growth, reads)
-surface the platform's own error and do not poison, by design (rows 4 and 20, `ambiguous fresh arena
-growth leaves no metadata and is safely retryable`). A PGlite statement that hits an uncoded one is
-still swallowed by that host's main loop; the fork fix reports it to Postgres as `EIO`.
+The store's retryable platform failures (zero barriers, arena growth, reads) still surface the
+platform's own error and do not poison, by design (rows 4 and 20, `ambiguous fresh arena growth leaves
+no metadata and is safely retryable`). Since 0.5.8-pgx.2 PGlite reports an uncoded one to Postgres as
+`EIO` instead of its main loop swallowing it.
 
 ## Conformance record — 2026-07-21
 
