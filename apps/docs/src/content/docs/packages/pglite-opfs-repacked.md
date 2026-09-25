@@ -102,7 +102,18 @@ absent, partial, or independently present; completed flushes remain stable. It d
 recovery after power loss, media failure, arbitrary external edits, or mysteriously missing activated
 files.
 
+A platform write the store could not complete poisons the live instance. An arena write the platform
+rejected before confirming a single byte leaves that range unknown, and a failed metadata-log append
+is ambiguous by construction, so the store never continues from either: that call and every later
+call throw `StoreFailedError` until `close()`, which releases the handles and persists nothing more.
+Its numeric `code` is 29 (`EIO`), so PGlite reports an I/O error to Postgres, which treats a failed WAL
+write as PANIC, and the awaited host sync after a commit rejects on a poisoned store: in either
+durability mode, a commit whose write failed is never acknowledged. Close the database and reopen it;
+recovery keeps exactly what reached the platform. A write the platform accepted in part returns the
+short count and does not poison.
+
 All storage errors expose stable classes. Store-level errors carry a string `storeCode`; wrapped errors
 retain `cause`. `StoreFailedError` means the live instance is poisoned: close and reopen, then inspect
-its cause. See the [generated API reference](/api/pglite-opfs-repacked/readme/) for the complete error
+its cause. It also carries the numeric `code` 29 (`EIO`) for the engine's errno bridge, without being
+an `FsError`. See the [generated API reference](/api/pglite-opfs-repacked/readme/) for the complete error
 surface.

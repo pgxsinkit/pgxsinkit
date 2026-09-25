@@ -8,13 +8,38 @@ import {
   inspectMetadataBaseHeader,
   inspectTxnFrameHeader,
 } from "../../packages/pglite-opfs-repacked/src/core/codec";
-import { FsError, StoreFailedError, StoreLimitError } from "../../packages/pglite-opfs-repacked/src/core/errors";
+import {
+  FS_ERRNO,
+  FsError,
+  StoreFailedError,
+  StoreLimitError,
+} from "../../packages/pglite-opfs-repacked/src/core/errors";
 import { MAX_ACTIVE_LOG_FRAMES } from "../../packages/pglite-opfs-repacked/src/core/limits";
 import { writeExact } from "../../packages/pglite-opfs-repacked/src/core/port";
 import { RepackedVfs } from "../../packages/pglite-opfs-repacked/src/core/repacked-vfs";
 import { MemoryRepackedPort } from "../../packages/pglite-opfs-repacked/test/support/memory-port";
 
 const EXTENT_SIZES = [8192, 65_536] as const;
+
+/** What `action` threw; fails the test when it returns instead. */
+function thrown(action: () => unknown): unknown {
+  try {
+    action();
+  } catch (cause) {
+    return cause;
+  }
+  throw new Error("expected the call to throw");
+}
+
+/** A poisoned-store failure: coded `EIO` for an engine's errno bridge, carrying the first platform error. */
+function expectPoisonedWith(failure: unknown, platformMessage: string): StoreFailedError {
+  expect(failure).toBeInstanceOf(StoreFailedError);
+  const poisoned = failure as StoreFailedError;
+  expect(poisoned.code).toBe(FS_ERRNO.EIO);
+  expect(poisoned.cause).toBeInstanceOf(Error);
+  expect((poisoned.cause as Error).message).toBe(platformMessage);
+  return poisoned;
+}
 
 function durableResizeInodeIds(port: MemoryRepackedPort): bigint[] {
   const bytes = port.durableBytes("metadata-a.bin");
@@ -268,6 +293,55 @@ for (const extentSize of EXTENT_SIZES) {
       const reopened = await RepackedVfs.open(port);
       expect(new TextDecoder().decode(reopened.readFile("/partial"))).toBe("abc");
       reopened.close();
+    });
+
+    test("an arena write that makes no progress poisons with a coded failure that every later call repeats", async () => {
+      for (const entry of ["write", "writeFile", "orphan write"] as const) {
+        const port = new MemoryRepackedPort();
+        const vfs = await RepackedVfs.open(port, { extentSize });
+        vfs.writeFile("/durable", new TextEncoder().encode("before"), { nowMs: 1n });
+        vfs.strictSync();
+        const fd = vfs.open("/durable", "r+");
+        if (entry === "orphan write") vfs.unlink("/durable", 2n);
+        const replacement = new TextEncoder().encode("after!");
+        port.injectFault({
+          operation: "write",
+          label: entry === "writeFile" ? "arena.write-file" : "arena.write",
+          outcome: "throw-before",
+        });
+
+        // The platform threw before confirming a byte of an in-place overwrite: the range is unknown.
+        const failure = expectPoisonedWith(
+          thrown(() =>
+            entry === "writeFile"
+              ? vfs.writeFile("/durable", replacement, { flag: "r+", nowMs: 3n })
+              : vfs.write(fd, replacement, 0, replacement.byteLength, 0n, 3n),
+          ),
+          "injected write failure before effect",
+        );
+
+        // Every later call fails the same way, with the first platform error, and nothing is retried.
+        for (const later of [
+          () => vfs.stat("/"),
+          () => vfs.read(fd, new Uint8Array(1), 0, 1, 0n),
+          () => vfs.write(fd, replacement, 0, replacement.byteLength, 0n, 4n),
+          () => vfs.writeFile("/other", "x", { nowMs: 5n }),
+          () => vfs.strictSync(),
+        ]) {
+          expect(expectPoisonedWith(thrown(later), "injected write failure before effect").cause).toBe(failure.cause);
+        }
+
+        // Close from the poisoned state releases the handles and persists nothing.
+        const pending = port.pendingEffects();
+        expect(() => vfs.close()).toThrow(StoreFailedError);
+        expect(port.pendingEffects()).toEqual(pending);
+        expect(port.openHandleCount()).toBe(0);
+
+        port.terminate();
+        const reopened = await RepackedVfs.open(port);
+        expect(new TextDecoder().decode(reopened.readFile("/durable"))).toBe("before");
+        reopened.close();
+      }
     });
 
     test("a failed extension zero barrier leaves the old size and retry exposes only zeros", async () => {
@@ -582,8 +656,16 @@ for (const extentSize of EXTENT_SIZES) {
         label: "metadata.log.append",
         outcome: "throw-after",
       });
-      expect(() => vfs.mkdir("/ambiguous", { nowMs: 2n })).toThrow("injected write failure after effect");
-      expect(() => vfs.stat("/")).toThrow(StoreFailedError);
+      const ambiguous = expectPoisonedWith(
+        thrown(() => vfs.mkdir("/ambiguous", { nowMs: 2n })),
+        "injected write failure after effect",
+      );
+      expect(
+        expectPoisonedWith(
+          thrown(() => vfs.stat("/")),
+          "injected write failure after effect",
+        ).cause,
+      ).toBe(ambiguous.cause);
       expect(() => vfs.close()).toThrow(StoreFailedError);
     });
   });

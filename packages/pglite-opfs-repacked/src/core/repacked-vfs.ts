@@ -539,7 +539,7 @@ export class RepackedVfs implements RepackedFileSystem {
       return;
     }
     const progress = this.#writeLogical(existing?.extents ?? [], start, bytes, "arena.write-file", allocated);
-    if (progress.bytes === 0) throw progress.error;
+    if (progress.bytes === 0) this.#failStore(progress.error);
     const partialSize =
       existing !== undefined && !flags.truncate
         ? existing.size > checkedAdd(start, BigInt(progress.bytes), "partial writeFile size")
@@ -727,7 +727,7 @@ export class RepackedVfs implements RepackedFileSystem {
     }
     const source = buffer.subarray(offset, offset + admittedLength);
     const progress = this.#writeLogical(inode.extents, start, source, "arena.write", allocated);
-    if (progress.bytes === 0) throw progress.error;
+    if (progress.bytes === 0) this.#failStore(progress.error);
     const completedEnd = checkedAdd(start, BigInt(progress.bytes), "completed write end");
     if (completedEnd > inode.size) {
       const committedPlan =
@@ -1065,7 +1065,7 @@ export class RepackedVfs implements RepackedFileSystem {
       if (touchedExisting) this.#flushPreparedArena("arena.gap-zero.flush");
     }
     const progress = this.#writeLogical(orphan.extents, start, source.subarray(0, admitted.length), "arena.write");
-    if (progress.bytes === 0) throw progress.error;
+    if (progress.bytes === 0) this.#failStore(progress.error);
     const completedEnd = checkedAdd(start, BigInt(progress.bytes), "completed orphan write end");
     if (completedEnd > orphan.size) orphan.size = completedEnd;
     orphan.mtimeMs = nowMs;
@@ -1387,8 +1387,7 @@ export class RepackedVfs implements RepackedFileSystem {
       this.#metadataDirtySinceFlush = true;
       this.#store.activeLogEnd += BigInt(frame.byteLength);
     } catch (cause) {
-      this.#poison(cause);
-      throw cause;
+      this.#failStore(cause);
     }
   }
 
@@ -1448,5 +1447,18 @@ export class RepackedVfs implements RepackedFileSystem {
       this.#status = "failed";
       this.#failure = cause;
     }
+  }
+
+  /**
+   * The poison rule for a platform write the store could not complete: an arena write that made no
+   * progress (the platform threw before confirming a byte, so what the range now holds is unknown) or a
+   * metadata-log append (ambiguous by construction). Continuing would build on bytes nobody can vouch
+   * for, so the store poisons itself, and this call — like every later one until close — throws the
+   * coded `StoreFailedError` (`code` EIO) carrying the platform's error as its cause. The code is what
+   * lets an engine's errno bridge report an I/O error instead of an exception it cannot map.
+   */
+  #failStore(cause: unknown): never {
+    this.#poison(cause);
+    throw new StoreFailedError(this.#failure);
   }
 }

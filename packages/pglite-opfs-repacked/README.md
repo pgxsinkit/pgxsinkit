@@ -67,6 +67,17 @@ The guaranteed failure model covers worker, tab, process, or browser termination
 present unflushed writes, and completed flushes remaining stable. It does not promise recovery from
 power loss, media failure, arbitrary external edits, or missing files in an activated store.
 
+A platform write the store could not complete poisons it. When the platform rejects an arena write
+before confirming a single byte, what that range now holds is unknown, and a failed metadata-log
+append is ambiguous by construction; the store never continues from either. That call and every later
+call on the live instance throw `StoreFailedError` until `close()`, which releases the handles and
+persists nothing more. `StoreFailedError` carries `code` 29 (`EIO`), so PGlite reports an I/O error to
+Postgres (which treats a failed WAL write as PANIC) instead of an exception escaping its filesystem
+bridge, and the awaited host sync that follows a commit rejects on a poisoned store: a commit whose
+write failed is never acknowledged, in either mode. Close the database and reopen it; recovery keeps
+exactly what reached the platform. A write the platform accepted in part returns the short count, as a
+POSIX `write` does, and does not poison.
+
 ## Extent size and directory ownership
 
 `extentSize` is a creation-time option from 8 KiB through 16 MiB in 8 KiB increments; 64 KiB is the
@@ -157,7 +168,9 @@ and calls `truncate(path, size)`.
 ## Stable errors
 
 Store errors expose a stable string `storeCode`; `FsError` carries PGlite-compatible numeric `code`,
-plus optional `operation` and `path`. Wrapped errors retain their original `cause`.
+plus optional `operation` and `path`. Wrapped errors retain their original `cause`. `StoreFailedError`
+carries a numeric `code` too, always 29 (`EIO`), without being an `FsError`: an engine's errno bridge
+reports an I/O error, and the instance stays failed.
 
 | Error                          | Action                                                                            |
 | ------------------------------ | --------------------------------------------------------------------------------- |

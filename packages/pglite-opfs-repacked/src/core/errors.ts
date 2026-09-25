@@ -2,6 +2,8 @@ export const FS_ERRNO = {
   EBADF: 8,
   EEXIST: 20,
   EINVAL: 28,
+  /** The core reports this only as {@link StoreFailedError}'s `code`: the store failed, not the caller. */
+  EIO: 29,
   EISDIR: 31,
   ELOOP: 32,
   ENOENT: 44,
@@ -111,9 +113,17 @@ export class StoreClosedError extends Error {
   }
 }
 
-/** The live instance is poisoned and retains its first terminal cause. */
+/**
+ * The live instance is poisoned and retains its first terminal cause.
+ *
+ * It carries a numeric `code` (`EIO`), as `FsError` does, so an engine's filesystem bridge that maps
+ * coded errors to errnos (PGlite's) reports an I/O error to the engine instead of letting an exception
+ * unwind through it. It is deliberately NOT an `FsError`: an `FsError` leaves the store usable, a
+ * `StoreFailedError` means every later call fails the same way until close.
+ */
 export class StoreFailedError extends Error {
   readonly storeCode = "STORE_FAILED";
+  readonly code: number = FS_ERRNO.EIO;
   override readonly cause: unknown;
 
   constructor(cause: unknown) {

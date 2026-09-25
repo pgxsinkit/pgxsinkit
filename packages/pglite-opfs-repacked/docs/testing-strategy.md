@@ -32,7 +32,10 @@ from the deterministic port's immutable operation inventory. At both 8 KiB and 6
 short writes, throw-before, partial-then-error, and full-then-error outcomes, then terminates with all
 effects absent, all full, arena-only, metadata-only, or partial-write decisions. Its oracle checks
 stable bytes, valid-prefix recovery, allocator counts, absence of cross-owner aliases, exact repack
-authority, and poison where an ambiguous live continuation is forbidden.
+authority, and poison where an ambiguous live continuation is forbidden: every failed metadata append,
+strict-sync flush, and arena write that made no progress. (Until 2026-09-25 the metadata-append arm
+named a label the store never uses, `txn.append`, so it checked nothing; it names
+`metadata.log.append` now.)
 
 ## Normative fault matrix
 
@@ -86,6 +89,7 @@ authority, and poison where an ambiguous live continuation is forbidden.
 |  46 | Missing, short, or integrity-invalid activated arena header        | `activated stores reject missing, short, or integrity-invalid arena headers without mutation`                                                                                                                                                 |
 |  47 | Same-version arena/metadata extent identity mismatch               | `same-version arena and selected metadata extent identities must agree`                                                                                                                                                                       |
 |  48 | Multiple close failures                                            | `relaxed close forces a strict barrier, attempts every close, and preserves the first flush cause`; `failed-init cleanup attempts every close, preserves its first cause, and is idempotent`                                                  |
+|  49 | Arena data write without progress, or failed metadata append       | `an arena write that makes no progress poisons with a coded failure that every later call repeats`; `normal rejection appends nothing and an ambiguous append poisons`; generated ordinary campaign                                           |
 
 ## Browser and host termination lanes
 
@@ -167,17 +171,42 @@ past the high-water mark, holding metadata appends until the next sync) must pas
 structural locators fail loudly if a commit's WAL-write/append/flush shape changes, and the images must
 still meet the floor; a changed observation must be re-recorded here deliberately.
 
-**FINDING (2026-09-25): a transient platform write failure without an errno code is acknowledged as a
-commit.** When an arena write makes no progress the store rethrows the platform's own error without
-poisoning. PGlite's filesystem bridge maps a thrown error to an errno only if it has a truthy numeric
-`code`, and its main loop (`execProtocolRawSync`) runs `_PostgresMainLoopOnce()` inside a bare
-`catch {}`. So a plain `Error`, or a `DOMException` whose legacy code is 0 (`UnknownError`), thrown by
-the commit's WAL write unwinds Postgres out of `XLogWrite` and vanishes: the statement resolves, strict's
-sync flushes a store that never received the WAL, and a reopen does not have the commit. The engine
-then never returns from its next statement (a busy loop with no platform call; observed after a coded
-failure too). A coded error (`QuotaExceededError`, code 22) fails the commit correctly. `strict: FINDING
-— a transient platform write failure without an errno code acknowledges a commit the store never
-received` asserts the defect as observed; a fix must flip it to the contract.
+**Fixed (2026-09-25): a transient platform write failure inside a commit could be acknowledged.** Found
+by this file. When an arena write made no progress the store rethrew the platform's own error without
+poisoning. PGlite's filesystem bridge (`tryFSOperation`) maps a thrown error to an errno only if it has
+a truthy numeric `code`, and its main loop (`execProtocolRawSync`) ran `_PostgresMainLoopOnce()` inside a
+catch that swallowed everything but its longjmp sentinel. So a plain `Error`, or a `DOMException` whose
+legacy code is 0 (`UnknownError`), thrown by the commit's WAL write unwound Postgres out of `XLogWrite`
+and vanished: the statement resolved, strict's sync flushed a store that never received the WAL, and a
+reopen did not have the commit. A coded error (`QuotaExceededError`, legacy code 22, which PGlite read
+as the errno `EFBIG`) failed the commit, but the engine then spun forever on its next statement, a
+synchronous loop that makes no platform call.
+
+The store half. An arena write the platform rejected before confirming a byte, and a failed metadata-log
+append, now poison the store and throw `StoreFailedError` (`code` 29, `EIO`, the platform's error as
+`cause`), and every later call throws the same until close (README "Durability", matrix row 49).
+Through PGlite, Postgres gets `EIO` in `XLogWrite`, PANICs, and the commit rejects with `could not write
+to log file …: I/O error`; nothing reaches the platform after the failed write; every image reopens
+without the commit. `strict: a transient platform write failure in a commit's WAL write fails the commit
+and poisons the store` asserts all of it for an uncoded `DOMException`, a plain `Error`, and a coded
+`DOMException`. One consequence is pinned by `an awaited durability failure rejects its query, poisons
+cache-only queries, and still closes every handle`: a query that reaches a poisoned store now fails
+with Postgres's own I/O error (SQLSTATE 58030), where the store's exception used to be swallowed and
+the failure surfaced only at the host sync.
+
+The PGlite half is a fix in the `@pgxsinkit/pglite` fork after 0.5.8-pgx.1. The main loop fails the
+instance on any exception that is not the Emscripten unwind or longjmp it uses for Postgres errors, so
+the failing statement rejects naming the cause, every later statement throws that failure at once, and
+`close()` releases the filesystem without running the aborted engine's shutdown; `tryFSOperation`
+maps an error without a code to `EIO`. Until the pin moves past 0.5.8-pgx.1 the statement after such a
+failure still spins, synchronously, so no test timeout can catch it: `strict: after a failed WAL write
+the next statement throws the same failure and close releases every handle` stays `test.todo` until
+then.
+
+Still open on 0.5.8-pgx.1: the store's retryable platform failures (zero barriers, arena growth, reads)
+surface the platform's own error and do not poison, by design (rows 4 and 20, `ambiguous fresh arena
+growth leaves no metadata and is safely retryable`). A PGlite statement that hits an uncoded one is
+still swallowed by that host's main loop; the fork fix reports it to Postgres as `EIO`.
 
 ## Conformance record — 2026-07-21
 

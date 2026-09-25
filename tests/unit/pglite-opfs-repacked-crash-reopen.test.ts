@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return real promises typed as void */
 /**
  * Crash and reopen: what a client sees after the page or worker dies between a commit and the store's
  * next sync, with PGlite as the engine through the package's own factory.
@@ -46,6 +47,7 @@ import { createHash } from "node:crypto";
 import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
 import { amcheck } from "@electric-sql/pglite/contrib/amcheck";
 
+import { FS_ERRNO, StoreFailedError } from "../../packages/pglite-opfs-repacked/src/core/errors";
 import { RepackedVfs } from "../../packages/pglite-opfs-repacked/src/core/repacked-vfs";
 import { OpfsRepackedPort } from "../../packages/pglite-opfs-repacked/src/opfs-port";
 import { createOpfsRepackedPGlite } from "../../packages/pglite-opfs-repacked/src/pglite-factory";
@@ -635,68 +637,116 @@ describe("opfs-repacked crash and reopen through the PGlite factory", () => {
 
       if (durability === "strict") {
         /**
-         * FINDING (2026-09-25). The store surfaces a platform failure in an arena write that made no
-         * progress by rethrowing the platform's own error, without poisoning. PGlite maps a thrown
-         * filesystem error to an errno only when it carries a truthy numeric `code`
-         * (`tryFSOperation`), and its main loop (`execProtocolRawSync`) wraps `_PostgresMainLoopOnce()`
-         * in a bare `catch {}` that swallows everything but its longjmp sentinel. So an error WITHOUT a
-         * code — any plain `Error`, or a `DOMException` whose legacy code is 0 (`UnknownError` and every
-         * name added after the legacy table) — unwinds Postgres out of `XLogWrite` and vanishes: the
-         * statement reports success, strict's host sync then flushes a store that never received the
-         * commit's WAL, and a reopen does not have it. The engine is left wedged: its next statement
-         * never returns (observed as a busy loop that makes no platform call — after a coded failure
-         * too), which is why both instances here are abandoned after the failing commit. A coded error
-         * takes Postgres's own path and fails the commit.
+         * A transient platform failure in the WAL write of a strict commit (c6's first arena write), with
+         * the platform error uncoded (a plain `Error`; a `DOMException` whose legacy code is 0, like
+         * `UnknownError` and every name added after the legacy table) or coded (`QuotaExceededError`,
+         * legacy code 22).
          *
-         * Asserted as observed so it cannot change unnoticed. The contract is "acknowledged ⇒
-         * recoverable"; a fix (in the host's main loop, or the store surfacing a coded `FsError`/poisoning
-         * on a failed arena write) must flip the second expectation to it.
+         * FIXED (2026-09-25). Found by this file: the store rethrew the platform's own error on an arena
+         * write that made no progress, without poisoning. PGlite maps a thrown filesystem error to an errno
+         * only when it has a truthy numeric `code` (`tryFSOperation`), and its main loop
+         * (`execProtocolRawSync`) swallowed every exception but its longjmp sentinel, so an uncoded error
+         * unwound Postgres out of `XLogWrite` and vanished: the commit was ACKNOWLEDGED under strict
+         * durability and a reopen did not have it. A coded one failed the commit (as `EFBIG` — PGlite read
+         * the DOM legacy code as an errno), but the engine then spun forever on its next statement.
+         *
+         * The store now poisons itself on such a write and throws `StoreFailedError`, `code` EIO, whatever
+         * the platform threw (README "Durability"). PGlite maps it to an I/O error, Postgres PANICs in
+         * `XLogWrite` and reports it, and the commit fails; every later store call fails the same way, so
+         * nothing reaches the platform after the failed write and no later host sync can acknowledge
+         * anything. The PGlite side (the next statement throwing instead of spinning) is the pending test
+         * below.
          */
-        test(
-          "strict: FINDING — a transient platform write failure without an errno code acknowledges a commit the store never received",
-          async () => {
-            const c6 = windowOf(trace, "c6");
-            const walWrite = callsIn(trace, c6).find(isArenaWrite)!;
-            const commitSixWithFailure = async (error: unknown) => {
-              const directory = CrashOpfsDirectory.fromImage(seed);
-              const pg = await openStore(directory, "strict");
-              for (const step of STEPS.slice(
-                0,
-                STEPS.findIndex((candidate) => candidate.name === "c6"),
-              )) {
-                await step.run(pg);
-              }
-              expect(directory.calls()).toEqual(trace.calls.slice(0, c6.start));
-              directory.armTransientFailure(walWrite.index, error);
-              let acknowledged = true;
-              try {
-                await STEPS.find((candidate) => candidate.name === "c6")!.run(pg);
-              } catch {
-                acknowledged = false;
-              }
-              const end = directory.nextCallIndex;
-              const visible = await reopen(
-                directory.image("flushed"),
-                "strict",
-                completeFramesInImage(directory.calls(), end, "flushed"),
-              );
-              return { acknowledged, visible };
-            };
+        const PLATFORM_WRITE_FAILURES = [
+          ["uncoded DOMException", () => new DOMException("transient OPFS write failure", "UnknownError")],
+          ["plain Error", () => new Error("transient platform write failure")],
+          ["coded DOMException", () => new DOMException("transient quota failure", "QuotaExceededError")],
+        ] as const;
 
-            // Coded (QuotaExceededError's legacy code is 22): an errno, and Postgres fails the commit.
-            expect(
-              await commitSixWithFailure(new DOMException("transient quota failure", "QuotaExceededError")),
-            ).toEqual({
-              acknowledged: false,
-              visible: 5,
-            });
-            // Uncoded: THE DEFECT — c6 is acknowledged under strict durability and is not in the store.
-            expect(
-              await commitSixWithFailure(new DOMException("transient OPFS write failure", "UnknownError")),
-            ).toEqual({
-              acknowledged: true,
-              visible: 5,
-            });
+        /** Run c1–c5, fail c6's WAL write with `error` (thrown once, with no effect), and report what c6 did. */
+        const commitSixWithFailure = async (error: unknown) => {
+          const c6 = windowOf(trace, "c6");
+          const walWrite = callsIn(trace, c6).find(isArenaWrite)!;
+          const directory = CrashOpfsDirectory.fromImage(seed);
+          const pg = await openStore(directory, "strict");
+          for (const step of STEPS.slice(
+            0,
+            STEPS.findIndex((candidate) => candidate.name === "c6"),
+          )) {
+            await step.run(pg);
+          }
+          expect(directory.calls()).toEqual(trace.calls.slice(0, c6.start));
+          directory.armTransientFailure(walWrite.index, error);
+          let commitError: unknown;
+          try {
+            await STEPS.find((candidate) => candidate.name === "c6")!.run(pg);
+          } catch (cause) {
+            commitError = cause;
+          }
+          return { pg, directory, walWrite, commitError };
+        };
+
+        /** The engine failed the commit and the store refused to go on past the failed write. */
+        const expectCommitRefused = async (
+          error: unknown,
+          { pg, directory, walWrite, commitError }: Awaited<ReturnType<typeof commitSixWithFailure>>,
+        ) => {
+          // Postgres got an I/O error for the WAL write, PANICked, and the commit rejected with it.
+          expect(commitError).toBeInstanceOf(Error);
+          expect((commitError as Error).message).toMatch(/could not write to log file .*: I\/O error/);
+          // The store is poisoned with the platform's own error as the cause, coded EIO for the bridge.
+          const poisoned = await pg.strictSync().then(
+            () => undefined,
+            (cause: unknown) => cause,
+          );
+          expect(poisoned).toBeInstanceOf(StoreFailedError);
+          expect((poisoned as StoreFailedError).code).toBe(FS_ERRNO.EIO);
+          expect((poisoned as StoreFailedError).cause).toBe(error);
+          // Nothing reached the platform after the failed write.
+          expect(directory.nextCallIndex).toBe(walWrite.index + 1);
+          // Every image of what the platform holds reopens without c6.
+          const applied = directory.image("applied");
+          const flushed = directory.image("flushed");
+          const calls = directory.calls();
+          expect(await reopen(applied, "strict", completeFramesInImage(calls, calls.length, "applied"))).toBe(5);
+          if (!sameImage(applied, flushed)) {
+            expect(await reopen(flushed, "strict", completeFramesInImage(calls, calls.length, "flushed"))).toBe(5);
+          }
+        };
+
+        test(
+          "strict: a transient platform write failure in a commit's WAL write fails the commit and poisons the store",
+          async () => {
+            for (const [, makeError] of PLATFORM_WRITE_FAILURES) {
+              const error = makeError();
+              // The instance is abandoned, not closed: until the PGlite fix below ships, a statement after
+              // the PANIC never returns, and close() would run the aborted engine's shutdown.
+              await expectCommitRefused(error, await commitSixWithFailure(error));
+            }
+          },
+          TEST_TIMEOUT_MS,
+        );
+
+        /**
+         * PENDING the PGlite fork fix (2026-09-25): `execProtocolRawSync` fails the instance on any exception
+         * that is not the Emscripten unwind/longjmp it uses for Postgres errors, so a statement after the
+         * PANIC throws the failure at once instead of spinning, and `close()` releases everything without
+         * running the aborted engine's shutdown. The installed `@electric-sql/pglite` (0.5.8-pgx.1) predates
+         * it and spins synchronously — no test timeout can interrupt that — so this stays `test.todo` until
+         * the pin moves past 0.5.8-pgx.1; then make it a `test`.
+         */
+        test.todo(
+          "strict: after a failed WAL write the next statement throws the same failure and close releases every handle",
+          async () => {
+            for (const [, makeError] of PLATFORM_WRITE_FAILURES) {
+              const error = makeError();
+              const failed = await commitSixWithFailure(error);
+              await expectCommitRefused(error, failed);
+              await expect(failed.pg.query("SELECT 1")).rejects.toBe(failed.commitError);
+              await expect(failed.pg.exec("SELECT 1")).rejects.toBe(failed.commitError);
+              await expect(failed.pg.close()).rejects.toThrow();
+              expect(failed.directory.calls().filter((call) => call.kind === "close")).toHaveLength(4);
+            }
           },
           TEST_TIMEOUT_MS,
         );

@@ -28,7 +28,15 @@ describe("opfs-repacked PGlite poison delivery", () => {
     directory.failNextFlush(activeMetadata, failure);
 
     await expect(pg.exec("INSERT INTO values_to_flush VALUES (1)")).rejects.toBe(failure);
-    await expect(pg.exec("SELECT value FROM values_to_flush")).rejects.toBeInstanceOf(StoreFailedError);
+    // Planning the scan sizes the relation, which reaches the poisoned store: its `StoreFailedError`
+    // carries `code` EIO, so the engine reports Postgres's own I/O error (SQLSTATE 58030) rather than
+    // having the store's exception unwind through it.
+    const scanError = await pg.exec("SELECT value FROM values_to_flush").then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    expect(scanError).toMatchObject({ code: "58030" });
+    expect((scanError as Error).message).toMatch(/I\/O error$/);
     const flushesBeforeClose =
       directory.flushCount("arena.bin") +
       directory.flushCount("metadata-a.bin") +

@@ -146,10 +146,15 @@ async function runOrdinaryFaultCase(
   } catch (cause) {
     liveError = cause;
   }
+  // The poison rule: a failed metadata append, a failed strict sync, and an arena write that made no
+  // progress (the candidate's first extent write — any later one follows confirmed bytes) leave nothing
+  // the live store may continue from. A short write is a confirmed positive count, never a failure.
   if (
     liveError !== undefined &&
     variant.outcome !== "short" &&
-    (occurrence.label === "txn.append" || occurrence.label.startsWith("sync."))
+    (occurrence.label === "metadata.log.append" ||
+      occurrence.label.startsWith("sync.") ||
+      (occurrence.label === "arena.write-file" && occurrence.occurrence === 0))
   ) {
     expect(() => vfs.readdir("/")).toThrow(StoreFailedError);
   }

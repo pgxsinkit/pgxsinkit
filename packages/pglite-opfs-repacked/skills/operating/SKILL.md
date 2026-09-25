@@ -68,6 +68,11 @@ durability option at a call site.
 Successful initialization, repack activation, and close from an open instance always use strict
 ordering. Close from a poisoned instance attempts no persistence and still releases all handles.
 
+A platform write the store could not complete (an arena write rejected before a single byte was
+confirmed, or a failed metadata-log append) poisons the instance: that call and every later one throw
+`StoreFailedError`, whose `code` is 29 (`EIO`), so Postgres sees an I/O error and a commit whose write
+failed is never acknowledged. Close and reopen; do not retry on the live instance.
+
 ## Reopen and recreate
 
 `extentSize` is chosen only for a new store: 8 KiB–16 MiB, aligned to 8 KiB, default 64 KiB. The persisted
@@ -94,7 +99,7 @@ does not select another apparent generation.
 - `UnexpectedStoreEntryError`: the directory is not dedicated and empty; choose a correct directory.
 - `ExtentSizeMismatchError`: omit `extentSize` or use the stored value.
 - `DurabilityModeMismatchError`: terminal factory-wiring error; close and rebuild through the factory.
-- `StoreFailedError`: the live instance is poisoned; close/reopen and inspect `cause`.
+- `StoreFailedError` (`code` 29, `EIO`): the live instance is poisoned; close/reopen and inspect `cause`.
 - `StoreClosedError`: stop using the adapter.
 
 The guaranteed model covers worker, tab, process, and browser termination; unflushed writes may be
