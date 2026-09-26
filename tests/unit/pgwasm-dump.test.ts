@@ -98,7 +98,9 @@ describe("Store backups", () => {
       expect(await rejectionOf(createTestPgwasm({ dataDir: `file://${dir}/db`, loadDataDir: backup }))).toBeInstanceOf(
         DataDirExistsError,
       );
-      // The refused open released the directory: it opens again.
+      // The refused open left the directory a working database. (That a refusal releases the storage is
+      // proven where storage is held: the spy build in pgwasm-create.test.ts records the release, and the
+      // IndexedDB browser lane opens a store again after a failed boot. A file:// directory holds nothing.)
       const reopened = await createTestPgwasm({ dataDir: `file://${dir}/db` });
       expect((await reopened.query<{ one: number }>("SELECT 1 AS one")).rows).toEqual([{ one: 1 }]);
     } finally {

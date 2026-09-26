@@ -3,6 +3,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { idbDatabaseName, idbLockName } from "../../packages/pgwasm-c/src/host/mounts/idb";
 import { closeTestPgwasms, createTestPgwasm, scratchDir } from "./support/pgwasm";
 
 afterEach(closeTestPgwasms);
@@ -77,5 +78,16 @@ describe("file storage", () => {
     } finally {
       dir.cleanup();
     }
+  });
+});
+
+describe("IndexedDB storage identities", () => {
+  // Existing stores are found by these names: the IndexedDB database (IDBFS names it after the mount
+  // point) and the Web Lock that guards it. Changing either would orphan every store made before.
+  it("keeps the database name /pglite/<name> and the Web Lock pglite-idbfs:/pglite/<name>", () => {
+    expect(idbDatabaseName("store")).toBe("/pglite/store");
+    expect(idbLockName("store")).toBe("pglite-idbfs:/pglite/store");
+    expect(idbDatabaseName("a b/c")).toBe("/pglite/a b/c");
+    expect(idbLockName("a b/c")).toBe("pglite-idbfs:/pglite/a b/c");
   });
 });

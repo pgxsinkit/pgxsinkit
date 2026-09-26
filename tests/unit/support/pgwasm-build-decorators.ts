@@ -18,6 +18,7 @@ function wrapRunning(
     session?: (session: WireSession) => WireSession;
     persist?: (relaxed: boolean, inner: (relaxed: boolean) => Promise<void>) => Promise<void>;
     release?: (afterFailedBoot: boolean) => void;
+    withoutBlob?: boolean;
   },
 ): RunningPostgres {
   return {
@@ -28,7 +29,7 @@ function wrapRunning(
     persist: (relaxed) =>
       overrides.persist ? overrides.persist(relaxed, (r) => running.persist(r)) : running.persist(relaxed),
     readEntries: () => running.readEntries(),
-    blob: running.blob,
+    blob: overrides.withoutBlob ? undefined : running.blob,
     shutdown: () => running.shutdown(),
     release: (options) => {
       overrides.release?.(options?.afterFailedBoot === true);
@@ -54,7 +55,7 @@ function wrapMounted(
 
 function wrapBuild(
   inner: PostgresBuild,
-  changes: { identity?: BuildIdentity; synchronousExchange?: boolean },
+  changes: { identity?: BuildIdentity; synchronousExchange?: boolean; blobDevice?: boolean },
   wrap: (running: RunningPostgres) => RunningPostgres,
 ): PostgresBuild {
   return {
@@ -62,6 +63,7 @@ function wrapBuild(
     capabilities: {
       ...inner.capabilities,
       ...(changes.synchronousExchange === undefined ? {} : { synchronousExchange: changes.synchronousExchange }),
+      ...(changes.blobDevice === undefined ? {} : { blobDevice: changes.blobDevice }),
     },
     boot: async (request) => wrapMounted(await inner.boot(request), wrap),
   };
@@ -176,4 +178,9 @@ export function persistHookBuild(
 /** Observe the release of a started database (`afterFailedBoot` when its boot failed after starting). */
 export function releaseHookBuild(inner: PostgresBuild, hook: (afterFailedBoot: boolean) => void): PostgresBuild {
   return wrapBuild(inner, {}, (running) => wrapRunning(running, { release: hook }));
+}
+
+/** The same build without a `/dev/blob` device: the shape of a build that has none. */
+export function noBlobDeviceBuild(inner: PostgresBuild): PostgresBuild {
+  return wrapBuild(inner, { blobDevice: false }, (running) => wrapRunning(running, { withoutBlob: true }));
 }

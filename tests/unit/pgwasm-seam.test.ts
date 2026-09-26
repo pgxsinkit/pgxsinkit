@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { cBuild } from "../../packages/pgwasm-c/src";
-import type { Results } from "../../packages/pgwasm/src";
+import { UnsupportedFeatureError, type Results } from "../../packages/pgwasm/src";
 import { live } from "../../packages/pgwasm/src/live";
 import { protocol, serialize } from "../../packages/pgwasm/src/protocol";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
-import { asyncExchangeBuild, outOfBandNotifyBuild } from "./support/pgwasm-build-decorators";
+import { asyncExchangeBuild, noBlobDeviceBuild, outOfBandNotifyBuild } from "./support/pgwasm-build-decorators";
 import { Recorder } from "./support/pgwasm-live";
 import { rejectionOf } from "./support/rejection";
 
@@ -93,3 +93,17 @@ for (const [label, build] of [
     });
   });
 }
+
+describe("pgwasm over a build without /dev/blob", () => {
+  it("refuses the blob query option with UnsupportedFeatureError, and keeps working", async () => {
+    const db = await createTestPgwasm({ build: noBlobDeviceBuild(cBuild) });
+    expect(protocol(db).capabilities.blobDevice).toBe(false);
+    await db.exec("CREATE TABLE t (v int)");
+    const blob = new Blob(["1\n2\n"]);
+    const viaQuery = await rejectionOf(db.query("COPY t FROM '/dev/blob'", [], { blob }));
+    expect(viaQuery).toBeInstanceOf(UnsupportedFeatureError);
+    expect(viaQuery.message).toContain('The "c" Postgres build has no /dev/blob device');
+    expect(await rejectionOf(db.exec("COPY t FROM '/dev/blob'", { blob }))).toBeInstanceOf(UnsupportedFeatureError);
+    expect((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM t")).rows).toEqual([{ n: 0 }]);
+  });
+});

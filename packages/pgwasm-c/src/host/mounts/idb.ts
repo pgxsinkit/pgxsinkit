@@ -7,6 +7,19 @@ import type { PostgresModule } from "../emscripten";
 import { PG_ROOT, PGDATA } from "../paths";
 import type { StorageMount } from "./storage-mount";
 
+/**
+ * The IndexedDB database behind `idb://<name>`. IDBFS names the database after its mount point, so this
+ * is both. It is the identity of every existing store: never change it.
+ */
+export function idbDatabaseName(name: string): string {
+  return `${PG_ROOT}/${name}`;
+}
+
+/** The Web Lock that guards `idb://<name>` against a second open. The identity of existing stores too. */
+export function idbLockName(name: string): string {
+  return `pglite-idbfs:${idbDatabaseName(name)}`;
+}
+
 /** The slice of the Web Locks API this mount uses. */
 interface LockManagerLike {
   request(
@@ -38,7 +51,7 @@ export class IdbMount implements StorageMount {
   }
 
   get #mountPoint(): string {
-    return `${PG_ROOT}/${this.#name}`;
+    return idbDatabaseName(this.#name);
   }
 
   async acquire(): Promise<void> {
@@ -57,7 +70,7 @@ export class IdbMount implements StorageMount {
       releaseLock = resolve;
     });
     const lockRequest = locks.request(
-      `pglite-idbfs:${this.#mountPoint}`,
+      idbLockName(this.#name),
       { mode: "exclusive", ifAvailable: true },
       async (lock) => {
         resolveAcquired(lock !== null);

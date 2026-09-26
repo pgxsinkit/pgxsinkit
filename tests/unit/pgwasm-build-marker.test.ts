@@ -52,7 +52,10 @@ describe("the build marker on the C build", () => {
     }
   });
 
-  it("refuses another build's directory before writing, both ways, and releases it", async () => {
+  // That a refusal also releases the storage is proven where storage is held: the spy build in
+  // pgwasm-create.test.ts records the release, and the IndexedDB browser lane opens a store again after a
+  // failed boot. A file:// directory holds nothing, so this test cannot show it.
+  it("refuses another build's directory before writing, both ways, leaving each directory intact", async () => {
     const dir = scratchDir("pgwasm-marker-mismatch");
     try {
       const cDir = `file://${dir.path}/c`;
@@ -71,7 +74,7 @@ describe("the build marker on the C build", () => {
       expect(intoC).toBeInstanceOf(BuildMismatchError);
       expect((intoC as BuildMismatchError).found).toEqual({ build: "c", dataFormat: 1 });
 
-      // Each directory still opens with its own build.
+      // Nothing was written: each directory still opens with its own build.
       expect((await (await createTestPgwasm({ dataDir: cDir })).query("SELECT 1 AS one")).rows).toEqual([{ one: 1 }]);
       const again = await createTestPgwasm({ dataDir: foreignDir, build: foreign });
       expect((await again.query("SELECT 1 AS one")).rows).toEqual([{ one: 1 }]);
