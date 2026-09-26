@@ -134,9 +134,11 @@ uses them yet; their lanes prove them on their own. Where the code came from, fi
   is the C build's; `fresh: true` runs initdb. The shared code's paths are proven against shapes no
   build in the repo has, by wrapping the C build (`tests/unit/support/pgwasm-build-decorators.ts`): an
   asynchronous exchange delivered in single-message chunks, notifications that arrive between exchanges
-  through `onUnsolicited`, another build identity, and hooks on the storage persist and release
-  (`pgwasm-seam`, `pgwasm-build-marker`, `pgwasm-persist-failure`). Boots that must fail before anything
-  is written run on a spy build that records calls (`pgwasm-create`, `pgwasm-build-marker`).
+  through `onUnsolicited`, another build identity, a build without `/dev/blob`, and hooks on the storage
+  persist and release (`pgwasm-seam`, `pgwasm-build-marker`, `pgwasm-persist-failure`). Boots that must
+  fail before anything is written run on a spy build that records calls (`pgwasm-create`,
+  `pgwasm-build-marker`). `pgwasm-extension-types` is also a type-level test, checked by
+  `bun run typecheck`: an inline extension's `setup(pg)` is typed, and namespaces are inferred.
   `pgwasm-c-artefacts` checks the six artefact files against their pins and that only
   `src/artefacts.ts` and `src/contrib/*.ts` reference them; `pgwasm-c-initdb` pins the command lines
   initdb actually runs through the owned tokenizer; `pgwasm-legacy-datadir` opens a directory made by
@@ -181,6 +183,26 @@ Against `@pgxsinkit/pglite` 0.5.8-pgx.2 (the fork at `b36bf12`):
   The fork logged it and let Postgres truncate the name, so two long names could collide.
 - A Store backup entry whose path leaves the data directory (`..`) is refused with
   `BackupFormatError`.
+- A Store backup that is cut short (even exactly at a member boundary), lacks its two end-of-archive
+  records, or has a malformed size (a PAX `size` included) is refused with `BackupFormatError`. The
+  fork's tinytar reader restored the members before a cut. Every backup PGlite ever wrote came from
+  tinytar's writer, which always writes the end records, so no existing backup is refused.
+- A server extension whose bundle fails to download, or is not a readable tarball, fails the boot. The
+  fork logged the failure and booted without the extension.
+- `close()` rejects when Postgres' shutdown throws; it still runs the final persist and releases the
+  storage first. The fork logged the error and resolved.
+- A boot that fails after a custom `fs` (a `BaseFilesystem`) was handed over closes it:
+  `cleanupFailedInit()` defaults to `closeFs()`. The fork left a filesystem without its own cleanup
+  hook open.
+- `dataDir` is refused with `UnsupportedDataDirError` when it is a bare path, has an unknown scheme,
+  or is `idb://` without a name, and when it is given together with `fs`; `opfs-ahp://` is refused with
+  `OpfsAhpRemovedError`. The fork opened a bare path or an unknown scheme as a NODEFS directory, a
+  nameless `idb://` as an in-memory database, and let `fs` win over `dataDir`.
+- `listen()` and `unlisten()` take the transaction lock before the listen lock, the order a
+  transaction's `tx.listen()` already holds them in (a live query's init does this). In the fork, a
+  top-level `listen()` racing a transaction's `tx.listen()` deadlocked both.
+- The unsubscribe function `listen()` returns removes a quoted mixed-case channel's callback and
+  UNLISTENs it. The fork lower-cased the already-normalised name, so it did neither.
 - Restored files keep their modification times. The fork passed seconds to Emscripten's `utime`,
   which takes milliseconds, so restored files were dated January 1970.
 - The fork's exclusive-execution persist lane is gone: no kept filesystem used it. A relaxed persist

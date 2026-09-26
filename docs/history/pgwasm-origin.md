@@ -56,7 +56,7 @@
 | drizzle-orm's `pglite` driver (not in the fork)                 | w: `src/drizzle/*`                                                 |
 
 New, with no source: w: `src/build/seam.ts` (the build seam), w: `src/core/marker.ts` (the build
-marker, ADR-0063), w: `src/core/mutex.ts`, w: `src/core/internals.ts`, w: `src/tar/*`,
+marker, ADR-0063), w: `src/core/mutex.ts`, w: `src/core/internals.ts`, w: `src/tar/tar.ts` (replacing tinytar),
 c: `src/host/exit-code.ts`, c: `src/artefact-pins.ts` and `scripts/pgwasm-artefacts.ts`.
 
 ## Tests
