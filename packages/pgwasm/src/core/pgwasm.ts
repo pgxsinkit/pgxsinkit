@@ -813,6 +813,9 @@ export class PgwasmInstance implements Pgwasm {
       );
     } finally {
       try {
+        // A background persist may still be running: a close after a failure skips the final persist
+        // that would otherwise queue behind it. Releasing tears its storage down under it, so wait first.
+        await this.#persistMutex.runExclusive(async () => {});
         // Release even when shutdown or persisting failed, so exclusive storage ownership is released.
         await running?.release();
       } finally {

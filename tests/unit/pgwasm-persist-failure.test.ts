@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 
 import { cBuild } from "../../packages/pgwasm-c/src";
 import type { Pgwasm } from "../../packages/pgwasm/src";
+import { protocol, serialize } from "../../packages/pgwasm/src/protocol";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { persistHookBuild, releaseHookBuild } from "./support/pgwasm-build-decorators";
 import { rejectionOf } from "./support/rejection";
@@ -109,5 +110,37 @@ describe("a failed statement persist", () => {
     );
     expect(error).toBe(failure);
     expect(events).toEqual(["persist:start", "persist:end", "release:true"]);
+  });
+
+  it("lets a background persist settle before a close after a failure releases the storage", async () => {
+    const events: string[] = [];
+    let holdNext = false;
+    const inner = releaseHookBuild(cBuild, (afterFailedBoot) => events.push(`release:${afterFailedBoot}`));
+    const build = persistHookBuild(inner, async (relaxed, persist) => {
+      if (relaxed && holdNext) {
+        holdNext = false;
+        events.push("persist:start");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await persist(relaxed);
+        events.push("persist:end");
+        return;
+      }
+      await persist(relaxed);
+    });
+    const db = await createTestPgwasm({ build, relaxedDurability: true });
+    holdNext = true;
+    await db.exec("SELECT 1");
+    // A throwing sink fails the instance mid-reply, while the statement's background persist is held.
+    const failing = protocol(db).execProtocolRawStream(serialize.query("SELECT repeat('x', 100000)"), {
+      onRawData: () => {
+        throw new Error("forced sink failure");
+      },
+    });
+    const failure = await rejectionOf(failing);
+    expect(failure.name).toBe("PgwasmFailedError");
+    expect(failure.message).toContain("forced sink failure");
+    expect(await rejectionOf(db.close())).toBe(failure);
+    events.push("close:returned");
+    expect(events).toEqual(["persist:start", "persist:end", "release:false", "close:returned"]);
   });
 });
