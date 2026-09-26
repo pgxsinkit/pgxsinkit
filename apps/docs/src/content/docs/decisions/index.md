@@ -74,5 +74,7 @@ complete as ADRs are added.
 - [ADR-0059 — The attach client answers isSynced from a worker-pushed started-state snapshot](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0059-attach-client-started-state-snapshot.md)
 - [ADR-0060 — The Outbox keeps acked rows as a ledger](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0060-outbox-acked-ledger.md)
 - [ADR-0061 — Raw statements carry a COPY blob](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0061-raw-statements-carry-a-copy-blob.md)
+- [ADR-0062 — Absorb PGlite as pgwasm (upstream compatibility is an anti-goal)](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0062-absorb-pglite-as-pgwasm.md)
+- [ADR-0063 — Build permanence and `storage.build`](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0063-build-permanence-and-storage-build.md)
 
 <!-- adr:list:end -->

@@ -1,12 +1,19 @@
 # OPFS Repacked VFS
 
-The packed-storage OPFS VFS for PGlite: every virtual file of a Postgres datadir lives inside a
-constant set of four OPFS files. A greenfield, recreate-only store — exactly one on-disk format
-version exists at any time, and a format change is a total destructive break.
+The packed-storage OPFS VFS for pgwasm, and its only OPFS filesystem (ADR-0062): every virtual file
+of a Postgres datadir lives inside a constant set of four OPFS files. A greenfield, recreate-only
+store — exactly one on-disk format version exists at any time, and a format change is a total
+destructive break.
 
 ## Language
 
 ### Storage
+
+**Repacked format**:
+The store's on-disk format: the arena, the two alternating metadata files and the activation file,
+together.
+The name survives the package moving into pgwasm (`@pgxsinkit/pgwasm/opfs`).
+_Avoid_: "opfs-ahp" (the upstream access-handle-pool filesystem this replaced, now removed)
 
 **Arena**:
 The single data file holding all extent payload bytes, written in place.

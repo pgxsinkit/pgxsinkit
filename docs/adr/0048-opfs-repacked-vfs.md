@@ -8,6 +8,11 @@ platforms. The still-open full-engine-in-real-Safari-SharedWorker question below
 2026-07-21 real-device runs returned `granted-and-persisted` with SharedWorker-direct timings within
 noise of the dedicated-worker column.
 
+Amended by [ADR-0062](0062-absorb-pglite-as-pgwasm.md) (2026-09-26): the store moves inside
+`@pgxsinkit/pgwasm` as its only OPFS filesystem (`@pgxsinkit/pgwasm/opfs`), `opfs-ahp` is removed,
+and the rule below against relying on fork-only host behavior is retired, because the store and the
+runtime become one package we own. The on-disk format keeps the name "repacked".
+
 Browsers meter OPFS synchronous access handles, and a PostgreSQL data directory is far wider than
 the tightest meter: a PGlite datadir is 971 files (measured), so upstream `opfs-ahp`'s
 one-open-handle-per-file design plus its handle pool holds on the order of 1070 handles — while

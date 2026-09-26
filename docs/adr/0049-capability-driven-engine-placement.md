@@ -9,6 +9,10 @@ Amended (2026-08-22): the engine's attach waits for an in-flight spare provision
 (`ProvisionStalledError`) so the host rebinds to a fresh store. This bounds the ACCELERATOR, not engine
 liveness — D5's refusal of timing-based engine-death detection is unchanged.
 
+Amended by [ADR-0063](0063-build-permanence-and-storage-build.md) (2026-09-26): a store's Postgres
+build is fixed at creation exactly as decision 7 fixes its backend, and `storage.build` (`c` by
+default) joins decision 9's registry-declared properties.
+
 ADR-0048 delivered `opfs-repacked` — a constant-four-handle OPFS VFS that runs on every engine,
 including WebKit's ~252-handle cap — but left hosting as "a consumer decision outside this package",
 and ADR-0032 put the whole sync engine inside a native `SharedWorker`, where Chromium and Firefox

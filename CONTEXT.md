@@ -1,7 +1,7 @@
 # pgxsinkit
 
 An offline-first **sync toolkit** for the topology `PostgreSQL → Circuits engine →
-durable-streams → PGlite` (read path) and `client → write API → PostgreSQL`
+durable-streams → pgwasm` (read path) and `client → write API → PostgreSQL`
 (write path). The
 `@pgxsinkit/*` packages are the product; a demo app and an integration + perf
 harness exist to prove and harden them.
@@ -28,7 +28,7 @@ _Avoid_: calling it "pgxsinkit" — it is one consumer of pgxsinkit.
 **Harness**:
 The integration and performance suites (`tests/integration`, `apps/perf-lab`)
 that prove the toolkit against real PostgreSQL, durable-streams, the Circuits
-engine, and PGlite. It hardens the
+engine, and pgwasm. It hardens the
 product; it is not the product.
 _Avoid_: "the demo" (the harness is not the demo app).
 
@@ -161,10 +161,27 @@ rebuild are group-granular.
 _Avoid_: "sync group", "shard", "batch", and especially "group" alone (it collides
 with an application-domain Group primitive and is a reserved word).
 
+## Language — the embedded database
+
+**pgwasm**:
+The Postgres runtime the client queries, in browsers and on Bun (`@pgxsinkit/pgwasm`, ADR-0062):
+queries, transactions, live queries, the filesystems and the Drizzle driver, over whichever Postgres
+build it is handed. It began as a copy of PGlite and is owned outright; compatibility with PGlite is
+an anti-goal.
+_Avoid_: "PGlite" (the upstream project it came from, no longer tracked); "engine" (the sync engine's
+word: Engine home, Elected engine worker); "local database".
+
+**Postgres build**:
+One compiled Postgres that pgwasm runs, shipped as its own package: the C build (`pgwasm-c`) or the
+pgrust build (`pgwasm-pgrust`, experimental). A build supplies boot, a byte channel per session
+carrying the wire protocol, and a statement of its capabilities; everything above the wire protocol
+is pgwasm's, and a difference between builds is a capability, never a branch in shared code.
+_Avoid_: "engine" or "backend" for a build ("backend" is the storage axis, opfs or idbfs); "the wasm".
+
 ## Language — the local-first client
 
 **Local schema**:
-The PGlite schema the client generates from the sync registry: enum types, each
+The schema the client generates in pgwasm from the sync registry: enum types, each
 synced table (its projected columns, types, NOT NULL, and primary key), and — for
 writable tables — the overlay, mutation journal, reconcile trigger, and read
 model. It is a **read cache plus write-staging buffer**, not a mirror of Postgres.
@@ -172,7 +189,7 @@ _Avoid_: "the local mirror", "the local replica of the schema" (it is neither a
 mirror nor full parity).
 
 **Sync worker**:
-The worker context that runs the whole local-first engine — PGlite, the Local schema,
+The worker context that runs the whole local-first engine — pgwasm, the Local schema,
 the Mutation journal machinery, the read-path stream subscriptions, and the convergence loop. Its home is
 capability-selected (the Engine home, ADR-0049): the SharedWorker attach point itself where that
 scope grants sync-access handles, else an elected engine worker behind the same SharedWorker —
@@ -292,20 +309,23 @@ exists to turn into a conscious decision.
 The only way a consumer names a local store: a plain path/name, never a storage URL. The name
 never encodes the storage backend — in a browser the backend is capability-selected (ADR-0049:
 `opfs-repacked` where the engine home holds sync-access handles, `idbfs` as the fallback), on
-Bun/Node it is the filesystem; a scheme-bearing string is rejected at the boundary. Memory-backed
+Bun it is the filesystem; a scheme-bearing string is rejected at the boundary. Memory-backed
 stores are not a product configuration — pgxsinkit's durability semantics (persistent retention,
 the optimistic Mutation journal) assume a persisted store — and exist only behind the explicit
-testing acknowledgment. _Avoid_: "dataDir" (retired from the public contract; a PGlite-internal
+testing acknowledgment. _Avoid_: "dataDir" (retired from the public contract; a pgwasm-internal
 notion now), any `scheme://` URL in configuration or documentation examples, and "IndexedDB in a
 browser" as the derivation rule (idb is the fallback, not the primary).
 
 **Storage declaration**:
-The registry-owned storage contract for a browser store (ADR-0049/0047): `storage.backend`
-(`opfs` default, or `idbfs` to force IndexedDB) and `storage.durability` (`relaxed` default, or
-`strict`). It lives on the registry, not on any minting surface, worker entry, or attach site,
-because both properties follow the data: one declaration binds every open of every store minted from
-that registry. It scopes the BROWSER store only — Node mints stay filesystem, export clones stay
-memory. A store's declaration is immutable: a preference change mints a fresh store under a fresh
+The registry-owned storage contract (ADR-0049/0047/0063): `storage.backend` (`opfs` default, or
+`idbfs` to force IndexedDB), `storage.durability` (`relaxed` default, or `strict`) and
+`storage.build` (the Postgres build: `c` default, or `pgrust`). It lives on the registry, not on any
+minting surface, worker entry, or attach site, because all three properties follow the data: one
+declaration binds every open of every store minted from that registry. `backend` and `durability`
+scope the BROWSER store only — Bun mints stay filesystem, export clones stay memory; `build` binds
+every store on every runtime, because a Store backup restores only into its own build. The build's
+CODE is still supplied where stores are created; the declaration is checked against it, never used
+to load it. A store's declaration is immutable: a preference change mints a fresh store under a fresh
 path, never redeclares an existing one. _Avoid_: calling it a placement mode (where the engine runs
 is a runtime decision, never declared); a per-open, per-tab, or minting-surface option.
 
@@ -330,7 +350,7 @@ per-tab, or per-table toggle — it is one registry declaration binding every op
 
 **Store backup**:
 The full-fidelity export of the whole local store (`exportStore`): everything the store holds,
-staged writes, pending Outbox events, and sync metadata included, restorable only into PGlite. The lossless option, and the
+staged writes, pending Outbox events, and sync metadata included, restorable only into a store of the same Postgres build (Build permanence). The lossless option, and the
 only export an offline device with unflushed writes can take.
 _Avoid_: "database dump" (that is a Diagnostic dump or Data export — a backup is a
 store image, not SQL).
@@ -552,6 +572,18 @@ then-best backend; nothing carries across, and the replacement is a fresh store.
 _Avoid_: "migration"/"upgrade" for a backend change (there is no in-place
 conversion — it is destroy-and-rebuild); treating a granted probe as authority
 over an existing store.
+
+**Build permanence**:
+A store's Postgres build is FIXED at creation, for the store's whole life
+(ADR-0063): pgwasm marks every data directory it creates with the build's
+identity (an unmarked directory is the C build's), and opening it with another
+build is a typed refusal before any file is touched. The builds cannot read each
+other's data directories, and a Store backup is a data-directory image, so a
+backup restores only into its own build. The build is declared once
+(`storage.build` in the Storage declaration); the ONE route to another build is
+the Destructive lifecycle followed by a fresh boot that re-syncs from the server.
+_Avoid_: "migration"/"upgrade" for a build change; treating a shared Postgres
+major or catalog version as proof that two builds share an on-disk format.
 
 **Destructive lifecycle**:
 The one toolkit-owned deletion machine for explicit `destroy()`, AUTHORIZED

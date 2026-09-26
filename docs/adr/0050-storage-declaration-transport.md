@@ -1,6 +1,7 @@
 # Storage declaration transport and path-addressed store teardown
 
-Status: accepted (2026-07-24)
+Status: accepted (2026-07-24) — amended by [ADR-0063](0063-build-permanence-and-storage-build.md)
+(2026-09-26): the declaration gains `build`.
 
 The board demo added a storage-preference switch (backend `opfs`/`idbfs`, durability
 `relaxed`/`strict`) and threaded both preferences through the SharedWorker **name**
