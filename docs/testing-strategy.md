@@ -121,6 +121,74 @@ The manual Chromium provision comparison is
 outside every aggregate and reports foreground attach-to-first-query timing for plain versus
 provision-ahead-of-attach samples.
 
+## pgwasm (ADR-0062 step 1)
+
+`@pgxsinkit/pgwasm` (the engine-neutral runtime) and `@pgxsinkit/pgwasm-c` (the C build: the pinned
+`@electric-sql/pglite` 0.5.8 artefacts and their host code) replace the PGlite fork. In step 1 nothing
+uses them yet; their lanes prove them on their own. Where the code came from, file by file, is in
+[docs/history/pgwasm-origin.md](history/pgwasm-origin.md).
+
+- **Unit lane** (`bun run test:unit`): `tests/unit/pgwasm-*.test.ts` and `tests/unit/pgwasm-c-*.test.ts`.
+  Most databases start from the prepopulated data directory (`tests/unit/support/pgwasm.ts`), an
+  unmarked C-build directory, so every seeded boot also exercises the rule that an unmarked directory
+  is the C build's; `fresh: true` runs initdb. The shared code's paths are proven against shapes no
+  build in the repo has, by wrapping the C build (`tests/unit/support/pgwasm-build-decorators.ts`): an
+  asynchronous exchange delivered in single-message chunks, notifications that arrive between exchanges
+  through `onUnsolicited`, another build identity, and hooks on the storage persist and release
+  (`pgwasm-seam`, `pgwasm-build-marker`, `pgwasm-persist-failure`). Boots that must fail before anything
+  is written run on a spy build that records calls (`pgwasm-create`, `pgwasm-build-marker`).
+  `pgwasm-c-artefacts` checks the six artefact files against their pins and that only
+  `src/artefacts.ts` and `src/contrib/*.ts` reference them; `pgwasm-c-initdb` pins the command lines
+  initdb actually runs through the owned tokenizer; `pgwasm-legacy-datadir` opens a directory made by
+  the fork's PGlite and moves Store backups both ways between the fork and pgwasm (step 1 only: the
+  fork leaves the graph in step 3); `pgwasm-public-surface` pins every entry point's runtime exports.
+- **IndexedDB browser lane** (`bun run test:browser:pgwasm-idb`, `tests/e2e/pgwasm-idb/`): Bun has
+  neither IndexedDB nor Web Locks, so `idb://` storage is proven in Chromium and WebKit, on demand and
+  outside the commit path, like the opfs-repacked lane. It runs the fork's web base flow (create,
+  parameters, a gzipped dump loaded into memory, close, reopen after a reload, delete) and its IDBFS
+  correctness cases through the build's `onPostgresModule` hook: one open per store (also across two
+  tabs), the store released after a boot that fails before or after Postgres started, a relaxed
+  statement running beside an in-flight snapshot, a strict statement held until the clock moves past
+  its sync, a background persist failure reported once and recovered by the final persist, a throwing
+  extension close hook that still lets shutdown, the final persist and the release happen, a failed
+  final persist reported ahead of a failed close hook, and a clean shutdown that leaves nothing for
+  crash recovery (with a dropped-persist control that does recover). The fork's `PGliteWorker`
+  live-query cases are not ported: the worker is not part of pgwasm.
+- **Packed install** (`bun run fixture:smoke`): the fixture installs both packed packages, boots pgwasm
+  on the C build from the install (live, amcheck, Drizzle, `/protocol`, a Store backup restored, the
+  `opfs-ahp://` refusal), typechecks against the published declarations, and builds a Vite production
+  consumer whose emitted assets must contain every artefact byte-identical under a fingerprinted name.
+
+### Behaviour drift from the fork
+
+Against `@pgxsinkit/pglite` 0.5.8-pgx.2 (the fork at `b36bf12`):
+
+- `dumpDataDir()` takes the query lock, so a dump never reads the data directory while a statement is
+  running. The fork read it beside the running statement.
+- A throw from the wire flush that ends a main-loop run (`_PostgresSendReadyForQueryIfNecessary`,
+  `_pgl_pq_flush`) latches the instance as failed, like any other engine exception. The fork rethrew
+  it without latching.
+- `dumpDataDir()` always returns a `File`, named `<store>.tar` or `<store>.tar.gz`. The fork returned
+  a `Blob` where `File` did not exist.
+- `auto` compression always means gzip (`CompressionStream` exists in Bun and every supported
+  browser). The fork fell back to an uncompressed tarball where it found no compressor.
+- `username` runs `SET ROLE` with a quoted identifier. The fork interpolated the name unquoted.
+- Promises the fork left unawaited are awaited (oxlint's `no-floating-promises`). One changes what a
+  caller sees: when a live query's prepared statement was gone, the fork re-ran it without awaiting and
+  then delivered the failed attempt's (undefined) results; pgwasm awaits the re-run and delivers only
+  its results.
+- `serialize.parse` refuses a statement name longer than Postgres' 63 characters with a `RangeError`.
+  The fork logged it and let Postgres truncate the name, so two long names could collide.
+- A Store backup entry whose path leaves the data directory (`..`) is refused with
+  `BackupFormatError`.
+- Restored files keep their modification times. The fork passed seconds to Emscripten's `utime`,
+  which takes milliseconds, so restored files were dated January 1970.
+- The fork's exclusive-execution persist lane is gone: no kept filesystem used it. A relaxed persist
+  still runs beside later statements, and `close()` and a failed boot wait for an in-flight persist
+  before releasing storage.
+- New data directories carry the build marker `PGWASM_BUILD` (ADR-0063). Existing unmarked
+  directories open on the C build and are not backfilled.
+
 ## Offline return (board ADR-0010)
 
 The board demo's app shell is served offline by a hand-rolled, runtime-capture service worker
