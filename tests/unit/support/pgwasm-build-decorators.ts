@@ -17,6 +17,7 @@ function wrapRunning(
   overrides: {
     session?: (session: WireSession) => WireSession;
     persist?: (relaxed: boolean, inner: (relaxed: boolean) => Promise<void>) => Promise<void>;
+    release?: (afterFailedBoot: boolean) => void;
   },
 ): RunningPostgres {
   return {
@@ -29,7 +30,10 @@ function wrapRunning(
     readEntries: () => running.readEntries(),
     blob: running.blob,
     shutdown: () => running.shutdown(),
-    release: (options) => running.release(options),
+    release: (options) => {
+      overrides.release?.(options?.afterFailedBoot === true);
+      return running.release(options);
+    },
   };
 }
 
@@ -167,4 +171,9 @@ export function persistHookBuild(
   hook: (relaxed: boolean, persist: (relaxed: boolean) => Promise<void>) => Promise<void>,
 ): PostgresBuild {
   return wrapBuild(inner, {}, (running) => wrapRunning(running, { persist: hook }));
+}
+
+/** Observe the release of a started database (`afterFailedBoot` when its boot failed after starting). */
+export function releaseHookBuild(inner: PostgresBuild, hook: (afterFailedBoot: boolean) => void): PostgresBuild {
+  return wrapBuild(inner, {}, (running) => wrapRunning(running, { release: hook }));
 }

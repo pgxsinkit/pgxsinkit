@@ -4,8 +4,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { cBuild } from "../../packages/pgwasm-c/src";
+import type { Pgwasm } from "../../packages/pgwasm/src";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
-import { persistHookBuild } from "./support/pgwasm-build-decorators";
+import { persistHookBuild, releaseHookBuild } from "./support/pgwasm-build-decorators";
 import { rejectionOf } from "./support/rejection";
 
 afterEach(closeTestPgwasms);
@@ -70,5 +71,43 @@ describe("a failed statement persist", () => {
     await db.exec("SELECT 1");
     await db.close();
     expect(db.closed).toBe(true);
+  });
+
+  it("lets a background persist settle before a failed boot releases the storage", async () => {
+    const events: string[] = [];
+    let holdNext = false;
+    const inner = releaseHookBuild(cBuild, (afterFailedBoot) => events.push(`release:${afterFailedBoot}`));
+    const build = persistHookBuild(inner, async (relaxed, persist) => {
+      if (relaxed && holdNext) {
+        holdNext = false;
+        events.push("persist:start");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await persist(relaxed);
+        events.push("persist:end");
+        return;
+      }
+      await persist(relaxed);
+    });
+    const failure = new Error("forced late init failure");
+    const error = await rejectionOf(
+      createTestPgwasm({
+        build,
+        relaxedDurability: true,
+        extensions: {
+          late: {
+            name: "late",
+            setup: async (pg: Pgwasm) => ({
+              init: async () => {
+                holdNext = true;
+                await pg.exec("CREATE TABLE late_init (v int)");
+                throw failure;
+              },
+            }),
+          },
+        },
+      }),
+    );
+    expect(error).toBe(failure);
+    expect(events).toEqual(["persist:start", "persist:end", "release:true"]);
   });
 });

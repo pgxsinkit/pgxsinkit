@@ -259,6 +259,9 @@ export class PgwasmInstance implements Pgwasm {
       this.#ready = false;
       this.#closed = true;
       try {
+        // A background persist a statement of the boot started (an extension's init) must settle first:
+        // releasing tears its storage down under it.
+        await this.#persistMutex.runExclusive(async () => {});
         await running.release({ afterFailedBoot: true });
       } catch {
         // Preserve the error that made the boot fail.
