@@ -5,6 +5,7 @@ from the sync engine down to the embedded Postgres runtime. Amends
 [ADR-0048](0048-opfs-repacked-vfs.md): the store moves inside the runtime package, and its "no
 fork-only host behavior" rule is retired. [ADR-0063](0063-build-permanence-and-storage-build.md)
 records the store-level rules that follow from having more than one Postgres build.
+Revised 2026-09-27 before implementation: filesystem mounting is build-specific (step 1 design).
 
 ## Context
 
@@ -44,8 +45,8 @@ What pgxsinkit and its consumers use from the fork's 21 packages: the core (`que
 
    | Package | Contents | Licence |
    | --- | --- | --- |
-   | `@pgxsinkit/pgwasm` | the runtime: core, live queries, `pg-protocol`, templating, the memory, IndexedDB and file filesystems, the OPFS store at `/opfs`, our Drizzle driver | MIT |
-   | `@pgxsinkit/pgwasm-c` | the C build: `pglite.wasm`, `initdb.wasm`, the filesystem bundle, the `amcheck` extension files, the prepopulated data directory | PostgreSQL License |
+   | `@pgxsinkit/pgwasm` | the runtime: core, live queries, `pg-protocol`, templating, the filesystem contract (`BaseFilesystem`, `FsStats`) and the storage vocabulary (memory, IndexedDB, file), the OPFS store at `/opfs`, our Drizzle driver | MIT |
+   | `@pgxsinkit/pgwasm-c` | the C build: `pglite.wasm`, `initdb.wasm`, the filesystem bundle, the `amcheck` extension files, the prepopulated data directory, and its Emscripten host code, including the memory, IndexedDB and file mounts (Emscripten built-ins) | PostgreSQL License |
    | `@pgxsinkit/pgwasm-pg-dump` | the `pg_dump` wasm and its loader (engine-neutral: it speaks the wire protocol) | PostgreSQL License |
    | `@pgxsinkit/pgwasm-repl` | the development REPL | MIT |
    | `@pgxsinkit/pgwasm-pgrust` | phase 2 only (decision 9) | AGPL-3.0 |
@@ -59,12 +60,13 @@ What pgxsinkit and its consumers use from the fork's 21 packages: the core (`que
    socket server and the benchmark.
 
 3. **The wire protocol is the seam.** `pgwasm` owns everything above it once, engine-neutrally:
-   `query`, `exec`, `transaction`, `listen`, live queries, type parsers, the Drizzle driver and the
-   filesystem contract. A Postgres build provides three things: `boot`, a byte channel per session,
-   and a capability record (its identity, how many sessions it holds, whether it needs cross-origin
-   isolation, which filesystems it supports). Anything that differs between builds is a capability,
-   never a branch in shared code. A user installs the build they want and hands it over:
-   `createPgwasm({ build })`. Each build package exports its artefacts as
+   `query`, `exec`, `transaction`, `listen`, live queries, type parsers, the Drizzle driver, the
+   filesystem contract, the storage vocabulary, `dataDir` parsing, the refusals and the capability
+   checks. A Postgres build provides three things: `boot`, a byte channel per session, and a
+   capability record (its identity, how many sessions it holds, whether it needs cross-origin
+   isolation, which filesystems it supports). Each build mounts storage itself. Anything that differs
+   between builds is a capability, never a branch in shared code. A user installs the build they
+   want and hands it over: `createPgwasm({ build })`. Each build package exports its artefacts as
    `new URL("./…", import.meta.url)` references, so bundlers copy and fingerprint them.
 
 4. **Our own Drizzle driver**, on drizzle's public `drizzle-orm/pg-core/async/session` base

@@ -1,0 +1,50 @@
+@pgxsinkit/pgwasm-c
+===================
+
+This package republishes compiled third-party software and includes host code that
+began as a copy of third-party code. These attributions are permanent.
+
+------------------------------------------------------------------------------
+ElectricSQL — @electric-sql/pglite (host code under `src/`)
+------------------------------------------------------------------------------
+
+The C build's host code under `src/` (module instantiation, initdb, the memory,
+IndexedDB and file mounts, the filesystem adapter, extension install) began as a copy
+of ElectricSQL's PGlite (`packages/pglite`, `packages/pglite-utils`):
+
+  Source:  https://github.com/electric-sql/pglite
+  License: PostgreSQL License (PGlite is dual-licensed Apache-2.0 / PostgreSQL
+           License; pgxsinkit takes it under the PostgreSQL License)
+  Copyright (c) ElectricSQL and contributors
+
+Owned outright (ADR-0062); compatibility with PGlite is an explicit anti-goal. The
+PostgreSQL License text is in LICENSE.
+
+------------------------------------------------------------------------------
+Components compiled into the artefacts (`artefacts/pglite.wasm`, `pglite.data`,
+`pglite.js`, `initdb.wasm`, `initdb.js`, `amcheck.tar.gz`)
+------------------------------------------------------------------------------
+
+The artefacts are republished byte-identical from `@electric-sql/pglite` 0.5.8
+(https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz; sha256 of every
+file pinned in `src/artefact-pins.ts`). They were built from ElectricSQL's
+`postgres-pglite` tree with Emscripten, and contain:
+
+  - PostgreSQL 18 (PostgreSQL License, (c) PostgreSQL Global Development Group and
+    The Regents of the University of California) — https://www.postgresql.org
+  - ElectricSQL's changes to PostgreSQL for PGlite (PostgreSQL License,
+    (c) ElectricSQL and contributors) — https://github.com/electric-sql/postgres-pglite
+  - ICU and its data files (Unicode License v3, (c) Unicode, Inc.); the full licence
+    text travels inside `pglite.data` at `/pglite/icu/LICENSE`
+  - libxml2 (MIT, (c) Daniel Veillard and contributors)
+  - libxslt (MIT, (c) Daniel Veillard and contributors)
+  - zlib (zlib License, (c) Jean-loup Gailly and Mark Adler)
+  - OSSP uuid (MIT-style licence, (c) Ralf S. Engelschall and The OSSP Project)
+  - the Emscripten runtime in the generated JavaScript glue (`pglite.js`,
+    `initdb.js`) and its system libraries (MIT / University of Illinois NCSA,
+    (c) the Emscripten authors), including musl libc (MIT, (c) Rich Felker and
+    contributors) and LLVM compiler-rt (Apache License 2.0 with LLVM Exceptions)
+
+The list is derived from the configure line embedded in `pglite.wasm`
+(`--with-icu --with-uuid=ossp --with-zlib --with-libxml --with-libxslt`) and from the
+Emscripten toolchain that produced it.

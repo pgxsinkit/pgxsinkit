@@ -57,6 +57,10 @@ const WEIGHT: Record<string, number> = {
   "client-schema": 1,
   "apply-ladder": 1,
   "sync-apply": 1,
+  "pgwasm-live": 12,
+  "pgwasm-c-engine-features": 8,
+  "pgwasm-basic": 5,
+  "pgwasm-query-sizes": 5,
 };
 
 const concurrency = Math.max(
