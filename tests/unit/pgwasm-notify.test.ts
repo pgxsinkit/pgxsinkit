@@ -145,5 +145,61 @@ for (const [label, build] of [
       }
       expect(counts).toEqual([1, 1, 1, 1, 1, 1, 1]);
     });
+
+    it("unsubscribes a quoted mixed-case channel through the function listen returned", async () => {
+      pg = await createTestPgwasm({ build });
+      const counts: number[] = [];
+      for (const channel of ['"CaSESEnsiTIvE"', '"Quoted Channel With Spaces"', "MixedUnquoted"]) {
+        const listener = counter();
+        const unsubscribe = await pg.listen(channel, listener.callback);
+        await pg.exec(`NOTIFY ${channel}, 'payload1'`);
+        await eventually(() => listener.calls.length === 1);
+        await unsubscribe();
+        await pg.exec(`NOTIFY ${channel}, 'payload2'`);
+        await settle();
+        counts.push(listener.calls.length);
+      }
+      expect(counts).toEqual([1, 1, 1]);
+      // UNLISTEN reached Postgres too: nothing is left listening.
+      expect((await pg.query("SELECT pg_listening_channels() AS channel")).rows).toEqual([]);
+    });
   });
 }
+
+describe("LISTEN from a transaction beside a top-level LISTEN", () => {
+  it("takes the locks in one order, so neither waits on the other forever", async () => {
+    const pg = await createTestPgwasm();
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    let entered!: () => void;
+    const inTransaction = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    // The shape of a live query's init: tx.listen() inside a transaction.
+    const transaction = pg.transaction(async (tx) => {
+      entered();
+      await gate;
+      await tx.listen("from_transaction", () => undefined);
+    });
+    await inTransaction;
+    // A top-level listen arrives while the transaction holds its lock, and gets as far as it can.
+    const topLevel = pg.listen("top_level", () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    openGate();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadlocked = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("listen deadlocked against the transaction's listen")), 2000);
+    });
+    try {
+      await Promise.race([Promise.all([transaction, topLevel]), deadlocked]);
+    } finally {
+      clearTimeout(timer);
+    }
+    expect((await pg.query<{ channel: string }>("SELECT pg_listening_channels() AS channel ORDER BY 1")).rows).toEqual([
+      { channel: "from_transaction" },
+      { channel: "top_level" },
+    ]);
+  });
+});

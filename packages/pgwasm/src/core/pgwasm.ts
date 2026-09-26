@@ -702,49 +702,75 @@ export class PgwasmInstance implements Pgwasm {
 
   // ─── notifications ───────────────────────────────────────────────────────────
 
+  // Lock order: the transaction lock, then the listen lock, then the query lock. A transaction's
+  // tx.listen() runs with the transaction lock already held, so a top-level listen must take the
+  // transaction lock before the listen lock too, or each would hold the lock the other waits for.
+
   async listen(
     channel: string,
     callback: (payload: string) => void,
     tx?: Transaction,
   ): Promise<(tx?: Transaction) => Promise<void>> {
-    return await this.#listenMutex.runExclusive(async () => {
-      const pgChannel = toPostgresName(channel);
-      const target: Pick<Transaction, "exec"> = tx ?? this;
-      let listeners = this.#notifyListeners.get(pgChannel);
-      if (!listeners) {
-        listeners = new Set();
-        this.#notifyListeners.set(pgChannel, listeners);
-      }
-      listeners.add(callback);
-      try {
-        await target.exec(`LISTEN ${channel}`);
-      } catch (error) {
-        listeners.delete(callback);
-        if (listeners.size === 0) this.#notifyListeners.delete(pgChannel);
-        throw error;
-      }
-      return async (unlistenTx?: Transaction) => {
-        await this.unlisten(pgChannel, callback, unlistenTx);
-      };
-    });
+    return await this.#withListenLocks(tx, (exec) => this.#subscribe(channel, callback, exec));
   }
 
   async unlisten(channel: string, callback?: (payload: string) => void, tx?: Transaction): Promise<void> {
-    await this.#listenMutex.runExclusive(async () => {
-      const pgChannel = toPostgresName(channel);
-      const target: Pick<Transaction, "exec"> = tx ?? this;
-      const cleanUp = async () => {
-        await target.exec(`UNLISTEN ${channel}`);
-        // Another caller may have subscribed while UNLISTEN ran.
-        if (this.#notifyListeners.get(pgChannel)?.size === 0) this.#notifyListeners.delete(pgChannel);
-      };
-      if (callback) {
-        this.#notifyListeners.get(pgChannel)?.delete(callback);
-        if (this.#notifyListeners.get(pgChannel)?.size === 0) await cleanUp();
-      } else {
-        await cleanUp();
-      }
-    });
+    await this.#withListenLocks(tx, (exec) => this.#unsubscribe(channel, callback, exec));
+  }
+
+  async #withListenLocks<T>(
+    tx: Transaction | undefined,
+    fn: (exec: (sql: string) => Promise<unknown>) => Promise<T>,
+  ): Promise<T> {
+    if (tx) return await this.#listenMutex.runExclusive(() => fn((sql) => tx.exec(sql)));
+    await this.#checkReady();
+    return await this.#transactionMutex.runExclusive(() =>
+      this.#listenMutex.runExclusive(() => fn((sql) => this.#runExec(sql))),
+    );
+  }
+
+  async #subscribe(
+    channel: string,
+    callback: (payload: string) => void,
+    exec: (sql: string) => Promise<unknown>,
+  ): Promise<(tx?: Transaction) => Promise<void>> {
+    const pgChannel = toPostgresName(channel);
+    let listeners = this.#notifyListeners.get(pgChannel);
+    if (!listeners) {
+      listeners = new Set();
+      this.#notifyListeners.set(pgChannel, listeners);
+    }
+    listeners.add(callback);
+    try {
+      await exec(`LISTEN ${channel}`);
+    } catch (error) {
+      listeners.delete(callback);
+      if (listeners.size === 0) this.#notifyListeners.delete(pgChannel);
+      throw error;
+    }
+    // By the channel as the caller wrote it: unlisten() normalises it the same way listen() did.
+    return async (unlistenTx?: Transaction) => {
+      await this.unlisten(channel, callback, unlistenTx);
+    };
+  }
+
+  async #unsubscribe(
+    channel: string,
+    callback: ((payload: string) => void) | undefined,
+    exec: (sql: string) => Promise<unknown>,
+  ): Promise<void> {
+    const pgChannel = toPostgresName(channel);
+    const cleanUp = async () => {
+      await exec(`UNLISTEN ${channel}`);
+      // Another caller may have subscribed while UNLISTEN ran.
+      if (this.#notifyListeners.get(pgChannel)?.size === 0) this.#notifyListeners.delete(pgChannel);
+    };
+    if (callback) {
+      this.#notifyListeners.get(pgChannel)?.delete(callback);
+      if (this.#notifyListeners.get(pgChannel)?.size === 0) await cleanUp();
+    } else {
+      await cleanUp();
+    }
   }
 
   onNotification(callback: (channel: string, payload: string) => void): () => void {
