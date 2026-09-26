@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { eq, sql } from "drizzle-orm";
+import { Cache } from "drizzle-orm/cache/core/cache";
+import type { MutationOption } from "drizzle-orm/cache/core/cache";
 import {
   bigint,
   boolean,
@@ -15,8 +17,10 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
+import type { PgDialect } from "drizzle-orm/pg-core/dialect";
 
 import { drizzle } from "../../packages/pgwasm/src/drizzle";
+import { jitMappersUsable } from "../../packages/pgwasm/src/drizzle/driver";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { rejectionOf } from "./support/rejection";
 
@@ -144,5 +148,69 @@ describe("the pgwasm Drizzle driver", () => {
   it("exposes the pgwasm database as $client", async () => {
     const { client, db } = await database();
     expect(db.$client).toBe(client);
+  });
+
+  it("invalidates through the configured cache: $cache.invalidate and every mutation", async () => {
+    const mutations: MutationOption[] = [];
+    // A real cache (drizzle skips a NoopCache and its subclasses) that records invalidations.
+    class RecordingCache extends Cache {
+      strategy(): "all" {
+        return "all";
+      }
+      async get(): Promise<undefined> {
+        return undefined;
+      }
+      async put(): Promise<void> {}
+      async onMutate(params: MutationOption): Promise<void> {
+        mutations.push(params);
+      }
+    }
+    const client = await createTestPgwasm();
+    await client.exec(
+      "CREATE TABLE users (id serial PRIMARY KEY, name text NOT NULL, active boolean NOT NULL DEFAULT true)",
+    );
+    const cache = new RecordingCache();
+    const db = drizzle(client, { cache });
+    await db.$cache.invalidate({ tables: "users" });
+    await db.insert(users).values({ name: "ada" });
+    expect(mutations).toEqual([{ tables: "users" }, { tables: ["users"] }]);
+    // The caller's cache object is not changed.
+    expect(Object.keys(cache)).toEqual([]);
+  });
+
+  it("keeps a callable no-op $cache.invalidate when no cache is configured", async () => {
+    const db = drizzle(await createTestPgwasm());
+    expect(await db.$cache.invalidate({ tables: "users" })).toBeUndefined();
+  });
+
+  describe("JIT row mappers", () => {
+    const mappers = (db: object) => (db as { dialect: PgDialect }).dialect.mapperGenerators.rows.name;
+
+    it("are used only when asked for and `new Function` works", async () => {
+      const client = await createTestPgwasm();
+      expect(mappers(drizzle(client))).toBe("makeDefaultQueryMapper");
+      expect(mappers(drizzle(client, { jit: true }))).toBe("makeJitQueryMapper");
+      expect(jitMappersUsable(undefined)).toBe(false);
+      expect(jitMappersUsable(true)).toBe(true);
+    });
+
+    it("fall back to the premade mappers where `new Function` throws (a strict CSP)", async () => {
+      const { client } = await database();
+      const realFunction = globalThis.Function;
+      // What an MV3 extension page's CSP does to the Function constructor.
+      globalThis.Function = function forbidden(): never {
+        throw new EvalError("Refused to evaluate a string as JavaScript: 'unsafe-eval' is not allowed");
+      } as unknown as FunctionConstructor;
+      let db: ReturnType<typeof drizzle>;
+      try {
+        expect(jitMappersUsable(true)).toBe(false);
+        db = drizzle(client, { jit: true });
+      } finally {
+        globalThis.Function = realFunction;
+      }
+      expect(mappers(db)).toBe("makeDefaultQueryMapper");
+      await db.insert(users).values({ name: "ada" });
+      expect(await db.select({ name: users.name }).from(users)).toEqual([{ name: "ada" }]);
+    });
   });
 });
