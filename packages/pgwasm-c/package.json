@@ -1,7 +1,6 @@
 {
   "name": "@pgxsinkit/pgwasm-c",
   "version": "0.0.0",
-  "private": true,
   "license": "PostgreSQL",
   "files": [
     "artefacts",

@@ -1,7 +1,6 @@
 {
   "name": "@pgxsinkit/pgwasm",
   "version": "0.0.0",
-  "private": true,
   "license": "MIT",
   "files": [
     "dist",

@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { publicPackages, type PublicPackage } from "../../scripts/build-public-packages";
@@ -26,6 +26,9 @@ const repoRoot = join(import.meta.dir, "..", "..");
  */
 const EXPECTED_IMPORTS: Record<string, readonly string[]> = {
   "packages/contracts": ["drizzle-orm", "zod"],
+  // Only the /drizzle entry imports drizzle-orm (an optional peer); the rest of pgwasm imports nothing.
+  "packages/pgwasm": ["drizzle-orm/pg-core/async/session"],
+  "packages/pgwasm-c": ["@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm/build", "@pgxsinkit/pgwasm/fs"],
   "packages/pglite-opfs-repacked": ["@electric-sql/pglite"],
   "packages/client": ["@pgxsinkit/contracts", "drizzle-orm", "@electric-sql/pglite"],
   // zod is a server peer but its bundle never imports it directly — the zod usage the old inlined
@@ -95,14 +98,33 @@ function importSpecifiers(bundle: string): string[] {
 }
 
 function bundlePaths(pkg: PublicPackage): string[] {
-  return pkg.entrypoints.map((entry) =>
+  const entries = pkg.entrypoints.map((entry) =>
     join(repoRoot, pkg.packageDir, "dist", entry.replace(/^src\//, "").replace(/\.ts$/, ".js")),
   );
+  if (pkg.splitting !== true) return entries;
+  // A split build's shared modules live in chunks next to the entries: they are bundles too.
+  const dist = join(repoRoot, pkg.packageDir, "dist");
+  const chunks = readdirSync(dist)
+    .filter((name) => /^chunk-.*\.js$/.test(name))
+    .map((name) => join(dist, name));
+  return [...entries, ...chunks];
+}
+
+/**
+ * A relative specifier is the package's own file (a split build's chunk, a build package's artefact):
+ * allowed when it resolves inside the package and exists.
+ */
+function isOwnRelativeFile(pkg: PublicPackage, bundlePath: string, specifier: string): boolean {
+  if (!specifier.startsWith("./") && !specifier.startsWith("../")) return false;
+  const packageRoot = join(repoRoot, pkg.packageDir);
+  const target = resolve(dirname(bundlePath), specifier);
+  return target.startsWith(`${packageRoot}${sep}`) && existsSync(target);
 }
 
 for (const pkg of publicPackages) {
   describe(`${pkg.packageDir} built artifact`, () => {
     let bundles: string[] = [];
+    let paths: string[] = [];
 
     beforeAll(() => {
       // Spawned, not in-process: `Bun.build` inside a test process corrupts module resolution for
@@ -111,7 +133,8 @@ for (const pkg of publicPackages) {
         cwd: repoRoot,
         stdio: "inherit",
       });
-      bundles = bundlePaths(pkg).map((path) => readFileSync(path, "utf8"));
+      paths = bundlePaths(pkg);
+      bundles = paths.map((path) => readFileSync(path, "utf8"));
     });
 
     it("only imports packages its manifest declares — nothing is inlined", () => {
@@ -125,12 +148,17 @@ for (const pkg of publicPackages) {
       const allowed = (specifier: string) =>
         declared.some((name) => specifier === name || specifier.startsWith(`${name}/`));
 
-      for (const bundle of bundles) {
-        expect(importSpecifiers(bundle).filter((specifier) => !allowed(specifier))).toEqual([]);
+      bundles.forEach((bundle, index) => {
+        const path = paths[index] ?? "";
+        expect(
+          importSpecifiers(bundle).filter(
+            (specifier) => !allowed(specifier) && !isOwnRelativeFile(pkg, path, specifier),
+          ),
+        ).toEqual([]);
         // The canary for an inlined dependency implementation: drizzle's entity machinery carries
         // this Symbol.for key in every copy.
         expect(bundle).not.toContain("drizzle:entityKind");
-      }
+      });
     });
 
     it("imports its known runtime dependencies as externals", () => {
@@ -141,11 +169,17 @@ for (const pkg of publicPackages) {
     });
 
     it("emits an external source map whose sources are all the package's own", () => {
-      for (const path of bundlePaths(pkg)) {
+      const allSources: string[] = [];
+      for (const path of paths) {
         const mapPath = `${path}.map`;
         expect(existsSync(mapPath)).toBe(true);
         const map = JSON.parse(readFileSync(mapPath, "utf8")) as { sources?: string[] };
-        expect(map.sources?.length ?? 0).toBeGreaterThan(0);
+        // In a split build an entry that only re-exports, or a chunk of bundler runtime helpers, has no
+        // sources of its own; the package's bundles together still must (checked below).
+        if (pkg.splitting !== true) {
+          expect(map.sources?.length ?? 0).toBeGreaterThan(0);
+        }
+        allSources.push(...(map.sources ?? []));
         // The backstop for the whole contract: the sourcemap names every module the bundle
         // carries, so ANY vendored dependency — declared or not — shows up as a node_modules
         // source. (`packages: "external"` can't serve as the backstop: combined with an explicit
@@ -153,6 +187,7 @@ for (const pkg of publicPackages) {
         const vendored = (map.sources ?? []).filter((source) => source.includes("node_modules"));
         expect(vendored).toEqual([]);
       }
+      expect(allSources.length).toBeGreaterThan(0);
     });
 
     if (pkg.packageDir === "packages/react") {
@@ -160,6 +195,23 @@ for (const pkg of publicPackages) {
         for (const bundle of bundles) {
           expect(bundle).not.toContain("react/jsx-dev-runtime");
           expect(bundle).not.toContain("jsxDEV");
+        }
+      });
+    }
+
+    if (pkg.packageDir === "packages/pgwasm-c") {
+      // Bundlers copy and fingerprint the artefacts from these literals, so each must point at a file
+      // the package ships, from wherever the bundle was emitted.
+      it("references artefacts that exist next to every bundle", () => {
+        const references = paths.flatMap((path, index) =>
+          [...(bundles[index] ?? "").matchAll(/new URL\("([^"]+)", import\.meta\.url\)/g)].map((match) =>
+            resolve(dirname(path), match[1] ?? ""),
+          ),
+        );
+        expect(references.length).toBe(4);
+        for (const target of references) {
+          expect(target.startsWith(join(repoRoot, pkg.packageDir, "artefacts") + sep)).toBe(true);
+          expect(existsSync(target)).toBe(true);
         }
       });
     }

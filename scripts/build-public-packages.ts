@@ -5,6 +5,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { verifyPgwasmArtefacts } from "./pgwasm-artefacts";
+
 interface BuildLog {
   message?: string;
 }
@@ -18,11 +20,12 @@ interface BunBuildApi {
   build(options: {
     entrypoints: string[];
     outdir: string;
+    root?: string;
     format: "esm";
     target: "bun";
     sourcemap: "external";
     external: string[];
-    splitting: false;
+    splitting: boolean;
     write: true;
   }): Promise<BuildResult>;
 }
@@ -59,6 +62,19 @@ export interface PublicPackage {
    * install.
    */
   browserBundle?: boolean;
+  /**
+   * Bundle every entry point in one build with code splitting, so modules the entries share are emitted
+   * once, as chunks. Needed where entry points share runtime identity: pgwasm's error classes, protocol
+   * messages and the registry its `/protocol` and `/live` entries read must be ONE module across them.
+   */
+  splitting?: boolean;
+  /**
+   * Relative specifiers kept as imports (Bun.build `external` patterns): a build package's artefacts,
+   * which ship next to the bundle and are referenced relative to it.
+   */
+  relativeExternals?: readonly string[];
+  /** Checked before bundling; throws when the package's pinned artefacts are missing or wrong. */
+  verify?: () => Promise<void>;
 }
 
 // Declaration emit resolves workspace dependencies to their already-built
@@ -69,6 +85,38 @@ export const publicPackages: readonly PublicPackage[] = [
     packageDir: "packages/contracts",
     entrypoints: ["src/index.ts"],
     bundler: "bun",
+  },
+  {
+    packageDir: "packages/pgwasm",
+    entrypoints: [
+      "src/index.ts",
+      "src/build/index.ts",
+      "src/drizzle/index.ts",
+      "src/fs/index.ts",
+      "src/live/index.ts",
+      "src/protocol/index.ts",
+    ],
+    bundler: "bun",
+    splitting: true,
+  },
+  {
+    // The C Postgres build: its artefacts live in `artefacts/`, one level above both `src/` and `dist/`,
+    // and every module that references them is emitted at its own depth (src/artefacts.ts into
+    // dist/index.js, src/contrib/*.ts into dist/contrib/), so the references stay valid unrewritten.
+    packageDir: "packages/pgwasm-c",
+    entrypoints: ["src/index.ts", "src/contrib/amcheck.ts"],
+    bundler: "bun",
+    relativeExternals: ["../artefacts/*", "../../artefacts/*"],
+    verify: async () => {
+      const problems = await verifyPgwasmArtefacts();
+      if (problems.length > 0) {
+        throw new Error(
+          `packages/pgwasm-c/artefacts/ does not hold the pinned files (${problems
+            .map(({ name, problem }) => `${name}: ${problem}`)
+            .join("; ")}); run \`bun install\`.`,
+        );
+      }
+    },
   },
   {
     packageDir: "packages/pglite-opfs-repacked",
@@ -146,7 +194,41 @@ export async function buildPackage(publicPackage: PublicPackage): Promise<void> 
     dependencies?: Record<string, string>;
     peerDependencies?: Record<string, string>;
   };
-  const external = [...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.peerDependencies ?? {})];
+  const external = [
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...Object.keys(manifest.peerDependencies ?? {}),
+    ...(publicPackage.relativeExternals ?? []),
+  ];
+
+  await publicPackage.verify?.();
+
+  if (publicPackage.splitting === true) {
+    const result = await Bun.build({
+      entrypoints: entrypoints.map((entrypoint) => resolve(repoRoot, packageDir, entrypoint)),
+      outdir,
+      root: resolve(repoRoot, packageDir, "src"),
+      format: "esm",
+      target: "bun",
+      sourcemap: "external",
+      external,
+      splitting: true,
+      write: true,
+    });
+    if (!result.success) {
+      for (const log of result.logs) {
+        console.error(log.message ?? log);
+      }
+      throw new Error(`Build failed for ${packageDir}`);
+    }
+    for (const entrypointRelativePath of entrypoints) {
+      const outFilePath = expectedOutFile(outdir, entrypointRelativePath);
+      if (!existsSync(outFilePath)) {
+        throw new Error(`Build did not emit expected output file: ${outFilePath}`);
+      }
+    }
+    console.log(`Built ${packageDir} (split)`);
+    return;
+  }
 
   for (const entrypointRelativePath of entrypoints) {
     const entrypoint = resolve(repoRoot, packageDir, entrypointRelativePath);

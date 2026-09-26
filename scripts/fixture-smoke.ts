@@ -18,10 +18,20 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ARTEFACT_FILES } from "../packages/pgwasm-c/src/artefact-pins";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Public packages in dependency order, with the entry points the smoke imports from.
-const PUBLIC_PACKAGES = ["contracts", "pglite-opfs-repacked", "client", "server", "react"] as const;
+const PUBLIC_PACKAGES = [
+  "contracts",
+  "pgwasm",
+  "pgwasm-c",
+  "pglite-opfs-repacked",
+  "client",
+  "server",
+  "react",
+] as const;
 
 /**
  * The peer dependencies a real consumer installs alongside the packages, derived from the published
@@ -104,7 +114,9 @@ async function packPackage(packageName: string, destination: string): Promise<st
   run("bun", ["pm", "pack", "--destination", destination], packageDir);
 
   const entries = await readdir(destination);
-  const tarball = entries.find((name) => name.includes(packageName) && name.endsWith(".tgz"));
+  // Exact: "pgwasm" must not match the "pgwasm-c" tarball.
+  const tarballName = new RegExp(`^pgxsinkit-${packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d.*\\.tgz$`);
+  const tarball = entries.find((name) => tarballName.test(name));
 
   if (!tarball) {
     throw new Error(`bun pm pack produced no tarball for @pgxsinkit/${packageName} in ${destination}`);
@@ -133,6 +145,15 @@ import { memoryStoreForTests } from "@pgxsinkit/client/testing";
 import { createOpfsRepackedPGlite, StoreRecreationRequiredError } from "@pgxsinkit/pglite-opfs-repacked";
 import { createSyncServer } from "@pgxsinkit/server";
 import { createSyncClientHooks } from "@pgxsinkit/react";
+import { createPgwasm, OpfsAhpRemovedError } from "@pgxsinkit/pgwasm";
+import { readTar } from "@pgxsinkit/pgwasm/build";
+import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
+import { BaseFilesystem } from "@pgxsinkit/pgwasm/fs";
+import { live } from "@pgxsinkit/pgwasm/live";
+import { protocol, serialize } from "@pgxsinkit/pgwasm/protocol";
+import { cBuild, cBuildArtefacts } from "@pgxsinkit/pgwasm-c";
+import { amcheck } from "@pgxsinkit/pgwasm-c/contrib/amcheck";
+import { sql } from "drizzle-orm";
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
 // A consumer-defined registry, built through the published contracts entry point.
@@ -222,6 +243,26 @@ assert.equal(rows.length, 1);
 assert.equal(rows[0].label, "Smoke");
 await client.stop();
 
+// pgwasm on the C build, from the packed install: the artefacts load from next to the bundle.
+assert.ok(cBuildArtefacts.postgresWasm instanceof URL);
+assert.equal(typeof BaseFilesystem, "function");
+assert.equal(typeof readTar, "function");
+const pg = await createPgwasm({ build: cBuild, extensions: { live, amcheck } });
+assert.deepEqual((await pg.query<{ one: number }>("SELECT 1 AS one")).rows, [{ one: 1 }]);
+await pg.exec("CREATE EXTENSION amcheck");
+const liveQuery = await pg.live.query<{ two: number }>("SELECT 2 AS two");
+assert.deepEqual(liveQuery.initialResults.rows, [{ two: 2 }]);
+await liveQuery.unsubscribe();
+const pgDrizzle = drizzle(pg);
+assert.deepEqual((await pgDrizzle.execute(sql\`select 3::int as three\`)).rows, [{ three: 3 }]);
+assert.ok((await protocol(pg).execProtocolRaw(serialize.query("SELECT 1"))).length > 0);
+const backup = await pg.dumpDataDir();
+await pg.close();
+const restored = await createPgwasm({ build: cBuild, loadDataDir: backup });
+assert.deepEqual((await restored.query<{ one: number }>("SELECT 1 AS one")).rows, [{ one: 1 }]);
+await restored.close();
+await assert.rejects(createPgwasm({ build: cBuild, dataDir: "opfs-ahp://store" }), OpfsAhpRemovedError);
+
 console.log("FIXTURE SMOKE OK");
 `;
 
@@ -271,6 +312,54 @@ export default defineConfig({
 `;
 
 /**
+ * A Vite production consumer of the C build: proves that a bundler copies and fingerprints the
+ * artefacts the package references with `new URL("…", import.meta.url)` (ADR-0062 decision 3). The
+ * bundle is for browsers, so it is built, not run; the emitted assets are checked against the pins.
+ */
+const PGWASM_VITE_ENTRY = `
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild, cBuildArtefacts } from "@pgxsinkit/pgwasm-c";
+import { amcheck } from "@pgxsinkit/pgwasm-c/contrib/amcheck";
+
+console.log(cBuildArtefacts.postgresWasm.href, cBuildArtefacts.fsBundle.href, cBuildArtefacts.initdbWasm.href);
+(globalThis as { bootPgwasm?: unknown }).bootPgwasm = () => createPgwasm({ build: cBuild, extensions: { amcheck } });
+`;
+
+const PGWASM_VITE_CONFIG = `
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  build: {
+    outDir: "dist-pgwasm",
+    assetsInlineLimit: 0,
+    rolldownOptions: {
+      input: "pgwasm-entry.ts",
+      output: { entryFileNames: "pgwasm.js" },
+    },
+  },
+});
+`;
+
+/** Every pinned artefact the C build loads by URL was emitted as a fingerprinted asset, byte-identical. */
+async function assertArtefactsFingerprinted(appDir: string): Promise<void> {
+  const assetsDir = join(appDir, "dist-pgwasm", "assets");
+  const emitted = new Map<string, string>();
+  for (const name of await readdir(assetsDir)) {
+    const bytes = new Uint8Array(await readFile(join(assetsDir, name)));
+    emitted.set(new Bun.CryptoHasher("sha256").update(bytes).digest("hex"), name);
+  }
+  for (const artefact of ["pglite.wasm", "pglite.data", "initdb.wasm", "amcheck.tar.gz"] as const) {
+    const assetName = emitted.get(ARTEFACT_FILES[artefact].sha256);
+    if (assetName === undefined) {
+      throw new Error(`the Vite build emitted no byte-identical asset for ${artefact}`);
+    }
+    if (assetName === artefact) {
+      throw new Error(`the Vite build emitted ${artefact} without a content hash in its name`);
+    }
+  }
+}
+
+/**
  * The consumer typecheck program: proves the PUBLISHED type surface — the packed d.ts graph as a
  * downstream project's use sites consume it — which the runtime smokes cannot see (Bun strips
  * types). `skipLibCheck: true` mirrors a real consumer AND is load-bearing: drizzle-orm's own
@@ -290,7 +379,7 @@ const CONSUMER_TSCONFIG = JSON.stringify(
       skipLibCheck: true,
       types: ["node"],
     },
-    include: ["smoke.ts", "consumer-entry.ts"],
+    include: ["smoke.ts", "consumer-entry.ts", "pgwasm-entry.ts"],
   },
   null,
   2,
@@ -372,6 +461,8 @@ async function main(): Promise<void> {
     await writeFile(join(appDir, "consumer-entry.ts"), VITE_CONSUMER_ENTRY);
     await writeFile(join(appDir, "vite.config.ts"), VITE_CONSUMER_CONFIG);
     await writeFile(join(appDir, "tsconfig.json"), CONSUMER_TSCONFIG);
+    await writeFile(join(appDir, "pgwasm-entry.ts"), PGWASM_VITE_ENTRY);
+    await writeFile(join(appDir, "vite.pgwasm.config.ts"), PGWASM_VITE_CONFIG);
 
     console.log("[fixture-smoke] installing the packed packages into the fixture…");
     run("bun", ["install", "--no-save"], appDir);
@@ -389,6 +480,12 @@ async function main(): Promise<void> {
 
     console.log("[fixture-smoke] rendering SyncClientProvider from the production consumer bundle…");
     run("bun", [join("dist-consumer", "consumer.js")], appDir);
+
+    console.log("[fixture-smoke] building a Vite production consumer of the C build…");
+    run(join(appDir, "node_modules", ".bin", "vite"), ["build", "--config", "vite.pgwasm.config.ts"], appDir, {
+      NODE_ENV: "production",
+    });
+    await assertArtefactsFingerprinted(appDir);
 
     console.log("[fixture-smoke] checking the pgxsinkit-generate bin resolves from the install…");
     assertGenerateBinResolves(appDir);
