@@ -1,3 +1,7 @@
+// Began as a copy of `@electric-sql/pglite` (taken under its PostgreSQL License option, © ElectricSQL
+// — see NOTICE): `makeQueryError` began as its `makePGliteError`. Owned outright (ADR-0062);
+// compatibility with PGlite is an anti-goal — evolve freely.
+
 import type { BuildIdentity, FilesystemKind } from "./build/seam";
 import type { QueryOptions } from "./interface";
 import type { DatabaseError } from "./protocol/wire/messages";

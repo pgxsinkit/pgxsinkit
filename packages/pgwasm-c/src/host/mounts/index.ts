@@ -1,3 +1,6 @@
+// Began as a copy of `@electric-sql/pglite` (taken under its PostgreSQL License option, © ElectricSQL
+// — see NOTICE). Owned outright (ADR-0062); compatibility with PGlite is an anti-goal — evolve freely.
+
 import type { StorageRequest } from "@pgxsinkit/pgwasm/build";
 
 import { FileMount } from "./file";

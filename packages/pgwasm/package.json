@@ -1,12 +1,13 @@
 {
   "name": "@pgxsinkit/pgwasm",
   "version": "0.0.0",
-  "license": "MIT",
+  "license": "MIT AND Apache-2.0",
   "files": [
     "dist",
     "src",
     "README.md",
     "LICENSE",
+    "LICENSE-APACHE-2.0",
     "NOTICE"
   ],
   "type": "module",

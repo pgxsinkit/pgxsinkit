@@ -48,3 +48,9 @@ restores only into its own build.
 ESM only, for Bun and browsers (pages, dedicated workers, SharedWorkers and extension pages).
 
 See the [documentation](https://pgxsinkit.github.io) for the full toolkit.
+
+## License
+
+MIT, except the Drizzle driver (`src/drizzle/`, `@pgxsinkit/pgwasm/drizzle`), which began as drizzle-orm's
+PGlite driver and stays under the Apache License 2.0 (`LICENSE-APACHE-2.0`); the package license is
+`MIT AND Apache-2.0`. `NOTICE` has every attribution.

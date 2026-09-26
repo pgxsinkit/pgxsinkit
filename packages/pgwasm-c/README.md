@@ -54,4 +54,5 @@ const pg = await createPgwasm({ build: cBuild, extensions: { amcheck } });
 await pg.exec("CREATE EXTENSION amcheck");
 ```
 
-Licensed under the PostgreSQL License. `NOTICE` lists the components compiled into the artefacts.
+Licensed under the PostgreSQL License. `NOTICE` lists the components compiled into the artefacts and
+reproduces each one's notice.

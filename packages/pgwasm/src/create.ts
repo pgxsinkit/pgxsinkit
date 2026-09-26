@@ -1,3 +1,6 @@
+// Began as a copy of `@electric-sql/pglite` (taken under its PostgreSQL License option, © ElectricSQL
+// — see NOTICE). Owned outright (ADR-0062); compatibility with PGlite is an anti-goal — evolve freely.
+
 import type { DataDirEntry, PostgresBuild, ServerExtension } from "./build/seam";
 import { readDataDirArchive } from "./core/data-dir-archive";
 import { BUILD_MARKER_PATH, checkBuildMarker, encodeBuildMarker, findEntry, PG_VERSION_PATH } from "./core/marker";

@@ -95,9 +95,10 @@ began as a copy of drizzle-orm's PGlite driver (`src/pglite/driver.ts`,
   Copyright (c) Drizzle Team and contributors
 
 Changes: the session, transaction and database classes are rebound from PGlite to
-pgwasm, and the driver never constructs its own database. The Apache-2.0 terms are
-permanent. A copy of the Apache License 2.0 is available at:
-  https://www.apache.org/licenses/LICENSE-2.0
+pgwasm; the driver never constructs its own database; it has its own JIT capability
+probe; `$cache.invalidate` is bound without changing the caller's cache. The Apache-2.0 terms are
+permanent. A copy of the Apache License 2.0 ships with this package in
+LICENSE-APACHE-2.0 (from https://www.apache.org/licenses/LICENSE-2.0.txt).
 
 ------------------------------------------------------------------------------
 postgres.js — type parsers and serializers

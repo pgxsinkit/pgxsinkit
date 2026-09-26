@@ -1,3 +1,6 @@
+// Began as a copy of `@electric-sql/pglite` (taken under its PostgreSQL License option, © ElectricSQL
+// — see NOTICE). Owned outright (ADR-0062); compatibility with PGlite is an anti-goal — evolve freely.
+
 /**
  * gzip through the platform's `CompressionStream` / `DecompressionStream`, which Bun and every
  * supported browser context provide, so there is one code path and no Node `zlib` fallback.
