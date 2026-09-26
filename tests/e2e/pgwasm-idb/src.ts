@@ -191,7 +191,7 @@ const harness = {
         extensions: {
           failing: {
             name: "failing",
-            setup: async (pg: Pgwasm) => ({
+            setup: async (pg) => ({
               init: async () => {
                 wrapSyncfs(module(), (original) => {
                   let delayNext = true;
@@ -380,7 +380,7 @@ const harness = {
       extensions: {
         failing: {
           name: "failing",
-          setup: async (pg: Pgwasm) => ({
+          setup: async (pg) => ({
             close: async () => {
               queryWhileClosing = await errorOf(() => pg.query("SELECT 1"));
               const mod = module();

@@ -4,7 +4,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { cBuild } from "../../packages/pgwasm-c/src";
-import type { Pgwasm } from "../../packages/pgwasm/src";
 import { protocol, serialize } from "../../packages/pgwasm/src/protocol";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { persistHookBuild, releaseHookBuild } from "./support/pgwasm-build-decorators";
@@ -97,7 +96,7 @@ describe("a failed statement persist", () => {
         extensions: {
           late: {
             name: "late",
-            setup: async (pg: Pgwasm) => ({
+            setup: async (pg) => ({
               init: async () => {
                 holdNext = true;
                 await pg.exec("CREATE TABLE late_init (v int)");

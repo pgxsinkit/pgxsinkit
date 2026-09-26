@@ -87,10 +87,19 @@ export interface Extension<TNamespace = unknown> {
 /** The `extensions` option: client extensions and a build's server extensions, by key. */
 export type Extensions = Readonly<Record<string, Extension | ServerExtension>>;
 
-/** The namespaces client extensions attach, by their key in `extensions`. */
+/**
+ * The namespaces client extensions attach, by their key in `extensions`. An extension that attaches
+ * none (its namespace type is `undefined` or `unknown`) adds no key: the database has no such member.
+ */
 export type ExtensionNamespaces<E extends Extensions> = {
   readonly [
-    K in keyof E as E[K] extends Extension<infer N> ? ([N] extends [undefined] ? never : K) : never
+    K in keyof E as E[K] extends Extension<infer N>
+      ? unknown extends N
+        ? never
+        : [N] extends [undefined]
+          ? never
+          : K
+      : never
   ]: E[K] extends Extension<infer N> ? N : never;
 };
 
@@ -106,7 +115,12 @@ export interface PgwasmOptions<E extends Extensions = Extensions> {
   readonly fs?: BaseFilesystem;
   /** A Store backup (`dumpDataDir()` output) to create the data directory from. */
   readonly loadDataDir?: Blob | File;
-  readonly extensions?: E;
+  /**
+   * Client extensions (such as `live`) and the build's server extensions, by key. Typed as the
+   * inferred `E` intersected with {@link Extensions}: `E` carries each extension's namespace onto the
+   * database, and the intersection gives an extension written inline its `setup(pg: Pgwasm)` type.
+   */
+  readonly extensions?: E & Extensions;
   /**
    * Return from a statement before its storage persist completes. The persist runs in the
    * background, and a failure is reported by the next statement.
