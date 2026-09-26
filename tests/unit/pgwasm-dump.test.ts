@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 
-import { DataDirExistsError } from "../../packages/pgwasm/src";
+import { BackupFormatError, DataDirExistsError } from "../../packages/pgwasm/src";
 import { readDataDirArchive } from "../../packages/pgwasm/src/core/data-dir-archive";
 import { decodeBuildMarker } from "../../packages/pgwasm/src/core/marker";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
@@ -64,6 +64,16 @@ describe("Store backups", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses a backup cut short, rather than restoring the members before the cut", async () => {
+    const db = await withRow();
+    const whole = new Uint8Array(await (await db.dumpDataDir("none")).arrayBuffer());
+    // Cut at a member boundary: every remaining member is intact, the end records are gone.
+    const cut = new File([whole.subarray(0, whole.byteLength - 1024)], "pgdata.tar", { type: "application/x-tar" });
+    const error = await rejectionOf(createTestPgwasm({ loadDataDir: cut }));
+    expect(error).toBeInstanceOf(BackupFormatError);
+    expect(error.message).toContain("truncated");
   });
 
   it("carries the build marker, in the layout backups have always had", async () => {

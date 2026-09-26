@@ -8,6 +8,13 @@
  * split into `prefix` + `name`, PAX extended headers (`x`, per entry; `g`, global and ignored) and GNU
  * long names (`L`). Links, devices and FIFOs are refused rather than skipped, so an archive with
  * content this codec cannot represent fails loudly instead of restoring partially.
+ *
+ * Reading is strict about completeness, for the same reason: a data directory restored from part of
+ * a backup is a corrupt database. A header or payload cut short, a size that is not a number, a
+ * header whose checksum fails and an archive without its two zero end records are all refused. The
+ * end records are required because every writer whose archives reach this reader writes them: every
+ * PGlite Store backup came from tinytar's `tar()`, which always appends them (checked for the fork's
+ * dumps and the prepopulated data directory), as do npm's tarballs and the extension bundles.
  */
 
 /** One archive member. */
@@ -56,22 +63,41 @@ export function readTar(archive: Uint8Array): TarEntry[] {
   let offset = 0;
   let pendingName: string | undefined;
   let pendingSize: number | undefined;
-  while (offset + RECORD <= archive.byteLength) {
+  for (;;) {
+    if (offset === archive.byteLength) {
+      throw new TarFormatError(
+        `tar archive ends at byte ${offset} without its end-of-archive records: it is truncated`,
+      );
+    }
+    if (offset + RECORD > archive.byteLength) {
+      throw new TarFormatError(`tar archive ends inside the header at byte ${offset}: it is truncated`);
+    }
     const header = archive.subarray(offset, offset + RECORD);
-    if (isZeroRecord(header)) break;
+    if (isZeroRecord(header)) {
+      const second = archive.subarray(offset + RECORD, offset + 2 * RECORD);
+      if (second.byteLength < RECORD || !isZeroRecord(second)) {
+        throw new TarFormatError(
+          `tar archive has one end-of-archive record at byte ${offset}, not two: it is truncated or damaged`,
+        );
+      }
+      if (pendingName !== undefined || pendingSize !== undefined) {
+        throw new TarFormatError(`tar archive ends after an extended header with no member for it`);
+      }
+      return entries;
+    }
     verifyChecksum(header, offset);
     const typeflag = String.fromCharCode(header[156] ?? 0);
     const declaredSize = readOctal(header, 124, 12, offset);
     const size = pendingSize ?? declaredSize;
     const dataStart = offset + RECORD;
-    if (dataStart + size > archive.byteLength) {
-      throw new TarFormatError(`tar member at byte ${offset} runs past the end of the archive`);
+    if (dataStart + padded(size) > archive.byteLength) {
+      throw new TarFormatError(`tar member at byte ${offset} runs past the end of the archive: it is truncated`);
     }
     const data = archive.subarray(dataStart, dataStart + size);
     offset = dataStart + padded(size);
 
     if (typeflag === "x") {
-      const pax = readPax(data);
+      const pax = readPax(data, offset);
       pendingName = pax.path ?? pendingName;
       pendingSize = pax.size;
       continue;
@@ -95,7 +121,6 @@ export function readTar(archive: Uint8Array): TarEntry[] {
       throw new TarFormatError(`tar member "${name}" has unsupported type "${typeflag}"`);
     }
   }
-  return entries;
 }
 
 function padded(size: number): number {
@@ -192,25 +217,35 @@ function isZeroRecord(header: Uint8Array): boolean {
   return true;
 }
 
-/** PAX extended header records: `"<length> <key>=<value>\n"`, lengths in bytes. Only `path` and `size` matter. */
-function readPax(data: Uint8Array): { path?: string; size?: number } {
+/**
+ * PAX extended header records: `"<length> <key>=<value>\n"`, lengths in bytes. Only `path` and `size`
+ * matter; a record that does not parse, or a `size` that is not a non-negative integer, is refused.
+ */
+function readPax(data: Uint8Array, recordOffset: number): { path?: string; size?: number } {
   const result: { path?: string; size?: number } = {};
+  const malformed = (what: string) =>
+    new TarFormatError(`tar PAX header before byte ${recordOffset} has a malformed ${what}`);
   let cursor = 0;
   while (cursor < data.byteLength) {
     let space = cursor;
     while (space < data.byteLength && data[space] !== 0x20) space++;
-    if (space >= data.byteLength) break;
-    const length = Number.parseInt(decoder.decode(data.subarray(cursor, space)), 10);
-    if (!Number.isSafeInteger(length) || length <= space - cursor || cursor + length > data.byteLength) {
-      throw new TarFormatError("malformed PAX header record");
+    const lengthText = decoder.decode(data.subarray(cursor, space));
+    if (space >= data.byteLength || !/^[0-9]+$/.test(lengthText)) throw malformed("record");
+    const length = Number.parseInt(lengthText, 10);
+    if (!Number.isSafeInteger(length) || length <= space - cursor + 1 || cursor + length > data.byteLength) {
+      throw malformed("record");
     }
+    if (data[cursor + length - 1] !== 0x0a) throw malformed("record");
     const record = decoder.decode(data.subarray(space + 1, cursor + length - 1));
     const equals = record.indexOf("=");
-    if (equals !== -1) {
-      const key = record.slice(0, equals);
-      const value = record.slice(equals + 1);
-      if (key === "path") result.path = value;
-      if (key === "size") result.size = Number.parseInt(value, 10);
+    if (equals === -1) throw malformed("record");
+    const key = record.slice(0, equals);
+    const value = record.slice(equals + 1);
+    if (key === "path") result.path = value;
+    if (key === "size") {
+      const size = /^[0-9]+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN;
+      if (!Number.isSafeInteger(size)) throw malformed(`size ("${value}")`);
+      result.size = size;
     }
     cursor += length;
   }
