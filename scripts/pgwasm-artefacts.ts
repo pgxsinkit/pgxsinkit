@@ -12,9 +12,13 @@
  *   3. the pinned members are extracted, each checked against its sha256 before it replaces the
  *      file in `artefacts/`.
  *
- * Any mismatch fails the run with the file, the expected and the actual digest; nothing that does not
- * match a pin is ever kept. `--verify-only` checks `artefacts/` without fetching or extracting
- * (`build:public-packages` runs it before bundling the package).
+ * A file in `artefacts/` that fails its pin is deleted as soon as it is found, before anything is
+ * fetched, so a run that then fails (no network, a bad tarball) leaves the file missing rather than
+ * wrong: nothing that does not match a pin is kept. Extraction writes each file to a `.part` name and
+ * renames it into place only once its content has matched the pin. Any mismatch fails the run with the
+ * file, the expected and the actual digest. `--verify-only` checks `artefacts/` without fetching or
+ * extracting, deleting mismatching files the same way (`build:public-packages` runs it before bundling
+ * the package).
  */
 
 import { mkdirSync, renameSync, rmSync } from "node:fs";
@@ -53,11 +57,11 @@ function describeMismatch(name: ArtefactName, bytes: Uint8Array): string | undef
   return actual === pin.sha256 ? undefined : `sha256 ${actual}, expected ${pin.sha256}`;
 }
 
-/** Check every pinned file in `artefacts/`; an empty result means all are present and correct. */
-export async function verifyPgwasmArtefacts(): Promise<ArtefactProblem[]> {
+/** Check every pinned file in `dir`; an empty result means all are present and correct. */
+export async function verifyPgwasmArtefacts(dir: string = ARTEFACT_DIR): Promise<ArtefactProblem[]> {
   const problems: ArtefactProblem[] = [];
   for (const name of names) {
-    const file = Bun.file(path.join(ARTEFACT_DIR, name));
+    const file = Bun.file(path.join(dir, name));
     if (!(await file.exists())) {
       problems.push({ name, problem: "missing" });
       continue;
@@ -66,6 +70,13 @@ export async function verifyPgwasmArtefacts(): Promise<ArtefactProblem[]> {
     if (mismatch !== undefined) problems.push({ name, problem: mismatch });
   }
   return problems;
+}
+
+/** Delete every file `problems` reports as present but not matching its pin. */
+export function discardMismatchedArtefacts(problems: readonly ArtefactProblem[], dir: string = ARTEFACT_DIR): void {
+  for (const { name, problem } of problems) {
+    if (problem !== "missing") rmSync(path.join(dir, name), { force: true });
+  }
 }
 
 async function readCachedTarball(): Promise<Uint8Array | undefined> {
@@ -122,19 +133,27 @@ async function extract(tarball: Uint8Array, wanted: readonly ArtefactName[]): Pr
     }
     const target = path.join(ARTEFACT_DIR, name);
     const partial = `${target}.part`;
-    await Bun.write(partial, member.data);
-    renameSync(partial, target);
+    try {
+      await Bun.write(partial, member.data);
+      renameSync(partial, target);
+    } finally {
+      rmSync(partial, { force: true });
+    }
   }
 }
 
 /** Make `artefacts/` hold exactly the pinned files. Returns the names it had to (re)write. */
 export async function ensurePgwasmArtefacts(): Promise<ArtefactName[]> {
-  const stale = (await verifyPgwasmArtefacts()).map((problem) => problem.name);
-  if (stale.length === 0) return [];
+  const problems = await verifyPgwasmArtefacts();
+  if (problems.length === 0) return [];
+  // Before any fetch that may fail: a wrong file must not outlive this run.
+  discardMismatchedArtefacts(problems);
+  const stale = problems.map((problem) => problem.name);
   const tarball = (await readCachedTarball()) ?? (await downloadTarball());
   await extract(tarball, stale);
   const remaining = await verifyPgwasmArtefacts();
   if (remaining.length > 0) {
+    discardMismatchedArtefacts(remaining);
     throw new Error(`artefacts still fail verification after extraction: ${JSON.stringify(remaining)}`);
   }
   return stale;
@@ -146,8 +165,10 @@ if (import.meta.main) {
     if (verifyOnly) {
       const problems = await verifyPgwasmArtefacts();
       if (problems.length > 0) {
+        discardMismatchedArtefacts(problems);
         console.error(
-          `pgwasm-artefacts: packages/pgwasm-c/artefacts/ does not hold the pinned files:\n` +
+          `pgwasm-artefacts: packages/pgwasm-c/artefacts/ does not hold the pinned files ` +
+            `(any that did not match were deleted):\n` +
             problems.map(({ name, problem }) => `  ${name}: ${problem}`).join("\n") +
             "\nRun `bun install` (its postinstall fetches and verifies them).",
         );

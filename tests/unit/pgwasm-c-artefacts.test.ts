@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { ARTEFACT_FILES, ARTEFACT_SOURCE, type ArtefactName } from "../../packages/pgwasm-c/src/artefact-pins";
+import { discardMismatchedArtefacts, verifyPgwasmArtefacts } from "../../scripts/pgwasm-artefacts";
+import { scratchDir } from "./support/pgwasm";
 
 // The C build's artefacts are pinned by version and checksum and fetched by the root postinstall
 // (scripts/pgwasm-artefacts.ts); they are never committed. This file checks what is on disk against the
@@ -53,5 +55,22 @@ describe("the C build's artefacts", () => {
       (file) => /["'`](\.\.\/)+artefacts\//.test(readFileSync(file, "utf8")) && !allowed(file),
     );
     expect(offenders.map((file) => path.relative(packageDir, file))).toEqual([]);
+  });
+
+  it("deletes a file that fails its pin, and leaves a missing one missing", async () => {
+    const scratch = scratchDir("pgwasm-artefacts");
+    try {
+      writeFileSync(path.join(scratch.path, "pglite.js"), "not the glue");
+      const problems = await verifyPgwasmArtefacts(scratch.path);
+      expect(problems.find((problem) => problem.name === "pglite.js")?.problem).toMatch(/^size 12, expected \d+$/);
+      expect(problems.filter((problem) => problem.problem === "missing").map((problem) => problem.name)).toHaveLength(
+        names.length - 1,
+      );
+      discardMismatchedArtefacts(problems, scratch.path);
+      expect(existsSync(path.join(scratch.path, "pglite.js"))).toBe(false);
+      expect(readdirSync(scratch.path)).toEqual([]);
+    } finally {
+      scratch.cleanup();
+    }
   });
 });
