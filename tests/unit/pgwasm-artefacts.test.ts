@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import type { TarEntry } from "../../packages/pgwasm/src/tar/tar";
@@ -7,13 +7,17 @@ import {
   ARTEFACT_PACKAGES,
   artefactDir,
   artefactPackage,
+  assertArtefactsVerified,
   cachedTarballPath,
   discardMismatchedArtefacts,
+  ensureArtefacts,
   extractPinned,
   verifyArtefacts,
+  type ArtefactPackage,
   type ArtefactPin,
 } from "../../scripts/pgwasm-artefacts";
 import { scratchDir } from "./support/pgwasm";
+import { rejectionOf } from "./support/rejection";
 
 // The build packages' artefacts are pinned by version and checksum and fetched by the root postinstall
 // (scripts/pgwasm-artefacts.ts); they are never committed. This file checks what is on disk against the
@@ -114,6 +118,59 @@ describe("the build packages' artefacts", () => {
     } finally {
       scratch.cleanup();
     }
+  });
+
+  describe("across packages", () => {
+    const cBuild = artefactPackage("packages/pgwasm-c");
+    const pgDump = artefactPackage("packages/pgwasm-pg-dump");
+
+    /** Each package's artefacts in its own scratch subdirectory: the C build's empty, pg_dump's with a wrong wasm. */
+    function scratchPackages(scratch: { readonly path: string }) {
+      const dirOf = (pkg: ArtefactPackage) => path.join(scratch.path, path.basename(pkg.packageDir));
+      for (const pkg of [cBuild, pgDump]) mkdirSync(dirOf(pkg));
+      const wrong = path.join(dirOf(pgDump), "pg_dump.wasm");
+      writeFileSync(wrong, "not pg_dump");
+      return { dirOf, wrong };
+    }
+
+    it("deletes every package's wrong files before fetching any, so a failed fetch leaves none behind", async () => {
+      const scratch = scratchDir("pgwasm-artefacts");
+      try {
+        const { dirOf, wrong } = scratchPackages(scratch);
+        const fetched: string[] = [];
+        const failure = await rejectionOf(
+          ensureArtefacts([cBuild, pgDump], {
+            dirOf,
+            fetchPinned: async (pkg) => {
+              fetched.push(pkg.packageDir);
+              throw new Error("offline");
+            },
+          }),
+        );
+        expect(failure.message).toBe("offline");
+        expect(fetched).toEqual([cBuild.packageDir]);
+        expect(existsSync(wrong)).toBe(false);
+      } finally {
+        scratch.cleanup();
+      }
+    });
+
+    it("verify-only names every package's problems, and deletes every wrong file", async () => {
+      const scratch = scratchDir("pgwasm-artefacts");
+      try {
+        const { dirOf, wrong } = scratchPackages(scratch);
+        const failure = await rejectionOf(assertArtefactsVerified([cBuild, pgDump], { dirOf }));
+        const [cProblems, pgDumpProblems] = failure.message.split(" | ");
+        expect(cProblems).toContain(`${cBuild.packageDir}/artefacts/: `);
+        expect(cProblems).toContain("amcheck.tar.gz: missing");
+        expect(pgDumpProblems).toContain(`${pgDump.packageDir}/artefacts/: `);
+        expect(pgDumpProblems).toContain("pg_dump.js: missing");
+        expect(pgDumpProblems).toMatch(/pg_dump\.wasm: size 11, expected \d+/);
+        expect(existsSync(wrong)).toBe(false);
+      } finally {
+        scratch.cleanup();
+      }
+    });
   });
 });
 

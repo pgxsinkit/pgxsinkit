@@ -14,12 +14,13 @@
  *      `sourcesContent` entry) and checked against its sha256 before it replaces the file in
  *      `artefacts/`.
  *
- * A file in `artefacts/` that fails its pin is deleted as soon as it is found, before anything is
- * fetched, so a run that then fails (no network, a bad tarball) leaves the file missing rather than
- * wrong: nothing that does not match a pin is kept. Extraction writes each file to a `.part` name and
- * renames it into place only once its content has matched the pin. Any mismatch fails the run with the
- * file, the expected and the actual digest. `--verify-only [packageDir…]` checks `artefacts/` without
- * fetching or extracting, deleting mismatching files the same way (`build:public-packages` verifies each
+ * Every package's `artefacts/` is verified, and every file failing its pin deleted, before anything is
+ * fetched for any package, so a run that then fails (no network, a bad tarball) leaves each such file
+ * missing rather than wrong, in every package: nothing that does not match a pin is kept. Extraction
+ * writes each file to a `.part` name and renames it into place only once its content has matched the
+ * pin. Any mismatch fails the run with the file, the expected and the actual digest.
+ * `--verify-only [packageDir…]` checks `artefacts/` without fetching or extracting, deleting mismatching
+ * files the same way and failing with every package's problems (`build:public-packages` verifies each
  * package before bundling it).
  */
 
@@ -129,15 +130,48 @@ export function discardMismatchedArtefacts(problems: readonly ArtefactProblem[],
   }
 }
 
-/** Throw, naming every problem, unless `pkg`'s artefacts are all present and correct. */
-export async function assertArtefactsVerified(pkg: ArtefactPackage): Promise<void> {
-  const problems = await verifyArtefacts(pkg);
-  if (problems.length > 0) {
-    discardMismatchedArtefacts(problems, artefactDir(pkg));
+export interface ArtefactRunOptions {
+  /** Where a package's artefacts are: its own `artefacts/` unless given (a test's scratch directory). */
+  readonly dirOf?: (pkg: ArtefactPackage) => string;
+  /** Fetch the named pinned files of `pkg` into `dir`: from their npm tarballs unless given. */
+  readonly fetchPinned?: (pkg: ArtefactPackage, dir: string, names: readonly string[]) => Promise<void>;
+}
+
+/**
+ * Verify every package, deleting each file that fails its pin, before anything is fetched for any of
+ * them: a later failure (one package's fetch, offline) leaves no wrong file behind in another. Returns
+ * each package's problems, in order.
+ */
+async function verifyAndDiscard(
+  packages: readonly ArtefactPackage[],
+  dirOf: (pkg: ArtefactPackage) => string,
+): Promise<ArtefactProblem[][]> {
+  const found: ArtefactProblem[][] = [];
+  for (const pkg of packages) {
+    const dir = dirOf(pkg);
+    const problems = await verifyArtefacts(pkg, dir);
+    discardMismatchedArtefacts(problems, dir);
+    found.push(problems);
+  }
+  return found;
+}
+
+/** Throw, naming every package's problems, unless all of `packages`' artefacts are present and correct. */
+export async function assertArtefactsVerified(
+  packages: readonly ArtefactPackage[],
+  { dirOf = artefactDir }: ArtefactRunOptions = {},
+): Promise<void> {
+  const found = await verifyAndDiscard(packages, dirOf);
+  const failing = packages.flatMap((pkg, index) => {
+    const problems = found[index] ?? [];
+    return problems.length === 0
+      ? []
+      : [`${pkg.packageDir}/artefacts/: ${problems.map(({ name, problem }) => `${name}: ${problem}`).join("; ")}`];
+  });
+  if (failing.length > 0) {
     throw new Error(
-      `${pkg.packageDir}/artefacts/ does not hold the pinned files; any that did not match were deleted ` +
-        `(${problems.map(({ name, problem }) => `${name}: ${problem}`).join("; ")}). Run \`bun install\` (its ` +
-        `postinstall fetches and verifies them).`,
+      `the build packages' artefacts/ do not hold the pinned files; any that did not match were deleted ` +
+        `(${failing.join(" | ")}). Run \`bun install\` (its postinstall fetches and verifies them).`,
     );
   }
 }
@@ -230,8 +264,7 @@ function membersOf(source: ArtefactSource): Promise<ReadonlyMap<string, TarEntry
   return pending;
 }
 
-async function extract(pkg: ArtefactPackage, wanted: readonly string[]): Promise<void> {
-  const dir = artefactDir(pkg);
+async function extract(pkg: ArtefactPackage, dir: string, wanted: readonly string[]): Promise<void> {
   mkdirSync(dir, { recursive: true });
   for (const name of wanted) {
     const pin = pkg.files[name];
@@ -252,21 +285,34 @@ async function extract(pkg: ArtefactPackage, wanted: readonly string[]): Promise
   }
 }
 
-/** Make `pkg`'s `artefacts/` hold exactly the pinned files. Returns the names it had to (re)write. */
-export async function ensureArtefacts(pkg: ArtefactPackage): Promise<string[]> {
-  const dir = artefactDir(pkg);
-  const problems = await verifyArtefacts(pkg);
-  if (problems.length === 0) return [];
-  // Before any fetch that may fail: a wrong file must not outlive this run.
-  discardMismatchedArtefacts(problems, dir);
-  const stale = problems.map((problem) => problem.name);
-  await extract(pkg, stale);
-  const remaining = await verifyArtefacts(pkg);
-  if (remaining.length > 0) {
-    discardMismatchedArtefacts(remaining, dir);
-    throw new Error(`artefacts still fail verification after extraction: ${JSON.stringify(remaining)}`);
+/**
+ * Make every package's artefacts hold exactly its pinned files. Every package is verified, and every
+ * mismatching file deleted, before anything is fetched. Returns, per package in order, the names it had
+ * to (re)write.
+ */
+export async function ensureArtefacts(
+  packages: readonly ArtefactPackage[],
+  { dirOf = artefactDir, fetchPinned = extract }: ArtefactRunOptions = {},
+): Promise<string[][]> {
+  // Before any fetch that may fail: no wrong file, in any package, may outlive this run.
+  const found = await verifyAndDiscard(packages, dirOf);
+  const written: string[][] = [];
+  for (const [index, pkg] of packages.entries()) {
+    const stale = (found[index] ?? []).map((problem) => problem.name);
+    if (stale.length > 0) {
+      const dir = dirOf(pkg);
+      await fetchPinned(pkg, dir, stale);
+      const remaining = await verifyArtefacts(pkg, dir);
+      if (remaining.length > 0) {
+        discardMismatchedArtefacts(remaining, dir);
+        throw new Error(
+          `${pkg.packageDir}: artefacts still fail verification after extraction: ${JSON.stringify(remaining)}`,
+        );
+      }
+    }
+    written.push(stale);
   }
-  return stale;
+  return written;
 }
 
 if (import.meta.main) {
@@ -275,17 +321,16 @@ if (import.meta.main) {
   const requested = args.filter((arg) => arg !== "--verify-only");
   try {
     const packages = requested.length > 0 ? requested.map(artefactPackage) : ARTEFACT_PACKAGES;
-    for (const pkg of packages) {
-      if (verifyOnly) {
-        await assertArtefactsVerified(pkg);
-        console.log(`pgwasm-artefacts: ${pkg.packageDir}: all pinned artefacts present and verified.`);
-        continue;
-      }
-      const written = await ensureArtefacts(pkg);
+    // Verify-only fails naming every package's problems; nothing is written either way when it passes.
+    const written: readonly string[][] = verifyOnly
+      ? await assertArtefactsVerified(packages).then(() => [])
+      : await ensureArtefacts(packages);
+    for (const [index, pkg] of packages.entries()) {
+      const names = written[index] ?? [];
       console.log(
-        written.length === 0
+        names.length === 0
           ? `pgwasm-artefacts: ${pkg.packageDir}: all pinned artefacts present and verified.`
-          : `pgwasm-artefacts: ${pkg.packageDir}: fetched and verified ${written.join(", ")}.`,
+          : `pgwasm-artefacts: ${pkg.packageDir}: fetched and verified ${names.join(", ")}.`,
       );
     }
   } catch (error) {

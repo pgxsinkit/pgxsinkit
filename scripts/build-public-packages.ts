@@ -108,7 +108,7 @@ export const publicPackages: readonly PublicPackage[] = [
     entrypoints: ["src/index.ts", "src/prepopulated.ts", "src/contrib/amcheck.ts"],
     bundler: "bun",
     relativeExternals: ["../artefacts/*", "../../artefacts/*"],
-    verify: () => assertArtefactsVerified(artefactPackage("packages/pgwasm-c")),
+    verify: () => assertArtefactsVerified([artefactPackage("packages/pgwasm-c")]),
   },
   {
     // pg_dump: its artefacts sit in `artefacts/` like pgwasm-c's, referenced only from src/artefacts.ts,
@@ -117,7 +117,7 @@ export const publicPackages: readonly PublicPackage[] = [
     entrypoints: ["src/index.ts"],
     bundler: "bun",
     relativeExternals: ["../artefacts/*"],
-    verify: () => assertArtefactsVerified(artefactPackage("packages/pgwasm-pg-dump")),
+    verify: () => assertArtefactsVerified([artefactPackage("packages/pgwasm-pg-dump")]),
   },
   {
     // A React component: built through Vite library mode for the production JSX runtime, like
