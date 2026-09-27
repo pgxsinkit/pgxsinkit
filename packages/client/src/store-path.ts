@@ -1,8 +1,8 @@
 import type { StorageDescription } from "@pgxsinkit/pgwasm";
 
-// Store path contract (ADR-0036). The public seams (`createSyncClient`, `createClientPGlite`, the worker
+// Store path contract (ADR-0036). The public seams (`createSyncClient`, `createPgwasmClient`, the worker
 // attach/provision messages, the board store registry) take a `storePath` — a PLAIN path/name, never a
-// PGlite storage URL. The storage backend is DERIVED from the engine home's capabilities here, never chosen by
+// pgwasm storage URL. The storage backend is DERIVED from the engine home's capabilities here, never chosen by
 // the consumer: opfs-repacked when that home holds sync access, IndexedDB as the browser fallback, and the
 // filesystem on Bun/Node. A memory-backed store is
 // not a product configuration — pgxsinkit's durability semantics (persistent retention, the optimistic
@@ -36,8 +36,8 @@ export class InvalidStorePathError extends Error {
 }
 
 /**
- * Thrown when a caller-owned store handed to {@link CreateSyncClientOptions.pgliteInstance} /
- * {@link CreateSyncClientOptions.precreatedPglite} is PROVABLY non-persistent (ADR-0036 decision 4): its
+ * Thrown when a caller-owned store handed to {@link CreateSyncClientOptions.pgwasmInstance} /
+ * {@link CreateSyncClientOptions.precreatedPgwasm} is PROVABLY non-persistent (ADR-0036 decision 4): its
  * `storage` is memory (pgwasm's default — the bare `createPgwasm({ build })` a copy-paste reaches — or an
  * explicit `memory://`), or a filesystem that explicitly reports itself non-persistent. Names both the why (durability
  * semantics assume a persisted store) and the two exits, so a consumer is never left guessing which store to
@@ -110,10 +110,10 @@ export function readTestStoreMarker(options: unknown): TestStoreMarker | undefin
 }
 
 /**
- * What {@link createClientPGlite} (and any store-opening seam) accepts as its store argument: a plain
+ * What {@link createPgwasmClient} (and any store-opening seam) accepts as its store argument: a plain
  * `storePath` string, or the option object a testing helper mints (`memoryStoreForTests(...)`) — carrying a
  * `storePath` plus the invisible internal marker. Accepting the object form is what lets the testing
- * helper's output flow STRAIGHT into `createClientPGlite(memoryStoreForTests("x"))` without a consumer ever
+ * helper's output flow STRAIGHT into `createPgwasmClient(memoryStoreForTests("x"))` without a consumer ever
  * naming a backend.
  */
 export type StorePathInput = string | ({ storePath: string } & WithTestStoreMarker);
@@ -129,7 +129,7 @@ export function normaliseStorePathInput(input: StorePathInput): { storePath: str
 
 /**
  * The environment seam the backend derivation reads — factored out so a browser derivation is fakeable in
- * a Bun unit test (there is no `indexedDB` there). `hasIndexedDb` is the browser/worker signal: PGlite's
+ * a Bun unit test (there is no `indexedDB` there). `hasIndexedDb` is the browser/worker signal: pgwasm's
  * IndexedDB backend needs `indexedDB`, which a browser tab AND a Web/Shared/dedicated worker expose but
  * Bun/Node do not — so it distinguishes "run in the browser" (idb) from "run on the server" (filesystem)
  * without a DOM-lib dependency.
@@ -177,7 +177,7 @@ function assertPlainStorePath(storePath: string): void {
 }
 
 /**
- * Resolve a plain {@link storePath} to the PGlite dataDir URL the store opens at — the ONE derivation point
+ * Resolve a plain {@link storePath} to the pgwasm dataDir URL the store opens at — the ONE derivation point
  * (ADR-0036 decision 2, amended by ADR-0049). A browser worker with a proven OPFS sync-access grant resolves
  * to `opfs://<storePath>`; another browser context (`indexedDB` present) resolves to `idb://<storePath>`;
  * Bun/Node resolves to `file://<storePath>` (relative paths use the working directory). The `backendOverride`
@@ -188,15 +188,15 @@ function assertPlainStorePath(storePath: string): void {
  * internal plumbing; do not surface it to consumers as something to imitate.
  *
  * CRITICAL (ADR-0036 decision 5, probed on PGlite 0.5.4): memory selection is ALWAYS the scheme-selected
- * `memory://` form, NEVER PGlite's explicit `fs: new MemoryFS()` option — `dumpDataDir` from an explicit-`fs`
+ * `memory://` form, NEVER pgwasm's explicit `fs: new MemoryFS()` option — `dumpDataDir` from an explicit-`fs`
  * instance silently omits relation files created after initdb, so a restored clone raises "relation does not
  * exist". Callers that need a memory store must route through this function, never construct `MemoryFS`.
  *
  * ADR-0049 (D1) adds the `opfs://<storePath>` form: when the placement probe granted a sync-access handle in
  * the executing scope (`env.hasOpfsSyncAccess`), the browser store lives on `opfs-repacked`. Precedence:
  * memory override (test/ephemeral) → `opfs://` (probe granted) → `idb://` (browser, handle denied) →
- * `file://` (Bun/Node). `opfs://` is TOOLKIT-INTERNAL plumbing — PGlite does NOT accept it as a `dataDir`;
- * {@link createClientPGlite} (plan step 10) interprets it via the opfs-repacked factory + the OPFS namespace
+ * `file://` (Bun/Node). `opfs://` is TOOLKIT-INTERNAL plumbing — pgwasm does NOT accept it as a `dataDir`;
+ * {@link createPgwasmClient} (plan step 10) interprets it via the opfs-repacked factory + the OPFS namespace
  * builders below. Like every URL resolved here, it never leaks to consumers.
  */
 export function resolveStoreDataDir(
@@ -305,10 +305,10 @@ export function opfsProbeDirectoryPath(): readonly [string, string] {
 
 /**
  * The IndexedDB database name a browser store occupies (ADR-0036) — a browser-only OPERATIONAL helper for
- * orphan GC / corrupt-store deletion (`indexedDB.deleteDatabase(...)`), NOT part of the create path. PGlite
+ * orphan GC / corrupt-store deletion (`indexedDB.deleteDatabase(...)`), NOT part of the create path. pgwasm
  * maps `idb://<storePath>` to the IndexedDB database `/pglite/<storePath>` (its `WASM_PREFIX` `/pglite`
  * joined with the path after the scheme; verified against `@electric-sql/pglite` 0.5.4 dist). Exposed so a
- * consumer that GCs its own stores routes that PGlite-internal naming knowledge through the library rather
+ * consumer that GCs its own stores routes that pgwasm-internal naming knowledge through the library rather
  * than re-deriving the `/pglite/` prefix itself. Rejects a scheme-bearing/empty path exactly as
  * {@link resolveStoreDataDir} does, so the two stay in lockstep.
  */
@@ -362,7 +362,7 @@ interface OpfsDirectoryHandle {
  * - **`file://`** (Bun/Node) — filesystem existence of the datadir directory. `node:fs` is imported
  *   DYNAMICALLY inside this branch, never at module top level, so a browser bundle (which only ever hits the
  *   `idb://` branch below) never pulls `node:fs` in. Relative paths resolve against the working directory,
- *   exactly as PGlite's filesystem backend and {@link resolveStoreDataDir} do.
+ *   exactly as pgwasm's filesystem backend and {@link resolveStoreDataDir} do.
  * - **`opfs://`** (browser, placement probe granted) — existence of the store DIRECTORY at
  *   `pgxsinkit/stores/<identity>` ({@link opfsStoreDirectoryPath}), walked via
  *   `navigator.storage.getDirectory()` and a `getDirectoryHandle` chain with `{ create: false }`. This is
@@ -377,7 +377,7 @@ interface OpfsDirectoryHandle {
  *   ({@link storeIndexedDbDatabaseName}). BEST-EFFORT: `databases()` is unavailable on some engines (older
  *   Firefox, certain worker contexts); when absent we CANNOT prove existence, so we report `false` and let
  *   the restore proceed rather than fabricate a result — a real overlay collision would still surface as a
- *   PGlite-level boot failure. We never fake a positive.
+ *   pgwasm-level boot failure. We never fake a positive.
  */
 export async function storeTargetExists(
   storePath: string,
@@ -388,7 +388,7 @@ export async function storeTargetExists(
   if (dataDir.startsWith("memory://")) return false;
   if (dataDir.startsWith("file://")) {
     // The datadir path is everything after the `file://` scheme; `node:fs` handles absolute and
-    // cwd-relative paths identically to PGlite's own filesystem backend.
+    // cwd-relative paths identically to pgwasm's own filesystem backend.
     const path = dataDir.slice("file://".length);
     const { existsSync } = await import("node:fs");
     return existsSync(path);

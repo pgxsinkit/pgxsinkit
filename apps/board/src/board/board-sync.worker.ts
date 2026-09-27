@@ -37,12 +37,12 @@ if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
 // `x-region` stays WRITE-ONLY (writeRequestHeaders) exactly as in-process: the write function is DB-bound
 // and wins from the regional pin, while the read path is meant to be CDN-fronted. The worker
 // loads PGlite's own boot assets on `create`; those hit the same-origin HTTP cache the login screen's
-// `warmPgliteBootAssets` already primed (the tab warm is pure HTTP-cache priming in worker mode).
+// `warmCBuildAssets` already primed (the tab warm is pure HTTP-cache priming in worker mode).
 
 // The local-store seam (./store-factory): with `VITE_BOARD_STORE_FACTORY` set to a module URL, THAT module
 // mints this engine's store — the spare `provision` and the boot create alike, because both go through
-// `defineSyncWorker`'s single `createPglite` option. Unset, the option is not passed at all and the toolkit's
-// own `createClientPGlite` runs exactly as before. The `import()` is deliberately opaque to the bundler
+// `defineSyncWorker`'s single `createStore` option. Unset, the option is not passed at all and the toolkit's
+// own `createPgwasmClient` runs exactly as before. The `import()` is deliberately opaque to the bundler
 // (`@vite-ignore`): the URL is a runtime value naming a module OUTSIDE this repo, which Vite must neither
 // resolve nor bundle.
 const storeFactory = resolveBoardStoreFactory(import.meta.env, (url) => import(/* @vite-ignore */ url));
@@ -59,5 +59,5 @@ defineSyncWorker({
   convergenceIntervalMs: 15_000,
   requestHeaders: { apikey: boardConfig.publishableKey },
   ...(boardConfig.functionsRegion ? { writeRequestHeaders: { "x-region": boardConfig.functionsRegion } } : {}),
-  ...(storeFactory ? { createPglite: storeFactory } : {}),
+  ...(storeFactory ? { createStore: storeFactory } : {}),
 });

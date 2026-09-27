@@ -102,7 +102,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
     await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
     // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so the recording namespace
-    // now lives on `createSyncEngine`'s return rather than on the mocked `PGlite.create` instance.
+    // now lives on `createSyncEngine`'s return rather than on the mocked `pgwasm.create` instance.
     // The subscription metadata store, which the desync/discard paths now call directly (there is no
     // engine namespace to route through). `deleteSubscriptionState` is what the ADR-0021 assertions
     // observe — the persisted cursor being cleared is the difference between a re-activation that

@@ -1,8 +1,8 @@
 /**
  * Boot observability (ADR-0034) — spare-adoption provision reporting. A boot that ADOPTS a pre-provisioned
- * store (the caller minted the raw PGlite ahead of boot and stamped its create timing) must report the
- * spare's initdb cost as `BootReport.provision` and set `phases.pgliteCreateMs = null` — the create was
- * paid at provision time, off this boot's clock. Exercised in-process via `precreatedPglite` +
+ * store (the caller minted the raw pgwasm ahead of boot and stamped its create timing) must report the
+ * spare's initdb cost as `BootReport.provision` and set `phases.pgwasmCreateMs = null` — the create was
+ * paid at provision time, off this boot's clock. Exercised in-process via `precreatedPgwasm` +
  * `provisionStamp` (the same seam `defineSyncWorker` uses when a boot adopts a provisioned spare), with
  * `syncEnabled: false` so the report finalizes at `ready` without needing a shape transport.
  */
@@ -12,7 +12,7 @@ import { integer, text } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
-import { type ClientPGlite, createClientPGlite, createSyncClient } from "../../packages/client/src/index";
+import { type PgwasmClient, createPgwasmClient, createSyncClient } from "../../packages/client/src/index";
 import { memoryStoreForTests } from "../../packages/client/src/testing";
 
 const registry = defineSyncRegistry({
@@ -25,10 +25,10 @@ const registry = defineSyncRegistry({
 let storeId = 0;
 
 describe("BootReport — spare adoption (ADR-0034)", () => {
-  it("reports provision != null and phases.pgliteCreateMs === null when adopting a provisioned store", async () => {
+  it("reports provision != null and phases.pgwasmCreateMs === null when adopting a provisioned store", async () => {
     // Mint the raw store ahead of boot (a spare) and stamp its create timing, then adopt it — the exact
     // shape `defineSyncWorker` forwards when a boot adopts a provisioned spare.
-    const precreated = await createClientPGlite(memoryStoreForTests(`boot-report-provision-${++storeId}`));
+    const precreated = await createPgwasmClient(memoryStoreForTests(`boot-report-provision-${++storeId}`));
     const provisionReadyAt = performance.now() - 250; // the spare sat ready ~250ms before this boot
 
     const client = await createSyncClient({
@@ -37,7 +37,7 @@ describe("BootReport — spare adoption (ADR-0034)", () => {
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...memoryStoreForTests(`boot-report-provision-${storeId}`),
-      precreatedPglite: Promise.resolve(precreated as unknown as ClientPGlite),
+      precreatedPgwasm: Promise.resolve(precreated as unknown as PgwasmClient),
       provisionStamp: Promise.resolve({ initdbMs: 111, provisionReadyAt }),
       syncEnabled: false,
     } as Parameters<typeof createSyncClient>[0]);
@@ -53,7 +53,7 @@ describe("BootReport — spare adoption (ADR-0034)", () => {
     expect(r.provision).not.toBeNull();
     expect(r.provision!.initdbMs).toBe(111);
     expect(r.provision!.provisionedMsBeforeBoot).toBeGreaterThanOrEqual(0);
-    expect(r.phases.pgliteCreateMs).toBeNull();
+    expect(r.phases.pgwasmCreateMs).toBeNull();
     // Sync disabled → no eager groups in the report.
     expect(r.groups).toHaveLength(0);
 

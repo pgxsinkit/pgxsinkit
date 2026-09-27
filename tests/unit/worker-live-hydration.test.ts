@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // `live-initial` (`hydratingTables`), and posts `live-hydrated` only after the caught-up rows' diff on the
 // SAME port (rows-before-signal). The tab (`attachSyncClient`) turns a non-empty `hydratingTables` into the
 // subscription's `hydrated` promise. Driven over a bun `MessageChannel` with a fully controllable fake
-// `pglite.live` + startCircuitsSync stub — no real PGlite/network (mirrors `client-lazy-facade`).
+// `pglite.live` + startCircuitsSync stub — no real pgwasm/network (mirrors `client-lazy-facade`).
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 

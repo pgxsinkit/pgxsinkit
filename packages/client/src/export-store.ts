@@ -1,7 +1,7 @@
-// Local store export (ADR-0035). Slice 1 ships the **store backup**: a full-fidelity, PGlite-restorable
+// Local store export (ADR-0035). Slice 1 ships the **store backup**: a full-fidelity, pgwasm-restorable
 // tarball of the whole local store, taken LIVE (no engine suspension). It is a `CHECKPOINT` — run through
 // the engine's normal query serialisation so it orders behind in-flight engine work — followed by
-// PGlite's `dumpDataDir`. Because the dump is of the datadir itself, the Mutation journal and Overlay
+// pgwasm's `dumpDataDir`. Because the dump is of the datadir itself, the Mutation journal and Overlay
 // travel INSIDE the artefact: a store backup is the lossless option, the only export an offline device
 // with unflushed writes can take (CONTEXT.md → Store backup).
 //
@@ -12,7 +12,7 @@
 
 import type { MutationDiagnostics } from "@pgxsinkit/contracts";
 
-import type { ClientPGlite } from "./index";
+import type { PgwasmClient } from "./index";
 
 /**
  * Monotonic clock (ms) — `performance.now()` where available, else `Date.now()` (mirrors BootReport).
@@ -24,7 +24,7 @@ export const nowMs = (): number => (typeof performance !== "undefined" ? perform
 /** Options for {@link SyncClient.exportStore}. */
 export interface StoreExportOptions {
   /**
-   * How to compress the tarball, forwarded to PGlite's `dumpDataDir`. `"auto"` (the default) gzips when a
+   * How to compress the tarball, forwarded to pgwasm's `dumpDataDir`. `"auto"` (the default) gzips when a
    * `CompressionStream` is available and falls back to an uncompressed tar otherwise; `"gzip"` forces
    * compression; `"none"` skips it. The report's `compression` records the compression that was actually
    * applied (which, under `"auto"`, is resolved at runtime).
@@ -61,7 +61,7 @@ export interface ExportReportCommon {
 }
 
 /**
- * A live **store backup** (ADR-0035): the whole datadir as a PGlite-restorable tarball, journal and overlay
+ * A live **store backup** (ADR-0035): the whole datadir as a pgwasm-restorable tarball, journal and overlay
  * included. `checkpoint`/`dump` are the only phases — a store backup is a `CHECKPOINT` + `dumpDataDir`, no
  * clone. Slice-1 shape, kept unchanged (the union is additive).
  */
@@ -88,7 +88,7 @@ export interface StoreBackupReport extends ExportReportCommon {
  * A **diagnostic dump** (ADR-0035, via the throwaway clone of the addendum): human-readable SQL of
  * EVERYTHING the store holds — synced tables, the `_overlay`/`_mutations` journal, the `pgxsinkit` metadata
  * schema, the read-model views, and the reconcile functions/triggers. It is a live datadir dump (checkpoint
- * + `dumpDataDir`) fed into a memory-backed throwaway PGlite via `loadDataDir`, against which `pg_dump` runs
+ * + `dumpDataDir`) fed into a memory-backed throwaway pgwasm via `loadDataDir`, against which `pg_dump` runs
  * — so the live engine is never touched (the addendum's whole point). Its phases add the clone boot and the
  * `pg_dump` walls to the shared checkpoint/dump pair.
  */
@@ -105,7 +105,7 @@ export interface DiagnosticDumpReport extends ExportReportCommon {
     dumpStartedAtMs: number;
     /** `dumpDataDir` wall — the uncompressed internal tarball the throwaway clone boots from (`compression: "none"`). */
     dumpMs: number;
-    /** Offset from export start when the throwaway clone's `PGlite.create({ loadDataDir })` began. */
+    /** Offset from export start when the throwaway clone's `pgwasm.create({ loadDataDir })` began. */
     cloneBootStartedAtMs: number;
     /** Clone boot wall — booting the memory-backed throwaway from the internal dump. */
     cloneBootMs: number;
@@ -154,7 +154,7 @@ export interface DataExportReport extends ExportReportCommon {
     dumpStartedAtMs: number;
     /** `dumpDataDir` wall — the uncompressed internal tarball the throwaway clone boots from (`compression: "none"`). */
     dumpMs: number;
-    /** Offset from export start when the throwaway clone's `PGlite.create({ loadDataDir })` began. */
+    /** Offset from export start when the throwaway clone's `pgwasm.create({ loadDataDir })` began. */
     cloneBootStartedAtMs: number;
     /** Clone boot wall — booting the memory-backed throwaway from the internal dump. */
     cloneBootMs: number;
@@ -175,7 +175,7 @@ export type ExportReport = StoreBackupReport | DiagnosticDumpReport | DataExport
 
 /** The artefact + its report — the resolved value of {@link SyncClient.exportStore}. */
 export interface StoreExportResult {
-  /** The store-backup tarball as a named `File`, restorable by PGlite via `loadDataDir`. */
+  /** The store-backup tarball as a named `File`, restorable by pgwasm via `loadDataDir`. */
   file: File;
   /** The structured record of the export (ADR-0035). */
   report: StoreBackupReport;
@@ -183,7 +183,7 @@ export interface StoreExportResult {
 
 /**
  * Reduce a plain store PATH (ADR-0036) to a filesystem-safe token for the backup file name. Takes the
- * path's LAST segment (as PGlite's own `dumpDataDir` does when it names the inner db), then keeps only
+ * path's LAST segment (as pgwasm's own `dumpDataDir` does when it names the inner db), then keeps only
  * `[A-Za-z0-9._-]`. No scheme stripping — the store path is a plain name, never a storage URL. Falls back
  * to a fixed token for an empty path so the name is always well formed.
  */
@@ -209,16 +209,16 @@ export const compactTimestamp = (): string => new Date().toISOString().replace(/
  * (the caller's export-start monotonic anchor) so the timings compose into either report.
  *
  * The `CHECKPOINT` is a utility statement — Drizzle has no builder for it, so a raw `exec` is the justified
- * tier-③ form here. Running it via `pglite.exec` serialises it behind any in-flight engine work on PGlite's
+ * tier-③ form here. Running it via `pglite.exec` serialises it behind any in-flight engine work on pgwasm's
  * single connection, flushing dirty buffers to the datadir the dump then reads — so the tarball reflects
  * committed state, not a torn mid-write datadir.
  */
 export async function performDatadirDump(
-  pglite: Pick<ClientPGlite, "exec" | "dumpDataDir">,
+  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">,
   compression: "auto" | "gzip" | "none",
   startPerf: number,
 ): Promise<{
-  dumped: Awaited<ReturnType<ClientPGlite["dumpDataDir"]>>;
+  dumped: Awaited<ReturnType<PgwasmClient["dumpDataDir"]>>;
   checkpointStartedAtMs: number;
   checkpointMs: number;
   dumpStartedAtMs: number;
@@ -240,12 +240,12 @@ export async function performDatadirDump(
 /** The dependencies {@link performStoreExport} needs from the owning client — narrow, so it is unit-testable. */
 export interface StoreExportDeps {
   /** The live store to checkpoint and dump. */
-  pglite: Pick<ClientPGlite, "exec" | "dumpDataDir">;
+  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">;
   /** The Mutation diagnostics seam (`client.diagnostics().mutation` / `readMutationStats`). */
   readMutationStats: () => Promise<MutationDiagnostics>;
   /**
    * The store's configured plain store PATH (ADR-0036) — reduced to the `storeId` in the default backup
-   * file name (`deriveStoreId`). The resolved PGlite dataDir URL is deliberately NOT used here: it is
+   * file name (`deriveStoreId`). The resolved pgwasm dataDir URL is deliberately NOT used here: it is
    * internal plumbing and must not leak into an artefact name as something to imitate.
    */
   storePath?: string;
@@ -273,7 +273,7 @@ export async function performStoreExport(
     startPerf,
   );
 
-  // PGlite names its dump `<db>.tar.gz` (type `application/x-gzip`) when it compressed, `<db>.tar`
+  // pgwasm names its dump `<db>.tar.gz` (type `application/x-gzip`) when it compressed, `<db>.tar`
   // (`application/x-tar`) otherwise — so the RESULT, not the requested option, tells us what `"auto"`
   // resolved to. Detect from whichever of name/type the runtime populated (its `File` is a polyfill in
   // non-browser hosts, so trust both).
@@ -284,7 +284,7 @@ export async function performStoreExport(
   const mimeType = gzipped ? "application/x-gzip" : "application/x-tar";
   const storeId = deriveStoreId(deps.storePath);
   const fileName = options.fileName ?? `${storeId}-${compactTimestamp()}${extension}`;
-  // Build the artefact `File` from the raw bytes, NOT by re-wrapping `dumped`: PGlite's dump is a File
+  // Build the artefact `File` from the raw bytes, NOT by re-wrapping `dumped`: pgwasm's dump is a File
   // polyfill in non-browser hosts, and `new File([polyfillFile], name)` keeps the polyfill's own name
   // rather than the one we pass. Extracting the bytes first guarantees the store-scoped name sticks.
   const bytes = new Uint8Array(await dumped.arrayBuffer());

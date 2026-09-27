@@ -23,7 +23,7 @@ function deferred(): Deferred {
 }
 
 // The DURABLE recovery-required marker. These tests exercise the
-// crash matrix by constructing store states directly — boot a REAL filesystem-backed PGlite client, write
+// crash matrix by constructing store states directly — boot a REAL filesystem-backed pgwasm client, write
 // journal rows / craft the `pgxsinkit_local_meta` marker via the raw handle, close (the fs store persists),
 // then re-boot on the SAME path and assert the boot's `warmBoot` BootReport outcome. The invariant under
 // test: the marker is never `false` while a committed `sending` row exists, so a warm boot only skips
@@ -90,7 +90,7 @@ afterEach(async () => {
 async function freshStorePath(label: string): Promise<string> {
   const dir = path.join(TMP_ROOT, `${label}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   storeDirs.push(dir);
-  // PGlite's NodeFS mkdirs only the leaf store dir, not its parent — create the parent up front.
+  // pgwasm's NodeFS mkdirs only the leaf store dir, not its parent — create the parent up front.
   await mkdir(dir, { recursive: true });
   return path.join(dir, "store");
 }
@@ -352,9 +352,9 @@ describe("durable recovery-required marker (slice 2)", () => {
   // pauses exactly B's `sending` UPDATE (deterministic — no sleeps); a fetch stub acks A and hangs B.
   it("14. two concurrent flushUnits: A's settle does NOT clear the marker while B's sending commit is in flight", async () => {
     const storePath = await freshStorePath("race");
-    // Provision the fs store (schema + a clean `false` marker), then drive the race over its raw PGlite.
+    // Provision the fs store (schema + a clean `false` marker), then drive the race over its raw pgwasm.
     const provisioner = await bootFsClient(todosRegistry, storePath);
-    const rawPglite = provisioner.pglite;
+    const rawPglite = provisioner.pgwasm;
 
     const unitA = "11111111-1111-1111-1111-111111111111";
     const unitB = "22222222-2222-2222-2222-222222222222";
@@ -465,8 +465,8 @@ describe("durable recovery-required marker (slice 2)", () => {
     const provisioner = await bootFsClient(todosRegistry, storePath);
     const runtime = createMutationRuntime({
       db: {
-        exec: (sql) => provisioner.pglite.exec(sql),
-        query: (sql, params) => provisioner.pglite.query(sql, params),
+        exec: (sql) => provisioner.pgwasm.exec(sql),
+        query: (sql, params) => provisioner.pgwasm.query(sql, params),
       },
       registry: todosRegistry,
       batchWriteUrl: DEAD_WRITE,
@@ -492,12 +492,12 @@ describe("durable recovery-required marker (slice 2)", () => {
     try {
       // Both settle (concurrently); the last unit to close its span sees the counter at 0 and clears.
       await Promise.all([runtime.flushUnit(unitA), runtime.flushUnit(unitB)]);
-      const marker = await provisioner.pglite.query<{ value: string }>(
+      const marker = await provisioner.pgwasm.query<{ value: string }>(
         "SELECT value FROM pgxsinkit_local_meta WHERE key = $1",
         [MARKER_KEY],
       );
       expect(marker.rows[0]?.value).toBe("false");
-      const sending = await provisioner.pglite.query<{ n: number }>(
+      const sending = await provisioner.pgwasm.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM todos_mutations WHERE status = 'sending'",
       );
       expect(sending.rows[0]?.n).toBe(0);
@@ -535,7 +535,7 @@ describe("durable recovery-required marker (slice 2)", () => {
   it("17. a sender that enters while the clear is in flight rewrites the marker true (no stale-flag skip)", async () => {
     const storePath = await freshStorePath("clear-race");
     const provisioner = await bootFsClient(todosRegistry, storePath);
-    const rawPglite = provisioner.pglite;
+    const rawPglite = provisioner.pgwasm;
 
     const unitA = "55555555-5555-5555-5555-555555555555";
     const unitB = "66666666-6666-6666-6666-666666666666";
@@ -651,7 +651,7 @@ describe("durable recovery-required marker (slice 2)", () => {
   it("18. a guard-blocked clear keeps the marker true and leaves the flag false (next sender re-writes true)", async () => {
     const storePath = await freshStorePath("guard-blocked");
     const provisioner = await bootFsClient(todosRegistry, storePath);
-    const rawPglite = provisioner.pglite;
+    const rawPglite = provisioner.pgwasm;
 
     const unitA = "77777777-7777-7777-7777-777777777777";
     const unitB = "88888888-8888-8888-8888-888888888888";

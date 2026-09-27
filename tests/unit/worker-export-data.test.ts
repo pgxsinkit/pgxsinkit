@@ -15,7 +15,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   type SyncWorkerHost,
 } from "../../packages/client/src/index";
@@ -53,7 +53,7 @@ async function makeHost(): Promise<{ host: SyncWorkerHost<TodosRegistry>; pg: Pg
     streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+    precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
     syncEnabled: false,
     installGlobal: false,
     convergenceIntervalMs: 10_000_000,

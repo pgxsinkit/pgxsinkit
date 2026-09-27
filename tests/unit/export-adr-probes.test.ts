@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 //   (a) do ephemeral (pg_temp) row bytes spill into a LIVE store-backup tarball?
 //   (b) is a live datadir dump taken UNDER write activity crash-consistent (boots clean, coherent journal)?
 //   (c) does a data export's row set equal the live store's synced-table row set (clone fidelity)?
-// All three use a REAL in-memory PGlite (`syncEnabled: false`, no network); (c) is WASM-heavy (`pg_dump.wasm`)
+// All three use a REAL in-memory pgwasm (`syncEnabled: false`, no network); (c) is WASM-heavy (`pg_dump.wasm`)
 // so this file is FULL unit lane only (`test:unit`), never `test:unit:fast`. Fresh stores are booted straight
 // from the artefact via `loadDataDir` through the same resolution module the toolkit uses (ADR-0036).
 
@@ -77,7 +77,7 @@ async function makeClient(storePath: string): Promise<SyncClient<Registry>> {
   });
 }
 
-/** Boot a bare, engine-less PGlite straight from a store-backup artefact via `loadDataDir` (a restore/boot). */
+/** Boot a bare, engine-less pgwasm straight from a store-backup artefact via `loadDataDir` (a restore/boot). */
 async function bootFromBackup(storePath: string, backup: File | Blob): Promise<Pgwasm> {
   const fresh = await createPgwasm({
     build: cBuild,
@@ -121,7 +121,7 @@ describe("ADR-0035 probe (a): ephemeral (pg_temp) bytes in a LIVE store-backup t
     // it. (The table's NAME can appear elsewhere as a bare identifier in durable metadata / a reconcile
     // function body — that is not row content and is not what this asserts.) This is the reassuring outcome
     // for a consumer using ephemeral retention to keep sensitive rows out of on-disk backups. Were this ever
-    // to flip on a future PGlite, this assertion fails loudly and the finding must be re-reported to
+    // to flip on a future pgwasm, this assertion fails loudly and the finding must be re-reported to
     // consumers rather than silently accepted.
     const bytes = new Uint8Array(await file.arrayBuffer());
     // Decode byte-for-byte (latin1: every byte → one code point) so the raw tarball is searchable as text

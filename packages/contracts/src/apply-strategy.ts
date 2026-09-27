@@ -1,7 +1,7 @@
 /**
  * Static, type-driven read-path apply ladder (ADR-0009 decision 3).
  *
- * We own the registry's column types ahead of time and only ever target the latest PGlite, so the
+ * We own the registry's column types ahead of time and only ever target the latest pgwasm, so the
  * bulk-insert strategy for a synced table is chosen **once, statically** from its column types —
  * never by probing `information_schema` at runtime. This module is the pure, dependency-free core
  * (no registry, no Drizzle import) so it stays in the fast unit lane; {@link deriveSyncColumnTypes}
@@ -36,7 +36,7 @@ export interface SyncColumnType {
 }
 
 /**
- * Postgres scalar types whose JS→CSV-text rendering is unambiguous, so PGlite `COPY ... FROM`
+ * Postgres scalar types whose JS→CSV-text rendering is unambiguous, so pgwasm `COPY ... FROM`
  * round-trips them losslessly. Deliberately **conservative** (ADR-0009 decision 3): never add a
  * type here unless `COPY` truly handles it. Notably EXCLUDES timestamps/dates (format nuances),
  * `numeric` (precision/format), `bytea`, `interval`, `json`/`jsonb`, and arrays — those route to the
@@ -85,7 +85,7 @@ function isCopySafe(column: SyncColumnType): boolean {
   if (column.isArray) {
     return false;
   }
-  // Enum labels are plain text on the COPY wire; PGlite's COPY input casts them into the enum type
+  // Enum labels are plain text on the COPY wire; pgwasm's COPY input casts them into the enum type
   // losslessly, so an enum column is COPY-safe even though its `sqlType` (the enum name) is not a base type.
   if (column.isEnum) {
     return true;
@@ -95,7 +95,7 @@ function isCopySafe(column: SyncColumnType): boolean {
 
 /**
  * `json_to_recordset` extends the COPY-safe set with arrays, `json`, and `jsonb` — viable now that
- * the latest PGlite round-trips bigint and bigint[] correctly (ADR-0009 decision 3).
+ * the latest pgwasm round-trips bigint and bigint[] correctly (ADR-0009 decision 3).
  */
 function isJsonSafe(column: SyncColumnType): boolean {
   if (isCopySafe(column)) {

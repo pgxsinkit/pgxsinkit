@@ -56,7 +56,7 @@ export function isSubscriptionTiming(value: unknown): value is SubscriptionTimin
 /**
  * Retention for a synced table (ADR-0021): **whether** its local copy is durable.
  *
- * - `persistent` (default) — the durable PGlite backend with a resumable subscription-state.
+ * - `persistent` (default) — the durable pgwasm backend with a resumable subscription-state.
  * - `ephemeral` — the table's whole per-table local cluster (read cache, overlay, journal, sequence,
  *   views, reconcile trigger/function) is emitted as `TEMP`, so reads **and** writes leave no durable
  *   trace. Consequence: no durable offline write queue — pair a must-not-lose write with a pessimistic
@@ -158,11 +158,11 @@ export function isStorageBuild(value: unknown): value is StorageBuild {
 
 /**
  * The declared store ENGINE (ADR-0050 addendum 2026-09-08): the module URL of a store factory that answers
- * for the store instead of the toolkit's own `createClientPGlite`.
+ * for the store instead of the toolkit's own `createPgwasmClient`.
  *
  * `module` is an **absolute or origin-relative module URL** the engine home can `import()`. Its default
- * export — or a named `createPglite` — is the toolkit's own `createPglite` seam (ADR-0036), unchanged:
- * `(storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>`. The module owns everything
+ * export — or a named `createStore` — is the toolkit's own `createStore` seam (ADR-0036), unchanged:
+ * `(storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>`. The module owns everything
  * this declaration does not carry: its own assets (derivable from `import.meta.url`; there is no asset
  * base and there will not be one), its own storage layout under the store path, and its own environment
  * requirements (a threaded engine that needs a cross-origin-isolated page refuses to construct without
@@ -489,7 +489,7 @@ export interface RowTransformContext {
  * jsonb column, or otherwise rewrite a value, *conditionally on row data*. This expresses
  * what a static, whole-column `omitColumns` cannot.
  *
- * Server authority only: it never alters the local PGlite schema and never alters the shape
+ * Server authority only: it never alters the local pgwasm schema and never alters the shape
  * definition — the engine ref-counts shapes by definition (ADR-0055), so a transform can
  * neither change which stream a subject reads nor split one that would otherwise be shared.
  * Return the same `row` reference to signal "no change".
@@ -534,7 +534,7 @@ export interface ClientProjectionSpec {
    *
    * Declare what the CLIENT's queries need, not what the server has: a scan the app runs on every render
    * over a large synced table (the motivating case: a `due_at` window over 100k rows — ~13 ms sequential
-   * vs ~0.1 ms indexed on PGlite, logged by `tests/unit/read-model-overlay-plan`). Each index costs write
+   * vs ~0.1 ms indexed on pgwasm, logged by `tests/unit/read-model-overlay-plan`). Each index costs write
    * time on every applied batch and space in the user's store, so an index nothing queries is a straight loss.
    *
    * Rendered on the synced table ONLY — never on the overlay, whose primary key is already its index and
@@ -545,7 +545,7 @@ export interface ClientProjectionSpec {
 
 /**
  * Server-side projection applied on the read egress path. This is server
- * authority, not client shape — it never alters the local PGlite schema or the
+ * authority, not client shape — it never alters the local pgwasm schema or the
  * shape definition — so it lives apart from {@link ClientProjectionSpec} (ADR-0004).
  */
 export interface ServerProjectionSpec {

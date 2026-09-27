@@ -1,8 +1,8 @@
-import { createSyncClient, type ClientPGlite } from "@pgxsinkit/client";
+import { createSyncClient, type PgwasmClient } from "@pgxsinkit/client";
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 export type PerfLabClient = Awaited<ReturnType<typeof createSyncClient<SyncTableRegistry>>>;
-export type PerfLabDb = ClientPGlite;
+export type PerfLabDb = PgwasmClient;
 
 export type PerfLabConnectionMode = "live" | "offline";
 
@@ -72,7 +72,7 @@ export async function loadPerfClient(
 
   return {
     client,
-    db: client.pglite,
+    db: client.pgwasm,
     dispose: async () => {
       await client.stop();
     },

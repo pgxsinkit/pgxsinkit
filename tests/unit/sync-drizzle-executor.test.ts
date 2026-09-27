@@ -15,7 +15,7 @@ import { createTablesFromSchema } from "../support/drizzle";
 import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0028 slice E — the internal Drizzle executor adapter (`drizzleOverPg`) that lets the sync engine's
-// metadata-store DML run as tier-① Drizzle over BOTH a plain PGlite connection and an open PGlite
+// metadata-store DML run as tier-① Drizzle over BOTH a plain pgwasm connection and an open pgwasm
 // `Transaction` (the commit boundary the engine owns). Plus the DDL/pgTable drift guard.
 
 const META = "pgxsinkit";

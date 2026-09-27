@@ -219,7 +219,7 @@ function writableTableKeys(registry: SyncTableRegistry): string[] {
  * statement — but only where NOT EXISTS any `sending` row in ANY writable journal (the EXISTS-union is built
  * from the registry's journal Drizzle objects via {@link getJournalTable}). Correct regardless of JS
  * bookkeeping: a concurrent enqueue that committed a `sending` row makes the guard fail, so the marker stays
- * `"true"`. Returns `{ cleared }` from the statement's affected-row count (PGlite reports `affectedRows`) —
+ * `"true"`. Returns `{ cleared }` from the statement's affected-row count (pgwasm reports `affectedRows`) —
  * `true` when the guard passed (an existing marker row flipped/held at `"false"`), `false` when a `sending`
  * row blocked it OR no marker row exists yet. Off the boot path AND at the end of a boot recovery pass.
  *

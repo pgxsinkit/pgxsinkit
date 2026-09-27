@@ -10,7 +10,7 @@
 // - IDENTIFIER_RENAMES: whole identifier tokens only (`[A-Za-z_$][\w$]*`), looked up in the map, so a name
 //   inside a longer identifier (`createPgliteFactory`) is left alone. Applied in code, comments and strings,
 //   so `{@link ...}` references follow the rename.
-// - SPECIFIER_RENAMES: a string literal whose whole content is one of the listed module specifiers.
+// - SPECIFIER_RENAMES: a listed module specifier, in a module-specifier position only.
 // - PHRASE_RENAMES: listed multi-word diagnostics strings (the boot rail lines and phases), matched exactly.
 // - MANUAL_SITES: names whose replacement is structural, not a rename (e.g. `pgliteBootAssets` becomes
 //   `build: createCBuild({ assets })`). They are reported with their guidance and never rewritten.
@@ -93,7 +93,13 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const SPECIFIER_PATTERN = new RegExp(`(['"\`])(${[...SPECIFIER_RENAMES.keys()].map(escapeRegExp).join("|")})\\1`, "g");
+// Only in a module-specifier position (`from`, `import`, `import()`, `require()`, `mock.module()`, `vi.mock()`,
+// `declare module`), so a package name held as data (an artefact pin) or quoted in a comment is left alone.
+const SPECIFIER_LEAD = String.raw`(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*|\bmock\.module\s*\(\s*|\bvi\.mock\s*\(\s*|\bdeclare\s+module\s+)`;
+const SPECIFIER_PATTERN = new RegExp(
+  `${SPECIFIER_LEAD}(['"])(${[...SPECIFIER_RENAMES.keys()].map(escapeRegExp).join("|")})\\2`,
+  "g",
+);
 
 export interface RewriteResult {
   readonly text: string;
@@ -109,9 +115,9 @@ export function rewriteSource(source: string): RewriteResult {
     changes += parts.length - 1;
     text = parts.join(to);
   }
-  text = text.replace(SPECIFIER_PATTERN, (_match, quote: string, specifier: string) => {
+  text = text.replace(SPECIFIER_PATTERN, (_match, lead: string, quote: string, specifier: string) => {
     changes += 1;
-    return `${quote}${SPECIFIER_RENAMES.get(specifier)}${quote}`;
+    return `${lead}${quote}${SPECIFIER_RENAMES.get(specifier)}${quote}`;
   });
   text = text.replace(IDENTIFIER, (token) => {
     const renamed = IDENTIFIER_RENAMES.get(token);
@@ -165,18 +171,24 @@ const DIAGNOSTIC =
 /** The "unknown property" diagnostics of a typecheck log that name a {@link TYPECHECK_PROPERTY_RENAMES} key. */
 export function parseTypecheckLog(log: string): PropertyDiagnostic[] {
   const diagnostics: PropertyDiagnostic[] = [];
+  // A file shared by several projects is reported once per project; keep each position once.
+  const seen = new Set<string>();
   for (const raw of log.split("\n")) {
     // oxlint-disable-next-line no-control-regex -- strips ANSI colour codes from a pretty tsc log
     const match = DIAGNOSTIC.exec(raw.replace(/\u001b\[[0-9;]*m/g, "").trim());
     if (!match) continue;
     const property = match[6] ?? "";
     if (!TYPECHECK_PROPERTY_RENAMES.has(property)) continue;
-    diagnostics.push({
+    const diagnostic = {
       file: match[1] ?? "",
       line: Number(match[2] ?? match[4]),
       column: Number(match[3] ?? match[5]),
       property,
-    });
+    };
+    const key = `${diagnostic.file}:${diagnostic.line}:${diagnostic.column}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    diagnostics.push(diagnostic);
   }
   return diagnostics;
 }

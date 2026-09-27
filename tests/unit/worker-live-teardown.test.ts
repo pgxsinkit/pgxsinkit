@@ -2,9 +2,9 @@ import { describe, expect, it } from "bun:test";
 // Awaited live-query teardown (ADR-0040 decision 1, Slice 1). These pin the close-vs-unsubscribe race
 // that wedged the bun runner forever (repro'd against @electric-sql/pglite 0.5.4 — see
 // tmp/agents/upstream-pglite-live-unsubscribe-close-hang.md): a fire-and-forget live `unsubscribe()`
-// still in flight when the engine closes leaves an internal PGlite promise forever pending, so the
+// still in flight when the engine closes leaves an internal pgwasm promise forever pending, so the
 // process never exits. Both seams (worker host `close()` and in-process client `stop()`) now retain
-// every teardown promise and settle them BEFORE the PGlite close. The proof is structural: each test
+// every teardown promise and settle them BEFORE the pgwasm close. The proof is structural: each test
 // unsubscribes and IMMEDIATELY closes with NO intervening macrotask tick, and the whole file must
 // still exit cleanly — the pre-fix shape would hang the runner here.
 
@@ -18,8 +18,8 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
-  createClientPGlite,
+  type PgwasmClient,
+  createPgwasmClient,
   createSyncClient,
   defineSyncWorker,
   getReadModelView,
@@ -54,7 +54,7 @@ describe("awaited live-query teardown (ADR-0040 Slice 1)", () => {
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...testStoreAcknowledgment(),
-      precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+      precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -82,7 +82,7 @@ describe("awaited live-query teardown (ADR-0040 Slice 1)", () => {
     expect(sub.initialRows.map((r) => r.title)).toEqual(["A"]);
 
     // The exact hang shape: fire the tab-side unsubscribe, then close the host in the SAME macrotask.
-    // `close()` awaits the worker-side live-query teardown before it closes PGlite, so this resolves.
+    // `close()` awaits the worker-side live-query teardown before it closes pgwasm, so this resolves.
     sub.unsubscribe();
     await host.close();
 
@@ -100,7 +100,7 @@ describe("awaited live-query teardown (ADR-0040 Slice 1)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       ...testStoreAcknowledgment(),
-      precreatedPglite: createClientPGlite(memoryStoreForTests("live-teardown-inproc")),
+      precreatedPgwasm: createPgwasmClient(memoryStoreForTests("live-teardown-inproc")),
     });
     await client.ready;
     await client.tables.todos.create({ id: TODO_ID, title: "A", done: false });
@@ -117,7 +117,7 @@ describe("awaited live-query teardown (ADR-0040 Slice 1)", () => {
     expect(sub.initialRows.map((r) => r.title)).toEqual(["A"]);
 
     // Unsubscribe, then stop in the SAME macrotask: `stop()` awaits the retained teardown before the
-    // PGlite close, so no in-flight `unsubscribe()` races the close.
+    // pgwasm close, so no in-flight `unsubscribe()` races the close.
     sub.unsubscribe();
     await client.stop();
 

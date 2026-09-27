@@ -554,7 +554,7 @@ function resolveGrantExecuteRoles(grantExecuteTo: readonly string[] | undefined)
  * - **A default (NULL) `proacl` explodes to nothing.** That is why the unconditional
  *   `REVOKE ALL … FROM PUBLIC` is emitted FIRST: revoking materializes the previously-implicit ACL
  *   (`NULL` → `{owner=X/owner}`), so by the time this block runs the catalog states the truth. Pinned by
- *   the PGlite unit lane, and by the integration lane against a real cluster.
+ *   the pgwasm unit lane, and by the integration lane against a real cluster.
  * - **Grantee `0` is PUBLIC**, which has no role name (`pg_get_userbyid(0)` returns a placeholder
  *   string), so it is revoked by the `FROM PUBLIC` spelling rather than by name.
  *
@@ -610,7 +610,7 @@ $$;`;
  * `anon`/`authenticated`/`service_role` trio via default privileges; because the artifact begins with
  * `DROP FUNCTION`, EVERY install recreates that exposure. So the revokes are emitted unconditionally
  * (convergence must not depend on install history), the Supabase-trio ones through the shared
- * role-existence guard so the artifact stays portable to PGlite and plain-Postgres lanes.
+ * role-existence guard so the artifact stays portable to pgwasm and plain-Postgres lanes.
  *
  * Those named revokes are the READABLE fast path — a reviewer sees the two known exposures closed in
  * plain SQL. The guarantee is {@link buildApplyFunctionAclConvergerSql}, which then revokes EVERY

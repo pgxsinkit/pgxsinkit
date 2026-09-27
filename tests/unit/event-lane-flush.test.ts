@@ -28,7 +28,7 @@ import {
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { closeOpenTestPgwasms, createSchemaTestPgwasm } from "../support/pgwasm-store";
 
-// The Event lane's flush loop (ADR-0053 decisions 3 + 4), against a REAL PGlite and a mocked endpoint
+// The Event lane's flush loop (ADR-0053 decisions 3 + 4), against a REAL pgwasm and a mocked endpoint
 // (Phase C builds the real one). What is pinned: batch assembly ordered by the `seq` append ordinal across
 // every Event stream, the deferred-backoff skip, all three clamps, the four verdicts (three terminal, one
 // not), the TWO retry classes with no attempt cap and no client-side quarantine, the drain signal's

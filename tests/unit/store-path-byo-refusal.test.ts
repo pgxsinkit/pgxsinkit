@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-// The BYO-instance refusal (ADR-0036 decision 4): `createSyncClient` refuses a caller-owned PGlite that is
+// The BYO-instance refusal (ADR-0036 decision 4): `createSyncClient` refuses a caller-owned pgwasm that is
 // PROVABLY non-persistent (a bare `createPgwasm({ build })` default, or an explicit memory store), unless a testing
 // acknowledgment is spread into the options. Anything else present — including a real filesystem store —
 // passes (the guard is not a storage-backend whitelist). Uses REAL pgwasm instances so the `.storage` the
@@ -17,8 +17,8 @@ import type { FilesystemDescription } from "@pgxsinkit/pgwasm/fs";
 import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
-  type ClientPGlite,
-  createClientPGlite,
+  type PgwasmClient,
+  createPgwasmClient,
   createSyncClient,
   NonPersistentStoreError,
   type SyncClient,
@@ -60,32 +60,32 @@ afterEach(async () => {
 });
 
 describe("BYO refusal (ADR-0036 decision 4)", () => {
-  it("refuses a bare `createPgwasm({ build })` (in-memory default) supplied as pgliteInstance", async () => {
+  it("refuses a bare `createPgwasm({ build })` (in-memory default) supplied as pgwasmInstance", async () => {
     const bare = await createPgwasm({ build: cBuild });
     looseInstances.push(bare);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
-      createSyncClient({ ...commonOptions, pgliteInstance: bare as unknown as ClientPGlite }),
+      createSyncClient({ ...commonOptions, pgwasmInstance: bare as unknown as PgwasmClient }),
     ).rejects.toBeInstanceOf(NonPersistentStoreError);
   });
 
-  it("refuses an explicit memory store supplied as pgliteInstance", async () => {
-    const memory = await createClientPGlite(memoryStoreForTests("byo-refuse-instance"));
+  it("refuses an explicit memory store supplied as pgwasmInstance", async () => {
+    const memory = await createPgwasmClient(memoryStoreForTests("byo-refuse-instance"));
     looseInstances.push(memory as unknown as Pgwasm);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
-    await expect(createSyncClient({ ...commonOptions, pgliteInstance: memory })).rejects.toBeInstanceOf(
+    await expect(createSyncClient({ ...commonOptions, pgwasmInstance: memory })).rejects.toBeInstanceOf(
       NonPersistentStoreError,
     );
   });
 
-  it("PROPAGATES the refusal through the precreatedPglite path — never swallowed by the reject-fallback", async () => {
+  it("PROPAGATES the refusal through the precreatedPgwasm path — never swallowed by the reject-fallback", async () => {
     // The precreated path falls back to a fresh create ONLY when the promise REJECTS. A SUCCESSFULLY
     // resolved-but-non-persistent instance must raise NonPersistentStoreError, not silently boot a fresh store.
-    const memory = await createClientPGlite(memoryStoreForTests("byo-refuse-precreated"));
+    const memory = await createPgwasmClient(memoryStoreForTests("byo-refuse-precreated"));
     looseInstances.push(memory as unknown as Pgwasm);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
-      createSyncClient({ ...commonOptions, precreatedPglite: Promise.resolve(memory) }),
+      createSyncClient({ ...commonOptions, precreatedPgwasm: Promise.resolve(memory) }),
     ).rejects.toBeInstanceOf(NonPersistentStoreError);
   });
 
@@ -94,8 +94,8 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
     // passes. Proves the predicate catches only the accidental non-persistent shapes.
     const dir = await mkdtemp(join(tmpdir(), "pgxsinkit-byo-file-"));
     tempDirs.push(dir);
-    const fileStore = await createClientPGlite(join(dir, "store"));
-    client = await createSyncClient({ ...commonOptions, precreatedPglite: Promise.resolve(fileStore) });
+    const fileStore = await createPgwasmClient(join(dir, "store"));
+    client = await createSyncClient({ ...commonOptions, precreatedPgwasm: Promise.resolve(fileStore) });
     await client.ready;
     // Schema exec ran on the file store (the readonly synced table exists).
     const result = await client.rawQuery("select count(*)::int as n from profile");
@@ -110,7 +110,7 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
     expect(custom.storage).toEqual({ kind: "vfs", name: "custom" });
     client = await createSyncClient({
       ...commonOptions,
-      precreatedPglite: Promise.resolve(custom as unknown as ClientPGlite),
+      precreatedPgwasm: Promise.resolve(custom as unknown as PgwasmClient),
     });
     await client.ready;
     const result = await client.rawQuery("select count(*)::int as n from profile");
@@ -127,7 +127,7 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
     looseInstances.push(ephemeral);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
-      createSyncClient({ ...commonOptions, pgliteInstance: ephemeral as unknown as ClientPGlite }),
+      createSyncClient({ ...commonOptions, pgwasmInstance: ephemeral as unknown as PgwasmClient }),
     ).rejects.toBeInstanceOf(NonPersistentStoreError);
   });
 
@@ -135,7 +135,7 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
     client = await createSyncClient({
       ...commonOptions,
       ...testStoreAcknowledgment(),
-      precreatedPglite: createClientPGlite(memoryStoreForTests("byo-ack")),
+      precreatedPgwasm: createPgwasmClient(memoryStoreForTests("byo-ack")),
     });
     await client.ready;
     const result = await client.rawQuery("select count(*)::int as n from profile");

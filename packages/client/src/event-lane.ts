@@ -48,7 +48,7 @@ import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 import { syncDebug } from "./debug";
 import { getOutboxTable } from "./local-tables";
 
-/** The raw local-store seam the Event lane executes through (structurally PGlite; mirrors `MutationDb`). */
+/** The raw local-store seam the Event lane executes through (structurally pgwasm; mirrors `MutationDb`). */
 export interface EventLaneDb {
   query: <TRow extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,

@@ -11,7 +11,7 @@
 //     On the DEFAULT configuration the retirement signals are the ones that carry actual EVIDENCE of death:
 //     the engine control port's `close` event (MessagePort `close` is Baseline, so this covers every current
 //     browser), the reported paths owned above this module (worker `error`, spawn failure, tab death), and
-//     the teardown handshake. SILENCE IS NEVER A VERDICT HERE (ADR-0049 D5): PGlite's synchronous WASM work
+//     the teardown handshake. SILENCE IS NEVER A VERDICT HERE (ADR-0049 D5): pgwasm's synchronous WASM work
 //     blocks the engine's event loop, so a legitimate long import stalls the control channel exactly as a
 //     corpse does. Timing therefore lives entirely behind the OPT-IN execution limit — with it enabled, an
 //     unacked `connect-port` and a tab-reported overdue dispatch both hand the question to the probe loop,

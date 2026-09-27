@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 // Store backup (ADR-0035) on the in-process client: a LIVE `dumpDataDir` (CHECKPOINT → dump), no engine
-// suspension. Uses a REAL in-memory PGlite with `syncEnabled: false` (no network) and a readwrite table so
+// suspension. Uses a REAL in-memory pgwasm with `syncEnabled: false` (no network) and a readwrite table so
 // a staged-but-unflushed write can be observed travelling inside the artefact via the report's diagnostics.
 
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";

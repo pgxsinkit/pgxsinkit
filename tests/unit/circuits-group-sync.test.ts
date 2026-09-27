@@ -504,7 +504,7 @@ describe("circuits group sync", () => {
     first.unsubscribe();
 
     // ENQUEUED from inside the ready callback, and that is what makes it an ordering assertion rather
-    // than a re-read: PGlite runs one connection FIFO, so this select sees everything committed before
+    // than a re-read: pgwasm runs one connection FIFO, so this select sees everything committed before
     // ready was announced and nothing committed after it.
     const idsAtReady: Promise<string[]>[] = [];
     const second = await startCircuitsSync(pg, {

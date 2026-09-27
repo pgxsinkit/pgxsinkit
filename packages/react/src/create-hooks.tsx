@@ -1,7 +1,7 @@
 import { createContext, type DependencyList, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
 import {
-  type ClientPGlite,
+  type PgwasmClient,
   type LiveRowsSubscription,
   type MutationListOptions,
   type MutationSummaryDetail,
@@ -17,7 +17,7 @@ import { liveFieldAliases, remapAliasedLiveRow, remapLiveRow, type SelectedField
 /**
  * Minimal interface satisfied by every Drizzle select/query builder.
  * Calling `.toSQL()` extracts the SQL string and positional params without
- * executing the query, so they can be fed into PGlite's live query API. `_.selectedFields` is the
+ * executing the query, so they can be fed into pgwasm's live query API. `_.selectedFields` is the
  * select's field metadata, used to remap PGlite's snake_case rows back to the builder's field keys
  * ({@link remapLiveRow}) — without it the typed rows would carry the underlying column names.
  */
@@ -43,12 +43,12 @@ interface LiveRowsState<TRows> {
 }
 
 /**
- * The raw direct-PGlite subscription used only by `useLiveRows`'s explicit-`pglite` override (tests/multi-db).
+ * The raw direct-pgwasm subscription used only by `useLiveRows`'s explicit-`pglite` override (tests/multi-db).
  * Wraps `pglite.live.query` into the client's {@link LiveRowsSubscription} shape so the hook body treats the
  * override and the seam identically. The normal path goes through `client.subscribeLiveRows`.
  */
 function subscribeRawPglite<TRow extends Record<string, unknown>>(
-  pglite: ClientPGlite,
+  pglite: PgwasmClient,
   query: string,
   params: unknown[],
   onRows: (rows: TRow[]) => void,
@@ -126,15 +126,15 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     options?: {
       params?: readonly unknown[];
       ready?: boolean;
-      /** Explicit PGlite instance — overrides the context client. Useful in tests or multi-db scenarios. */
-      pglite?: ClientPGlite;
+      /** Explicit pgwasm instance — overrides the context client. Useful in tests or multi-db scenarios. */
+      pgwasm?: PgwasmClient;
     },
   ): { rows: TRow[]; loading: boolean; error: Error | null } {
     const contextClient = useContext(SyncClientContext);
-    // An explicit `pglite` override keeps the raw direct-PGlite path (tests/multi-db); otherwise the query
+    // An explicit `pglite` override keeps the raw direct-pgwasm path (tests/multi-db); otherwise the query
     // runs through the client's live-rows seam, so this hook works against the worker-attached client too
     // (which has no local `pglite`) exactly as against the in-process client (ADR-0032 S2 §4).
-    const overridePglite = options?.pglite;
+    const overridePglite = options?.pgwasm;
     const ready = options?.ready ?? true;
 
     const paramsKey = JSON.stringify(options?.params ?? []);
@@ -169,7 +169,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         }
       };
 
-      // The raw-PGlite override subscribes directly (unchanged); the seam path is the SAME `pglite.live`
+      // The raw-pgwasm override subscribes directly (unchanged); the seam path is the SAME `pglite.live`
       // wrapper the in-process client exposes, so behaviour is identical when no override is given.
       const subscribe = run.pglite
         ? subscribeRawPglite<TRow>(run.pglite, run.query, run.params, onRows)
@@ -211,7 +211,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
 
   function useLiveRow<TRow extends Record<string, unknown> = Record<string, unknown>>(
     query: string,
-    options?: { params?: readonly unknown[]; ready?: boolean; pglite?: ClientPGlite },
+    options?: { params?: readonly unknown[]; ready?: boolean; pgwasm?: PgwasmClient },
   ): { row: TRow | null; loading: boolean; error: Error | null } {
     const { rows, loading, error } = useLiveRows<TRow>(query, options);
     return { row: rows[0] ?? null, loading, error };
@@ -289,7 +289,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
 
       const { sql, selectedFields } = run.queryInfo;
       // Render the query safe to MATERIALISE: hand the seam the select's unique field aliases so it wraps a
-      // JOIN with same-named columns (two `title`) under a positional column-alias-list — otherwise PGlite's
+      // JOIN with same-named columns (two `title`) under a positional column-alias-list — otherwise pgwasm's
       // live query refuses it (`column "title" specified more than once`) and same-named columns collapse.
       // With `fields` the rows come back keyed by those aliases, so map by alias; without a field map (a raw
       // query) the seam leaves the SQL unwrapped and rows stay name-keyed (`remapLiveRow`).

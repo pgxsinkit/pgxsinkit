@@ -25,7 +25,7 @@ describe("pgxsinkit utilities migration render", () => {
   // ADR-0054 decision 5: no pgxsinkit-emitted function relies on default privileges. The clock is a
   // harmless monotonic read whose callers legitimately include RLS-context sessions (a column DEFAULT
   // is evaluated as whatever role writes the row), so the Supabase trio is granted back EXPLICITLY —
-  // through the shared role-existence guard, so the migration still applies on PGlite/plain Postgres.
+  // through the shared role-existence guard, so the migration still applies on pgwasm/plain Postgres.
   it("revokes PUBLIC and grants the Supabase trio back through the role-existence guard", () => {
     expect(sql).toContain("REVOKE ALL ON FUNCTION public.pgxsinkit_clock_us() FROM PUBLIC;");
 

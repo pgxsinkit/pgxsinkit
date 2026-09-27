@@ -31,7 +31,7 @@ const BOB = "Bob Nilsson";
 const PLATFORM = "00000000-0000-4000-8000-0000000000a1";
 
 // The dev handles the board exposes on `window` in the Vite dev build (board-client-provider): the live
-// client (worker-attached or in-process) and, ONLY in in-process mode, the PGlite query profiler.
+// client (worker-attached or in-process) and, ONLY in in-process mode, the pgwasm query profiler.
 interface BoardDevWindow {
   __boardClient?: {
     bootReport: () => Promise<unknown>;
@@ -159,7 +159,7 @@ test("(a) default boot → the SharedWorker engine boots and forwards its rail",
   await expect(teamNav(idbTabA).getByText("Growth", { exact: true })).toBeVisible();
   await expect(teamNav(idbTabA).getByText("Design", { exact: true })).toHaveCount(0);
 
-  // Worker mode: the live client is exposed, but the PGlite-bound profiler is NOT (PGlite is off-thread).
+  // Worker mode: the live client is exposed, but the pgwasm-bound profiler is NOT (pgwasm is off-thread).
   expect(await idbTabA.evaluate(() => (window as unknown as BoardDevWindow).__boardClient != null)).toBe(true);
   expect(await idbTabA.evaluate(() => (window as unknown as BoardDevWindow).__boardProfiler == null)).toBe(true);
 
@@ -189,7 +189,7 @@ test("(b) second tab attaches the same SharedWorker; a write in tab A appears in
   await waitForBoardReady(idbTabB);
 
   // A write in tab A mutates the shared engine's store; tab B's live query (its own bridge subscription to the
-  // one PGlite) fires — so the new issue appears in tab B without any per-tab engine.
+  // one pgwasm) fires — so the new issue appears in tab B without any per-tab engine.
   const title = await createIssue(idbTabA, PLATFORM);
   await expect(idbTabB.getByText(title)).toBeVisible();
 });
@@ -272,13 +272,13 @@ test("(C) SharedWorker feature-detect off → in-process fallback boots and the 
     await signIn(page, ALICE);
     await expect(teamNav(page).getByText("Growth", { exact: true })).toBeVisible();
 
-    // In-process mode: the board exposes the PGlite-bound profiler (set ONLY on the in-process path), proving the
+    // In-process mode: the board exposes the pgwasm-bound profiler (set ONLY on the in-process path), proving the
     // fallback engine — not a worker — is running the store on the tab.
     expect(await page.evaluate(() => (window as unknown as BoardDevWindow).__boardProfiler != null)).toBe(true);
 
     await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
-    // Provider cleanup removes the old client handle synchronously, while its PGlite close may finish in the
+    // Provider cleanup removes the old client handle synchronously, while its pgwasm close may finish in the
     // background. The old client's token callback is identity-bound, so Bob can boot immediately without either
     // waiting for that close or exposing Bob's credentials to Alice's store.
     await expect
@@ -370,7 +370,7 @@ test("(E) strict durability selected → the board boots and writes still work",
 });
 
 test("(F) sign-in after the spare provision completes adopts the provisioned store", async ({ browser }) => {
-  // The login screen pre-provisions a spare store (~2.5s of PGlite create/initdb inside the elected worker). A
+  // The login screen pre-provisions a spare store (~2.5s of pgwasm create/initdb inside the elected worker). A
   // robot that clicks sign-in immediately races AHEAD of that create and takes the fresh-attach path — which is
   // exactly how the provisioned-spare adoption stall shipped unnoticed: every lane clicked early, and only
   // human-paced logins (spare already COMPLETE) hit the claim → coordinator adoption → pipe handover. This test
@@ -386,11 +386,11 @@ test("(F) sign-in after the spare provision completes adopts the provisioned sto
     await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
     // Wait for the CREATE to finish, not for it to start: `worker store provisioned` is logged the moment the
     // provision is registered — before initdb — so polling it clicks sign-in mid-initdb, the very race this
-    // scenario exists to avoid. `boot pglite.create done {ms}` is the `timeAsync` completion line, emitted only
-    // once PGlite.create resolves inside the elected worker. The worker's rail is page-visible, and the first
+    // scenario exists to avoid. `boot pgwasm.create done {ms}` is the `timeAsync` completion line, emitted only
+    // once pgwasm.create resolves inside the elected worker. The worker's rail is page-visible, and the first
     // attach may also receive a `[replay]`-prefixed copy of the buffered line — either copy proves the same fact.
     await expect
-      .poll(() => consoleLines.some((line) => line.includes("boot pglite.create done")), { timeout: 60_000 })
+      .poll(() => consoleLines.some((line) => line.includes("boot pgwasm.create done")), { timeout: 60_000 })
       .toBe(true);
 
     await signIn(page, ALICE);
@@ -438,7 +438,7 @@ async function applyStoragePreferences(
   await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
 }
 
-/** The `/pglite/*` IndexedDB database names present now (the board's PGlite stores live under this prefix). */
+/** The `/pglite/*` IndexedDB database names present now (the board's pgwasm stores live under this prefix). */
 function pgliteDbNames(page: Page): Promise<string[]> {
   return page.evaluate(async () => {
     const infos = await indexedDB.databases();

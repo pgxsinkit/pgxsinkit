@@ -4,9 +4,9 @@ import { Column, is, SQL } from "drizzle-orm";
 export type SelectedFields = Record<string, unknown>;
 
 /**
- * Map a raw PGlite live-query row onto a Drizzle select's field keys.
+ * Map a raw pgwasm live-query row onto a Drizzle select's field keys.
  *
- * `useLiveDrizzleRows` feeds the builder's `.toSQL()` straight into PGlite's `live.query`, which
+ * `useLiveDrizzleRows` feeds the builder's `.toSQL()` straight into pgwasm's `live.query`, which
  * returns rows keyed by the **underlying column names** (snake_case) — `select({ assigneeId })`
  * produces SQL `select "assignee_id"`, so the raw row is `{ assignee_id }`, not `{ assigneeId }`.
  * Drizzle's own execution would remap these by position; the live query bypasses that, so this does it
@@ -41,7 +41,7 @@ export function remapLiveRow(
 //
 // Reading by the underlying column NAME (as `remapLiveRow` does) is unsound when a JOIN's tables share a
 // column name — `select({ courseTitle: course.title, moduleTitle: module.title })` compiles to a SELECT
-// with two `title` output columns. PGlite's `live` extension MATERIALISES the query and fails hard
+// with two `title` output columns. pgwasm's `live` extension MATERIALISES the query and fails hard
 // (`column "title" specified more than once`); even a plain query would silently collapse both `title`s
 // into one value. The seam (`client.subscribeLiveRows`) fixes this by wrapping the query with a POSITIONAL
 // column-alias-list when it is handed `fields` — the unique aliases below — so every output column is

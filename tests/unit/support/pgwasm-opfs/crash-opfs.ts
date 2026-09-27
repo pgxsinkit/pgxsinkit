@@ -2,7 +2,7 @@
  * A deterministic, fault-injecting OPFS directory for crash-and-reopen tests: the platform the store's
  * production `OpfsRepackedPort` talks to, with a power switch.
  *
- * It sits BELOW the port on purpose. `createOpfsRepackedPGlite` takes a directory handle and builds its
+ * It sits BELOW the port on purpose. `createOpfsPgwasm` takes a directory handle and builds its
  * own `OpfsRepackedPort`, so a double of the directory is the only seam that runs the package's own
  * factory unmodified; and because that port forwards every store call 1:1 to a sync access handle
  * (`getSize`/`read`/`write`/`truncate`/`flush`/`close`), the calls recorded here ARE the calls the store

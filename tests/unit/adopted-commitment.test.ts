@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-// The ADOPTED-boot commitment barrier. An adopting boot (`precreatedPglite` / `pgliteInstance` — the
+// The ADOPTED-boot commitment barrier. An adopting boot (`precreatedPgwasm` / `pgwasmInstance` — the
 // provision→adopt accelerator, ADR-0032 decision 5) skips `openOwnedStore` entirely, so the pre-mint phase
 // machine (`resolveFreshBoot`) never runs and nothing flags the commitment barrier. Left alone, every
 // spare-adopted OPFS store stays UNCOMMITTED for life — no sentinel, a record still at `opfs-candidate` (or
@@ -20,9 +20,9 @@ import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
 import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
-  type ClientPGlite,
+  type PgwasmClient,
   CommittedStoreUnreachableError,
-  createClientPGlite,
+  createPgwasmClient,
   createSyncClient,
   type FreshCommitmentSeams,
   resolveAdoptedCommitmentBarrier,
@@ -233,7 +233,7 @@ function installBrowserGlobals(root: FakeDir, metaIdb: FakeMetaIdb): void {
   });
 }
 
-const openInstances: ClientPGlite[] = [];
+const openInstances: PgwasmClient[] = [];
 
 /**
  * A real (memory) pgwasm standing in for a provisioned store. `branded` makes it report the opfs-repacked
@@ -244,12 +244,12 @@ async function makeAdoptedPglite(options: {
   branded: boolean;
   log?: string[];
   strictSyncFails?: boolean;
-}): Promise<ClientPGlite> {
+}): Promise<PgwasmClient> {
   const pg = (await createPgwasm({
     build: cBuild,
     loadDataDir: await prepopulatedDataDir(),
     extensions: { live },
-  })) as unknown as ClientPGlite;
+  })) as unknown as PgwasmClient;
   openInstances.push(pg);
   registerStrictSync(pg, () => {
     options.log?.push("strictSync");
@@ -279,7 +279,7 @@ function bootRegistry(): SyncTableRegistry {
 }
 
 /** Boot `createSyncClient` over an ADOPTED instance, exactly as the worker's provision-adopt path does. */
-function bootAdopting(storePath: string, instance: ClientPGlite): Promise<SyncClient<SyncTableRegistry>> {
+function bootAdopting(storePath: string, instance: PgwasmClient): Promise<SyncClient<SyncTableRegistry>> {
   return createSyncClient({
     registry: bootRegistry(),
     controlPlaneUrl: "http://127.0.0.1:1",
@@ -290,7 +290,7 @@ function bootAdopting(storePath: string, instance: ClientPGlite): Promise<SyncCl
     // The adopted instance is a memory store (test only) — acknowledge it past the BYO refusal (ADR-0036)
     // WITHOUT selecting the memory backend, so the boot keeps the persistent lane's gate.
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(instance),
+    precreatedPgwasm: Promise.resolve(instance),
   });
 }
 
@@ -459,7 +459,7 @@ describe("resolveAdoptedCommitmentBarrier — only the ownable states owe the ba
 // apart from deletion authority: left alone it opens `idb://<path>` directly, which over a store whose record
 // says `opfs-committed` MINTS AN EMPTY SIBLING at the same path — the app looks wiped and offline writes fork
 // into a store no worker-mode boot ever opens. Both client-owned mint seams (`createSyncClient`'s own open and
-// the eager `createClientPGlite`) must fail closed instead. Proven end to end here, against real boots.
+// the eager `createPgwasmClient`) must fail closed instead. Proven end to end here, against real boots.
 // =========================================================================================================
 
 /** Boot `createSyncClient` CLIENT-OWNED (no adopted instance) — the in-process fallback's own mint path. */
@@ -496,13 +496,13 @@ describe("no-grant boot over an opfs-committed store — typed refusal, never an
     expect((refusal as CommittedStoreUnreachableError).storePath).toBe(storePath);
     // The remedy must name a CALLABLE api — the caller's boot just failed, so they hold no client to `destroy()`.
     expect((refusal as Error).message).toContain(`destroyStoreArtifacts(${JSON.stringify(storePath)})`);
-    // No sibling was minted (PGlite's `/pglite/<path>` database was never opened) and the record is untouched.
+    // No sibling was minted (pgwasm's `/pglite/<path>` database was never opened) and the record is untouched.
     expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
     expect(metaPhase(metaIdb, storePath)).toBe("opfs-committed");
     expect(log.filter((entry) => entry.startsWith("record:"))).toEqual([]);
   });
 
-  it("eager `createClientPGlite` → REJECTS typed, and as a `precreatedPglite` the boot surfaces THAT refusal", async () => {
+  it("eager `createPgwasmClient` → REJECTS typed, and as a `precreatedPgwasm` the boot surfaces THAT refusal", async () => {
     const storePath = "no-grant-precreate-committed";
     const metaIdb = new FakeMetaIdb();
     const root = new FakeDir();
@@ -510,7 +510,7 @@ describe("no-grant boot over an opfs-committed store — typed refusal, never an
     installBrowserGlobals(root, metaIdb);
 
     // The eager precreate is itself a store mint, so it carries the same gate.
-    const eager = createClientPGlite(storePath);
+    const eager = createPgwasmClient(storePath);
     const eagerRefusal = await eager.then(
       (instance) => {
         openInstances.push(instance);
@@ -529,7 +529,7 @@ describe("no-grant boot over an opfs-committed store — typed refusal, never an
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       storePath,
-      precreatedPglite: eager,
+      precreatedPgwasm: eager,
     }).then(
       (booted) => {
         client = booted;

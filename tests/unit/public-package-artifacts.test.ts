@@ -50,7 +50,7 @@ const EXPECTED_IMPORTS: Record<string, readonly string[]> = {
 };
 
 const OPFS_REPACKED_RUNTIME_EXPORTS = [
-  // The PGlite adapter, its factory, and the stable runtime errors.
+  // The pgwasm adapter, its factory, and the stable runtime errors.
   "CorruptStoreError",
   "DurabilityModeMismatchError",
   "ExtentSizeMismatchError",
@@ -63,7 +63,7 @@ const OPFS_REPACKED_RUNTIME_EXPORTS = [
   "StoreRecreationRequiredError",
   "UnexpectedStoreEntryError",
   "createOpfsRepackedPGlite",
-  // The engine-agnostic store core a coordinator worker owns, with no PGlite, wasm, or OPFS in it.
+  // The engine-agnostic store core a coordinator worker owns, with no pgwasm, wasm, or OPFS in it.
   "MemoryRepackedPort",
   "MountedRepackedVfs",
   "RepackedVfs",

@@ -17,7 +17,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
+  type PgwasmClient,
   createSyncClient,
   defineSyncWorker,
   getAllMutationsView,
@@ -27,7 +27,7 @@ import {
 import { memoryStoreForTests, testStoreAcknowledgment } from "../../packages/client/src/testing";
 
 // The registry-wide reactive mutation-status API. These tests boot a
-// REAL PGlite client (fs- or memory-backed), craft journal transitions across MULTIPLE writable tables via the
+// REAL pgwasm client (fs- or memory-backed), craft journal transitions across MULTIPLE writable tables via the
 // raw handle, and assert `client.mutations.summary/subscribeSummary/list/subscribe` fold the cross-journal
 // `pgxsinkit_all_mutations` view correctly — including that the LIVE summary converges after a trigger-style
 // delete of an acked row (the correctness win of the generated-view option over runtime state).
@@ -341,7 +341,7 @@ describe("registry-wide mutation-status API — worker parity (slice 4)", () => 
       streamBaseUrl: DEAD_STREAM_BASE,
       batchWriteUrl: DEAD_WRITE,
       ...testStoreAcknowledgment(),
-      precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+      precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,

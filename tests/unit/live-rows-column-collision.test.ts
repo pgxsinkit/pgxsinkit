@@ -11,8 +11,8 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
-  createClientPGlite,
+  type PgwasmClient,
+  createPgwasmClient,
   createSyncClient,
   defineSyncWorker,
   getReadModelView,
@@ -26,7 +26,7 @@ import { liveFieldAliases, remapAliasedLiveRow, type SelectedFields } from "../.
 // The live-query seam bug (root-caused from emergent's first browser+Electric learner e2e lane): a live
 // read built from a Drizzle select over a JOIN of two tables sharing a column name (two `title`) compiles
 // to a SELECT with duplicate OUTPUT column names — Drizzle emits no aliases, it maps result columns
-// positionally. Legal as a plain query, but PGlite's `live` extension MATERIALISES it and fails
+// positionally. Legal as a plain query, but pgwasm's `live` extension MATERIALISES it and fails
 // `column "title" specified more than once`; and even a plain query silently collapses both `title`s into
 // one value. The seam must render such a query safe to materialise by giving every output column a UNIQUE
 // alias. This suite pins the fix through BOTH client paths: in-process `subscribeLiveRows` and the worker
@@ -135,7 +135,7 @@ describe("subscribeLiveRows over a same-named-column JOIN (in-process seam)", ()
       syncEnabled: false,
       // A precreated memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPglite: createClientPGlite(memoryStoreForTests("live-collision-inproc")),
+      precreatedPgwasm: createPgwasmClient(memoryStoreForTests("live-collision-inproc")),
     });
     await active.ready;
     await active.tables.course.create({ id: COURSE_ID, title: "Course A" });
@@ -232,7 +232,7 @@ describe("subscribeLiveRows over a duplicate-output-name query (worker bridge se
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A precreated memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+      precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -315,7 +315,7 @@ describe("subscribeLiveRows over a duplicate-output-name query (worker bridge se
     expect(emissions.length).toBeGreaterThanOrEqual(1);
     expect(emissions.at(-1)).toEqual([{ titleA: "Item A2", titleB: "Item A2", id: ITEM_ID }]);
 
-    // No drain tick needed: the host awaits the worker-side live-query teardown before closing PGlite
+    // No drain tick needed: the host awaits the worker-side live-query teardown before closing pgwasm
     // (ADR-0040 decision 1), so the afterEach `host.close()` can no longer race a still-registered query.
     sub.unsubscribe();
   });
@@ -345,7 +345,7 @@ describe("subscribeLiveRows over a same-named-column JOIN (worker bridge seam)",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A precreated memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+      precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,

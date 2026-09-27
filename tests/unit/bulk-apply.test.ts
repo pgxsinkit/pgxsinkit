@@ -139,7 +139,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
   });
 
   it("applyUpsertsToTable round-trips timestamptz given parsed Date instances", async () => {
-    // srs_card was created by the string-valued round-trip test above (shared PGlite instance).
+    // srs_card was created by the string-valued round-trip test above (shared pgwasm instance).
     const id = "c0000000-0000-0000-0000-000000000002";
     await drizzleOver(pg)
       .insert(srsCard)

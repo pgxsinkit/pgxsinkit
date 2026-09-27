@@ -71,7 +71,7 @@ export interface MetadataTables {
  * group's sync bookkeeping (cursor + tags) is scoped to the engine session by placing it in `pg_temp`
  * relations that die with the engine — the cursor's lifetime is mechanically tied to the TEMP cluster
  * whose rows it indexes. `pg_temp` is a per-session alias Postgres accepts in DML qualification (probed
- * on real PGlite), so the DML paths select these objects unchanged. Same relation NAMES as the durable
+ * on real pgwasm), so the DML paths select these objects unchanged. Same relation NAMES as the durable
  * variants, distinguished by schema alone (maintainer ruling).
  */
 const SESSION_METADATA_SCHEMA = "pg_temp";

@@ -12,7 +12,7 @@ import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
 import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // The native read path end to end (ADR-0055 + ADR-0056): K durable-streams subscriptions through the
-// edge, envelopes translated, folded, and applied into one PGlite table. Two properties are the
+// edge, envelopes translated, folded, and applied into one pgwasm table. Two properties are the
 // reason this test exists rather than a unit one — that two shapes really do land in a single table
 // (the shared tier's whole point), and that the engine barrier really does hold the boot commit when
 // the engine has a computed-but-undelivered revocation.

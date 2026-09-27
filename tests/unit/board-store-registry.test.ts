@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import type { ClientPGlite, StoreWorkerQuiesceOutcome } from "@pgxsinkit/client";
+import type { PgwasmClient, StoreWorkerQuiesceOutcome } from "@pgxsinkit/client";
 
 import {
   type QuiesceThenDestroyDeps,
@@ -17,7 +17,7 @@ import {
 } from "../../apps/board/src/board/store-registry";
 
 // Unit test of the spare-store binding logic (board cold-boot optimisation B) through the injected
-// adapters — no browser, no real PGlite. Each `createStore` returns an identity-tagged sentinel so a
+// adapters — no browser, no real pgwasm. Each `createStore` returns an identity-tagged sentinel so a
 // claim can prove it handed over the SAME in-flight eager create rather than opening a second store.
 
 interface HarnessOptions {
@@ -53,7 +53,7 @@ function makeHarness(options: HarnessOptions = {}) {
     createStore: async (storePath) => {
       createdStorePaths.push(storePath);
       if (rejectStorePaths.has(storePath)) throw new Error(`corrupt store at ${storePath}`);
-      return { __store: storePath } as unknown as ClientPGlite;
+      return { __store: storePath } as unknown as PgwasmClient;
     },
     destroyStore: async (storePath) => {
       if (rejectDestroyPaths.has(storePath)) throw new Error(`store held at ${storePath}`);

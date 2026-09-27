@@ -110,7 +110,7 @@ function buildOverlayFixedColumns() {
 /**
  * The two overlay columns the `<t>_read_model` view carries on top of the projected synced columns.
  * Read through real drizzle result mapping (a live query, not the raw `MutationDb` seam), so
- * `local_updated_at_us` is a `mode: "bigint"` int8 (PGlite returns it as a string at runtime) rather than
+ * `local_updated_at_us` is a `mode: "bigint"` int8 (pgwasm returns it as a string at runtime) rather than
  * the journal/overlay `bigintText` passthrough. Snake-case property keys so consumers reach them the same
  * way the generator names them (`view["overlay_kind"]`).
  */
@@ -152,7 +152,7 @@ const localMetaShape = pgTable(LOCAL_META_TABLE, {
  * The **Outbox**'s columns (ADR-0053 decision 2), mirroring the DDL in `schema.ts` — see {@link OUTBOX_TABLE}
  * there for the column-by-column public contract. The `_us` bigints and `seq` are the same `bigintText`
  * passthrough the journal object uses (rows come back through the raw seam UNMAPPED, so the runtime reads
- * them as strings); `payload` is real `jsonb` (PGlite parses it, so the flush loop gets the object back).
+ * them as strings); `payload` is real `jsonb` (pgwasm parses it, so the flush loop gets the object back).
  * `seq` is DEFAULTed by the sequence, so an insert omits it — hence no `.notNull()` footgun on `$inferInsert`.
  */
 function buildOutboxColumns() {

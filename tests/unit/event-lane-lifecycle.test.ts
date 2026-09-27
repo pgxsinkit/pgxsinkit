@@ -9,7 +9,7 @@ import { createSyncClient, type SyncClient } from "../../packages/client/src/ind
 import { collectDataExportSyncedTableNames } from "../../packages/client/src/schema";
 import { memoryStoreForTests } from "../../packages/client/src/testing";
 
-// The Outbox's position in the store lifecycle (ADR-0053 decision 8), on a REAL in-memory PGlite with sync
+// The Outbox's position in the store lifecycle (ADR-0053 decision 8), on a REAL in-memory pgwasm with sync
 // disabled (no network). Every lifecycle surface takes a position, and each one is pinned here:
 // `dropReadCache` never touches the Outbox, a non-forced `destroy` refuses on staged events (and says so
 // distinctly from the owed-mutations refusal) while `force` proceeds, the store backup carries the Outbox,

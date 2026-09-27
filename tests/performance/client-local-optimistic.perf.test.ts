@@ -105,7 +105,7 @@ describe("performance: client local optimistic views", () => {
         for (let index = 0; index < config.readSamples; index += 1) {
           const rowId = buildSyntheticCreatePayload(0, index % config.localRows, config.extraColumnCount).id;
           const started = performance.now();
-          const result = await client.pglite.query<{ id: string; overlay_kind: string }>(readQuerySql, [rowId]);
+          const result = await client.pgwasm.query<{ id: string; overlay_kind: string }>(readQuerySql, [rowId]);
           readTimings.push(performance.now() - started);
           expect(result.rows[0]?.id).toBe(rowId);
         }

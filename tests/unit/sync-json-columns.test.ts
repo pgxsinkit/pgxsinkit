@@ -155,7 +155,7 @@ describe("json columns arrive as Postgres text and are decoded once, at the wire
     );
     expect(typed.rows[0]).toEqual({ meta: "object", criteria: "array", label: "string" });
 
-    // The read a live query performs: PGlite's own decode, unmapped — an object, not a string.
+    // The read a live query performs: pgwasm's own decode, unmapped — an object, not a string.
     const raw = await pg.query<{ revision_meta: unknown; criteria: unknown; label: unknown }>(
       `select revision_meta, criteria, label from json_goals where id = $1`,
       [ID_A],

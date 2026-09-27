@@ -25,7 +25,7 @@ import { createCircuitsTestPgwasm } from "../support/circuits-pgwasm";
 import { drizzleOver } from "../support/drizzle";
 
 // Lazy on-demand activation, end-to-end against the REAL engine (postgres → Circuits → durable-streams
-// → PGlite).
+// → pgwasm).
 //
 // Why this exists: `client-lazy-facade.test.ts` fully MOCKS the sync engine (it only records that
 // `ensureGroupStarted` was called), and no integration test drives a lazy group actually streaming
@@ -244,9 +244,9 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
 
     // A real on-disk store (not memory): it must survive `stop()` so boot B is a genuine warm store.
     const storePath = await mkdtemp(join(tmpdir(), "pgxsinkit-ephemeral-restart-"));
-    const countClientTodo = async (client: { pglite: unknown }) =>
+    const countClientTodo = async (client: { pgwasm: unknown }) =>
       (
-        await drizzleOver(client.pglite as Pgwasm)
+        await drizzleOver(client.pgwasm as Pgwasm)
           .select({ count: count() })
           .from(todosTable)
           .where(eq(todosTable.id, todoId))

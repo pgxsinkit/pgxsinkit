@@ -269,7 +269,7 @@ export interface CopyFromBlobStatementOptions {
 
 /**
  * Render the `COPY <table> (<columns>) FROM '/dev/blob' WITH (FORMAT text)` statement for `rows`,
- * together with the COPY TEXT bytes PGlite must read for it — a {@link RawStatement} whose `blob`
+ * together with the COPY TEXT bytes pgwasm must read for it — a {@link RawStatement} whose `blob`
  * carries the body (narrowed to a non-optional `blob`: this builder ALWAYS produces one).
  *
  * This is the ONE implementation of the COPY-from-blob load: the sync applier's bulk path
@@ -281,7 +281,7 @@ export interface CopyFromBlobStatementOptions {
  * TRANSFERRED, not copied — see {@link RawStatement.blob}: the buffer is detached after the call.
  *
  * Tier ③ (ADR-0028 allow-list), exactly as the applier's copy of this statement was: `COPY … FROM
- * '/dev/blob'` is PGlite's blob-ingest grammar and has NO Drizzle builder form, so the statement text
+ * '/dev/blob'` is pgwasm's blob-ingest grammar and has NO Drizzle builder form, so the statement text
  * stays a raw string. Every identifier in it is still derived — the table from `getTableConfig`, each
  * column through `quoteIdentifier` — so nothing in the string is a hand-written identifier.
  */

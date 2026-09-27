@@ -142,7 +142,7 @@ async function createStoreFromDump(dump: Blob | File, options?: TestPgwasmOption
 }
 
 // Every instance these helpers hand out is tracked so a test file can close them all in one
-// `afterEach(closeOpenTestPgwasms)`. This matters for more than tidiness: an un-closed PGlite keeps its
+// `afterEach(closeOpenTestPgwasms)`. This matters for more than tidiness: an un-closed pgwasm keeps its
 // (multi-MB) WASM heap alive, so a file that boots one per test and never closes them accumulates
 // memory across the run — later tests then boot and operate **progressively slower** under the growing
 // heap (and bun force-exits with code 99 on the leaked handles). A factory's instance can be a whole

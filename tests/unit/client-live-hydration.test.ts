@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun
 // caught up at subscribe time, with the same rows-before-signal ordering the lazy path already had. Cached
 // rows paint immediately; a steady-state (all-ready) subscription builds no promise and pays no extra
 // refresh; a sync-disabled client never gates. Driven over a fully controllable fake `pglite.live` +
-// startCircuitsSync stub (no real PGlite/network), mirroring `client-lazy-facade.test.ts`.
+// startCircuitsSync stub (no real pgwasm/network), mirroring `client-lazy-facade.test.ts`.
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 

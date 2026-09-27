@@ -191,7 +191,7 @@ export interface CreateMutationRuntimeOptions<TRegistry extends SyncTableRegistr
   registryVersion?: string;
   /**
    * Whether pgxsinkit owns the local schema (and therefore the `pgxsinkit_local_meta` table the durable
-   * recovery-required marker lives in). Defaults to `true`. A caller-owned `pgliteInstance` boot sets this
+   * recovery-required marker lives in). Defaults to `true`. A caller-owned `pgwasmInstance` boot sets this
    * `false`: the meta table may not exist, so the marker is never read/written and boot recovery runs
    * unconditionally.
    */
@@ -396,7 +396,7 @@ export interface MutationRuntime<TRegistry extends SyncTableRegistry> {
    * runs from a consumer call ({@link recoverSending} keeps today's exact per-table semantics and never
    * touches the marker); {@link BootRecoveryOutcome} feeds the `warmBoot` BootReport fields verbatim.
    *
-   * - `ownsMetaTable: false` (caller-owned PGlite) → unconditional recovery, marker untouched.
+   * - `ownsMetaTable: false` (caller-owned pgwasm) → unconditional recovery, marker untouched.
    * - `restore: true` → unconditional recovery + {@link quarantineRecovered} + self-verifying clear (marker ignored).
    * - marker `false` → skip the loop entirely.
    * - marker absent (not initialized) → one conservative recovery pass, then initialize the marker.
@@ -535,7 +535,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
   };
 
   // Whether pgxsinkit owns the local schema (and the `pgxsinkit_local_meta` table the durable
-  // recovery-required marker lives in). A caller-owned PGlite boot sets this false, so the marker is never
+  // recovery-required marker lives in). A caller-owned pgwasm boot sets this false, so the marker is never
   // touched and the SET/clear seams below are no-ops.
   const ownsMetaTable = options.ownsMetaTable ?? true;
   // Cached "this epoch has already committed the marker `true`" flag. Marker-first ordering:
@@ -609,7 +609,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     // so relative to this synchronous check-and-reset block it is either
     //   (i)  BEFORE it → `markSendingInFlight > 0` here → no clear is issued at all (the FIX 1 gate); or
     //   (ii) AFTER it  → the sender reads `recoveryMarkerDirty === false` → it awaits
-    //        `writeMutationRecoveryRequired(true)`, and PGlite's single-connection queue serializes that upsert
+    //        `writeMutationRecoveryRequired(true)`, and pgwasm's single-connection queue serializes that upsert
     //        AFTER the already-issued clear → the marker is durably `true` again BEFORE the sender's `sending`
     //        UPDATE (only issued once the marker await resolves) can commit. A crash between the rewrite and the
     //        UPDATE leaves marker-`true`/no-row (conservative).
@@ -1441,7 +1441,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       const contexts = filterContexts(tableContexts, undefined);
       const tablesVisited = contexts.length;
 
-      // Caller-owned PGlite: the meta table may not exist, so never touch the marker and always recover.
+      // Caller-owned pgwasm: the meta table may not exist, so never touch the marker and always recover.
       if (!bootOwnsMetaTable) {
         await runtime.recoverSending();
         return { skipped: false, required: true, tablesVisited, rowsRecovered: null };
@@ -3150,7 +3150,7 @@ async function reconcileTable(db: MutationDb, context: TableContext) {
   // (clear the overlay once the echo lands) or 'conflicted' (retire once a later write resolved it). When
   // none exist — the steady state of an idle entity set — all three statements below are no-ops, so skip
   // the whole transaction. This matters because the convergence driver runs reconcile for EVERY writable
-  // table on its interval (default 1.5s), and each CTE pays full PGlite plan+execute cost even against an
+  // table on its interval (default 1.5s), and each CTE pays full pgwasm plan+execute cost even against an
   // empty journal: left unguarded it is the dominant idle-CPU cost. The real-time cleanup path is the
   // <table>_reconcile_on_sync trigger; this bulk pass is a fallback, so skipping it when there is nothing
   // to clear changes no outcome. The guard is a single existence probe over the (small, usually empty)
@@ -3303,7 +3303,7 @@ async function reconcileTable(db: MutationDb, context: TableContext) {
     await db.query(ackedClearQuery.sql, ackedClearQuery.params as unknown[]);
 
     // Clear acknowledged delete mutations where synced row is absent
-    // Single compound CTE — PGlite does not support multi-statement query().
+    // Single compound CTE — pgwasm does not support multi-statement query().
     const clearableEntities = queryBuilder.$with("clearable_entities").as(
       queryBuilder
         .selectDistinct(

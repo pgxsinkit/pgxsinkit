@@ -3,13 +3,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // `query`/`queryRow`/`queryRaw`/`queryRawRow` compile a read to SQL on the tab (its `drizzle` is a real
 // Drizzle database over a bridge executor) and route it to `defineSyncWorker`'s `guardedQuery` RPC, which
 // runs the engine's `guardedRawQuery` — the ADR-0041 read gate + the ADR-0021 lazy-group guard — on its owned
-// in-process client and returns the full PGlite `Results` so Drizzle's own mapping runs on the tab.
+// in-process client and returns the full pgwasm `Results` so Drizzle's own mapping runs on the tab.
 //
-// The harness boots a REAL in-process engine over a prepopulated in-memory PGlite behind `defineSyncWorker`,
+// The harness boots a REAL in-process engine over a prepopulated in-memory pgwasm behind `defineSyncWorker`,
 // driven by `attachSyncClient` across a bun `MessageChannel` (no real Worker), so Drizzle's result mapping is
 // exercised for real. ONLY `startCircuitsSync` is mocked — a controllable sync stub whose `ensureGroupStarted`
 // records activation — so the lazy-activation assertions (tests 3 & 7) can observe a guarded read starting a
-// lazy group exactly as `client-lazy-facade`/`lazy-guard` prove in-process, while everything else (PGlite,
+// lazy group exactly as `client-lazy-facade`/`lazy-guard` prove in-process, while everything else (pgwasm,
 // Drizzle, schema, mutation, local store) runs unmocked. mock.module → this file is registered in the
 // ISOLATED set of scripts/run-unit-tests.ts so it runs in its own process.
 
@@ -22,7 +22,7 @@ import { cBuild } from "@pgxsinkit/pgwasm-c";
 import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
 import { live } from "@pgxsinkit/pgwasm/live";
 
-import type { ClientPGlite, SyncClient } from "../../packages/client/src/index";
+import type { PgwasmClient, SyncClient } from "../../packages/client/src/index";
 import type { SyncWorkerHost } from "../../packages/client/src/worker/define-sync-worker";
 
 const registry = defineSyncRegistry({
@@ -43,7 +43,7 @@ const registry = defineSyncRegistry({
   }),
   // A parent/child readonly pair for the relational mapping-parity case. `published_at` is a `mode: "string"`
   // timestamp so the parser-mirroring is load-bearing: without the worker re-applying drizzle's identity
-  // parsers (temporal OIDs + numeric[]), PGlite would hand back a `Date` for this temporal column and
+  // parsers (temporal OIDs + numeric[]), pgwasm would hand back a `Date` for this temporal column and
   // drizzle's string column would surface a `Date` — a parity break against the in-process session, which
   // sees the raw string.
   authors: defineSyncTable({
@@ -167,7 +167,7 @@ async function makeHost(syncEnabled: boolean): Promise<SyncWorkerHost<Registry>>
     streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+    precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
     syncEnabled,
     installGlobal: false,
     convergenceIntervalMs: 10_000_000,

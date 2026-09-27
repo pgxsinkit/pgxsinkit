@@ -16,7 +16,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 import {
   attachSyncClient,
   type BridgeEnvelope,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   identityCodec,
   isBridgeEnvelope,
@@ -164,7 +164,7 @@ class FakeMetaDatabase {
 
 class FakeAuthorityIdb {
   readonly store: FakeMetaStore;
-  /** PGlite's own idb databases (`/pglite/<storePath>`) this scope already holds — the `idbStoreExists` fact. */
+  /** pgwasm's own idb databases (`/pglite/<storePath>`) this scope already holds — the `idbStoreExists` fact. */
   readonly pgliteDatabases = new Set<string>();
   private readonly database: FakeMetaDatabase;
   private readonly order: string[];
@@ -174,7 +174,7 @@ class FakeAuthorityIdb {
     this.database = new FakeMetaDatabase(this.store);
   }
 
-  /** Seed PGlite's idb database for a store, as a store minted on the idb backend leaves it. */
+  /** Seed pgwasm's idb database for a store, as a store minted on the idb backend leaves it. */
   seedPgliteDb(storePath: string): void {
     this.pgliteDatabases.add(storeIndexedDbDatabaseName(storePath));
   }
@@ -188,7 +188,7 @@ class FakeAuthorityIdb {
       onsuccess: null as (() => void) | null,
       onerror: null as (() => void) | null,
     };
-    // The meta database is opened WITH a version and is always present here; any other name is PGlite's own
+    // The meta database is opened WITH a version and is always present here; any other name is pgwasm's own
     // store database, opened version-less by the non-creating existence check (`idbStoreExists`).
     if (name !== undefined && name !== STORE_META_DATABASE && !this.pgliteDatabases.has(name)) {
       const transaction = { abort: () => undefined };
@@ -267,10 +267,10 @@ async function sentinelPresent(root: FakeOpfsDir, storePath: string): Promise<bo
   }
 }
 
-/** A fresh prepopulated memory PGlite (skips the ~2s initdb) as the raw store the worker would `create`. */
-async function makePglite(): Promise<ClientPGlite> {
+/** A fresh prepopulated memory pgwasm (skips the ~2s initdb) as the raw store the worker would `create`. */
+async function makePglite(): Promise<PgwasmClient> {
   const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
-  return pg as unknown as ClientPGlite;
+  return pg as unknown as PgwasmClient;
 }
 
 function connectRaw(host: SyncWorkerHost<TodosRegistry>): {
@@ -356,7 +356,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async () => {
+      createStore: async () => {
         creates += 1;
         return makePglite();
       },
@@ -401,7 +401,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
       ...testStoreAcknowledgment(),
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create-replacement");
         return makePglite();
       },
@@ -434,7 +434,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -459,7 +459,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     const storePath = "granted-provision-existing-idb";
     const order: string[] = [];
     const idb = new FakeAuthorityIdb(order);
-    // No meta record, a pristine commitment namespace — but PGlite's idb database for this store EXISTS.
+    // No meta record, a pristine commitment namespace — but pgwasm's idb database for this store EXISTS.
     idb.seedPgliteDb(storePath);
     const root = new FakeOpfsDir(order);
     installGrantedScope(idb, root);
@@ -471,7 +471,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -511,7 +511,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -546,7 +546,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -578,7 +578,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       syncEnabled: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -611,7 +611,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
       ...testStoreAcknowledgment(),
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -642,7 +642,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
       ...testStoreAcknowledgment(),
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -677,7 +677,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
       ...testStoreAcknowledgment(),
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -719,7 +719,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
       ...testStoreAcknowledgment(),
-      createPglite: async () => {
+      createStore: async () => {
         order.push("create");
         return makePglite();
       },
@@ -738,7 +738,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
 
   it("pre-creates the store on `provision` and the first `attach` adopts it (no second create)", async () => {
     const created: string[] = [];
-    let instance: ClientPGlite | null = null;
+    let instance: PgwasmClient | null = null;
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
@@ -747,7 +747,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async (storePath) => {
+      createStore: async (storePath) => {
         created.push(storePath);
         instance = await makePglite();
         return instance;
@@ -767,10 +767,10 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     });
     await client.ready;
 
-    // The booted engine adopted the provisioned instance — createPglite was NOT called a second time.
+    // The booted engine adopted the provisioned instance — createStore was NOT called a second time.
     expect(created).toEqual(["spare-1"]);
     const booted = await host.whenBooted();
-    expect(booted.pglite).toBe(instance!);
+    expect(booted.pgwasm).toBe(instance!);
   });
 
   it("treats a rejected provision as a pure accelerator failure and boots on attach", async () => {
@@ -782,7 +782,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async () => {
+      createStore: async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
         throw new Error("warm-up failed");
       },
@@ -808,7 +808,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     expect((provisionError as Error).message).toContain("warm-up failed");
     const client = await attaching;
     await client.ready;
-    expect((await host.whenBooted()).pglite).toBeDefined();
+    expect((await host.whenBooted()).pgwasm).toBeDefined();
   });
 
   it("adopts on the store's storePath even when the attach also carries a distinct bare storeId (board shape)", async () => {
@@ -816,7 +816,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     // (`pgxsinkit-board-<id>`); provision carried only the storePath. The worker must adopt on the
     // storePath, not the storeId — otherwise it boots a SECOND store and the pre-paid initdb is wasted.
     const created: string[] = [];
-    let instance: ClientPGlite | null = null;
+    let instance: PgwasmClient | null = null;
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
@@ -825,7 +825,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
-      createPglite: async (storePath) => {
+      createStore: async (storePath) => {
         created.push(storePath);
         instance = await makePglite();
         return instance;
@@ -849,7 +849,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     // Still one create, and the booted engine adopted the provisioned instance.
     expect(created).toEqual(["pgxsinkit-board-abc"]);
     const booted = await host.whenBooted();
-    expect(booted.pglite).toBe(instance!);
+    expect(booted.pgwasm).toBe(instance!);
   });
 });
 
@@ -868,7 +868,7 @@ describe("role-selected registry (ADR-0032 S3, config.role → resolveRegistry)"
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A memory precreated store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPglite: makePglite(),
+      precreatedPgwasm: makePglite(),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -916,7 +916,7 @@ describe("role-selected registry (ADR-0032 S3, config.role → resolveRegistry)"
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...testStoreAcknowledgment(),
-      precreatedPglite: makePglite(),
+      precreatedPgwasm: makePglite(),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -949,7 +949,7 @@ describe("Offline toggle over the bridge (ADR-0032 S3, set-online)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A memory precreated store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPglite: makePglite(),
+      precreatedPgwasm: makePglite(),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -1004,7 +1004,7 @@ describe("the DECLARED store engine (ADR-0050 addendum 2026-09-08)", () => {
       // The BUILT-IN factory. Once the declaration names an engine this must not run at all: a store the
       // toolkit minted while an engine was declared is the silent-wrong-engine failure the seam exists to
       // prevent.
-      createPglite: async () => {
+      createStore: async () => {
         order.push("built-in");
         return makePglite();
       },
@@ -1044,7 +1044,7 @@ describe("the DECLARED store engine (ADR-0050 addendum 2026-09-08)", () => {
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
       ...testStoreAcknowledgment(),
-      createPglite: async () => {
+      createStore: async () => {
         order.push("built-in");
         return makePglite();
       },
@@ -1080,7 +1080,7 @@ describe("the DECLARED store engine (ADR-0050 addendum 2026-09-08)", () => {
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
       ...testStoreAcknowledgment(),
-      createPglite: async () => {
+      createStore: async () => {
         order.push("built-in");
         return makePglite();
       },

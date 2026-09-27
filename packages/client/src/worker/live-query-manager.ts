@@ -1,4 +1,4 @@
-// The worker-owned live-query manager (ADR-0040). It owns the PGlite `live` registration lifecycle, the
+// The worker-owned live-query manager (ADR-0040). It owns the pgwasm `live` registration lifecycle, the
 // single change listener + shared `LiveDiffState` per query, and the awaited-teardown bookkeeping (decision
 // 1). Slice 3 added DEDUPLICATION: identical live queries (same fingerprint — see live-query-fingerprint.ts)
 // share ONE registration and ONE diff computation, fanned out to every subscriber (decision 2). Slice 4 adds
@@ -6,7 +6,7 @@
 // effective keep-alive retains the registration for a grace period so a matching resubscribe reuses it
 // verbatim (no ~400 ms re-materialization); retention is bounded by explicit count/row budgets and defaults
 // to OFF (keep-alive 0 → tear down the instant the last subscriber leaves). The 0 default is deliberate:
-// a retained entry still pays a full SQL rerun + diff on every dependent write (PGlite live queries cannot
+// a retained entry still pays a full SQL rerun + diff on every dependent write (pgwasm live queries cannot
 // be paused), so keeping one alive is only worthwhile for a genuinely hot, re-mounted query — the default
 // keeps worker memory bounded and never runs surprise standing SQL.
 //
@@ -76,7 +76,7 @@ export interface LiveQueryPolicy {
    * Default retention (ms) for a zero-subscriber entry, floored by each subscriber's own `keepAliveMs` hint.
    * Default 0 — the current route-scoped behaviour (tear a query down the moment its last consumer leaves).
    * The standing argument for 0: a retained zero-subscriber entry STILL pays a full SQL rerun + diff on every
-   * dependent-table write — PGlite live queries cannot be paused, only torn down — so retention trades that
+   * dependent-table write — pgwasm live queries cannot be paused, only torn down — so retention trades that
    * standing cost for avoiding re-materialization, and is only worth it for a genuinely hot, re-mounted query.
    */
   defaultKeepAliveMs?: number;
@@ -142,7 +142,7 @@ export interface LiveQueryDiagnostics {
   lastUsedAt: number | null;
   /** How long (ms) the entry has been retained (now − lastUsedAt), or `null` when not retained. */
   retainedSinceMs: number | null;
-  /** A teardown is in flight (the entry is unsubscribing from PGlite). */
+  /** A teardown is in flight (the entry is unsubscribing from pgwasm). */
   teardownPending: boolean;
 }
 
@@ -240,7 +240,7 @@ export function createLiveQueryManager(deps: LiveQueryManagerDeps): LiveQueryMan
     deps.clearTimer ?? ((handle: TimerHandle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 
   // ADR-0040 decision 1 (originally define-sync-worker's Slice 1): a fire-and-forget live `unsubscribe()`
-  // still in flight when PGlite closes wedges the process forever. Every teardown promise is retained here so
+  // still in flight when pgwasm closes wedges the process forever. Every teardown promise is retained here so
   // `dispose()` settles them ALL before the caller closes the engine; rejections are swallowed so an
   // interrupted teardown never becomes an unhandled rejection.
   const pendingTeardowns = new Set<Promise<void>>();
@@ -276,7 +276,7 @@ export function createLiveQueryManager(deps: LiveQueryManagerDeps): LiveQueryMan
     (entry as { setup: Promise<void> }).setup = (async () => {
       const setupStartedAt = now();
       const { materialSql, params, pkColumns } = spec;
-      // Single-column PK → PGlite's incremental machinery (`live.incrementalQuery`); composite/keyless →
+      // Single-column PK → pgwasm's incremental machinery (`live.incrementalQuery`); composite/keyless →
       // `live.query` (full ordered result each fire) + worker-side diff. Identical selection to the pre-dedup
       // path; the fingerprint already encoded this choice as its `mode`.
       const registered =
@@ -298,8 +298,8 @@ export function createLiveQueryManager(deps: LiveQueryManagerDeps): LiveQueryMan
           }
         }
         // A retained (zero-subscriber) entry stays live and its rows can GROW past the row budget on a write.
-        // Re-enforce OUTSIDE this callback (a queued microtask) — eviction's PGlite `unsubscribe()` must not
-        // run inside PGlite's own notification call (ADR-0040 decision 4 — the budget stays authoritative).
+        // Re-enforce OUTSIDE this callback (a queued microtask) — eviction's pgwasm `unsubscribe()` must not
+        // run inside pgwasm's own notification call (ADR-0040 decision 4 — the budget stays authoritative).
         if (retained.has(entry)) queueMicrotask(() => enforceBudgets());
       };
       registered.subscribe(listener);
@@ -456,10 +456,10 @@ export function createLiveQueryManager(deps: LiveQueryManagerDeps): LiveQueryMan
         `[pgxsinkit] keepAliveMs must be <= ${MAX_KEEP_ALIVE_MS} ms (the platform setTimeout ceiling; got ${hint})`,
       );
     }
-    // Reject a param shape that would trip PGlite bug #1055's broken live-query param inlining BEFORE any
+    // Reject a param shape that would trip pgwasm bug #1055's broken live-query param inlining BEFORE any
     // fingerprinting or registration (see live-query-params-guard.ts). Synchronous, so every subscriber —
     // in-process and worker alike — fails loudly rather than binding wrong rows or hitting a cryptic
-    // `format()` error deep inside PGlite.
+    // `format()` error deep inside pgwasm.
     assertLiveQueryParamsSafe(spec.materialSql, spec.params);
     const keepAliveMs = hint ?? 0;
     const scope = opts?.scope;
@@ -512,7 +512,7 @@ export function createLiveQueryManager(deps: LiveQueryManagerDeps): LiveQueryMan
       // membership write. A listener fire (computeLiveDiff → deliverDiff) is synchronous, so with no yield here
       // no diff can land between the two: the joiner can neither miss a diff (it would be added to the map
       // first) nor be handed one its snapshot already reflects (the snapshot is taken first). The initial rows
-      // come from the diff state, NOT a fresh PGlite read — the registration is already current.
+      // come from the diff state, NOT a fresh pgwasm read — the registration is already current.
       //
       // Keep-alive GENERATION rule (ADR-0040 decision 4): a 0→1 join opens a new generation and RESETS the
       // entry's generation hint to this joiner's; any later join `max`'s it. The last-out effective keep-alive

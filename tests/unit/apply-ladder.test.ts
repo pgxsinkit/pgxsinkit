@@ -38,7 +38,7 @@ const scalars = pgTable("scalars", {
   count: integer("count").notNull(),
 });
 
-// The static apply ladder (ADR-0009 decision 3) executing on the pinned PGlite: each tier applies
+// The static apply ladder (ADR-0009 decision 3) executing on the pinned pgwasm: each tier applies
 // correctly. The json/copy tiers take their casts from the resolved target's model-derived column
 // types (ADR-0029 D2) — there is no `information_schema` round-trip to fall back to.
 
@@ -78,7 +78,7 @@ describe("apply ladder", () => {
       debug: false,
     });
 
-    // Re-read with deterministic text casts so the array/bigint comparison is stable across PGlite
+    // Re-read with deterministic text casts so the array/bigint comparison is stable across pgwasm
     // return-type choices.
     const result = await drizzleOver(pg)
       .select({

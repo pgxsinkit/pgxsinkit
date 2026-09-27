@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 // ADR-0049 (capability-driven engine placement) step 10a: the store-boot WIRING — `resolveStoreBoot`
 // assembles the boot observations (meta record + commitment namespace + recordless idb fact) and EXECUTES the
-// classifier's verdict with real effects, and `createClientPGlite`'s `opfs://` branch routes to the
+// classifier's verdict with real effects, and `createPgwasmClient`'s `opfs://` branch routes to the
 // opfs-repacked factory. Bun has no browser IndexedDB / OPFS / WASM, so every IO surface is faked here and
 // the opfs-repacked factory is injected — no real engine is ever constructed.
 
-import { createClientPGlite, resolveStoreBoot } from "../../packages/client/src/index";
+import { createPgwasmClient, resolveStoreBoot } from "../../packages/client/src/index";
 import { CommittedStoreUnreachableError, resolveDeniedBootAuthority } from "../../packages/client/src/store-boot";
 import { StoreMetaUnreadableError } from "../../packages/client/src/store-meta";
 import {
@@ -692,7 +692,7 @@ describe("resolveStoreBoot — fail closed", () => {
 });
 
 // =========================================================================================================
-// B. createClientPGlite — the opfs:// branch routes to the injected opfs-repacked factory
+// B. createPgwasmClient — the opfs:// branch routes to the injected opfs-repacked factory
 // =========================================================================================================
 
 interface CapturedFactoryOptions {
@@ -701,11 +701,11 @@ interface CapturedFactoryOptions {
   extentSize?: number;
 }
 
-describe("createClientPGlite — opfs:// factory routing", () => {
+describe("createPgwasmClient — opfs:// factory routing", () => {
   it("routes opfs:// to the factory with durability relaxed (default) + extentSize 65536 + the directory handle", async () => {
     const captured: CapturedFactoryOptions[] = [];
     const directoryHandle = { opfsDir: true };
-    await createClientPGlite("opfs-default", {
+    await createPgwasmClient("opfs-default", {
       hasOpfsSyncAccess: true,
       opfsFactories: {
         createOpfsPgwasm: async (options: CapturedFactoryOptions) => {
@@ -724,7 +724,7 @@ describe("createClientPGlite — opfs:// factory routing", () => {
 
   it('maps durability:"strict" → factory durability "strict"', async () => {
     const captured: CapturedFactoryOptions[] = [];
-    await createClientPGlite("opfs-strict", {
+    await createPgwasmClient("opfs-strict", {
       hasOpfsSyncAccess: true,
       durability: "strict",
       opfsFactories: {
@@ -741,7 +741,7 @@ describe("createClientPGlite — opfs:// factory routing", () => {
 
   it("retries a transient factory failure (twice then success) with bounded backoff", async () => {
     let calls = 0;
-    const result = await createClientPGlite("opfs-retry", {
+    const result = await createPgwasmClient("opfs-retry", {
       hasOpfsSyncAccess: true,
       opfsFactories: {
         createOpfsPgwasm: async () => {
@@ -760,7 +760,7 @@ describe("createClientPGlite — opfs:// factory routing", () => {
   it("does NOT enter the opfs branch without opfs access (idb/file/memory path unchanged)", async () => {
     // Guard: a throwing factory is injected but never reached, because no `hasOpfsSyncAccess` means the store
     // resolves to the memory backend (this test lane) — the byte-identical baseline.
-    const guard = await createClientPGlite(memoryStoreForTests("guard-no-opfs"), {
+    const guard = await createPgwasmClient(memoryStoreForTests("guard-no-opfs"), {
       opfsFactories: {
         createOpfsPgwasm: async () => {
           throw new Error("opfs factory must not be reached");

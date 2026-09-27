@@ -4,11 +4,11 @@ import { describe, expect, it } from "bun:test";
 // module is loaded ONCE per scope, rejections included. No browser, no bundler, no real store: the loader is
 // injected and each "store" is an identity-tagged sentinel, so a mint can be traced to the module that made it.
 
-import { createStoreEngineResolver, loadStoreEngineFactory, type ClientPGlite } from "../../packages/client/src/index";
+import { createStoreEngineResolver, loadStoreEngineFactory, type PgwasmClient } from "../../packages/client/src/index";
 
 const MODULE = "/store-engine/factory.js";
 
-const storeSentinel = (tag: string) => ({ tag }) as unknown as ClientPGlite;
+const storeSentinel = (tag: string) => ({ tag }) as unknown as PgwasmClient;
 
 describe("loadStoreEngineFactory — which export answers for the store", () => {
   it("takes the module's default export", async () => {
@@ -18,9 +18,9 @@ describe("loadStoreEngineFactory — which export answers for the store", () => 
     expect(await factory("store-a")).toEqual(storeSentinel("store-a"));
   });
 
-  it("falls back to a named `createPglite` when there is no default", async () => {
+  it("falls back to a named `createStore` when there is no default", async () => {
     const factory = await loadStoreEngineFactory(MODULE, () =>
-      Promise.resolve({ createPglite: (storePath: string) => Promise.resolve(storeSentinel(storePath)) }),
+      Promise.resolve({ createStore: (storePath: string) => Promise.resolve(storeSentinel(storePath)) }),
     );
     expect(await factory("store-b")).toEqual(storeSentinel("store-b"));
   });
@@ -55,7 +55,7 @@ describe("loadStoreEngineFactory — which export answers for the store", () => 
   });
 
   it("a module with no callable export throws loudly rather than resolving to nothing", async () => {
-    const failure: Error = await loadStoreEngineFactory(MODULE, () => Promise.resolve({ createPglite: 42 })).then(
+    const failure: Error = await loadStoreEngineFactory(MODULE, () => Promise.resolve({ createStore: 42 })).then(
       () => new Error("expected the load to fail"),
       (error: unknown) => error as Error,
     );

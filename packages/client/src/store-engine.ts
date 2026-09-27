@@ -1,20 +1,20 @@
-import type { ClientPGlite } from "./index";
+import type { PgwasmClient } from "./index";
 
 // ── The DECLARED store engine (ADR-0050 addendum 2026-09-08) ─────────────────────────────────────
 //
 // A store's storage declaration may name an ENGINE: `storage.engine = { module: <module URL> }`. When it
-// does, THAT module mints the store instead of the toolkit's own `createClientPGlite` — so an application
+// does, THAT module mints the store instead of the toolkit's own `createPgwasmClient` — so an application
 // can drive a different PostgreSQL-shaped engine, one that lives outside this repo, without a line of
 // engine-specific code in the toolkit. Nothing here knows, names or imports any particular engine: the
 // module URL is the entire surface.
 //
-// The contract is the toolkit's own `createPglite` seam (ADR-0036), unchanged and unextended — the module's
-// DEFAULT export, or failing that a named `createPglite`:
+// The contract is the toolkit's own `createStore` seam (ADR-0036), unchanged and unextended — the module's
+// DEFAULT export, or failing that a named `createStore`:
 //
-//   (storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>
+//   (storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>
 //
 // `storePath` is a plain store NAME, never a storage URL. The handle comes back and is used exactly as a
-// `createClientPGlite` one is, so it must carry the whole `ClientPGlite` surface the engine touches — `live`
+// `createPgwasmClient` one is, so it must carry the whole `PgwasmClient` surface the engine touches — `live`
 // included. Everything the seam does not pass, the module owns: its own assets (derivable from
 // `import.meta.url`; there is no asset base and there will not be one), its own storage layout under the
 // store path, and its own environment requirements (a threaded engine that needs a cross-origin-isolated
@@ -24,8 +24,8 @@ import type { ClientPGlite } from "./index";
 // two ways a declared module goes wrong, and either one silently falling back to the built-in store would
 // report a healthy engine for one that never ran.
 
-/** The one function the declared engine trades in — the toolkit's `createPglite` option (ADR-0036). */
-export type StoreEngineFactory = (storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>;
+/** The one function the declared engine trades in — the toolkit's `createStore` option (ADR-0036). */
+export type StoreEngineFactory = (storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>;
 
 /** How a scope loads a module URL: the dynamic `import()` in a browser scope, a stub in a unit test. */
 export type StoreEngineModuleLoader = (url: string) => Promise<unknown>;
@@ -39,7 +39,7 @@ export type StoreEngineModuleLoader = (url: string) => Promise<unknown>;
 const importStoreEngineModule: StoreEngineModuleLoader = (url) => import(/* @vite-ignore */ url);
 
 /**
- * Import one store-engine module URL and take its factory: the default export, else a named `createPglite`.
+ * Import one store-engine module URL and take its factory: the default export, else a named `createStore`.
  *
  * @param module the declared `storage.engine.module` — an absolute or origin-relative module URL.
  * @param load how to import it; defaults to a dynamic `import()` in the calling scope.
@@ -59,13 +59,13 @@ export async function loadStoreEngineFactory(
       { cause },
     );
   }
-  const exports = (loaded ?? {}) as { default?: unknown; createPglite?: unknown };
-  const factory = typeof exports.default === "function" ? exports.default : exports.createPglite;
+  const exports = (loaded ?? {}) as { default?: unknown; createStore?: unknown };
+  const factory = typeof exports.default === "function" ? exports.default : exports.createStore;
   if (typeof factory !== "function") {
     throw new Error(
       `[pgxsinkit] the declared store engine "${module}" exports no store factory. Expected a default ` +
-        `export (or a named \`createPglite\`) of ` +
-        `\`(storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>\`.`,
+        `export (or a named \`createStore\`) of ` +
+        `\`(storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>\`.`,
     );
   }
   return factory as StoreEngineFactory;

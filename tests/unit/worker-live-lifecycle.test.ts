@@ -337,7 +337,7 @@ describe("worker live-query lifecycle races (ADR-0040 fix round)", () => {
     // The P1 wedge class (ADR-0040 decision 1): the FIRST-EVER subscribe is held in its pre-manager phase
     // (mid `prepareQuery`, before `ensureLiveManager`). Pre-fix, `close()` saw `liveManager === null`, skipped
     // disposal, and closed the engine while the subscribe went on to build a manager + registration against a
-    // closing PGlite — re-creating the close-vs-unsubscribe hang. Now `close()` flips `closing`, cancels the
+    // closing pgwasm — re-creating the close-vs-unsubscribe hang. Now `close()` flips `closing`, cancels the
     // pending subscribe, and AWAITS its in-flight task before disposing; the resumed subscribe early-bails on
     // `closing` and creates nothing.
     const { host, post } = await bootHostAndDriver();

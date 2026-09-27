@@ -60,8 +60,8 @@ export const projectsSyncRegistry = defineSyncRegistry({
 
 // Read-path regression fixture for a server composite key narrowed to one client key. The owner is
 // predicate-pinned, so `(id, owner_id)` is collision-free within one subject's shape even though the
-// local PGlite table stores only `id`. Keeping this in the integration schema lets the implementation
-// lane exercise the real Postgres -> Circuits -> durable-streams -> PGlite path.
+// local pgwasm table stores only `id`. Keeping this in the integration schema lets the implementation
+// lane exercise the real Postgres -> Circuits -> durable-streams -> pgwasm path.
 const projectionKeyRowsSyncEntry = defineSyncTable({
   tableName: "projection_key_rows",
   makeColumns: () => ({

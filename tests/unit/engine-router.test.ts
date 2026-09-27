@@ -788,7 +788,7 @@ describe("router connect-port ack window — the liveness fallback where `close`
 
 describe("router liveness on DEFAULT config — no execution limit, no timing verdict (ADR-0049 D5)", () => {
   it("never arms a connect-ack window, never probes, and NEVER retires a silent engine", () => {
-    // PGlite's synchronous WASM work blocks the engine worker's event loop, so a legitimate long import or
+    // pgwasm's synchronous WASM work blocks the engine worker's event loop, so a legitimate long import or
     // query stops `connect-port-ack` AND `control-ack` from being processed. ADR-0049 D5 is explicit that no
     // false-positive-free timing detection exists, so the timing machinery is opt-in: with the limit
     // DISABLED (the default) a second tab attaching mid-import must NEVER retire the healthy engine — the

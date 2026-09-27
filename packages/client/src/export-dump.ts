@@ -7,7 +7,7 @@
 // The mechanism is the addendum's throwaway clone, NOT the abandoned suspend/reopen seam: (1) take a LIVE
 // datadir dump of the running store (the SAME checkpoint + `dumpDataDir` core the store backup uses, but
 // uncompressed — the clone consumes it immediately, so the gzip+gunzip round trip is pure waste); (2) boot
-// a memory-backed THROWAWAY PGlite from that dump via `loadDataDir` — engine-less, no `live` extension,
+// a memory-backed THROWAWAY pgwasm from that dump via `loadDataDir` — engine-less, no `live` extension,
 // nothing `pg_dump`'s `DEALLOCATE ALL` can corrupt; (3) run `pg_dump` against the throwaway; (4) discard
 // it. The live engine is never touched — the addendum's whole point — so tabs never notice beyond the
 // lifecycle slot reporting busy.
@@ -21,7 +21,7 @@ import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
 import { cBuild } from "@pgxsinkit/pgwasm-c";
 
 import { compactTimestamp, type DiagnosticDumpReport, deriveStoreId, nowMs, performDatadirDump } from "./export-store";
-import type { ClientPGlite } from "./index";
+import type { PgwasmClient } from "./index";
 import { resolveStoreDataDir } from "./store-path";
 
 /** Options for {@link SyncClient.exportDiagnostics}. */
@@ -45,12 +45,12 @@ export interface DiagnosticExportResult {
 /** The dependencies {@link performDiagnosticExport} needs from the owning client — narrow, so it is unit-testable. */
 export interface DiagnosticExportDeps {
   /** The live store to checkpoint and dump (the clone source; the live engine is never suspended). */
-  pglite: Pick<ClientPGlite, "exec" | "dumpDataDir">;
+  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">;
   /** The Mutation diagnostics seam (`client.diagnostics().mutation` / `readMutationStats`). */
   readMutationStats: () => Promise<MutationDiagnostics>;
   /**
    * The store's configured plain store PATH (ADR-0036) — reduced to the `storeId` in the default artefact
-   * file name. The resolved PGlite dataDir URL is deliberately NOT used: it is internal plumbing and must
+   * file name. The resolved pgwasm dataDir URL is deliberately NOT used: it is internal plumbing and must
    * not leak into an artefact name as something to imitate.
    */
   storePath?: string;
@@ -76,7 +76,7 @@ export interface CloneDumpPhases {
   checkpointStartedAtMs: number;
   /** `CHECKPOINT` wall — flushing dirty buffers before the internal datadir dump the clone consumes. */
   checkpointMs: number;
-  /** Offset from `startPerf` when the throwaway clone's `PGlite.create({ loadDataDir })` began. */
+  /** Offset from `startPerf` when the throwaway clone's `pgwasm.create({ loadDataDir })` began. */
   cloneBootStartedAtMs: number;
   /** Clone boot wall — booting the memory-backed throwaway from the internal dump. */
   cloneBootMs: number;
@@ -97,7 +97,7 @@ export interface CloneDumpResult {
 /**
  * The throwaway-clone dump core shared by BOTH `pgDump` exports (ADR-0035 addendum): (1) a LIVE datadir dump
  * of the running store (`compression: "none"` — the clone consumes the bytes immediately, so gzip+gunzip is
- * pure waste); (2) a memory-backed THROWAWAY PGlite booted from it via `loadDataDir` — engine-less, no
+ * pure waste); (2) a memory-backed THROWAWAY pgwasm booted from it via `loadDataDir` — engine-less, no
  * `live` extension, nothing `pg_dump`'s `DEALLOCATE ALL` can corrupt; (3) `pg_dump` against the throwaway
  * with the caller's `args` (none for a diagnostic dump; the `-t` allowlist + `--no-owner` for a data
  * export); (4) discard the clone in a `finally`. Factored out so `performDiagnosticExport` and
@@ -120,7 +120,7 @@ export interface CloneDumpOptions {
 }
 
 export async function runThrowawayCloneDump(
-  pglite: Pick<ClientPGlite, "exec" | "dumpDataDir">,
+  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">,
   startPerf: number,
   options: CloneDumpOptions = {},
 ): Promise<CloneDumpResult> {

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 // The SPARE-STORE ADOPTION BUDGET. The engine's boot waits for an in-flight `provision` attempt before it
 // decides whether to adopt the warmed store — and that wait used to be UNBOUNDED, so a spare whose create
-// never settled (observed once on Chromium: the rail stopped at `boot pglite.create start`, no error, no
+// never settled (observed once on Chromium: the rail stopped at `boot pgwasm.create start`, no error, no
 // `done`) left every attach parked on "Starting local database…" forever. The spare is documented everywhere
 // as a pure ACCELERATOR, never a boot dependency, so the wait is now bounded by the engine-construction
 // `provisionAdoptionBudgetMs` (default 20000, measured from the ATTEMPT's start) and a stalled spare refuses
@@ -30,7 +30,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 import {
   attachSyncClient,
   type BridgeEnvelope,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   identityCodec,
   isBridgeEnvelope,
@@ -81,9 +81,9 @@ const settle = async (n = 8) => {
   for (let i = 0; i < n; i++) await tick();
 };
 
-async function makePglite(): Promise<ClientPGlite> {
+async function makePglite(): Promise<PgwasmClient> {
   const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
-  return pg as unknown as ClientPGlite;
+  return pg as unknown as PgwasmClient;
 }
 
 /** Connect a raw port to the host and record every bridge envelope the worker posts back. */
@@ -111,7 +111,7 @@ function railLines(seen: BridgeEnvelope[]): string[] {
 describe("the adoption budget leaves a provision that settles inside it untouched", () => {
   it("a spare minted well inside the budget is adopted by the attach, with no second create", async () => {
     const created: string[] = [];
-    let instance: ClientPGlite | null = null;
+    let instance: PgwasmClient | null = null;
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
@@ -122,7 +122,7 @@ describe("the adoption budget leaves a provision that settles inside it untouche
       convergenceIntervalMs: 10_000_000,
       // Generous, but FINITE: the bounded path is the one under test, not the `Infinity` escape hatch.
       provisionAdoptionBudgetMs: 60_000,
-      createPglite: async (storePath) => {
+      createStore: async (storePath) => {
         created.push(storePath);
         instance = await makePglite();
         return instance;
@@ -146,7 +146,7 @@ describe("the adoption budget leaves a provision that settles inside it untouche
     expect(railLines(seen)).toContain("worker adopting provisioned store");
     expect(railLines(seen).filter((line) => line.startsWith("worker provision adoption stalled"))).toEqual([]);
     expect(created).toEqual(["budget-adopted"]);
-    expect((await host.whenBooted()).pglite).toBe(instance!);
+    expect((await host.whenBooted()).pgwasm).toBe(instance!);
   });
 });
 
@@ -166,9 +166,9 @@ describe("a spare whose create never settles refuses the attach typed instead of
       convergenceIntervalMs: 10_000_000,
       // Small enough that the real (uninjectable — the worker has no clock seam) timer fires within the test.
       provisionAdoptionBudgetMs: 50,
-      createPglite: () => {
+      createStore: () => {
         opens.count += 1;
-        return new Promise<ClientPGlite>((resolve) => {
+        return new Promise<PgwasmClient>((resolve) => {
           releaseCreate = () => resolve(makePglite());
         });
       },
@@ -217,7 +217,7 @@ describe("a spare whose create never settles refuses the attach typed instead of
     // `bootPromise` was cleared by the refusal, so a later attach retries the boot — and the spare it waited
     // on is adopted the moment its create lands (nothing was thrown away). Wait for the provision's OWN
     // settlement (its `provision-ack` is posted after the worker's attempt settled and cleared
-    // `provisionAttempt`), not a fixed delay: `makePglite()` is a real memory-PGlite boot, and under a loaded
+    // `provisionAttempt`), not a fixed delay: `makePglite()` is a real memory-pgwasm boot, and under a loaded
     // machine a timed wait re-attaches while the create is still landing — refused again at once, because
     // the budget is already spent (the exact behaviour the runbook documents for a too-early retry).
     releaseCreate();

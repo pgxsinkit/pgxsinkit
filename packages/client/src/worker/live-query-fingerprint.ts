@@ -1,6 +1,6 @@
 // Canonical fingerprint for a live query (ADR-0040 decisions 2 & 3). Two identical live queries — same
-// POST-WRAP SQL, same bound params, same key mode — must map to ONE PGlite registration; anything that
-// changes what PGlite actually runs (or how the diff is keyed) must map to a DISTINCT one. The fingerprint
+// POST-WRAP SQL, same bound params, same key mode — must map to ONE pgwasm registration; anything that
+// changes what pgwasm actually runs (or how the diff is keyed) must map to a DISTINCT one. The fingerprint
 // covers EXECUTION-relevant inputs only: the materialized SQL, a TYPED encoding of the params, and the PK
 // columns (which pick `live.incrementalQuery` vs `live.query` and drive the diff key). `use` is deliberately
 // NOT an input — activation/hydration are per-subscriber pre-steps that never influence the registration
@@ -111,9 +111,9 @@ export function fingerprintLiveQuery(
   params: readonly unknown[],
   pkColumns?: readonly string[],
 ): LiveQueryFingerprint {
-  // Single-column PK → PGlite `live.incrementalQuery`; composite/keyless → `live.query` + worker-side diff.
+  // Single-column PK → pgwasm `live.incrementalQuery`; composite/keyless → `live.query` + worker-side diff.
   // The mode AND the exact pk columns both matter: same SQL with a different pk column is a different
-  // registration (different diff key), and incremental vs full are different PGlite machines.
+  // registration (different diff key), and incremental vs full are different pgwasm machines.
   const mode = pkColumns && pkColumns.length === 1 ? "inc" : "full";
   // ONE `JSON.stringify` over a fixed-shape object of type-tagged encoding STRUCTURES: the SQL is its own JSON
   // string element (cannot bleed into params), and JSON escaping makes the whole key unambiguous — no manual

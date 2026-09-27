@@ -91,7 +91,7 @@ function nativeRoleToName(role: NativePolicy["to"]): string {
 // shared `adminRolesClaimPath` constant rather than hard-coded, and the extracted roles claim goes
 // through the `case jsonb_typeof(…) when 'array' …` guard so a present-but-non-array claim DENIES (as
 // the JS mirror does) instead of raising "cannot extract elements from a scalar/object" — the guard's
-// behaviour is executed against PGlite in `rls-malformed-claim-arrays.test.ts`.
+// behaviour is executed against pgwasm in `rls-malformed-claim-arrays.test.ts`.
 const defaultOwnerOrAdminPredicateSql = `
   owner_id = coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),

@@ -387,7 +387,7 @@ export async function syncCircuitsShapes(options: CircuitsSyncOptions): Promise<
           });
         }
 
-        // Discard rather than persist work during teardown: PGlite skips the COMMIT once the tx is
+        // Discard rather than persist work during teardown: pgwasm skips the COMMIT once the tx is
         // rolled back, so both the rows and the offset advance are undone and a resume re-streams.
         if (unsubscribed) await tx.rollback();
       });

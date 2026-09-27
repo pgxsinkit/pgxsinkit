@@ -9,7 +9,7 @@
 // The convention is deliberately tiny, and it is a MANIFEST, not a file-name guess:
 //
 //   <base>store-engine/manifest.json   { "factory": "<file>.js", "name": "<display name>" }
-//   <base>store-engine/<file>.js       the store-factory module (default export, or `createPglite`)
+//   <base>store-engine/<file>.js       the store-factory module (default export, or `createStore`)
 //   <base>store-engine/…               whatever else that module loads at run time, its own business
 //
 // The manifest is REQUIRED, because the alternative is this repo hardcoding some engine's bundle file

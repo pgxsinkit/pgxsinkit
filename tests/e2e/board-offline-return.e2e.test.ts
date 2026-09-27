@@ -7,7 +7,7 @@ import { type BrowserContext, expect, type Locator, type Page, test } from "@pla
 //
 // The capability is deliberately RETURN, not first-visit offline: its precondition is one full online
 // session. Each context below therefore boots online first, and only then flips the SAME browser context
-// offline — same profile, so same PGlite store, same GoTrue session, same service-worker cache. Closing the
+// offline — same profile, so same pgwasm store, same GoTrue session, same service-worker cache. Closing the
 // page and opening a new one in that context is the "reopened the tab with no connectivity" journey; a
 // reload would keep the old document alive and never exercise the navigation branch.
 //
@@ -62,7 +62,7 @@ const CONNECTION_NEEDED_SIGN_IN = "Signing in needs a connection. Reconnect and 
 // Deadlines, scaled per stretch (the config's CI-headroom discipline: same assertions, longer budget where a
 // full store boot or a network-recovery window sits inside the wait).
 const COLD_BOOT_MS = 90_000;
-// An offline boot pays the same PGlite create/open as an online one, with every asset coming off the
+// An offline boot pays the same pgwasm create/open as an online one, with every asset coming off the
 // service-worker cache instead of the HTTP cache.
 const OFFLINE_BOOT_MS = 90_000;
 // The connection-needed state is meant to appear once the read path reports itself unreachable, which lags

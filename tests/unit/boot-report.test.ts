@@ -1,5 +1,5 @@
 /**
- * Boot observability (ADR-0034) — the in-process BootReport. Drives the REAL boot pipeline (real PGlite,
+ * Boot observability (ADR-0034) — the in-process BootReport. Drives the REAL boot pipeline (real pgwasm,
  * real engine, real ShapeInbox/commit queue) against a stubbed NETWORK rather than a stubbed engine: the
  * ambient `fetch` answers the real control-plane handlers and a gated durable-streams response, so the
  * report is built from a genuine boot and the test still decides WHEN catch-up completes.
@@ -125,7 +125,7 @@ const { createSyncClient } = await import("../../packages/client/src/index");
 const { memoryStoreForTests } = await import("../../packages/client/src/testing");
 
 let bootId = 0;
-// Track booted clients so each is stopped (closing its PGlite) after the test — an un-closed PGlite heap
+// Track booted clients so each is stopped (closing its pgwasm) after the test — an un-closed pgwasm heap
 // leaks and bun force-exits the process rc=99 (see tests/support/setup.ts).
 const openClients: Array<{ stop: () => Promise<void> }> = [];
 async function bootClient(extra: Record<string, unknown> = {}) {
@@ -185,10 +185,10 @@ describe("BootReport — in-process boot (ADR-0034)", () => {
     expect(typeof r.startedAt).toBe("number");
 
     // Phases: all non-negative, schema exec measurably positive, and the client created its own store so
-    // pgliteCreateMs is a real number (no spare adoption → provision null).
+    // pgwasmCreateMs is a real number (no spare adoption → provision null).
     expect(r.provision).toBeNull();
-    expect(r.phases.pgliteCreateMs).not.toBeNull();
-    expect(r.phases.pgliteCreateMs!).toBeGreaterThanOrEqual(0);
+    expect(r.phases.pgwasmCreateMs).not.toBeNull();
+    expect(r.phases.pgwasmCreateMs!).toBeGreaterThanOrEqual(0);
     expect(r.phases.schemaExecMs).toBeGreaterThan(0);
     expect(r.phases.journalRecoveryMs).toBeGreaterThanOrEqual(0);
     expect(r.phases.storeVersionReconcileMs).toBeGreaterThanOrEqual(0);
@@ -199,7 +199,7 @@ describe("BootReport — in-process boot (ADR-0034)", () => {
     expect(r.totalMs).toBeGreaterThanOrEqual(r.phases.schemaExecMs);
     expect(r.totalMs).toBeGreaterThanOrEqual(r.phases.journalRecoveryMs);
     expect(r.totalMs).toBeGreaterThanOrEqual(r.phases.storeVersionReconcileMs);
-    expect(r.totalMs).toBeGreaterThanOrEqual(r.phases.pgliteCreateMs!);
+    expect(r.totalMs).toBeGreaterThanOrEqual(r.phases.pgwasmCreateMs!);
 
     // One eager group, covering the single served shape.
     expect(r.groups).toHaveLength(1);

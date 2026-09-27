@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-// Real-PGlite coverage for live-query DEDUPLICATION over the worker bridge (ADR-0040 Slice 3, decisions 2/3).
+// Real-pgwasm coverage for live-query DEDUPLICATION over the worker bridge (ADR-0040 Slice 3, decisions 2/3).
 // A real in-memory engine behind `defineSyncWorker`, driven by two `attachSyncClient` tabs over bun
 // `MessageChannel`s (no actual Worker). `pglite.live` is wrapped to COUNT registrations, so "one registration
 // per fingerprint" is asserted directly. Proves: two tabs on the same SQL share ONE registration and both
@@ -16,7 +16,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   getReadModelView,
   type SyncWorkerHost,
@@ -58,7 +58,7 @@ let hosts: SyncWorkerHost<TodosRegistry>[] = [];
 let channels: MessageChannel[] = [];
 let liveRegistrations = 0;
 
-/** Boot a host over a prepopulated in-memory PGlite whose `live` registrations are counted. */
+/** Boot a host over a prepopulated in-memory pgwasm whose `live` registrations are counted. */
 async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
   const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   // Count every registration so dedup is provable — the manager must call these ONCE per fingerprint.
@@ -79,7 +79,7 @@ async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
     streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+    precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
     syncEnabled: false,
     installGlobal: false,
     convergenceIntervalMs: 10_000_000,
@@ -140,7 +140,7 @@ describe("live-query dedup over the worker bridge (ADR-0040 Slice 3)", () => {
       (rows) => rowsB.push(rows),
     );
 
-    // ONE PGlite registration for two identical subscriptions across two tabs (decision 2).
+    // ONE pgwasm registration for two identical subscriptions across two tabs (decision 2).
     expect(liveRegistrations).toBe(1);
     expect(subA.initialRows.map((r) => r.title)).toEqual(["A"]);
     expect(subB.initialRows.map((r) => r.title)).toEqual(["A"]);

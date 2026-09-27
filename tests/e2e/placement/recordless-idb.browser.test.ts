@@ -11,7 +11,7 @@ import { harnessCall, PLACEMENT_SERVER_URL, uniqueStore } from "./support";
 // fresh boot, which `destroy.browser.test.ts` pins.
 //
 // The RECOGNITION CONDITION is directly observable in a real browser WITHOUT booting an engine: a store with an
-// existing PGlite idb database but NO store meta record is exactly boot-classification 6's `idbStoreExists &&
+// existing pgwasm idb database but NO store meta record is exactly boot-classification 6's `idbStoreExists &&
 // record === undefined` → `boot-idb-authoritative`. This lane seeds that state (a bare idb store created and
 // closed, as a record-free fixed-mode store leaves it) and asserts the two facts the classifier keys on — using
 // the REAL non-creating existence check (`idbStoreExists`, invariant 14 — NEVER `indexedDB.databases()`) and the
@@ -49,7 +49,7 @@ test("a seeded bare idb store is recognized as a recordless fixed-mode store (ex
 // The `idbfs` backend + the ABSENCE of opfs artefacts (this lane's core "no virgin opfs mint, no migration"
 // claim) are asserted on EVERY engine. The `idb-authoritative` meta-record phase is asserted on chromium +
 // firefox; on WebKitGTK (Playwright) the elected DEDICATED engine's IndexedDB store-meta record is not
-// observable from the page context (the engine correctly reads the page-seeded PGlite idb store — it boots
+// observable from the page context (the engine correctly reads the page-seeded pgwasm idb store — it boots
 // `idbfs`, proving the two share IndexedDB — but the separate store-meta record it writes reads back `absent`
 // from the page; a WebKitGTK harness observation gap, the same class as its SharedWorker/dedicated-worker OPFS
 // sync-access denial). Real WebKit meta-record evidence is the device storage bench; here webkit asserts the

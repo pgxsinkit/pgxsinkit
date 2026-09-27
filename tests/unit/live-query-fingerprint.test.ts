@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 // The typed param codec + canonical key (ADR-0040 decisions 2 & 3). The guarantee under test: identical
-// execution inputs share a key; anything that changes what PGlite runs (or how the diff is keyed) — SQL,
+// execution inputs share a key; anything that changes what pgwasm runs (or how the diff is keyed) — SQL,
 // params, param TYPE, pk columns/mode — yields a distinct key; and unknown-prototype values never dedup.
 
 import { fingerprintLiveQuery } from "../../packages/client/src/worker/live-query-fingerprint";

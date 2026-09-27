@@ -9,7 +9,7 @@ import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { createSyncClient, type LocalStoreVersionEvent, type SyncClient } from "../../packages/client/src/index";
 import { writeStoredRegistryFingerprint } from "../../packages/client/src/local-store";
 
-// ADR-0041 staged boot readiness (stage 1) — REAL PGlite (filesystem store under ./tmp), no mocks. Covers the
+// ADR-0041 staged boot readiness (stage 1) — REAL pgwasm (filesystem store under ./tmp), no mocks. Covers the
 // two invariants that only a real store proves: (1) an OFFLINE boot with `syncEnabled: true` and unreachable
 // endpoints resolves `localReadReady` + `writeReady` with ZERO network while `ready` stays pending, and a
 // cached row still reads; (2) a stale-fingerprint boot that OWES mutations DEFERS the read-cache rebuild yet
@@ -148,7 +148,7 @@ describe("ADR-0041 staged boot readiness (stage 1) — real PGlite", () => {
     await seed.mutate.create("todos", { id: "cccccccc-cccc-cccc-cccc-cccccccccccc", title: "owed", done: false });
     expect((await seed.diagnostics()).mutation.pendingCount).toBe(1);
     // Poison the stored registry fingerprint so boot B's reconcile detects a mismatch.
-    await writeStoredRegistryFingerprint(seed.pglite, registry, "lsf1:stale-registry-fingerprint");
+    await writeStoredRegistryFingerprint(seed.pgwasm, registry, "lsf1:stale-registry-fingerprint");
     await seed.stop();
 
     // Boot B — the mismatch + owed mutations must DEFER the rebuild (not drop the owed write), while still

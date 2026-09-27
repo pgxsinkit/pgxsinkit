@@ -15,7 +15,7 @@ const Repl = lazy(() => import("@pgxsinkit/pgwasm-repl").then((module) => ({ def
  * A SQL REPL over the signed-in identity's LOCAL PGlite store. What you can query here is exactly what the
  * read path synced to you (RLS-scoped via `board-sync`), so it doubles as a window onto the read-path
  * scoping the rest of the demo asserts. The REPL is fed the client's `rawQuery`/`rawExec` inspection
- * surface via `replAdapter` (not `client.pglite`, which is unavailable in worker mode) — in worker mode
+ * surface via `replAdapter` (not `client.pgwasm`, which is unavailable in worker mode) — in worker mode
  * that routes each statement through the sync bridge. The REPL follows the OS colour scheme to match the
  * board's `defaultColorScheme="auto"`.
  *

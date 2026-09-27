@@ -24,7 +24,7 @@ import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   identityCodec,
   isBridgeEnvelope,
@@ -487,7 +487,7 @@ describe("provisionSyncWorker settles at the expiry deadline — it never hangs 
 // open is: the provision rejects typed at the deadline, a later attach on the same port WAITS on that same
 // attempt rather than booting fresh, and a retried provision re-acks against it instead of starting a second
 // open. That is exactly what `ProvisionExpiredError` documents for this placement, and it is pinned here against
-// the REAL `defineSyncWorker` (over a `MessageChannel`, no Worker) with a `createPglite` that never settles —
+// the REAL `defineSyncWorker` (over a `MessageChannel`, no Worker) with a `createStore` that never settles —
 // the scripted-SW harness above has no worker-side attempt to model. That attach-side WAIT is itself bounded by
 // the engine's spare-store adoption budget (`provisionAdoptionBudgetMs`, default 20000 from the attempt's start,
 // past which the attach is refused with `ProvisionStalledError`); the bound is pinned in
@@ -583,9 +583,9 @@ describe("the expiry bounds the PROMISE, not the worker-side create attempt", ()
       // Opt out of the spare-store adoption budget: this test pins WHAT the attach waits on, not for how long.
       provisionAdoptionBudgetMs: Number.POSITIVE_INFINITY,
       // The genuinely stuck storage open: the create this provision asks for NEVER settles.
-      createPglite: () => {
+      createStore: () => {
         opens.count += 1;
-        return new Promise<ClientPGlite>(() => undefined);
+        return new Promise<PgwasmClient>(() => undefined);
       },
     });
     hosts.push(host);

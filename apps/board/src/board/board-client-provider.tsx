@@ -76,7 +76,7 @@ function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmi
     void (async () => {
       try {
         // Boot rail: mark the app-side moment between auth settling and client creation, so the delay
-        // before the library's own `boot pglite.create` stamp is attributable to app code, not sync.
+        // before the library's own `boot pgwasm.create` stamp is attributable to app code, not sync.
         syncDebug("boot board client create start");
         const {
           client: next,
@@ -118,7 +118,7 @@ function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmi
           // worker-pushed snapshot (ADR-0059). A dedicated handle beside `__boardClient` (which the scenarios
           // type down to just `mutate`), following the boot-report stash precedent in board-client.ts.
           dev.__pgxsinkitE2eClient = next;
-          if (mode === "in-process") dev.__boardProfiler = createPgliteProfiler(next.pglite);
+          if (mode === "in-process") dev.__boardProfiler = createPgliteProfiler(next.pgwasm);
         }
         setStatus(next.status);
         setClient(next);

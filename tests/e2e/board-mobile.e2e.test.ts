@@ -83,7 +83,7 @@ function segment(control: Locator, text: string): Locator {
 // The one scaled deadline in this spec, for the one stretch that needs it (same discipline as the config's
 // CI-headroom note: same assertions, scaled deadline). This spec clicks sign-in almost immediately after the
 // login screen paints, so its FIRST boot regularly races AHEAD of the login screen's spare provision and pays
-// a full cold store boot — PGlite create + initdb + schema + catch-up — which straddles the config's 15s local
+// a full cold store boot — pgwasm create + initdb + schema + catch-up — which straddles the config's 15s local
 // expect budget (measured 10s and 25s on consecutive runs of the same code). Every later assertion keeps the
 // tight budget.
 const COLD_BOOT_MS = 90_000;

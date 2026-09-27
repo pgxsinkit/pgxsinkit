@@ -60,7 +60,7 @@ function hasGeneratedIdentityColumn(target: ApplyTarget, colNames: readonly stri
  * locally-generated one — so OVERRIDING SYSTEM VALUE is the semantically correct clause (and it makes
  * drizzle re-include the column it would otherwise drop). Tables without a generated column get a plain
  * insert, so the clause is emitted only where it is required. (The local synced table renders the identity
- * PK as a PLAIN column — the generator emits `getSQLType()` with no identity clause — and PGlite accepts
+ * PK as a PLAIN column — the generator emits `getSQLType()` with no identity clause — and pgwasm accepts
  * OVERRIDING SYSTEM VALUE against a plain column as a no-op, so this is safe there too.)
  */
 function insertInto(db: ReturnType<typeof drizzleOverPg>, target: ApplyTarget, colNames: readonly string[]) {
@@ -545,7 +545,7 @@ export async function applyMessagesToTableWithCopy({ pg, target, messages, debug
     udtNames: copyColumnUdts(target),
   });
   // The statement carries its body as BYTES (that is what crosses the worker bridge as a transferable on
-  // the raw seam); PGlite reads `/dev/blob` from a `Blob`, so wrap them here.
+  // the raw seam); pgwasm reads `/dev/blob` from a `Blob`, so wrap them here.
   await pg.query(statement.sql, [], { blob: new Blob([statement.blob], { type: "text/plain" }) });
 
   if (debug) console.log(`Inserted ${messages.length} rows using COPY`);

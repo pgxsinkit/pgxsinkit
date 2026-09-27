@@ -1,4 +1,4 @@
-import { syncDebug, storeIndexedDbDatabaseName, type ClientPGlite } from "@pgxsinkit/client";
+import { syncDebug, storeIndexedDbDatabaseName, type PgwasmClient } from "@pgxsinkit/client";
 
 // Spare-store binding (board cold-boot optimisation B). PGlite's `initdb` + IDBFS open costs ~1.9s even
 // once the WASM is pre-warmed (optimisation A, see ./pglite-warm), and it otherwise can't start until
@@ -14,7 +14,7 @@ import { syncDebug, storeIndexedDbDatabaseName, type ClientPGlite } from "@pgxsi
 //
 // The pure logic here is driven entirely through injected {@link StoreRegistryAdapters} so it is
 // unit-testable in bun without a browser. The real localStorage / IndexedDB / navigator.locks /
-// `createClientPGlite`(+warm) wiring lives in ./store-registry-default (kept out of this DOM-free module
+// `createPgwasmClient`(+warm) wiring lives in ./store-registry-default (kept out of this DOM-free module
 // so the unit test's root typecheck never pulls DOM globals in).
 //
 // RESILIENCE RULE: any failure in this machinery (storage unavailable, idb errors, no locks) falls back
@@ -60,7 +60,7 @@ export interface StoreRegistryState {
 
 /** A PGlite instance opened by an adapter, paired with the store id it actually opened. */
 export interface OpenedStore {
-  pglite: ClientPGlite;
+  pglite: PgwasmClient;
   /** The opened id — usually the requested one, but a fresh replacement id when a corrupt spare recovered. */
   storeId: string;
 }
@@ -68,7 +68,7 @@ export interface OpenedStore {
 /**
  * The browser seams the pure logic drives — injected so the claim/bind/GC flow is unit-testable without a
  * real browser. The default implementation (./store-registry-default) wires localStorage / IndexedDB /
- * navigator.locks / `createClientPGlite`(+warm).
+ * navigator.locks / `createPgwasmClient`(+warm).
  */
 export interface StoreRegistryAdapters {
   /** Read the raw registry JSON string, or null when unset. MAY throw when storage is unavailable. */
@@ -80,7 +80,7 @@ export interface StoreRegistryAdapters {
   /** Delete an IndexedDB database by name (best-effort). */
   deleteDatabase: (name: string) => Promise<void>;
   /** Create the raw PGlite store at `storePath` (consumes the WASM warm) — the eager/opening step. */
-  createStore: (storePath: string) => Promise<ClientPGlite>;
+  createStore: (storePath: string) => Promise<PgwasmClient>;
   /** Destroy every local artifact of a NOT-running store by path (OPFS directory + sentinel + meta + idb) —
    * the library's `destroyStoreArtifacts` (ADR-0050). MAY reject (a live worker still holds the store);
    * the caller keeps the path listed and retries next boot. */
@@ -98,14 +98,14 @@ export interface EnsureSpareResult {
 
 /**
  * The result of {@link StoreRegistry.openUserStore}. `pglite` is the (possibly still-pending) precreated
- * instance to hand to `createSyncClient` via `precreatedPglite`; it is absent only on the fallback
+ * instance to hand to `createSyncClient` via `precreatedPgwasm`; it is absent only on the fallback
  * path, where the caller opens `storePath` itself. `storePath` is always the store's plain path (ADR-0036)
  * — the library's fallback if `pglite` rejects, and the actual store on the deterministic fallback path.
  */
 export interface OpenUserStoreResult {
   storeId: string | null;
   storePath: string;
-  pglite?: Promise<ClientPGlite>;
+  pglite?: Promise<PgwasmClient>;
   /**
    * Whether this store is PROVABLY fresh — a just-claimed schemaless spare or a brand-new create, with no
    * prior schema/rows/subscription state (ADR-0032 S4 fresh-store prefetch overlap). A mapped (returning)
@@ -387,7 +387,7 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
       };
     } catch {
       // RESILIENCE: any registry/spare failure → deterministic fallback path, no eager create. The library
-      // opens `storePath` itself (no `precreatedPglite`). Conservatively NOT fresh: the deterministic
+      // opens `storePath` itself (no `precreatedPgwasm`). Conservatively NOT fresh: the deterministic
       // per-user store path may hold a prior session's store, so take the safe sequential path.
       return { storeId: null, storePath: fallbackStorePathForUser(userId), fresh: false };
     }

@@ -3,7 +3,7 @@ import { describe, expect, it } from "bun:test";
 // destructive lifecycle, both as PURE EFFECT-DRIVEN machines over their crash tables (plan §§ "Provenance
 // gates and the commitment barrier (D7)", "Destructive lifecycle (D8)"; ADR-0049 decisions 7 & 8; CONTEXT
 // § "Language — engine placement", entries "Commitment marker", "Destructive lifecycle"). The machines never
-// touch IDB/OPFS/PGlite — every side effect is INJECTED, so crashes are simulated by making an effect throw,
+// touch IDB/OPFS/pgwasm — every side effect is INJECTED, so crashes are simulated by making an effect throw,
 // then re-running the resume path from the observed post-crash state. The final composition test threads the
 // machines' observed post-crash states through `classifyStoreBoot` (store-meta.ts) — the crash-table proof the
 // plan demands: every row of both crash tables → verdict.

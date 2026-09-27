@@ -3,7 +3,7 @@
 // over the plan's crash tables. CONTEXT § "Language — engine placement" terms used exactly: "Commitment
 // marker", "Destructive lifecycle".
 //
-// EFFECT-INJECTED BY CONSTRUCTION. None of these machines touches IndexedDB, OPFS, or PGlite: every side
+// EFFECT-INJECTED BY CONSTRUCTION. None of these machines touches IndexedDB, OPFS, or pgwasm: every side
 // effect is a method on an injected effects object. Plan step 10 wires the REAL effects (the meta record IO
 // from `store-meta.ts`, the OPFS namespace builders from `store-path.ts`, the live engine's `strictSync()`);
 // unit tests inject fakes and simulate a crash by making one effect throw, then re-run the resume path from

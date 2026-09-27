@@ -8,12 +8,12 @@ import { renderPgxsinkitUtilitiesMigration } from "@pgxsinkit/server";
 
 import { scalarJsonColumnNames, type ApplyTarget } from "../../packages/client/src/local-tables";
 
-// One drizzle handle per PGlite instance, so every converted call site in a file shares a builder
+// One drizzle handle per pgwasm instance, so every converted call site in a file shares a builder
 // without re-wrapping. Wrapping is cheap, but a single identity also keeps `.toSQL()`-rendered
 // statements comparable across helpers.
 const handles = new WeakMap<Pgwasm, PgwasmDatabase<never>>();
 
-/** A (memoized) Drizzle handle over any test PGlite instance — the tier-① authoring surface. */
+/** A (memoized) Drizzle handle over any test pgwasm instance — the tier-① authoring surface. */
 export function drizzleOver(pg: Pgwasm): PgwasmDatabase<never> {
   let db = handles.get(pg);
   if (!db) {
@@ -76,7 +76,7 @@ export function makeApplyTarget(
  * Create the given Drizzle tables (and enums they reference) in a FRESH database by generating the
  * empty→schema migration statements offline (drizzle-kit's `generateDrizzleJson`/`generateMigration`)
  * and executing them. Deliberately NOT diff-based `pushSchema`: nothing is introspected, so this can
- * never emit statements about relations it was not given — safe for PGlite fixtures and for shared
+ * never emit statements about relations it was not given — safe for pgwasm fixtures and for shared
  * integration databases alike. Only meaningful for fixture tables that do not already exist.
  */
 export async function createTablesFromSchema(

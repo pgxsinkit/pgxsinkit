@@ -729,7 +729,7 @@ function buildTableColumnSql(columns: TableColumn[], primaryKeyColumns: string[]
  * takes the UNqualified relation name (the TEMP keyword places it in `pg_temp`; a `CREATE TEMP TABLE
  * pg_temp.x` target is not portable). Same relation/index NAMES as the durable form: an index name lives
  * per schema, so the durable (metadata-schema) and session (`pg_temp`) indexes coexist without collision
- * (probed on real PGlite).
+ * (probed on real pgwasm).
  *
  * CAVEAT — the `temp` flag only bares the RELATION name; `buildTableColumnSql` below still receives
  * `schemaName` and would qualify any ENUM column type into THAT schema. That is correct only because the

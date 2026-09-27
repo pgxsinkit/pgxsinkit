@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeEach } from "bun:test";
 import { closeOpenTestPgwasms, closeTestScopedPgwasms, markTestScope } from "./pgwasm-store";
 
 // Global test setup (bunfig `[test].preload`). `bun test` runs files sequentially in one process and
-// never frees an un-closed PGlite's (multi-MB) WASM heap — so across a many-file run the heaps pile up
+// never frees an un-closed pgwasm's (multi-MB) WASM heap — so across a many-file run the heaps pile up
 // and every later boot/query slows down (and bun force-exits rc=99 on the leak). These hooks close each
 // instance the support helpers hand out, keeping the whole run flat without a per-file `afterEach`.
 //

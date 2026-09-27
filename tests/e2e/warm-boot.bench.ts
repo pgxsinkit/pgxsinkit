@@ -9,14 +9,14 @@ import type { BootReport } from "@pgxsinkit/client";
 // ── Slice 0a warm-boot browser benchmark (manual/nightly, NOT test:integration) ─────────────────────
 // The proposal's "cold-worker warm-store boot" measurement, reproduced against the REAL board app in a
 // REAL Chromium with a PERSISTENT profile — the only faithful model of a returning user whose persisted
-// PGlite store survives (in worker mode: OPFS, per ADR-0049 capability-driven placement) but whose
+// pgwasm store survives (in worker mode: OPFS, per ADR-0049 capability-driven placement) but whose
 // SharedWorker (and its hot engine) has died. scripts/run-warm-boot-bench.ts
 // owns the podman stack + seed around this; a DEDICATED config (playwright.warm-boot.config.ts, testMatch
 // **/*.bench.ts) keeps this file invisible to the normal e2e lane's **/*.e2e.test.ts match, so the bench
 // never rides `test:integration`.
 //
 //   Run A (populate, ×1): fresh persistent profile → sign in → full catch-up (boot report finalizes +
-//     cached rows render) → close the WHOLE context so the SharedWorker (and PGlite) die.
+//     cached rows render) → close the WHOLE context so the SharedWorker (and pgwasm) die.
 //   Run B (measure, ×5):  reopen the SAME profile → a cold worker reopens the warm store. Capture the
 //     BootReport (assert storeKind "warm", schema replay + journal recovery skipped), navigation→attach,
 //     first live-query snapshot (team nav), first cached row (a seeded issue title). Close between every
@@ -47,7 +47,7 @@ import type { BootReport } from "@pgxsinkit/client";
 //     (`localReadReadyMs` is the relevant crossing, but it only rides a finalized report); we assert the
 //     rendered cached rows and capture the sync rail for the record.
 //
-// Timing is structural, never a PGlite poll (that would perturb the single WASM thread): milestones are
+// Timing is structural, never a pgwasm poll (that would perturb the single WASM thread): milestones are
 // page-global reads (`__boardClient`, `__boardBootReport`), DOM markers (team nav, an issue card), and
 // the worker's own monotonic rail. Assertions are structural (flags true / rows visible); the durations
 // are REPORTED (printed table + a JSON artifact under tmp/), not budget-asserted — budgets come later
@@ -155,7 +155,7 @@ async function populate(): Promise<void> {
     const report = await readBootReport(page, 60_000);
     expect(report, "populate run must reach initial sync").not.toBeNull();
   } finally {
-    // Close the WHOLE context: the SharedWorker (and its PGlite engine) die, so the next open is a cold
+    // Close the WHOLE context: the SharedWorker (and its pgwasm engine) die, so the next open is a cold
     // worker over the now-warm persisted store.
     await context.close();
   }
@@ -292,7 +292,7 @@ function summarize(label: string, samples: Sample[]) {
     // reads are safe (= where attach now resolves); `writeReadyMs` the moment the write runtime is up.
     localReadReadyMs: pick((s) => s.report?.localReadReadyMs ?? null),
     writeReadyMs: pick((s) => s.report?.writeReadyMs ?? null),
-    pgliteCreateMs: pick((s) => s.report?.phases.pgliteCreateMs ?? null),
+    pgwasmCreateMs: pick((s) => s.report?.phases.pgwasmCreateMs ?? null),
     schemaExecMs: pick((s) => s.report?.phases.schemaExecMs ?? null),
     journalRecoveryMs: pick((s) => s.report?.phases.journalRecoveryMs ?? null),
   };

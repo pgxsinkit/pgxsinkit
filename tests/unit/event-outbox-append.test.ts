@@ -17,7 +17,7 @@ import {
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { closeOpenTestPgwasms, createSchemaTestPgwasm } from "../support/pgwasm-store";
 
-// The Outbox + `appendEvent` (ADR-0053 decision 2), against a REAL PGlite carrying the generated local
+// The Outbox + `appendEvent` (ADR-0053 decision 2), against a REAL pgwasm carrying the generated local
 // schema. What is pinned here: the shape of the library-owned Outbox table (public contract), the four
 // append refusals (all synchronous call-site failures — "everything in the Outbox is well-formed" is the
 // invariant the flush loop and best-guess views lean on), the library's `eventId`/`occurredAtUs` stamps,

@@ -25,7 +25,7 @@ import type { MutationDiagnostics } from "@pgxsinkit/contracts";
 
 import { runThrowawayCloneDump } from "./export-dump";
 import { compactTimestamp, type DataExportReport, deriveStoreId, nowMs } from "./export-store";
-import type { ClientPGlite } from "./index";
+import type { PgwasmClient } from "./index";
 
 /** The default drain budget: actively flush + await the convergence barrier for up to 15s before failing. */
 export const DEFAULT_DRAIN_TIMEOUT_MS = 15_000;
@@ -113,7 +113,7 @@ export class DataExportDrainError extends Error {
 /** The dependencies {@link performDataExport} needs from the owning client — narrow, so it is unit-testable. */
 export interface DataExportDeps {
   /** The live store to checkpoint and dump (the clone source; the live engine is never suspended). */
-  pglite: Pick<ClientPGlite, "exec" | "dumpDataDir">;
+  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">;
   /** The Mutation diagnostics seam (`client.diagnostics().mutation` / `readMutationStats`). */
   readMutationStats: () => Promise<MutationDiagnostics>;
   /** The optimistic flush (`client.flush()`), driven during the drain to send drainable rows. */
@@ -136,7 +136,7 @@ export interface DataExportDeps {
   cloneCleanupSql: string;
   /**
    * The store's configured plain store PATH (ADR-0036) — reduced to the `storeId` in the default artefact
-   * file name. The resolved PGlite dataDir URL is deliberately NOT used: internal plumbing, never an
+   * file name. The resolved pgwasm dataDir URL is deliberately NOT used: internal plumbing, never an
    * artefact-name seed.
    */
   storePath?: string;

@@ -1,15 +1,16 @@
 import {
   type BridgePort,
-  type ClientPGlite,
-  createClientPGlite,
+  type PgwasmClient,
+  createPgwasmClient,
   createStoreEngineResolver,
   destroyStoreArtifacts,
   provisionSyncWorker,
   quiesceStoreWorker,
 } from "@pgxsinkit/client";
+import { createCBuild } from "@pgxsinkit/pgwasm-c";
 
 import { boardWorkerMode } from "./engine-host";
-import { warmPgliteBootAssets } from "./pglite-warm";
+import { warmCBuildAssets } from "./pglite-warm";
 import { type QuiesceThenDestroyOptions, quiesceThenDestroyStoreWith } from "./quiesce-destroy-core";
 import {
   boardStorageDeclaration,
@@ -178,7 +179,7 @@ export function boardEngineWorkerFactory(storePath: string): () => SharedWorker 
 // A placeholder the worker-mode `createStore` resolves to: in worker mode the raw store lives in the
 // worker, so there is no tab-side PGlite. The registry only awaits this promise (resolve = store ready,
 // reject = corrupt → recover); board-client IGNORES the value and attaches by store name instead.
-const WORKER_STORE_PLACEHOLDER = {} as unknown as ClientPGlite;
+const WORKER_STORE_PLACEHOLDER = {} as unknown as PgwasmClient;
 
 // The local-store seam (./store-factory), resolved once for THIS scope: with `VITE_BOARD_STORE_FACTORY` set
 // to a module URL, that module mints the store here too, so the seam is the board's — not just the worker's
@@ -200,8 +201,8 @@ const declaredStoreEngine = createStoreEngineResolver();
  * The in-process fallback's store (ADR-0032 decision 2 — no `SharedWorker`), tab-side.
  *
  * The durability preference is baked into the store at CREATE time (board-client later adopts this store via
- * `precreatedPglite`, so the create must carry it). The BACKEND preference needs NO equivalent here:
- * `createClientPGlite` takes no backend/idbfs knob (only the internal capability flag `hasOpfsSyncAccess`,
+ * `precreatedPgwasm`, so the create must carry it). The BACKEND preference needs NO equivalent here:
+ * `createPgwasmClient` takes no backend/idbfs knob (only the internal capability flag `hasOpfsSyncAccess`,
  * which DEFAULTS to false → the store resolves to `idb://`, ADR-0049 step 10a). This precreate never runs the
  * opfs probe/election, so it already opens on idbfs — forcing idbfs is a no-op relative to what it already
  * does, and the `opfs` default cannot make it opfs here (the board is idb-only in-process, see the module
@@ -213,17 +214,17 @@ const declaredStoreEngine = createStoreEngineResolver();
  * choice made most recently and most explicitly — and because the store it opens was minted under that
  * declaration, so nothing else may open it.
  */
-async function createInProcessStore(storePath: string): Promise<ClientPGlite> {
+async function createInProcessStore(storePath: string): Promise<PgwasmClient> {
   const declaredEngine = readStoreEnginePreference();
   if (declaredEngine !== undefined) return await (await declaredStoreEngine(declaredEngine))(storePath);
   if (boardStoreFactory) return await boardStoreFactory(storePath);
-  return await createClientPGlite(storePath, {
-    bootAssets: warmPgliteBootAssets(),
+  return await createPgwasmClient(storePath, {
+    build: createCBuild({ assets: warmCBuildAssets() }),
     durability: readDurabilityPreference(),
   });
 }
 
-/** The registry adapters bound to real localStorage / IndexedDB / navigator.locks / (worker provision | `createClientPGlite`). */
+/** The registry adapters bound to real localStorage / IndexedDB / navigator.locks / (worker provision | `createPgwasmClient`). */
 export function createBoardStoreAdapters(): StoreRegistryAdapters {
   return {
     // `getItem` returns null for an absent key (a fresh visitor) without throwing; a genuinely

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 // journal is drained (or the escape hatch is taken), then `pg_dump -t <synced table> --no-owner` runs against
 // a memory-backed throwaway clone, and a generated enum DDL header is concatenated ahead of it. The artefact
 // is the PORTABLE synced data — loadable into a vanilla Postgres, free of pgxsinkit's overlay/journal/views/
-// reconcile machinery. Uses a REAL in-memory PGlite (`syncEnabled: false`, no network) so the SQL can be
+// reconcile machinery. Uses a REAL in-memory pgwasm (`syncEnabled: false`, no network) so the SQL can be
 // asserted directly and re-loaded into a FRESH bare store. WASM-heavy (`pg_dump.wasm`): FULL unit lane only
 // (`test:unit`), NOT `test:unit:fast`.
 
@@ -127,7 +127,7 @@ describe("exportData portable SQL export (ADR-0035)", () => {
     expect(sql).not.toContain("reconcile_on_sync");
     expect(sql).not.toContain("exam_answer");
 
-    // THE PROOF: exec the artefact verbatim into a fresh, bare, engine-less PGlite (booted through the same
+    // THE PROOF: exec the artefact verbatim into a fresh, bare, engine-less pgwasm (booted through the same
     // resolution module the toolkit uses) and assert it stands up on its own.
     const fresh = await createPgwasm({
       build: cBuild,

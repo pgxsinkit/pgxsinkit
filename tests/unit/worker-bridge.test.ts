@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-// Protocol-tier bridge test (ADR-0032 S2, decision 8): a REAL in-process engine over an in-memory PGlite
+// Protocol-tier bridge test (ADR-0032 S2, decision 8): a REAL in-process engine over an in-memory pgwasm
 // behind `defineSyncWorker`, driven by `attachSyncClient` across a bun `MessageChannel` — NO actual Worker.
-// Covers the attach handshake, write RPC round trip (row lands in the worker's PGlite), the live-query DIFF
+// Covers the attach handshake, write RPC round trip (row lands in the worker's pgwasm), the live-query DIFF
 // bridge (initial snapshot → diff-only updates, tab-side identity preservation, unsubscribe), and event
 // fanout to two ports.
 
@@ -23,7 +23,7 @@ import {
   type BridgeEnvelope,
   buildCopyFromBlobStatement,
   type BridgePort,
-  type ClientPGlite,
+  type PgwasmClient,
   CommittedStoreUnreachableError,
   defineSyncWorker,
   ExecutionLimitMismatchError,
@@ -92,7 +92,7 @@ const readModel = getReadModelView(todosRegistry, "todos");
 let hosts: SyncWorkerHost<TodosRegistry>[] = [];
 let channels: MessageChannel[] = [];
 
-// Boot the worker over a PREPOPULATED memory PGlite (skips the ~2s initdb) handed in as `precreatedPglite`
+// Boot the worker over a PREPOPULATED memory pgwasm (skips the ~2s initdb) handed in as `precreatedPgwasm`
 // — the client still applies schema + reconcile, exactly the `storePath` path a browser worker would take.
 async function makeHost(executionLimit?: { maxDispatchMs?: number }): Promise<SyncWorkerHost<TodosRegistry>> {
   const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
@@ -101,10 +101,10 @@ async function makeHost(executionLimit?: { maxDispatchMs?: number }): Promise<Sy
     controlPlaneUrl: "http://127.0.0.1:1",
     streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
-    // The precreated store is a prepopulated MEMORY PGlite (test only) — acknowledge it past the BYO
+    // The precreated store is a prepopulated MEMORY pgwasm (test only) — acknowledge it past the BYO
     // refusal the worker's `createSyncClient` boot would otherwise raise (ADR-0036).
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+    precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
     syncEnabled: false,
     installGlobal: false,
     convergenceIntervalMs: 10_000_000, // never fire the interval during a test
@@ -150,10 +150,10 @@ afterEach(async () => {
 });
 
 describe("memory-override store over the bridge (ADR-0036)", () => {
-  it("provision + attach with a memory-override store boots the DEFAULT createPglite path end-to-end", async () => {
-    // No injected `precreatedPglite`/`createPglite`: the worker uses its DEFAULT `createClientPGlite`, so the
+  it("provision + attach with a memory-override store boots the DEFAULT createStore path end-to-end", async () => {
+    // No injected `precreatedPgwasm`/`createStore`: the worker uses its DEFAULT `createPgwasmClient`, so the
     // memory backend is selected only because the testing marker travels as the explicit `testStoreBackend`
-    // wire field (a symbol does not survive structured clone) → `createClientPGlite(storePath, "memory")`.
+    // wire field (a symbol does not survive structured clone) → `createPgwasmClient(storePath, "memory")`.
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
@@ -183,7 +183,7 @@ describe("memory-override store over the bridge (ADR-0036)", () => {
     // A write lands in the worker's real (memory) store — the whole default path booted on the override.
     await client.tables.todos.create({ id: "f1000000-0000-0000-0000-000000000000", title: "mem", done: false });
     const workerClient = await host.whenBooted();
-    const rows = await drizzleOver(workerClient.pglite as unknown as Pgwasm)
+    const rows = await drizzleOver(workerClient.pgwasm as unknown as Pgwasm)
       .select({ id: readModel.id, title: readModel.title })
       .from(readModel);
     expect(rows).toEqual([{ id: "f1000000-0000-0000-0000-000000000000", title: "mem" }]);
@@ -194,8 +194,8 @@ describe("app-schema prepare hooks run IN THE WORKER (consumer app-level schema)
   it("forwards both hooks around the registry schema exec, and app DDL is queryable afterwards", async () => {
     // The hooks are worker-ENTRY options (functions cannot cross the bridge), so a consumer bakes them into
     // the worker file — proven here by asserting they run against the WORKER engine's own store, ordered
-    // around the registry schema exec exactly as the in-process client. The `precreatedPglite` path runs
-    // schema/prepare/reconcile (unlike `pgliteInstance`), so the hooks fire.
+    // around the registry schema exec exactly as the in-process client. The `precreatedPgwasm` path runs
+    // schema/prepare/reconcile (unlike `pgwasmInstance`), so the hooks fire.
     const calls: string[] = [];
     let syncedTableBeforeSchema: string | null = "unset";
     let syncedTableAfterSchema: string | null = "unset";
@@ -207,7 +207,7 @@ describe("app-schema prepare hooks run IN THE WORKER (consumer app-level schema)
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...testStoreAcknowledgment(),
-      precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+      precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -258,7 +258,7 @@ describe("attach handshake (ADR-0032 decision 4)", () => {
         streamBaseUrl: "http://127.0.0.1:1/v1/stream",
         batchWriteUrl: "http://127.0.0.1:1/api/mutations",
         executionLimit: { maxDispatchMs: 1_000 },
-        createPglite: async () => {
+        createStore: async () => {
           createCalled = true;
           throw new Error("must not boot");
         },
@@ -341,7 +341,7 @@ describe("attach handshake (ADR-0032 decision 4)", () => {
 
 describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
   it("rejects attachSyncClient with the boot error, and a second attach retries the boot", async () => {
-    // A poisoned `pgliteInstance` whose every access throws forces `createSyncClient` (hence the worker's
+    // A poisoned `pgwasmInstance` whose every access throws forces `createSyncClient` (hence the worker's
     // boot) to reject deterministically. Each real boot attempt touches the store, so the hit counter grows
     // once per boot — the seam that distinguishes a genuine RETRY from a replayed cached rejection.
     let poisonHits = 0;
@@ -357,14 +357,14 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
           throw new Error("boot poison: pglite unavailable");
         },
       },
-    ) as unknown as ClientPGlite;
+    ) as unknown as PgwasmClient;
 
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
-      pgliteInstance: poison,
+      pgwasmInstance: poison,
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -418,14 +418,14 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
           throw refusal;
         },
       },
-    ) as unknown as ClientPGlite;
+    ) as unknown as PgwasmClient;
 
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
-      pgliteInstance: poison,
+      pgwasmInstance: poison,
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -468,14 +468,14 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
           throw refusal;
         },
       },
-    ) as unknown as ClientPGlite;
+    ) as unknown as PgwasmClient;
 
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
-      pgliteInstance: poison,
+      pgwasmInstance: poison,
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -512,7 +512,7 @@ describe("write RPC round trip (ADR-0032 decision 4)", () => {
 
     // Read the WORKER-side store directly through its booted in-process client.
     const workerClient = await host.whenBooted();
-    const rows = await drizzleOver(workerClient.pglite as unknown as Pgwasm)
+    const rows = await drizzleOver(workerClient.pgwasm as unknown as Pgwasm)
       .select({ id: readModel.id, title: readModel.title })
       .from(readModel);
     expect(rows).toEqual([{ id: "11111111-1111-1111-1111-111111111111", title: "buy milk" }]);
@@ -565,7 +565,7 @@ describe("blind pessimistic update across the bridge (ADR-0022 addendum)", () =>
   });
 });
 
-describe("pglite misuse trap is reflection-safe (attach client)", () => {
+describe("pgwasm misuse trap is reflection-safe (attach client)", () => {
   it("enumeration/spread never trip the trap; a direct read still throws the misuse error", async () => {
     const host = await makeHost();
     const { client } = await attach(host);
@@ -574,7 +574,7 @@ describe("pglite misuse trap is reflection-safe (attach client)", () => {
     // logging serializes prop diffs property-by-property; console inspection and object spreads do the
     // same). The trap must be invisible to every enumeration path — an enumerable throw-on-get turned
     // passive reflection into a crash (observed under React 19.2 dev with <SyncClientProvider client>).
-    expect(Object.keys(client)).not.toContain("pglite");
+    expect(Object.keys(client)).not.toContain("pgwasm");
     expect(() => ({ ...client })).not.toThrow();
     expect(() => {
       for (const key in client) {
@@ -582,9 +582,9 @@ describe("pglite misuse trap is reflection-safe (attach client)", () => {
       }
     }).not.toThrow();
 
-    // The misuse trap itself survives: touching `.pglite` directly still throws, and `in` still reports it.
-    expect("pglite" in client).toBe(true);
-    expect(() => client.pglite).toThrow(/client\.pglite is not available on a worker-attached client/);
+    // The misuse trap itself survives: touching `.pgwasm` directly still throws, and `in` still reports it.
+    expect("pgwasm" in client).toBe(true);
+    expect(() => client.pgwasm).toThrow(/client\.pgwasm is not available on a worker-attached client/);
   });
 });
 
@@ -596,7 +596,7 @@ describe("raw inspection RPC round trip (ADR-0032 S2)", () => {
 
     await client.tables.todos.create({ id: "d0000000-0000-0000-0000-000000000000", title: "inspect me", done: false });
 
-    // A parameterised read of the worker's store, resolved back over the RPC round trip (not `client.pglite`,
+    // A parameterised read of the worker's store, resolved back over the RPC round trip (not `client.pgwasm`,
     // which is blocked on the attach client). Reads the synced read-model view the write landed in.
     const queried = await client.rawQuery("select title from todos_read_model where id = $1", [
       "d0000000-0000-0000-0000-000000000000",
@@ -607,7 +607,7 @@ describe("raw inspection RPC round trip (ADR-0032 S2)", () => {
     const execed = await client.rawExec("select 1 as a; select 2 as b;");
     expect(execed.length).toBe(2);
 
-    // `rowMode: "array"` crosses the bridge intact — this is exactly what `@electric-sql/pglite-repl`
+    // `rowMode: "array"` crosses the bridge intact — this is exactly what `@pgxsinkit/pgwasm-repl`
     // sends on every exec, and its renderer calls `row.map`, so object rows here break every REPL
     // statement. Assert the rows really are arrays on both raw entry points.
     const arrayQueried = await client.rawQuery(
@@ -650,7 +650,7 @@ describe("raw inspection RPC round trip (ADR-0032 S2)", () => {
     await client.ready;
 
     // A LOCAL-ONLY table the consumer owns — the seam's whole audience (pgxsinkit models no such relation,
-    // and nothing here syncs). The tab has no PGlite at all, so this is the only way to write it atomically.
+    // and nothing here syncs). The tab has no pgwasm at all, so this is the only way to write it atomically.
     await client.rawExec("create table local_notes (id int primary key, body text);");
 
     const results = await client.rawTransaction([
@@ -875,7 +875,7 @@ describe("live-query bridge (ADR-0032 S2 §4)", () => {
     );
     expect(sub.lazyTables).toEqual(["archive"]);
     expect(sub.hydrated).toBeUndefined();
-    // No tick around unsubscribe: the host now awaits every live-query teardown before closing PGlite
+    // No tick around unsubscribe: the host now awaits every live-query teardown before closing pgwasm
     // (ADR-0040 decision 1), so unsubscribing the same macrotask it registered no longer wedges the
     // runner on the afterEach `host.close()`.
     sub.unsubscribe();
@@ -922,12 +922,12 @@ describe("boot observability (ADR-0034)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // The worker mints a MEMORY store here (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      createPglite: async () =>
+      createStore: async () =>
         (await createPgwasm({
           build: cBuild,
           loadDataDir: await prepopulatedDataDir(),
           extensions: { live },
-        })) as unknown as ClientPGlite,
+        })) as unknown as PgwasmClient,
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,

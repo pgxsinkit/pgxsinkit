@@ -5,9 +5,9 @@ import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 // Covers the two boot-path client options wired for the board optimisations:
-//   1. `pgliteBootAssets` (Part A) — a pre-warmed WASM/fs bundle promise, handed to the store's C build
-//      (`createCBuild({ assets })`) and on to `createPgwasm`; a REJECTED warm must still boot (the build
-//      falls back to its own lazy asset load).
+//   1. `build` (Part A) — the caller's build, here `createCBuild({ assets })` over a pre-warmed WASM/fs
+//      bundle promise, handed on to `createPgwasm`; a REJECTED warm must still boot (the build falls back
+//      to its own lazy asset load).
 //   2. `writeRequestHeaders` — write-only headers merged over `requestHeaders` on the mutation-flush
 //      path, while the read/shape path keeps `requestHeaders` alone (region-pin geometry).
 // The real merge/await logic lives in `createSyncClient` (packages/client/src/index.ts); its collaborators
@@ -47,7 +47,7 @@ const startCircuitsSyncMock = mock(async (_pg: unknown, options: Record<string, 
   };
 });
 
-describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)", () => {
+describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
   beforeAll(async () => {
     const realPgwasm = await import("@pgxsinkit/pgwasm");
     await mock.module("@pgxsinkit/pgwasm", () => ({
@@ -72,7 +72,7 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
     await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
     // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so its namespace now comes
-    // from `createSyncEngine`'s return rather than the mocked `PGlite.create` instance.
+    // from `createSyncEngine`'s return rather than the mocked `pgwasm.create` instance.
     // The subscription metadata store, which the reset path now calls directly (there is no engine
     // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
     await mock.module("../../packages/client/src/sync/subscription-state", () => ({
@@ -173,23 +173,27 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     return client;
   }
 
-  it("hands resolved pre-warmed boot assets to the store's C build, and that build to createPgwasm", async () => {
-    const pgliteWasmModule = { fake: "wasm" } as unknown as WebAssembly.Module;
+  it("hands the caller's build — a C build over pre-warmed assets — to createPgwasm", async () => {
+    const { createCBuild } = await import("@pgxsinkit/pgwasm-c");
+    const postgresWasmModule = { fake: "wasm" } as unknown as WebAssembly.Module;
     const fsBundle = new Blob([new Uint8Array([1, 2, 3])]);
-    await makeClient({ pgliteBootAssets: Promise.resolve({ pgliteWasmModule, fsBundle }) });
+    await makeClient({ build: createCBuild({ assets: Promise.resolve({ postgresWasmModule, fsBundle }) }) });
 
     expect(capturedCreateOptions?.["build"]).toBe(fakeWarmBuild);
     const assets = await capturedBuildOptions?.assets;
-    expect(assets?.["postgresWasmModule"]).toBe(pgliteWasmModule);
+    expect(assets?.["postgresWasmModule"]).toBe(postgresWasmModule);
     expect(assets?.["fsBundle"]).toBe(fsBundle);
-    // The extensions are still wired alongside the pre-warmed assets.
+    // The extensions are still wired alongside the pre-warmed build.
     expect(capturedCreateOptions?.["extensions"]).toBeDefined();
   });
 
-  it("boots (fallback) when the pre-warm promise REJECTS — the build gets the rejection, never the boot", async () => {
+  it("boots when the caller's build carries a REJECTED warm — the build gets the rejection, never the boot", async () => {
     // A failed warm must never fail the boot: the rejection reaches the C build's `assets`, where the build
     // falls back to loading its own assets (pgwasm-c's contract); createSyncClient itself boots normally.
-    const client = await makeClient({ pgliteBootAssets: Promise.reject(new Error("warm failed")) });
+    const { createCBuild } = await import("@pgxsinkit/pgwasm-c");
+    const warm = Promise.reject(new Error("warm failed"));
+    warm.catch(() => undefined);
+    const client = await makeClient({ build: createCBuild({ assets: warm }) });
 
     expect(client).toBeDefined();
     expect(capturedCreateOptions?.["build"]).toBe(fakeWarmBuild);
@@ -197,6 +201,12 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     await expect(capturedBuildOptions?.assets).rejects.toThrow("warm failed");
     // Extensions still wired — the boot completed normally.
     expect(capturedCreateOptions?.["extensions"]).toBeDefined();
+  });
+
+  it("runs the store on the shared cBuild when no build is given", async () => {
+    const { cBuild } = await import("@pgxsinkit/pgwasm-c");
+    await makeClient({});
+    expect(capturedCreateOptions?.["build"]).toBe(cBuild);
   });
 
   it("merges writeRequestHeaders over requestHeaders on the WRITE path only", async () => {
@@ -228,13 +238,13 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     expect(capturedMutationOptions?.["requestHeaders"]).toEqual({ apikey: "shared-key" });
   });
 
-  // ─── Durability (registry-declared, ADR-0047 / ADR-0049 D9; PGlite `relaxedDurability` below) ─────────
+  // ─── Durability (registry-declared, ADR-0047 / ADR-0049 D9; pgwasm `relaxedDurability` below) ─────────
   // Durability is a property of the DATA CONTRACT: `storage.durability` on the registry (relaxed default),
-  // resolved by `createSyncClient` at the single mint seam and threaded into `createClientPGlite` via its
+  // resolved by `createSyncClient` at the single mint seam and threaded into `createPgwasmClient` via its
   // internal carrier — never a per-open/per-worker option. These assert the resolved mode reaches
-  // `PGlite.create` as `relaxedDurability` through each surface: the `createSyncClient` boot (default + declared
-  // strict), the internal `createClientPGlite` carrier directly, and the `defineSyncWorker` default
-  // `createPglite` factory whose provision mint resolves durability off its registry.
+  // `pgwasm.create` as `relaxedDurability` through each surface: the `createSyncClient` boot (default + declared
+  // strict), the internal `createPgwasmClient` carrier directly, and the `defineSyncWorker` default
+  // `createStore` factory whose provision mint resolves durability off its registry.
   it("defaults durability to relaxed → relaxedDurability true into PGlite.create (createSyncClient)", async () => {
     await makeClient({});
     expect(capturedCreateOptions?.["relaxedDurability"]).toBe(true);
@@ -246,27 +256,27 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     expect(capturedCreateOptions?.["relaxedDurability"]).toBe(false);
   });
 
-  it("createClientPGlite defaults durability to relaxed → relaxedDurability true", async () => {
-    const { createClientPGlite } = await import("../../packages/client/src/index");
+  it("createPgwasmClient defaults durability to relaxed → relaxedDurability true", async () => {
+    const { createPgwasmClient } = await import("../../packages/client/src/index");
     const { memoryStoreForTests } = await import("../../packages/client/src/testing");
-    await createClientPGlite(memoryStoreForTests("rd-default"));
+    await createPgwasmClient(memoryStoreForTests("rd-default"));
     expect(capturedCreateOptions?.["relaxedDurability"]).toBe(true);
   });
 
-  it('createClientPGlite internal durability carrier "strict" → relaxedDurability false', async () => {
+  it('createPgwasmClient internal durability carrier "strict" → relaxedDurability false', async () => {
     // The internal carrier (toolkit-only; createSyncClient threads the resolved registry mode through it).
-    const { createClientPGlite } = await import("../../packages/client/src/index");
+    const { createPgwasmClient } = await import("../../packages/client/src/index");
     const { memoryStoreForTests } = await import("../../packages/client/src/testing");
-    await createClientPGlite(memoryStoreForTests("rd-false"), { durability: "strict" });
+    await createPgwasmClient(memoryStoreForTests("rd-false"), { durability: "strict" });
     expect(capturedCreateOptions?.["relaxedDurability"]).toBe(false);
   });
 
-  it('defineSyncWorker default createPglite factory resolves registry storage.durability:"strict" → relaxedDurability false on provision', async () => {
+  it('defineSyncWorker default createStore factory resolves registry storage.durability:"strict" → relaxedDurability false on provision', async () => {
     const { defineSyncWorker, provisionSyncWorker } = await import("../../packages/client/src/index");
     const { attachSyncRegistryStorage } = await import("@pgxsinkit/contracts");
     const { memoryStoreForTests } = await import("../../packages/client/src/testing");
 
-    // The registry declares `strict`, so the worker's DEFAULT createPglite factory (no injected `createPglite`) —
+    // The registry declares `strict`, so the worker's DEFAULT createStore factory (no injected `createStore`) —
     // which the provision path uses to mint the spare store — must resolve it to `relaxedDurability: false`.
     const host = defineSyncWorker({
       registry: attachSyncRegistryStorage(bootRegistry(), { durability: "strict" }),
@@ -284,7 +294,7 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     channel.port2.close();
   });
 
-  it("defineSyncWorker default createPglite factory defaults durability to relaxed → relaxedDurability true on provision", async () => {
+  it("defineSyncWorker default createStore factory defaults durability to relaxed → relaxedDurability true on provision", async () => {
     const { defineSyncWorker, provisionSyncWorker } = await import("../../packages/client/src/index");
     const { memoryStoreForTests } = await import("../../packages/client/src/testing");
 

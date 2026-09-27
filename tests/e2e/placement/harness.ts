@@ -11,7 +11,7 @@ import {
   attachSyncClient,
   type AttachedSyncClient,
   type AttachSyncClientOptions,
-  createClientPGlite,
+  createPgwasmClient,
   createOpfsEffects,
   createSyncClient,
   destroyStoreArtifacts,
@@ -295,7 +295,7 @@ export interface PlacementHarness {
   stopEngineIdentityObserver(name: string): void;
   /** The store meta record's phase, or `"absent"` / `"unavailable"`. */
   metaPhase(storePath: string): Promise<string>;
-  /** Seed a bare PGlite idb store directly (a recordless idb store), then close it. */
+  /** Seed a bare pgwasm idb store directly (a recordless idb store), then close it. */
   seedIdbStore(storePath: string): Promise<{ ok: boolean; error?: string }>;
   /** Seed a recordless idb store with the server registry's real local schema, then close it. */
   seedServerIdbStore(storePath: string): Promise<{ ok: boolean; error?: string }>;
@@ -608,7 +608,7 @@ const harness: PlacementHarness = {
     const client = clients.get(storePath);
     if (!client) return { started: false };
     // A CPU-bound cross join genuinely holds the single-threaded WASM engine busy for many seconds — real work
-    // (never `pg_sleep`, which PGlite lacks), so the engine's control plane cannot answer the router's probe pings
+    // (never `pg_sleep`, which pgwasm lacks), so the engine's control plane cannot answer the router's probe pings
     // (the execution-limit liveness signal). `rawExec` is a WRITE-CAPABLE op → its lost response settles `unknown`.
     const work = client.rawExec(
       "SELECT count(*) FROM generate_series(1, 60000) a CROSS JOIN generate_series(1, 60000) b",
@@ -778,8 +778,8 @@ const harness: PlacementHarness = {
 
   async seedIdbStore(storePath) {
     try {
-      // Default `createClientPGlite` (no OPFS grant) mints an idbfs store — a recordless idb store.
-      const pg = await createClientPGlite(storePath);
+      // Default `createPgwasmClient` (no OPFS grant) mints an idbfs store — a recordless idb store.
+      const pg = await createPgwasmClient(storePath);
       await pg.exec("CREATE TABLE IF NOT EXISTS recordless_marker (v integer)");
       await pg.exec("INSERT INTO recordless_marker VALUES (1)");
       await pg.close();
@@ -794,7 +794,7 @@ const harness: PlacementHarness = {
       // A realistic recordless idb store for the SERVER lane: it carries the package-generated local schema for
       // the server registry (so a real sync-enabled boot can open and use it), while remaining recordless so the
       // boot classifier still exercises invariant 14.
-      const pg = await createClientPGlite(storePath);
+      const pg = await createPgwasmClient(storePath);
       await pg.exec(generateLocalSchemaSql(fkSyncRegistry));
       await pg.close();
       return { ok: true };
@@ -852,7 +852,7 @@ const harness: PlacementHarness = {
         return storePath;
       }
     })();
-    // Delete the PGlite idb database, the meta record, and the OPFS store directory — best effort.
+    // Delete the pgwasm idb database, the meta record, and the OPFS store directory — best effort.
     const idb = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
     const deleteDb = (name: string): Promise<void> =>
       new Promise((resolve) => {

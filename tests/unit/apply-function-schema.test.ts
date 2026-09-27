@@ -32,7 +32,7 @@ const schemaRegistry = defineSyncRegistry({
 const APPLY_FUNCTION_SCHEMA = "app_fns";
 
 /**
- * A PGlite-backed server whose apply artifact was generated (and installed) into `app_fns`, exactly as
+ * A pgwasm-backed server whose apply artifact was generated (and installed) into `app_fns`, exactly as
  * `--function-schema app_fns` would. The startup posture is the zero-query one so the test exercises the
  * apply call itself and nothing else.
  */

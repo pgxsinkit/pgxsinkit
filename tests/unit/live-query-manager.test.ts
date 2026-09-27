@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 // Unit coverage for the worker-owned live-query manager (ADR-0040 Slices 2 & 3) driven by a FAKE `live`
-// namespace — no WASM PGlite. Slice 2 pins the extracted lifecycle (registration/listener/unsubscribe
+// namespace — no WASM pgwasm. Slice 2 pins the extracted lifecycle (registration/listener/unsubscribe
 // sequencing, `dispose()` awaiting every teardown, `refresh()` coalescing, dispose racing an in-flight setup).
 // Slice 3 pins DEDUPLICATION: identical fingerprints share ONE registration fanned to many subscribers,
 // distinct fingerprints get distinct registrations, single-flight setup/teardown, failed-setup rejection, and
@@ -16,7 +16,7 @@ import {
 
 type Row = Record<string, unknown>;
 
-/** A controllable stand-in for a PGlite `LiveQuery`: manual change emission, refresh, and unsubscribe gating. */
+/** A controllable stand-in for a pgwasm `LiveQuery`: manual change emission, refresh, and unsubscribe gating. */
 class FakeLiveQuery {
   readonly initialResults: { rows: Row[] };
   private readonly listeners = new Set<(r: { rows: Row[] }) => void>();
@@ -327,7 +327,7 @@ describe("live-query manager deduplication (ADR-0040 Slice 3)", () => {
     const subA = await manager.subscribe({ ...pkSpec }, a.subscriber);
     const subB = await manager.subscribe({ ...pkSpec }, b.subscriber);
 
-    // ONE PGlite registration, ONE listener — shared by both subscribers (decision 2).
+    // ONE pgwasm registration, ONE listener — shared by both subscribers (decision 2).
     expect(fake.queries).toHaveLength(1);
     expect(fake.queries[0]!.listenerCount).toBe(1);
     expect(a.initials).toEqual([[{ id: "1", v: "a" }]]);
@@ -1094,7 +1094,7 @@ describe("live-query manager PGlite #1055 param guard", () => {
   it("throws for an out-of-order-placeholder spec WITHOUT ever calling the underlying live.query/incrementalQuery", async () => {
     const fake = new FakeLive();
     const manager = makeManager(fake);
-    // Out-of-order `$2 … $1` with two params trips PGlite bug #1055's sequential inlining — the guard must
+    // Out-of-order `$2 … $1` with two params trips pgwasm bug #1055's sequential inlining — the guard must
     // reject it synchronously at the boundary, before any registration is attempted.
     const message = await rejectionOf(
       manager.subscribe(
@@ -1103,7 +1103,7 @@ describe("live-query manager PGlite #1055 param guard", () => {
       ),
     );
     expect(message).toMatch(/1055/);
-    // The broken spec never reached PGlite: no registration was created.
+    // The broken spec never reached pgwasm: no registration was created.
     expect(fake.queryCalls).toBe(0);
     expect(fake.incrementalCalls).toBe(0);
     expect(fake.queries).toHaveLength(0);

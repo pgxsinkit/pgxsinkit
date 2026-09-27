@@ -15,7 +15,7 @@
 // the IndexedDB IO (part B — the record's own database) and the recordless-idb detection (part C — a non-creating
 // idb existence check). It deliberately carries NO DOM lib dependency: like `store-path.ts`, it reads the
 // IndexedDB surface STRUCTURALLY off `globalThis` and accepts an injectable deps object so Bun unit tests
-// (no browser IDB) can fake the whole surface. The store identity encoding and PGlite's idb database naming
+// (no browser IDB) can fake the whole surface. The store identity encoding and pgwasm's idb database naming
 // are consumed from `store-path.ts` — this module never re-derives either.
 
 import { storeIdentityComponent, storeIndexedDbDatabaseName } from "./store-path";
@@ -137,7 +137,7 @@ export function classifyStoreBoot(obs: StoreBootObservations): StoreBootVerdict 
 // B. Meta record IO (small dedicated IndexedDB database)
 // =========================================================================================================
 
-/** The dedicated IndexedDB database holding every store's meta record — SEPARATE from PGlite's own idb stores. */
+/** The dedicated IndexedDB database holding every store's meta record — SEPARATE from pgwasm's own idb stores. */
 export const STORE_META_DATABASE = "pgxsinkit-store-meta";
 
 /** The single object store inside {@link STORE_META_DATABASE}; keyed by {@link storeIdentityComponent}. */
@@ -407,7 +407,7 @@ export async function deleteStoreMetaRecord(storePath: string, deps?: StoreMetaD
 // =========================================================================================================
 
 /**
- * Does PGlite's idb database for this store ALREADY exist, WITHOUT creating it? The recordless-idb recognition
+ * Does pgwasm's idb database for this store ALREADY exist, WITHOUT creating it? The recordless-idb recognition
  * check (invariant 14): no meta record + an existing idb store → `idb-authoritative`, never virgin. An
  * existing idb store's data is never overwritten by a fresh opfs mint — it is opened IN PLACE, whatever the
  * booting home's capabilities, because a store's storage backend is fixed at first mint.
@@ -419,7 +419,7 @@ export async function deleteStoreMetaRecord(storePath: string, deps?: StoreMetaD
  * the handle and resolve `true`. The `onerror` that follows an abort is the EXPECTED completion of the
  * non-exist path (the AbortError), not a failure — it resolves `false`. `indexedDB` absent → `false`
  * (no idb store can exist). The database name comes from `store-path.ts`'s {@link storeIndexedDbDatabaseName}
- * (the sole owner of PGlite's `/pglite/` naming) — never re-derived here.
+ * (the sole owner of pgwasm's `/pglite/` naming) — never re-derived here.
  */
 export function idbStoreExists(storePath: string, deps?: StoreMetaDeps): Promise<boolean> {
   const indexedDB = resolveIndexedDb(deps);

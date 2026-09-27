@@ -11,7 +11,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   type EventLaneReport,
   type OutboxStatus,
@@ -63,7 +63,7 @@ async function makeHost(eventOptions: { ackedRetentionMs?: number } = {}): Promi
     streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+    precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
     syncEnabled: false,
     installGlobal: false,
     convergenceIntervalMs: 10_000_000,

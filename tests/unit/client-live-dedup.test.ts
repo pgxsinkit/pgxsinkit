@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
 // In-process adoption of the live-query manager (ADR-0040 decision 6, Slice 6). The direct `createSyncClient`
 // now delegates `subscribeLiveRows` to its OWN `LiveQueryManager` (same module the worker uses), so within one
-// client identical subscriptions DEDUPLICATE onto one PGlite registration, keep-alive retains a zero-subscriber
-// entry, and `liveQueryDiagnostics()` returns real records. Driven over a real in-memory PGlite (no worker).
+// client identical subscriptions DEDUPLICATE onto one pgwasm registration, keep-alive retains a zero-subscriber
+// entry, and `liveQueryDiagnostics()` returns real records. Driven over a real in-memory pgwasm (no worker).
 
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
 import {
-  createClientPGlite,
+  createPgwasmClient,
   createSyncClient,
   getReadModelView,
   type SyncClient,
@@ -52,7 +52,7 @@ async function bootClient(storePath: string, liveQueries?: { defaultKeepAliveMs?
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     syncEnabled: false,
     ...testStoreAcknowledgment(),
-    precreatedPglite: createClientPGlite(memoryStoreForTests(storePath)),
+    precreatedPgwasm: createPgwasmClient(memoryStoreForTests(storePath)),
     ...(liveQueries ? { liveQueries } : {}),
   });
   await active.ready;

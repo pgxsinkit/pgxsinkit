@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import type { ClientPGlite } from "@pgxsinkit/client";
+import type { PgwasmClient } from "@pgxsinkit/client";
 
 import {
   BOARD_STORE_FACTORY_ENV,
@@ -13,7 +13,7 @@ import {
 // No browser, no bundler, no real store: the env object and the module loader are both injected, and the
 // "store" each factory hands back is an identity-tagged sentinel so a mint can be traced to its module.
 
-const storeSentinel = (tag: string) => ({ tag }) as unknown as ClientPGlite;
+const storeSentinel = (tag: string) => ({ tag }) as unknown as PgwasmClient;
 
 const envWith = (url: string): StoreFactoryEnv => ({ [BOARD_STORE_FACTORY_ENV]: url });
 
@@ -52,9 +52,9 @@ describe("board local-store factory seam", () => {
     ]);
   });
 
-  it("accepts a named `createPglite` export when the module has no default", async () => {
+  it("accepts a named `createStore` export when the module has no default", async () => {
     const factory = resolveBoardStoreFactory(envWith("https://engine.example/named.js"), () =>
-      Promise.resolve({ createPglite: (storePath: string) => Promise.resolve(storeSentinel(storePath)) }),
+      Promise.resolve({ createStore: (storePath: string) => Promise.resolve(storeSentinel(storePath)) }),
     );
 
     expect(await factory?.("store-c")).toEqual(storeSentinel("store-c"));
@@ -73,7 +73,7 @@ describe("board local-store factory seam", () => {
 
   it("throws loudly when the module exports no callable factory", async () => {
     const factory = resolveBoardStoreFactory(envWith("https://engine.example/empty.js"), () =>
-      Promise.resolve({ createPglite: "not a function" }),
+      Promise.resolve({ createStore: "not a function" }),
     );
 
     const failure = await factory?.("store-e").catch((error: unknown) => error);

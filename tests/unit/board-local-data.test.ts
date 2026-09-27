@@ -11,7 +11,7 @@ import { REGISTRY_KEY, storePathForStore, type StoreRegistryState } from "../../
 
 // Unit test of the board's "Delete local data" wipe DECISION logic through the DOM-free core
 // (apps/board/src/board/local-data-core.ts) — every browser touch is an injected {@link WipeSurfaces} fake, so
-// no DOM, no real PGlite, no mock.module. The three behaviours are the DEFECT-A / DEFECT-B fixes:
+// no DOM, no real pgwasm, no mock.module. The three behaviours are the DEFECT-A / DEFECT-B fixes:
 //   - a PARTIAL failure KEEPS the registry and retains the failed store paths on the Obsolete-stores list
 //     (so a later boot's `destroyObsoleteStores` retries them) rather than removing the key and stranding them;
 //   - an ALL-success wipe REMOVES the registry key (today's behaviour);

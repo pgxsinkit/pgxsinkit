@@ -1,7 +1,7 @@
 // `@pgxsinkit/client/testing` — the ONLY sanctioned door to a memory-backed store (ADR-0036 decision 3).
 //
 // pgxsinkit's durability semantics assume a persisted store, so the production API surface cannot express a
-// memory store: `createSyncClient`/`createClientPGlite` take a plain `storePath` whose backend is derived
+// memory store: `createSyncClient`/`createPgwasmClient` take a plain `storePath` whose backend is derived
 // (IndexedDB / filesystem), and the BYO seam refuses a provably non-persistent instance. Genuine memory
 // stores are needed in exactly two of OUR places — the unit-test lane (speed + isolation) and the export
 // machinery's throwaway clone — and this subpath serves the first: an import whose NAME says what it is, so
@@ -12,7 +12,7 @@
 // marker at runtime — invisible in the public return type. Consumers SPREAD them into the client options:
 //
 //   createSyncClient({ ...memoryStoreForTests("my-test"), registry, controlPlaneUrl, streamBaseUrl, batchWriteUrl })
-//   createSyncClient({ ...testStoreAcknowledgment(), pgliteInstance, registry, controlPlaneUrl, streamBaseUrl, batchWriteUrl })
+//   createSyncClient({ ...testStoreAcknowledgment(), pgwasmInstance, registry, controlPlaneUrl, streamBaseUrl, batchWriteUrl })
 
 import { TEST_STORE_BACKEND } from "./store-path";
 
@@ -42,7 +42,7 @@ export function memoryStoreForTests(storePath: string): MemoryStoreForTests {
 /**
  * Mint an options fragment that ACKNOWLEDGES a caller-owned test store, bypassing the BYO refusal
  * (ADR-0036 decision 4) WITHOUT selecting a backend — for when the test supplies its own non-persistent
- * PGlite via `pgliteInstance` / `precreatedPglite`. Spread it alongside that option.
+ * pgwasm via `pgwasmInstance` / `precreatedPgwasm`. Spread it alongside that option.
  *
  * Same DURABILITY CAVEAT as {@link memoryStoreForTests}: only for tests / throwaway flows; a non-persistent
  * store voids the retention + journal durability guarantees.

@@ -48,6 +48,23 @@ describe("rewriteSource — the closed rename lists", () => {
     expect(result.changes).toBe(20);
   });
 
+  it("rewrites a specifier in every module-specifier position, and only there", () => {
+    const source = [
+      'export * from "drizzle-orm/pglite";',
+      "await import('@electric-sql/pglite/live');",
+      'mock.module("@pgxsinkit/pglite-opfs-repacked", () => ({}));',
+      'const repl = require("@electric-sql/pglite-repl");',
+    ].join("\n");
+    expect(rewriteSource(source).text).toBe(
+      [
+        'export * from "@pgxsinkit/pgwasm/drizzle";',
+        "await import('@pgxsinkit/pgwasm/live');",
+        'mock.module("@pgxsinkit/pgwasm/opfs", () => ({}));',
+        'const repl = require("@pgxsinkit/pgwasm-repl");',
+      ].join("\n"),
+    );
+  });
+
   it("is idempotent", () => {
     expect(rewriteSource(AFTER)).toEqual({ text: AFTER, changes: 0 });
   });
@@ -59,6 +76,8 @@ describe("rewriteSource — the closed rename lists", () => {
       'import "@electric-sql/pglite/live/extra";',
       "// Began as a copy of PGlite's tests.",
       "const key = 'pglite-opfs-repacked';",
+      'const pin = { package: "@electric-sql/pglite-prepopulatedfs" };',
+      "// Began as a copy of `@electric-sql/pglite-repl`.",
     ].join("\n");
     expect(rewriteSource(source)).toEqual({ text: source, changes: 0 });
   });
@@ -93,10 +112,11 @@ describe("findManualSites — structural replacements are reported, never rewrit
 });
 
 describe("typecheck-driven property fixes", () => {
-  it("parses plain and pretty tsc diagnostics that name a renamed property", () => {
+  it("parses plain and pretty tsc diagnostics that name a renamed property, each position once", () => {
     const log = [
       "tests/a.test.ts(3,10): error TS2339: Property 'pglite' does not exist on type 'SyncClient'.",
       "\u001b[96mtests/b.tsx\u001b[0m:\u001b[93m7\u001b[0m:\u001b[93m5\u001b[0m - error TS2353: Object literal may only specify known properties, and 'pglite' does not exist in type 'Options'.",
+      "tests/a.test.ts(3,10): error TS2339: Property 'pglite' does not exist on type 'SyncClient'.",
       "tests/c.ts(1,1): error TS2339: Property 'other' does not exist on type 'X'.",
       "tests/d.ts(2,2): error TS2322: Type 'string' is not assignable to type 'number'.",
     ].join("\n");

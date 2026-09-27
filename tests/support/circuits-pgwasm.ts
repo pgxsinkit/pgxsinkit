@@ -4,7 +4,7 @@ import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
 import { createFreshTestPgwasm } from "./pgwasm-store";
 
-// A fresh test PGlite carrying the subscription metadata the native sync engine reads and writes
+// A fresh test pgwasm carrying the subscription metadata the native sync engine reads and writes
 // (ADR-0029 D3 relations + ADR-0042's session cursors). `createSyncClient` provisions these during
 // boot; a test driving `startCircuitsSync` over a bare store has to do it itself, and this is the one
 // line that does.

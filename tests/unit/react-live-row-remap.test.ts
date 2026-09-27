@@ -5,7 +5,7 @@ import { pgTable, QueryBuilder, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { remapLiveRow, type SelectedFields } from "../../packages/react/src/remap-live-row";
 
-// The footgun this guards: `useLiveDrizzleRows` runs a Drizzle select's `.toSQL()` through PGlite's
+// The footgun this guards: `useLiveDrizzleRows` runs a Drizzle select's `.toSQL()` through pgwasm's
 // live query, which returns rows keyed by the underlying (snake_case) column names. `remapLiveRow`
 // uses the select's `_.selectedFields` metadata to map them back to the builder's field keys, so
 // `assignee_id` becomes `assigneeId` and typed access stops silently reading `undefined`.

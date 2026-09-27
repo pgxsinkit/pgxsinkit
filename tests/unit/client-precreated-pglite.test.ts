@@ -8,7 +8,7 @@ import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import {
   buildCopyFromBlobStatement,
-  createClientPGlite,
+  createPgwasmClient,
   createSyncClient,
   type SyncClient,
 } from "../../packages/client/src/index";
@@ -17,9 +17,9 @@ import { REGISTRY_FINGERPRINT_KEY } from "../../packages/client/src/schema";
 import { memoryStoreForTests, testStoreAcknowledgment } from "../../packages/client/src/testing";
 import { drizzleOver } from "../support/drizzle";
 
-// Engine-level test of the `precreatedPglite` seam (board cold-boot optimisation B): a caller creates the
-// raw store via `createClientPGlite`, but the client STILL owns schema exec + store-version reconcile
-// (unlike `pgliteInstance`, which skips them). Uses a REAL in-memory PGlite with `syncEnabled: false` so
+// Engine-level test of the `precreatedPgwasm` seam (board cold-boot optimisation B): a caller creates the
+// raw store via `createPgwasmClient`, but the client STILL owns schema exec + store-version reconcile
+// (unlike `pgwasmInstance`, which skips them). Uses a REAL in-memory pgwasm with `syncEnabled: false` so
 // no network is needed, and reads back through Drizzle (tier-①/②) rather than raw SQL strings.
 
 const profileTable = pgTable("profile", { id: uuid("id").primaryKey(), name: text("name") });
@@ -73,14 +73,14 @@ function bootRegistry(): SyncTableRegistry {
 let client: SyncClient<SyncTableRegistry> | undefined;
 
 afterEach(async () => {
-  // `createClientPGlite` instances are not tracked by the support-helper cleanup, so close them here (the
-  // client owns and closes `client.pglite`, which IS the precreated instance on the success path).
+  // `createPgwasmClient` instances are not tracked by the support-helper cleanup, so close them here (the
+  // client owns and closes `client.pgwasm`, which IS the precreated instance on the success path).
   await client?.stop();
   client = undefined;
 });
 
 async function assertProvisioned(active: SyncClient<SyncTableRegistry>): Promise<void> {
-  const db = drizzleOver(active.pglite as unknown as Pgwasm);
+  const db = drizzleOver(active.pgwasm as unknown as Pgwasm);
   // The registry's synced read table exists → schema exec ran.
   expect(await db.select().from(profileTable)).toEqual([]);
   // The store-version reconcile stamped the registry fingerprint into the local-meta table.
@@ -89,9 +89,9 @@ async function assertProvisioned(active: SyncClient<SyncTableRegistry>): Promise
   expect(rows.length).toBe(1);
 }
 
-describe("createSyncClient precreatedPglite", () => {
+describe("createSyncClient precreatedPgwasm", () => {
   it("applies schema + stamps the store version on a caller-precreated instance", async () => {
-    const precreated = createClientPGlite(memoryStoreForTests("precreated-success"));
+    const precreated = createPgwasmClient(memoryStoreForTests("precreated-success"));
     client = await createSyncClient({
       registry: bootRegistry(),
       controlPlaneUrl: "http://127.0.0.1:3101",
@@ -100,7 +100,7 @@ describe("createSyncClient precreatedPglite", () => {
       syncEnabled: false,
       // The precreated store is a memory store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPglite: precreated,
+      precreatedPgwasm: precreated,
     });
     await client.ready;
     await assertProvisioned(client);
@@ -113,7 +113,7 @@ describe("createSyncClient precreatedPglite", () => {
       streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
-      precreatedPglite: Promise.reject(new Error("eager create failed")),
+      precreatedPgwasm: Promise.reject(new Error("eager create failed")),
       ...memoryStoreForTests("precreated-fallback"),
     });
     // The rejected pre-create is caught and the normal storePath create path still provisions the store.
@@ -131,7 +131,7 @@ describe("createSyncClient raw inspection surface", () => {
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
       ...testStoreAcknowledgment(),
-      precreatedPglite: createClientPGlite(memoryStoreForTests("raw-query")),
+      precreatedPgwasm: createPgwasmClient(memoryStoreForTests("raw-query")),
     });
     await client.ready;
     // Seed straight into the synced read table (inspection surface bypasses the journal/overlay), then read
@@ -141,7 +141,7 @@ describe("createSyncClient raw inspection surface", () => {
     expect(result.rows).toEqual([{ id: "11111111-1111-1111-1111-111111111111", name: "Ada" }]);
     expect(result.fields.map((field) => field.name)).toEqual(["id", "name"]);
 
-    // `rowMode: "array"` passes straight through to PGlite — the REPL's exec mode.
+    // `rowMode: "array"` passes straight through to pgwasm — the REPL's exec mode.
     const arrayResult = await client.rawQuery("select id, name from profile where name = $1", ["Ada"], {
       rowMode: "array",
     });
@@ -157,7 +157,7 @@ describe("createSyncClient raw inspection surface", () => {
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
       ...testStoreAcknowledgment(),
-      precreatedPglite: createClientPGlite(memoryStoreForTests("raw-exec")),
+      precreatedPgwasm: createPgwasmClient(memoryStoreForTests("raw-exec")),
     });
     await client.ready;
     const results = await client.rawExec(
@@ -169,7 +169,7 @@ describe("createSyncClient raw inspection surface", () => {
   });
 });
 
-// The TRANSACTIONAL raw seam (the consumer's atomic LOCAL-ONLY write): several statements, one PGlite
+// The TRANSACTIONAL raw seam (the consumer's atomic LOCAL-ONLY write): several statements, one pgwasm
 // transaction, all-or-nothing. Raw SQL strings are the surface under test here (tier ③ by definition — the
 // seam exists precisely to carry SQL pgxsinkit does not model), but the ASSERTIONS read back through
 // Drizzle, so the rollback proof is a typed one.
@@ -182,7 +182,7 @@ describe("createSyncClient rawTransaction", () => {
       batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
       syncEnabled: false,
       ...testStoreAcknowledgment(),
-      precreatedPglite: createClientPGlite(memoryStoreForTests(storeName)),
+      precreatedPgwasm: createPgwasmClient(memoryStoreForTests(storeName)),
     });
     await booted.ready;
     return booted;
@@ -201,7 +201,7 @@ describe("createSyncClient rawTransaction", () => {
     expect(results.length).toBe(2);
     expect(results[1]?.rows).toEqual([{ id: "33333333-3333-3333-3333-333333333333", name: "Grace" }]);
     // Committed: the row survives the transaction.
-    const db = drizzleOver(client.pglite as unknown as Pgwasm);
+    const db = drizzleOver(client.pgwasm as unknown as Pgwasm);
     expect(await db.select().from(profileTable)).toEqual([
       { id: "33333333-3333-3333-3333-333333333333", name: "Grace" },
     ]);
@@ -225,13 +225,13 @@ describe("createSyncClient rawTransaction", () => {
     expect(rejected.length).toBeGreaterThan(0);
 
     // All-or-nothing: the FIRST statement's row is gone too.
-    const db = drizzleOver(client.pglite as unknown as Pgwasm);
+    const db = drizzleOver(client.pgwasm as unknown as Pgwasm);
     expect(await db.select().from(profileTable)).toEqual([]);
   });
 
   it("resolves [] for an empty list WITHOUT opening a transaction", async () => {
     client = await bootClient("raw-transaction-empty");
-    const transaction = spyOn(client.pglite as unknown as Pgwasm, "transaction");
+    const transaction = spyOn(client.pgwasm as unknown as Pgwasm, "transaction");
     try {
       expect(await client.rawTransaction([])).toEqual([]);
       expect(transaction).not.toHaveBeenCalled();

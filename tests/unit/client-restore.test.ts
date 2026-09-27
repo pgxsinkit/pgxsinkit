@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 // Restore — boot a client on a store backup (ADR-0035 decision 6, refined by ADR-0046). A REAL in-memory
-// PGlite. Round-trips a live `exportStore` tarball into a FRESH store via `restoreFrom` and asserts the
+// pgwasm. Round-trips a live `exportStore` tarball into a FRESH store via `restoreFrom` and asserts the
 // restore rules: fresh-target-only, recovered journal quarantined, and the ADR-0046 sync-enable split — a
 // restore whose recovered journal HAS quarantined mutations stays OFFLINE (dead network URLs prove no fetch),
 // while a restore of a CLEAN-journal backup (empty journal — the server bootstrap-artifact case) boots ONLINE
@@ -305,7 +305,7 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     // restore onto the same path. The fresh-target gate must refuse it before touching the datadir.
     const storePath = "tmp/agents/restore-existing-store";
     tmpStorePaths.push(storePath);
-    // tmp/ is gitignored, so the parent does not exist on a fresh checkout (CI) — PGlite's NodeFS
+    // tmp/ is gitignored, so the parent does not exist on a fresh checkout (CI) — pgwasm's NodeFS
     // throws at construction on a missing parent rather than creating it.
     await mkdir("tmp/agents", { recursive: true });
     const first = await createSyncClient<TodosRegistry>({
@@ -373,7 +373,7 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     ).rejects.toBeInstanceOf(RestoreTargetExistsError);
   });
 
-  it("throws when restoreFrom is combined with pgliteInstance or precreatedPglite", async () => {
+  it("throws when restoreFrom is combined with pgwasmInstance or precreatedPgwasm", async () => {
     const backup = new Blob([new Uint8Array([1, 2, 3])]);
     // A dummy instance/promise is enough — the mutual-exclusion guard runs before either is dereferenced.
     const fakeInstance = {} as never;
@@ -385,7 +385,7 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
         streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: DEAD_WRITE,
         restoreFrom: backup,
-        pgliteInstance: fakeInstance,
+        pgwasmInstance: fakeInstance,
       }),
     ).rejects.toThrow(/mutually exclusive/);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
@@ -396,13 +396,13 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
         streamBaseUrl: DEAD_STREAM_BASE,
         batchWriteUrl: DEAD_WRITE,
         restoreFrom: backup,
-        precreatedPglite: Promise.resolve(fakeInstance),
+        precreatedPgwasm: Promise.resolve(fakeInstance),
       }),
     ).rejects.toThrow(/mutually exclusive/);
   });
 
   it("fails loudly on a corrupt/garbage backup blob (memory lane — no store debris to survive)", async () => {
-    // Garbage bytes are not a valid PGlite datadir tarball → `loadDataDir` throws during create, and the boot
+    // Garbage bytes are not a valid pgwasm datadir tarball → `loadDataDir` throws during create, and the boot
     // rejects rather than half-creating a store. A memory store leaves nothing behind, so a retry is fresh.
     const garbage = new Blob([new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03])]);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void

@@ -13,7 +13,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   type SyncWorkerHost,
 } from "../../packages/client/src/index";
@@ -47,10 +47,10 @@ async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
     controlPlaneUrl: "http://127.0.0.1:1",
     streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
-    // The precreated store is a prepopulated MEMORY PGlite (test only) — acknowledge it past the BYO
+    // The precreated store is a prepopulated MEMORY pgwasm (test only) — acknowledge it past the BYO
     // refusal the worker's `createSyncClient` boot would otherwise raise (ADR-0036).
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+    precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
     syncEnabled: false,
     installGlobal: false,
     convergenceIntervalMs: 10_000_000,

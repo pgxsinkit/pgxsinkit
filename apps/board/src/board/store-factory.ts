@@ -1,23 +1,23 @@
-import type { ClientPGlite } from "@pgxsinkit/client";
+import type { PgwasmClient } from "@pgxsinkit/client";
 
 // ── The board's LOCAL STORE seam ──────────────────────────────────────────────────────────────────
 //
 // Every store the board opens is minted by ONE of two paths:
 //
 //   * unset `VITE_BOARD_STORE_FACTORY` (the default — every lane, every dev run, the hosted demo):
-//     the toolkit's own `createClientPGlite`, exactly as before. Nothing on this path changes: the
+//     the toolkit's own `createPgwasmClient`, exactly as before. Nothing on this path changes: the
 //     option below is not even passed, so the engine keeps the factory it has always built (declared
 //     durability, the placement decision's OPFS grant, PGlite's own boot assets).
 //   * `VITE_BOARD_STORE_FACTORY=<absolute module URL>`: THAT module mints the stores instead, so the
 //     same board app can drive another PostgreSQL-shaped engine — one that lives OUTSIDE this repo —
 //     without a line of engine-specific code in it. Nothing here knows or names any particular engine.
 //
-// **The contract.** The module's default export, or its named `createPglite`, is a
-// {@link BoardStoreFactory}: `(storePath, backendOverride?) => Promise<ClientPGlite>` — the toolkit's
-// own `createPglite` option (ADR-0036), unchanged and unextended. `storePath` is a plain store NAME,
+// **The contract.** The module's default export, or its named `createStore`, is a
+// {@link BoardStoreFactory}: `(storePath, backendOverride?) => Promise<PgwasmClient>` — the toolkit's
+// own `createStore` option (ADR-0036), unchanged and unextended. `storePath` is a plain store NAME,
 // never a storage URL; `backendOverride` is the internal memory selection a test lane can ask for. The
-// resolved handle is used exactly as a `createClientPGlite` one is, so it must carry the whole
-// `ClientPGlite` surface the engine touches — `live` included (the worker's live-query manager
+// resolved handle is used exactly as a `createPgwasmClient` one is, so it must carry the whole
+// `PgwasmClient` surface the engine touches — `live` included (the worker's live-query manager
 // subscribes through `pglite.live`).
 //
 // What the module owns, because the seam deliberately passes nothing else:
@@ -49,8 +49,8 @@ export interface StoreFactoryEnv {
   readonly [key: string]: unknown;
 }
 
-/** The one function the seam trades in — the toolkit's `createPglite` option (ADR-0036), unchanged. */
-export type BoardStoreFactory = (storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>;
+/** The one function the seam trades in — the toolkit's `createStore` option (ADR-0036), unchanged. */
+export type BoardStoreFactory = (storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>;
 
 /** How a scope loads a module URL: `(url) => import(url)` in the browser, a stub in the unit test. */
 export type StoreFactoryModuleLoader = (url: string) => Promise<unknown>;
@@ -67,7 +67,7 @@ export function readBoardStoreFactoryUrl(env: StoreFactoryEnv): string | undefin
 }
 
 /**
- * Import one module URL and take its store factory: the default export, else a named `createPglite`.
+ * Import one module URL and take its store factory: the default export, else a named `createStore`.
  *
  * Both failure modes are LOUD and specific — an unloadable URL and a module with no callable export are
  * the two ways a hand-typed URL goes wrong, and either one silently falling back to the built-in store
@@ -85,12 +85,12 @@ export async function loadBoardStoreFactory(url: string, load: StoreFactoryModul
       { cause },
     );
   }
-  const exports = (loaded ?? {}) as { default?: unknown; createPglite?: unknown };
-  const factory = typeof exports.default === "function" ? exports.default : exports.createPglite;
+  const exports = (loaded ?? {}) as { default?: unknown; createStore?: unknown };
+  const factory = typeof exports.default === "function" ? exports.default : exports.createStore;
   if (typeof factory !== "function") {
     throw new Error(
       `${BOARD_STORE_FACTORY_ENV}=${url} exports no store factory. Expected a default export (or a named ` +
-        `\`createPglite\`) of \`(storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>\`.`,
+        `\`createStore\`) of \`(storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>\`.`,
     );
   }
   return factory as BoardStoreFactory;

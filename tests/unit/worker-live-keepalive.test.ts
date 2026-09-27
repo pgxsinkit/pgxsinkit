@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-// Real-PGlite coverage for bounded zero-subscriber KEEP-ALIVE over the worker bridge (ADR-0040 Slice 4). A
+// Real-pgwasm coverage for bounded zero-subscriber KEEP-ALIVE over the worker bridge (ADR-0040 Slice 4). A
 // real in-memory engine behind `defineSyncWorker` configured with a generous `defaultKeepAliveMs`, driven by
 // an `attachSyncClient` tab over a bun `MessageChannel`. `pglite.live` is wrapped to COUNT registrations
 // (injected timers aren't available across the bridge, so the assertion is on registration COUNT, not
@@ -16,7 +16,7 @@ import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
-  type ClientPGlite,
+  type PgwasmClient,
   defineSyncWorker,
   getReadModelView,
   type SyncWorkerHost,
@@ -66,7 +66,7 @@ async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
     streamBaseUrl: "http://127.0.0.1:1/v1/stream",
     batchWriteUrl: "http://127.0.0.1:1/api/mutations",
     ...testStoreAcknowledgment(),
-    precreatedPglite: Promise.resolve(pg as unknown as ClientPGlite),
+    precreatedPgwasm: Promise.resolve(pg as unknown as PgwasmClient),
     syncEnabled: false,
     installGlobal: false,
     convergenceIntervalMs: 10_000_000,

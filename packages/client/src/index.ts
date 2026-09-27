@@ -30,7 +30,7 @@ import {
   type QueryOptions,
   type Results,
 } from "@pgxsinkit/pgwasm";
-import { cBuild, createCBuild } from "@pgxsinkit/pgwasm-c";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
 import type { PgwasmDatabase } from "@pgxsinkit/pgwasm/drizzle";
 import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 import { live, type PgwasmWithLive } from "@pgxsinkit/pgwasm/live";
@@ -239,7 +239,7 @@ export {
 } from "./store-boot";
 export {
   // The DECLARED store engine (ADR-0050 addendum): loading a `storage.engine.module` and taking its
-  // `createPglite`. The worker uses it for every declared mint; an app whose in-process fallback must
+  // `createStore`. The worker uses it for every declared mint; an app whose in-process fallback must
   // honour the same declaration uses it there.
   createStoreEngineResolver,
   loadStoreEngineFactory,
@@ -424,37 +424,24 @@ export class ClientDisposedError extends Error {
 // extension at all (ADR-0032 S1): `createSyncClient` starts it BESIDE the store (`startCircuitsSync`)
 // rather than attaching a namespace to the instance, so a store's type is exactly pgwasm + `live`
 // whether or not sync ever runs on it.
-export type ClientPGlite = PgwasmWithLive;
+export type PgwasmClient = PgwasmWithLive;
 
-/**
- * The pre-warmed boot assets of the C build (the WASM modules + filesystem bundle), consumed by
- * {@link createClientPGlite} / {@link CreateSyncClientOptions.pgliteBootAssets}. The host fetches +
- * compiles these on an earlier screen and hands the promise in; the store's build takes them
- * (`createCBuild({ assets })`, `pgliteWasmModule` as its `postgresWasmModule`) and skips its own lazy
- * asset load — see the field's JSDoc for the accelerator geometry.
- */
-export interface PgliteBootAssets {
-  pgliteWasmModule?: WebAssembly.Module;
-  initdbWasmModule?: WebAssembly.Module;
-  fsBundle?: Blob;
-}
-
-/** Options for {@link createClientPGlite}. */
-export interface CreateClientPGliteOptions {
+/** Options for {@link createPgwasmClient}. */
+export interface CreatePgwasmClientOptions {
   /**
-   * Pre-warmed boot assets (see {@link CreateSyncClientOptions.pgliteBootAssets}), handed to the store's
-   * C build (`createCBuild({ assets })`); a rejected warm falls back to the build's own asset load, so it
-   * never fails the create.
+   * The Postgres build the store runs on (see {@link CreateSyncClientOptions.build}); defaults to `cBuild`.
+   * Pass `createCBuild({ assets })` to hand in pre-warmed WASM modules and filesystem bundle: a rejected warm
+   * falls back to the build's own asset load, so it never fails the create.
    */
-  bootAssets?: Promise<PgliteBootAssets>;
+  build?: PostgresBuild;
   /**
    * @internal Toolkit-internal durability carrier (ADR-0047), NOT a public per-open knob. Durability is
    * registry-declared: {@link createSyncClient} resolves `storage.durability ?? "relaxed"` off its registry
    * and threads the resolved mode in here — the ONE resolution point — for every mint it funnels through this
    * factory (its own boot, the worker provision/spare mint, the pre-expose idb drain read). Defaults to
-   * `"relaxed"` when absent and is stamped onto the `boot pglite.create` rail (ADR-0047 D3). On idb, relaxed
+   * `"relaxed"` when absent and is stamped onto the `boot pgwasm.create` rail (ADR-0047 D3). On idb, relaxed
    * returns before the whole-datadir snapshot flush and schedules it asynchronously; strict keeps that
-   * synchronous snapshot (~100–200ms per statement). On OPFS-repacked the package factory keeps PGlite on its
+   * synchronous snapshot (~100–200ms per statement). On OPFS-repacked the package factory keeps pgwasm on its
    * awaited host path: relaxed routine sync asserts health without an ordinary physical flush, while strict
    * flushes arena data before metadata. Initialization, activation, and open-state close retain strict
    * ordering in both OPFS modes.
@@ -468,10 +455,10 @@ export interface CreateClientPGliteOptions {
   backendOverride?: "memory";
   /**
    * A store-backup tarball to seed the new store from (ADR-0035 decision 6, restore) — a `File`/`Blob` as
-   * produced by {@link SyncClient.exportStore}. Passed straight to PGlite's `loadDataDir`, so the created
+   * produced by {@link SyncClient.exportStore}. Passed straight to pgwasm's `loadDataDir`, so the created
    * store boots ON the backup's datadir. Restore is a CREATION-path feature: the caller (`createSyncClient`)
    * has already proven the target does not yet exist ({@link storeTargetExists}); this option carries no
-   * freshness check of its own. A corrupt/foreign tarball surfaces as a PGlite boot failure here.
+   * freshness check of its own. A corrupt/foreign tarball surfaces as a pgwasm boot failure here.
    */
   restoreFrom?: File | Blob;
   /**
@@ -484,7 +471,7 @@ export interface CreateClientPGliteOptions {
   /**
    * @internal ADR-0049 step 10a: the opfs-repacked factory + store-directory seam, injectable so Bun unit
    * tests exercise the `opfs://` branch WITHOUT loading real WASM/OPFS. In production both default to the real
-   * implementations (`createOpfsRepackedPGlite` via a lazy `import()`, and the OPFS effects' store directory
+   * implementations (`createOpfsPgwasm` via a lazy `import()`, and the OPFS effects' store directory
    * handle). Never consumer-facing.
    */
   opfsFactories?: {
@@ -537,29 +524,13 @@ const STREAM_LOST = "read stream lost; re-subscribing";
  * recognised without any brand: it is the one provenance that carries the OPFS commitment machinery, which a
  * BYO idb/file/memory instance does not.
  */
-function isOpfsRepackedStore(instance: ClientPGlite): boolean {
+function isOpfsRepackedStore(instance: PgwasmClient): boolean {
   const storage = instance.storage;
   return storage.kind === "vfs" && storage.name === OPFS_REPACKED_STORAGE_NAME;
 }
 
 /** The name the OPFS-repacked filesystem reports in `pg.storage` (`OpfsRepackedFS`'s `description`). */
 const OPFS_REPACKED_STORAGE_NAME = "opfs-repacked";
-
-/**
- * The build a client-owned store runs on. Without pre-warmed assets it is the shared `cBuild`; with them it is a
- * C build that takes the warmed modules (`createCBuild({ assets })`), where a rejected warm falls back to the
- * build's own lazy asset load, so it never fails the create.
- */
-function buildFor(bootAssets: Promise<PgliteBootAssets> | undefined): PostgresBuild {
-  if (bootAssets === undefined) return cBuild;
-  return createCBuild({
-    assets: bootAssets.then((assets) => ({
-      ...(assets.pgliteWasmModule ? { postgresWasmModule: assets.pgliteWasmModule } : {}),
-      ...(assets.initdbWasmModule ? { initdbWasmModule: assets.initdbWasmModule } : {}),
-      ...(assets.fsBundle ? { fsBundle: assets.fsBundle } : {}),
-    })),
-  });
-}
 
 /**
  * Open the opfs-repacked factory with bounded retries (3) and a small linear backoff for transient failures,
@@ -583,32 +554,32 @@ async function openWithBoundedRetries<T>(open: () => Promise<T>, backoffMs: numb
 }
 
 /**
- * Create the raw local PGlite store the sync client runs on — the SAME `PGlite.create` call
+ * Create the raw local pgwasm store the sync client runs on — the SAME `pgwasm.create` call
  * {@link createSyncClient} makes internally (the `live` extension, pre-warmed boot-asset
- * consumption, and the `boot pglite.create` rail stamp), extracted so exactly one implementation exists
+ * consumption, and the `boot pgwasm.create` rail stamp), extracted so exactly one implementation exists
  * and a host can create the store EAGERLY on an earlier screen. Hand the returned (still-pending)
- * instance to {@link CreateSyncClientOptions.precreatedPglite}: the client then owns schema exec, prepare
+ * instance to {@link CreateSyncClientOptions.precreatedPgwasm}: the client then owns schema exec, prepare
  * hooks, journal recovery, and registry reconciliation, exactly as its own `storePath` path does.
  *
  * Takes a plain store path (ADR-0036), never a storage URL — the backend is DERIVED from the engine home
  * (capability-selected opfs-repacked with IndexedDB fallback in a browser, or the filesystem on Bun/Node);
  * a scheme-bearing path throws {@link InvalidStorePathError}.
- * Also accepts the testing helper's output (`createClientPGlite(memoryStoreForTests("x"))`) so a test can
+ * Also accepts the testing helper's output (`createPgwasmClient(memoryStoreForTests("x"))`) so a test can
  * mint a memory store without naming a backend.
  *
  * The instance is deliberately **schemaless** — the registry-derived local schema is role/registry
  * dependent, so it is applied post-create by `createSyncClient`. The eager create buys only the expensive
  * initdb (+ persistent-store open), which is the dominant cold-boot cost once the WASM is pre-warmed.
  *
- * `bootAssets` is the pre-warmed WASM/fs bundle (see {@link CreateSyncClientOptions.pgliteBootAssets}); a
- * rejected warm makes the C build load its own assets — never a failure.
+ * `build` is the Postgres build (see {@link CreateSyncClientOptions.build}); a `createCBuild({ assets })` whose
+ * warm rejects loads its own assets — never a failure.
  */
-export async function createClientPGlite(
+export async function createPgwasmClient(
   store: StorePathInput,
-  options?: CreateClientPGliteOptions,
-): Promise<ClientPGlite> {
+  options?: CreatePgwasmClientOptions,
+): Promise<PgwasmClient> {
   // Normalise the store argument to a plain path (+ any internal memory override the testing helper carried),
-  // then derive the concrete PGlite dataDir URL (ADR-0036) — the single resolution point. A scheme-bearing/
+  // then derive the concrete pgwasm dataDir URL (ADR-0036) — the single resolution point. A scheme-bearing/
   // empty storePath throws here, so the old dataDir-URL contract fails loudly, never silently re-interpreted.
   const normalised = normaliseStorePathInput(store);
   const storePath = normalised.storePath;
@@ -619,11 +590,11 @@ export async function createClientPGlite(
   // CommittedStoreUnreachableError}) — an eager tab-side precreate must never be the thing that mints an empty
   // sibling over the committed store, nor one exposed beneath a record still claiming a candidate.
   // Keeping this at the documented precreate factory protects callers outside defineSyncWorker; the worker
-  // provision handler carries the same guard separately because it permits a caller-supplied createPglite factory.
+  // provision handler carries the same guard separately because it permits a caller-supplied createStore factory.
   if (options?.hasOpfsSyncAccess !== true && backendOverride !== "memory") {
     await resolveDeniedBootAuthority(storePath);
   }
-  // Derive the concrete PGlite dataDir URL (ADR-0036) — the single resolution point. Browser/worker → `idb://`,
+  // Derive the concrete pgwasm dataDir URL (ADR-0036) — the single resolution point. Browser/worker → `idb://`,
   // Bun/Node → `file://`, the sanctioned test lane → `memory://`. A scheme-bearing/empty storePath throws here.
   // ADR-0049 step 10a: when the caller threads the placement probe's grant (`hasOpfsSyncAccess`), the browser
   // store resolves to `opfs://` and routes to the opfs-repacked factory below. Default (undefined/false) leaves
@@ -634,17 +605,15 @@ export async function createClientPGlite(
   // Stamp the store's scheme on the boot rail (never the full path — it can carry an identity-specific store
   // name): "idb:" / "file:" / "memory:".
   const dataDirScheme = dataDir.slice(0, dataDir.indexOf(":") + 1);
-  // Resolve any pre-warmed boot assets BEFORE (and outside) the `boot pglite.create` stamp: the
-  // fetch+compile was kicked off on an earlier screen, so this await just retrieves the already-settled
-  // result and the stamp measures the create itself. A rejected warm is caught here only to settle it; the
-  // build itself falls back to its own lazy asset loading on a rejected `assets`, so it never fails the boot.
-  if (options?.bootAssets) await options.bootAssets.catch(() => undefined);
-  const build = buildFor(options?.bootAssets);
+  // The build a client-owned store runs on: the caller's (e.g. `createCBuild({ assets })` over a warm started
+  // on an earlier screen, where a rejected warm falls back to the build's own lazy asset load and never fails
+  // the boot), else the shared `cBuild`.
+  const build = options?.build ?? cBuild;
   // Durability (ADR-0047) is registry-declared and resolved by createSyncClient; the resolved mode is threaded
   // in via the internal `durability` carrier. Every store minting path (createSyncClient's own create, the
-  // worker's default createPglite factory, spare/prewarm mints) funnels through this function, so the
+  // worker's default createStore factory, spare/prewarm mints) funnels through this function, so the
   // `?? "relaxed"` here is the terminal fallback when no mode was threaded (e.g. an eager caller-owned
-  // precreate). Maps to PGlite's `relaxedDurability` boolean (`"strict"` → false). On idb the per-query
+  // precreate). Maps to pgwasm's `relaxedDurability` boolean (`"strict"` → false). On idb the per-query
   // synchronous flush dominates write latency; relaxing it schedules the flush asynchronously instead.
   const relaxedDurability = (options?.durability ?? "relaxed") !== "strict";
 
@@ -656,19 +625,19 @@ export async function createClientPGlite(
   // `"strict"`. The open is retried a bounded number of times for transient failures, then propagates.
   if (dataDir.startsWith("opfs://")) {
     const opfsPglite = (await timeAsync(
-      "boot pglite.create",
+      "boot pgwasm.create",
       async () => {
         const createOpfsStore =
           options?.opfsFactories?.createOpfsPgwasm ?? (await import("@pgxsinkit/pgwasm/opfs")).createOpfsPgwasm;
-        // A create that never returns used to leave the rail at `boot pglite.create start` with nothing after
+        // A create that never returns used to leave the rail at `boot pgwasm.create start` with nothing after
         // it — indistinguishable from a lost worker. These four phase lines split the create into its long
-        // steps (module load, directory handle, handle acquisition, PGlite boot), so a stall is attributable.
-        syncDebug("boot pglite.create phase", { phase: "module-loaded" });
+        // steps (module load, directory handle, handle acquisition, pgwasm boot), so a stall is attributable.
+        syncDebug("boot pgwasm.create phase", { phase: "module-loaded" });
         const getStoreDirectoryHandle =
           options?.opfsFactories?.getStoreDirectoryHandle ??
           (() => createOpfsEffects(storePath).getStoreDirectoryHandle());
         const directory = await getStoreDirectoryHandle();
-        syncDebug("boot pglite.create phase", { phase: "directory-ready" });
+        syncDebug("boot pgwasm.create phase", { phase: "directory-ready" });
         return openWithBoundedRetries(
           () =>
             createOpfsStore({
@@ -678,7 +647,7 @@ export async function createClientPGlite(
               extentSize: OPFS_STORE_EXTENT_SIZE,
               // The factory's own two phases: handles acquired (`store-opened`) and pgwasm booted
               // (`pgwasm-ready`). Same rail line, so one grep shows the whole create.
-              onPhase: (phase) => syncDebug("boot pglite.create phase", { phase }),
+              onPhase: (phase) => syncDebug("boot pgwasm.create phase", { phase }),
               // The store is engine-less by construction (only `live` is a create-time extension); the sync
               // engine attaches post-create (ADR-0032 S1). Restore rides the same `pgwasm` sub-options the
               // idb path uses; the pre-warmed boot assets ride the `build`.
@@ -691,20 +660,20 @@ export async function createClientPGlite(
         );
       },
       { ...(dataDirScheme ? { dataDir: dataDirScheme } : {}), relaxedDurability },
-    )) as ClientPGlite;
+    )) as PgwasmClient;
     // No brand is needed: the store reports itself as persistent through `pg.storage`, so the BYO
-    // non-persistent guard accepts it when it is adopted as a `precreatedPglite` (provision-then-attach).
+    // non-persistent guard accepts it when it is adopted as a `precreatedPgwasm` (provision-then-attach).
     return opfsPglite;
   }
 
   const pglite = (await timeAsync(
-    "boot pglite.create",
+    "boot pgwasm.create",
     () => {
       const createOptions: PgwasmOptions<{ live: typeof live }> = {
         build,
         dataDir,
         relaxedDurability,
-        // Restore (ADR-0035 decision 6): seed the brand-new store from the backup tarball. PGlite's
+        // Restore (ADR-0035 decision 6): seed the brand-new store from the backup tarball. pgwasm's
         // `loadDataDir` unpacks it into the datadir being created, so the store boots ON the backup's bytes —
         // the whole synced cache, Overlay, and Mutation journal that travelled inside it. Absent on a normal
         // create (the store initdbs empty).
@@ -726,7 +695,7 @@ export async function createClientPGlite(
     { ...(dataDirScheme ? { dataDir: dataDirScheme } : {}), relaxedDurability },
     // The raw store is deliberately sync-less here (only `live` is a create-time extension); the sync runtime
     // never lands on the instance at all (ADR-0032 S1).
-  )) as ClientPGlite;
+  )) as PgwasmClient;
   return pglite;
 }
 
@@ -777,7 +746,7 @@ export interface FreshBootResolution {
 }
 
 /**
- * Map a resolved PGlite dataDir URL to the ADR-0049 decision 12 `storageBackend` diagnostic — the inverse of
+ * Map a resolved pgwasm dataDir URL to the ADR-0049 decision 12 `storageBackend` diagnostic — the inverse of
  * {@link resolveStoreDataDir}'s scheme selection (`opfs://` → opfs-repacked, `idb://` → idbfs, `file://` →
  * filesystem, `memory://` → memory). Used to stamp the BootReport at the single client-owned mint seam. Returns
  * `undefined` for an unrecognised scheme (a BYO instance whose dataDir the toolkit never minted — e.g. an
@@ -798,7 +767,7 @@ function storageBackendFromDataDir(dataDir: string | undefined): NonNullable<Boo
  * then honestly omitted.
  */
 function storageBackendFromStorage(
-  storage: ClientPGlite["storage"],
+  storage: PgwasmClient["storage"],
 ): NonNullable<BootReport["storageBackend"]> | undefined {
   switch (storage.kind) {
     case "memory":
@@ -898,7 +867,7 @@ export async function resolveFreshBoot(
  * barrier. The barrier requires it (data-before-authority, invariant 3); a store that is not on the OPFS-repacked
  * filesystem has none, which is a boot invariant violation. `/opfs` is imported lazily, as the factory is.
  */
-function resolveEngineStrictSync(pglite: ClientPGlite): () => Promise<void> {
+function resolveEngineStrictSync(pglite: PgwasmClient): () => Promise<void> {
   if (!isOpfsRepackedStore(pglite)) {
     throw new Error(
       "[pgxsinkit] fresh commitment: the store is not on the OPFS-repacked filesystem, so it has no strict " +
@@ -928,11 +897,11 @@ export async function runFreshCommitmentBarrier(
 }
 
 /**
- * @internal The ADOPTED-boot commitment gate. A boot that ADOPTS an instance (`pgliteInstance` /
- * `precreatedPglite` — the provision→adopt accelerator, ADR-0032 decision 5) never enters `openOwnedStore`, so
+ * @internal The ADOPTED-boot commitment gate. A boot that ADOPTS an instance (`pgwasmInstance` /
+ * `precreatedPgwasm` — the provision→adopt accelerator, ADR-0032 decision 5) never enters `openOwnedStore`, so
  * {@link resolveFreshBoot} never runs and nothing flags the barrier. Left alone, an adopted OPFS store therefore
  * stays UNCOMMITTED for its whole life: no sentinel, and a record still at `opfs-candidate` (or absent, when the
- * adopted instance was built outside the mint seam — a BYO `pgliteInstance`). That state is INDISTINGUISHABLE
+ * adopted instance was built outside the mint seam — a BYO `pgwasmInstance`). That state is INDISTINGUISHABLE
  * from a torn candidate, so the next client-owned boot classifies `delete-candidate-and-rebuild` and DESTROYS a
  * populated store — offline, with nothing to rebuild from. An adopted opfs boot therefore owes the SAME barrier
  * ({@link runFreshCommitmentBarrier}) a fresh one does, pre-expose (invariant 3).
@@ -1067,7 +1036,7 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    */
   readSilenceMs?: number;
   /**
-   * The local store's name (ADR-0036) — a PLAIN path/name, never a PGlite storage URL. The storage backend
+   * The local store's name (ADR-0036) — a PLAIN path/name, never a pgwasm storage URL. The storage backend
    * is DERIVED from the engine home (capability-selected opfs-repacked with IndexedDB fallback in a browser,
    * or the filesystem on Bun/Node); a
    * scheme-bearing string (anything containing `://`) is rejected with {@link InvalidStorePathError}
@@ -1089,68 +1058,68 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * ADR-0049 D1: the placement probe's OPFS-sync-access grant, threaded from the SharedWorker's engine home
    * (`defineSyncWorker`'s SW-direct bootstrap) into this boot so the client-owned create opens the OPFS-repacked
    * backend. Absent/false is the honest IDBFS home — the declared `backend: "idbfs"` mode or a capability-absence
-   * fallback (a main thread can never hold handles either). Forwarded verbatim to {@link createClientPGlite}, which
+   * fallback (a main thread can never hold handles either). Forwarded verbatim to {@link createPgwasmClient}, which
    * resolves the actual dataDir from it.
    */
   hasOpfsSyncAccess?: boolean;
   /**
-   * Pre-warmed boot assets of the C build (the WASM modules + filesystem bundle), handed to the store's
-   * build (`createCBuild({ assets })`). The intent is to hide the ~2.5s cold `boot pglite.create` cost —
-   * dominated by the WASM fetch+compile — behind user think-time: the host starts fetching/compiling
-   * these on an earlier screen (e.g. the login/identity picker) and hands the still-pending promise
-   * here, so by the time a store is opened the assets are already resolved and the build skips
-   * its own lazy asset load. Ignored when {@link pgliteInstance} is supplied (the caller owns that
-   * instance's boot). A rejected/failed warm never fails the boot — the build falls back to loading its
-   * own assets, so this is a pure best-effort accelerator.
+   * The Postgres build a client-owned store runs on; defaults to `cBuild`. To hide the ~2.5s cold
+   * `boot pgwasm.create` cost — dominated by the WASM fetch+compile — behind user think-time, pass
+   * `createCBuild({ assets })` from `@pgxsinkit/pgwasm-c`, where `assets` is a `Promise<CBuildAssets>` the host
+   * started fetching/compiling on an earlier screen (e.g. the login/identity picker): by the time a store is
+   * opened the assets are resolved and the build skips its own lazy asset load. Ignored when
+   * {@link pgwasmInstance} is supplied (the caller owns that instance's boot). A rejected/failed warm never
+   * fails the boot — the build falls back to loading its own assets, so the warm is a pure best-effort
+   * accelerator.
    */
-  pgliteBootAssets?: Promise<PgliteBootAssets>;
+  build?: PostgresBuild;
   resetSubscriptionKeys?: string[];
-  prepareLocalDbBeforeSchema?: (pglite: ClientPGlite) => Promise<void>;
-  prepareLocalDbAfterSchema?: (pglite: ClientPGlite) => Promise<void>;
+  prepareLocalDbBeforeSchema?: (pglite: PgwasmClient) => Promise<void>;
+  prepareLocalDbAfterSchema?: (pglite: PgwasmClient) => Promise<void>;
   onStatusChange?: (status: SyncRuntimeStatus) => void;
   onTableInitialSync?: (tableKey: string) => void;
   /**
-   * A fully-provisioned PGlite instance the CALLER owns end-to-end. The client runs NONE of its
+   * A fully-provisioned pgwasm instance the CALLER owns end-to-end. The client runs NONE of its
    * post-create boot steps against it — no schema exec, prepare hooks, or registry reconciliation
    * (journal recovery still runs, as it does on every path). Use it only when the caller has already
    * applied the registry schema itself. Contrast the three PGlite-provenance seams:
    * - {@link storePath} (default) — the client creates the store AND runs every post-create step.
-   * - {@link precreatedPglite} — the caller creates the raw store (via {@link createClientPGlite}), but
+   * - {@link precreatedPgwasm} — the caller creates the raw store (via {@link createPgwasmClient}), but
    *   the client still runs every post-create step (schema, prepare hooks, and reconciliation), exactly as
    *   `storePath` does.
-   * - `pgliteInstance` — the caller creates AND provisions the store; the client runs none of them.
+   * - `pgwasmInstance` — the caller creates AND provisions the store; the client runs none of them.
    *
    * A caller-owned instance is REFUSED with {@link NonPersistentStoreError} if it is provably
-   * non-persistent (a `new PGlite()` default, or an in-memory store) — pgxsinkit's durability semantics
+   * non-persistent (a `new pgwasm()` default, or an in-memory store) — pgxsinkit's durability semantics
    * assume a persisted store (ADR-0036). Acknowledge a deliberate test store by spreading
    * `testStoreAcknowledgment()` from `@pgxsinkit/client/testing`.
    *
-   * Mutually exclusive with {@link precreatedPglite} (supplying both throws).
+   * Mutually exclusive with {@link precreatedPgwasm} (supplying both throws).
    */
-  pgliteInstance?: ClientPGlite;
+  pgwasmInstance?: PgwasmClient;
   /**
-   * A raw PGlite instance the caller created EAGERLY (via {@link createClientPGlite}) — typically on an
+   * A raw pgwasm instance the caller created EAGERLY (via {@link createPgwasmClient}) — typically on an
    * earlier screen, to hide the ~1.9s cold `initdb`/IDBFS open behind user think-time — but for which the
    * client still owns EVERYTHING else: schema exec, prepare hooks, journal recovery, and registry
    * reconciliation all run exactly as on the {@link storePath} path. This is the difference from
-   * {@link pgliteInstance} (which skips schema, prepare hooks, and reconciliation because the caller owns
+   * {@link pgwasmInstance} (which skips schema, prepare hooks, and reconciliation because the caller owns
    * them); see that
    * option's JSDoc for the three-way distinction.
    *
    * The promise form lets the still-pending eager create be handed straight in. Precedence/validation:
-   * - Supplying both this and {@link pgliteInstance} throws — they claim different ownership.
+   * - Supplying both this and {@link pgwasmInstance} throws — they claim different ownership.
    * - {@link storePath} is used ONLY as the fallback store name if this promise REJECTS: a failed eager
    *   create is caught, logged on the boot rail, and the normal `storePath` create path runs instead (also
-   *   consuming {@link pgliteBootAssets} if provided). The pattern is a pure accelerator, never a boot
+   *   consuming {@link build} if provided). The pattern is a pure accelerator, never a boot
    *   dependency.
    * - A successfully-adopted instance is subject to the same {@link NonPersistentStoreError} refusal as
-   *   {@link pgliteInstance} (checked after resolution, so the refusal propagates rather than being
+   *   {@link pgwasmInstance} (checked after resolution, so the refusal propagates rather than being
    *   swallowed by the reject-fallback).
    */
-  precreatedPglite?: Promise<ClientPGlite>;
+  precreatedPgwasm?: Promise<PgwasmClient>;
   /**
    * Restore the store from a **store backup** (ADR-0035 decision 6) — a `File`/`Blob` tarball as produced by
-   * {@link SyncClient.exportStore}. The client creates its store with the backup handed to PGlite's
+   * {@link SyncClient.exportStore}. The client creates its store with the backup handed to pgwasm's
    * `loadDataDir`, so it boots ON the backup's datadir (synced cache + Overlay + Mutation journal, all the
    * bytes that travelled inside it). Three restore-only rules apply, none of them optional:
    *
@@ -1169,7 +1138,7 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    *   ledger, so replay is unsafe on last-write-wins tables). Release (`retryFailed`) or discard
    *   (`discardQuarantined`) them explicitly. When this pass quarantines nothing, the restore comes online (above).
    *
-   * Mutually exclusive with {@link pgliteInstance} AND {@link precreatedPglite} — restore owns the store's
+   * Mutually exclusive with {@link pgwasmInstance} AND {@link precreatedPgwasm} — restore owns the store's
    * creation (`loadDataDir` is a create-time seed), so a caller-supplied instance conflicts (supplying either
    * with `restoreFrom` throws).
    */
@@ -1177,7 +1146,7 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   /**
    * PROVABLY-fresh store hint (ADR-0032 S4 / backlog-0003): the caller guarantees this store is brand-new
    * and schemaless — no prior schema, no synced rows, no persisted subscription state. When set (and sync
-   * is enabled, and the client owns schema exec — i.e. not the {@link pgliteInstance} path), the shape
+   * is enabled, and the client owns schema exec — i.e. not the {@link pgwasmInstance} path), the shape
    * catch-up is started BEFORE the local boot phases (schema exec, journal recovery, and registry
    * reconciliation) and buffered in memory, with commits gated until those phases finish — so the network
    * catch-up overlaps them instead of running strictly after. On a far-from-database caller this collapses
@@ -1281,8 +1250,8 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
   /**
    * @internal Provision timing for a boot that ADOPTS a pre-provisioned store (ADR-0034). When the store was
    * minted ahead of boot (a spare's off-thread initdb), the provisioner stamps its create cost and ready
-   * time here; the boot reports them as {@link BootReport.provision} and sets `phases.pgliteCreateMs = null`.
-   * A promise because the stamp settles with the spare's `create`. Only honoured on the {@link precreatedPglite}
+   * time here; the boot reports them as {@link BootReport.provision} and sets `phases.pgwasmCreateMs = null`.
+   * A promise because the stamp settles with the spare's `create`. Only honoured on the {@link precreatedPgwasm}
    * adoption path (ignored on a fallback create). `provisionReadyAt` must share this process's monotonic clock.
    */
   provisionStamp?: Promise<{ initdbMs: number; provisionReadyAt: number }>;
@@ -1403,7 +1372,7 @@ export interface SubscribeLiveRowsInput {
   /**
    * The unique output aliases to render the query's columns under so it is SAFE TO MATERIALISE, in the
    * compiled SQL's column order (one per output column). Drizzle emits no output aliases, so a JOIN whose
-   * tables share a column name compiles to duplicate output names — which PGlite's `live` extension
+   * tables share a column name compiles to duplicate output names — which pgwasm's `live` extension
    * refuses to materialise (`column "title" specified more than once`) and which silently collapse
    * same-named columns even in a plain query. When supplied, the seam wraps the query so every output
    * column gets its alias and rows come back KEYED BY THESE ALIASES; the consumer's row-mapper must read
@@ -1472,13 +1441,13 @@ export interface PreparedQueryResult<TTable extends string = string> {
 
 export interface SyncClient<TRegistry extends SyncTableRegistry> {
   drizzle: PgwasmDatabase<RegistryRelations<TRegistry>>;
-  pglite: ClientPGlite;
+  pgwasm: PgwasmClient;
   views: RegistryViews<TRegistry>;
   tables: {
     [TKey in SyncTableName<TRegistry>]: SyncClientTableHandle<TRegistry, TKey>;
   };
   /**
-   * Local-read readiness (ADR-0041): resolves once PGlite is open, the durable schema is ready, registry
+   * Local-read readiness (ADR-0041): resolves once pgwasm is open, the durable schema is ready, registry
    * reconciliation has completed, and the drizzle read
    * facade is built — so cached rows are queryable. Resolving this stage requires NO write runtime, NO sync
    * start, and NO network I/O, so an offline boot resolves it promptly. Under the ADR-0041 Option B contract
@@ -1675,7 +1644,7 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    *
    * The seam exists for a consumer that owns LOCAL-ONLY tables pgxsinkit does not manage (a definition cache,
    * a personal dictionary — anything that must delete-then-insert without a torn intermediate state). It is
-   * the ONLY way to get that atomicity on a worker-attached client, where the tab has no PGlite of its own,
+   * the ONLY way to get that atomicity on a worker-attached client, where the tab has no pgwasm of its own,
    * and it behaves identically on both client forms rather than making atomicity depend on where the engine
    * happens to live.
    *
@@ -1697,7 +1666,7 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * `query`/`queryRaw` builder path so the two entry points can never drift on guard semantics.
    * `defineSyncWorker` dispatches the `guardedQuery` RpcOp to this on its owned in-process client; the attach
    * client's Drizzle-over-bridge compiles the SQL on the tab and routes the read here so the guard runs
-   * worker-side. Accepts the full PGlite {@link QueryOptions} (the worker re-applies drizzle's identity
+   * worker-side. Accepts the full pgwasm {@link QueryOptions} (the worker re-applies drizzle's identity
    * parsers here — temporal OIDs + numeric[]) plus the raw-fragment `use` list. NOT part of the app-facing
    * read surface — reach for {@link query} / {@link queryRaw} instead; kept `@internal` (above) and excluded
    * from the generated API docs (typedoc excludeInternal).
@@ -1858,8 +1827,8 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    */
   liveQueryDiagnostics: () => Promise<LiveQueryDiagnostics[]>;
   /**
-   * Take a **store backup** (ADR-0035): a full-fidelity, PGlite-restorable tarball of the whole local
-   * store — synced cache, Overlay, and Mutation journal (unflushed writes included) — via PGlite's
+   * Take a **store backup** (ADR-0035): a full-fidelity, pgwasm-restorable tarball of the whole local
+   * store — synced cache, Overlay, and Mutation journal (unflushed writes included) — via pgwasm's
    * `dumpDataDir`. Taken LIVE (a `CHECKPOINT` serialised behind engine work, then the dump; no engine
    * suspension, no tab disruption), so it never blocks and is the only lossless export an offline device
    * with unflushed writes can take. Awaits engine-ready rather than rejecting during boot, then runs under
@@ -1908,19 +1877,19 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
 export type { MutationBatchItem, MutationDetail, MutationDiagnostics, MutationKind, MutationSummary };
 
 /**
- * The structured-clone-safe subset of PGlite's `QueryOptions` the inspection surface carries. Kept
+ * The structured-clone-safe subset of pgwasm's `QueryOptions` the inspection surface carries. Kept
  * narrow ON PURPOSE: on a worker-attached client the options object crosses the bridge via
  * `postMessage`, so function-valued options (`parsers`, `serializers`, `onNotice`) can never be part
- * of this contract. `rowMode: "array"` is what `@electric-sql/pglite-repl` asks for on every exec.
+ * of this contract. `rowMode: "array"` is what `@pgxsinkit/pgwasm-repl` asks for on every exec.
  *
- * `blob` diverges from PGlite's own type for the same reason: PGlite takes a `Blob`, which is neither
+ * `blob` diverges from pgwasm's own type for the same reason: pgwasm takes a `Blob`, which is neither
  * transferable nor (usefully) clonable, so this contract carries BYTES and wraps them into the `Blob` at
- * the PGlite call (ADR-0061).
+ * the pgwasm call (ADR-0061).
  */
 export interface RawQueryOptions {
   rowMode?: "object" | "array";
   /**
-   * The bytes PGlite reads when the statement is a `COPY … FROM '/dev/blob'` — the single-statement form
+   * The bytes pgwasm reads when the statement is a `COPY … FROM '/dev/blob'` — the single-statement form
    * of {@link RawStatement.blob}, for a bulk load that needs no surrounding transaction. Build the
    * statement AND these bytes together with {@link buildCopyFromBlobStatement}; any other statement
    * ignores this option.
@@ -1944,7 +1913,7 @@ export interface RawStatement {
   readonly sql: string;
   readonly params?: readonly unknown[];
   /**
-   * The bytes PGlite reads for this statement's `/dev/blob` — how a LOCAL-ONLY table an app owns is
+   * The bytes pgwasm reads for this statement's `/dev/blob` — how a LOCAL-ONLY table an app owns is
    * BULK-LOADED with `COPY` instead of one INSERT per row. It rides ONLY with a `COPY … FROM '/dev/blob'`
    * statement; any other statement ignores it. Build the pair with {@link buildCopyFromBlobStatement},
    * which renders the statement and serializes the rows from ONE column list (and with the same COPY TEXT
@@ -1962,9 +1931,9 @@ export interface RawStatement {
 }
 
 /**
- * Translate the raw seam's structured-clone-safe options into the PGlite `QueryOptions` the store takes:
+ * Translate the raw seam's structured-clone-safe options into the pgwasm `QueryOptions` the store takes:
  * the COPY body travels as BYTES (a `Uint8Array` — transferable across the worker bridge, unlike a `Blob`)
- * and PGlite reads `/dev/blob` from a `Blob`, so it is wrapped HERE, at the one place the two meet.
+ * and pgwasm reads `/dev/blob` from a `Blob`, so it is wrapped HERE, at the one place the two meet.
  * A statement's own `blob` ({@link RawStatement.blob}) wins over the call-level {@link RawQueryOptions.blob}.
  */
 function toPgliteQueryOptions(
@@ -1978,7 +1947,7 @@ function toPgliteQueryOptions(
 }
 
 /**
- * The same options WITHOUT the COPY bytes — for `rawExec`, whose PGlite counterpart runs a multi-statement
+ * The same options WITHOUT the COPY bytes — for `rawExec`, whose pgwasm counterpart runs a multi-statement
  * script through the simple protocol and has no `/dev/blob` hook at all. Dropping the field keeps the raw
  * trio on ONE options type (a caller can pass the same object to all three) while the COPY body reaches
  * only the two seams that can actually ingest it.
@@ -1989,7 +1958,7 @@ function withoutCopyBlob(options?: RawQueryOptions): QueryOptions | undefined {
   return rest;
 }
 
-/** The `{ query, exec }` duck `@electric-sql/pglite-repl` drives, backed by a client's inspection surface. */
+/** The `{ query, exec }` duck `@pgxsinkit/pgwasm-repl` drives, backed by a client's inspection surface. */
 export interface ReplInspectionSurface {
   query: (sql: string, params?: unknown[], options?: RawQueryOptions) => Promise<Results>;
   exec: (sql: string, options?: RawQueryOptions) => Promise<Results[]>;
@@ -1997,9 +1966,9 @@ export interface ReplInspectionSurface {
 
 /**
  * Shape a {@link SyncClient}'s inspection surface (`rawQuery`/`rawExec`) as the `{ query, exec }` duck
- * `@electric-sql/pglite-repl` needs. Identical on the in-process and worker-attached client — on the latter
- * each statement routes through the worker bridge, so the REPL works even though `client.pglite` is
- * unavailable. Cast the result at the `<Repl pg={...}>` prop (the REPL types the prop as a full `PGlite`).
+ * `@pgxsinkit/pgwasm-repl` needs. Identical on the in-process and worker-attached client — on the latter
+ * each statement routes through the worker bridge, so the REPL works even though `client.pgwasm` is
+ * unavailable. Cast the result at the `<Repl pg={...}>` prop (the REPL types the prop as a full `pgwasm`).
  * The surface is registry-independent, so it accepts any client's `rawQuery`/`rawExec` pair.
  */
 export function replAdapter(
@@ -2049,7 +2018,7 @@ type SyncGroupsRuntime = CircuitsGroupSyncResult;
 export async function createSyncClient<const TRegistry extends SyncTableRegistry>(
   options: CreateSyncClientOptions<TRegistry>,
 ): Promise<SyncClient<TRegistry>> {
-  // Fail fast on a bad keep-alive policy — before any PGlite boot work (ADR-0040 decision 4 — bounded).
+  // Fail fast on a bad keep-alive policy — before any pgwasm boot work (ADR-0040 decision 4 — bounded).
   validateLiveQueryPolicy(options.liveQueries);
   const status: SyncRuntimeStatus = {
     phase: "booting",
@@ -2091,9 +2060,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     rejectBootSettled = reject;
   });
 
-  if (options.pgliteInstance && options.precreatedPglite) {
+  if (options.pgwasmInstance && options.precreatedPgwasm) {
     throw new Error(
-      "createSyncClient: pass at most one of `pgliteInstance` or `precreatedPglite` — they claim different ownership of the post-create boot steps (schema exec, prepare hooks, and registry reconciliation).",
+      "createSyncClient: pass at most one of `pgwasmInstance` or `precreatedPgwasm` — they claim different ownership of the post-create boot steps (schema exec, prepare hooks, and registry reconciliation).",
     );
   }
 
@@ -2101,9 +2070,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // the fresh store — so it cannot coexist with a caller-supplied instance (which claims the store already
   // exists and is provisioned). Fail loudly rather than silently ignore one.
   const restoreBoot = options.restoreFrom != null;
-  if (restoreBoot && (options.pgliteInstance || options.precreatedPglite)) {
+  if (restoreBoot && (options.pgwasmInstance || options.precreatedPgwasm)) {
     throw new Error(
-      "createSyncClient: `restoreFrom` is mutually exclusive with `pgliteInstance` / `precreatedPglite` — restore boots a brand-new store from the backup (a create-time `loadDataDir` seed), so it cannot adopt a caller-owned instance. Drop the instance option, or drop `restoreFrom` (ADR-0035).",
+      "createSyncClient: `restoreFrom` is mutually exclusive with `pgwasmInstance` / `precreatedPgwasm` — restore boots a brand-new store from the backup (a create-time `loadDataDir` seed), so it cannot adopt a caller-owned instance. Drop the instance option, or drop `restoreFrom` (ADR-0035).",
     );
   }
 
@@ -2135,7 +2104,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   const engineHome: BootReport["engineHome"] | undefined = bootMode === "worker" ? options.engineHome : "in-process";
 
   // Boot observability (ADR-0034): build a structured report across the boot, finalized once at initial
-  // sync. Created FIRST so its monotonic anchor precedes every timed phase (including the PGlite create).
+  // sync. Created FIRST so its monotonic anchor precedes every timed phase (including the pgwasm create).
   const bootReportBuilder: BootReportBuilder = createBootReportBuilder({
     mode: bootMode,
     freshStore: options.freshStore === true,
@@ -2165,7 +2134,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   const backendOverride = testStoreMarker === "memory" ? ("memory" as const) : undefined;
 
   // Bind the create options once for the two client-owned create paths (fresh `storePath`, and the
-  // `precreatedPglite` reject-fallback), so both consume the same pre-warm + resolve the same backend.
+  // `precreatedPgwasm` reject-fallback), so both consume the same pre-warm + resolve the same backend.
   // ADR-0049 step 11c: the OPFS-home grant the client-owned mint opens under. Starts at the placement probe's
   // value and is ADJUSTED DOWN to `false` by the pre-mint phase machine (an existing idb store is opened in
   // place — the backend is fixed at first mint). Read at mint time by `timedCreate` below, so the phase machine
@@ -2186,14 +2155,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // declaration (`options.storage`, the ADR-0050 internal carrier; absent for in-process consumers). An
   // explicit disagreement is a typed refusal (the worker handlers refuse conflicts before this throws).
   // The resolved mode threads into every client-owned mint (its own boot create and the precreated-reject
-  // fallback) via the internal carrier on `createClientPGlite`; no open site takes a durability option, so
+  // fallback) via the internal carrier on `createPgwasmClient`; no open site takes a durability option, so
   // no mint can contradict the data contract.
   const resolvedDurability: StorageDurability = resolveStorageDeclaration(
     getSyncRegistryStorage(options.registry),
     options.storage,
   ).durability;
-  const createClientOptions: CreateClientPGliteOptions = {
-    ...(options.pgliteBootAssets ? { bootAssets: options.pgliteBootAssets } : {}),
+  const createClientOptions: CreatePgwasmClientOptions = {
+    ...(options.build ? { build: options.build } : {}),
     ...(backendOverride ? { backendOverride } : {}),
     durability: resolvedDurability,
     // Restore (ADR-0035 decision 6): seed the fresh store from the backup via `loadDataDir`. Restore is
@@ -2217,20 +2186,20 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       throw new RestoreTargetExistsError(fallbackStorePath);
     }
   }
-  // Time a client-owned `createClientPGlite` into `phases.pgliteCreateMs`; an ADOPTED store (spare or
+  // Time a client-owned `createPgwasmClient` into `phases.pgwasmCreateMs`; an ADOPTED store (spare or
   // caller-supplied) leaves it `null` (create ran elsewhere — see the provision block below).
-  const timedCreate = async (): Promise<ClientPGlite> => {
+  const timedCreate = async (): Promise<PgwasmClient> => {
     const startedAt = performance.now();
     // ADR-0049 step 10b/11c: the OPFS-home grant is spread in at MINT time (not baked into `createClientOptions`),
     // so the pre-mint phase machine that ran just above can settle `bootHasOpfsSyncAccess` first — opening the
     // committed opfs store or the existing idb store. Default absent keeps today's backend.
     // ADR-0049 decision 12: this is the SINGLE client-owned mint seam, so stamp `storageBackend` from the resolved
-    // dataDir scheme here — the same resolution `createClientPGlite` performs, so the diagnostic never diverges
+    // dataDir scheme here — the same resolution `createPgwasmClient` performs, so the diagnostic never diverges
     // from the backend actually opened. Covers every client-owned mint (in-process, worker, precreated-fallback).
     const resolvedDataDir = bootHasOpfsSyncAccess
       ? resolveStoreDataDir(fallbackStorePath, backendOverride, { hasIndexedDb: true, hasOpfsSyncAccess: true })
       : resolveStoreDataDir(fallbackStorePath, backendOverride);
-    const created = await createClientPGlite(fallbackStorePath, {
+    const created = await createPgwasmClient(fallbackStorePath, {
       ...createClientOptions,
       ...(bootHasOpfsSyncAccess ? { hasOpfsSyncAccess: true } : {}),
     });
@@ -2251,8 +2220,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // provably-non-persistent shapes are a memory store (pgwasm's default, or an explicit `memory://`) and a
   // filesystem that reports itself non-persistent. Checked AFTER a
   // successful resolution of the BYO promise, so the refusal PROPAGATES rather than being swallowed by the
-  // `precreatedPglite` reject-fallback below (which only catches a create that never produced a store).
-  const refuseIfNonPersistent = (instance: ClientPGlite): void => {
+  // `precreatedPgwasm` reject-fallback below (which only catches a create that never produced a store).
+  const refuseIfNonPersistent = (instance: PgwasmClient): void => {
     if (testStoreMarker !== undefined) return; // a deliberate test store — acknowledged.
     // An opfs-repacked instance reports `{ kind: "vfs", persistent: true }`, so adopting a provisioned opfs
     // store (provision-then-attach, ADR-0049) passes; every store the funnel mints is idb/file/opfs.
@@ -2264,7 +2233,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // accelerator MUST enter here: recovery/classification precede every persistent mint. Keeping the flow in one
   // closure prevents a rejected eager create from bypassing live `deleting` authority or the OPFS commitment
   // phase machine by jumping straight to `timedCreate()`.
-  const openOwnedStore = async (): Promise<ClientPGlite> => {
+  const openOwnedStore = async (): Promise<PgwasmClient> => {
     // A capability-denied browser may inherit an interrupted destroy or an unexposed candidate from an earlier
     // granted engine home, and it may be looking at a store that lives in OPFS it cannot open at all. ONE
     // bounded meta read settles all three before any replacement IDB store is minted: a `deleting` handoff
@@ -2313,24 +2282,24 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     return timedCreate();
   };
 
-  let pglite: ClientPGlite;
-  // Whether the boot adopted the caller's `precreatedPglite` (vs. falling back to a fresh create) — gates
+  let pglite: PgwasmClient;
+  // Whether the boot adopted the caller's `precreatedPgwasm` (vs. falling back to a fresh create) — gates
   // whether the provision stamp is honoured (ADR-0034).
   let adoptedPrecreated = false;
-  if (options.pgliteInstance) {
+  if (options.pgwasmInstance) {
     // The caller created AND provisioned this store; the client runs NONE of the post-create boot steps
-    // (schema, prepare hooks, and reconciliation) — see the `pgliteInstance` JSDoc. No create here →
-    // `pgliteCreateMs` null.
-    refuseIfNonPersistent(options.pgliteInstance);
-    pglite = options.pgliteInstance;
-  } else if (options.precreatedPglite) {
-    // The caller created the raw store eagerly via `createClientPGlite`; the client still owns every
+    // (schema, prepare hooks, and reconciliation) — see the `pgwasmInstance` JSDoc. No create here →
+    // `pgwasmCreateMs` null.
+    refuseIfNonPersistent(options.pgwasmInstance);
+    pglite = options.pgwasmInstance;
+  } else if (options.precreatedPgwasm) {
+    // The caller created the raw store eagerly via `createPgwasmClient`; the client still owns every
     // post-create step below. A REJECTED eager create must never fail the boot: fall back to the normal
     // `storePath` create, so the pattern stays a pure accelerator. Reify the promise's outcome first, THEN
     // branch — so the {@link NonPersistentStoreError} refusal runs on a SUCCESSFULLY resolved instance,
     // outside any catch, and PROPAGATES (never swallowed by the reject-fallback, which is only for a create
     // that never produced a store).
-    const outcome = await options.precreatedPglite.then(
+    const outcome = await options.precreatedPgwasm.then(
       (instance) => ({ ok: true as const, instance }),
       (error: unknown) => ({ ok: false as const, error }),
     );
@@ -2362,7 +2331,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // ADR-0049 decision 12: a BYO instance / adopted-precreated store was created OUTSIDE the mint seam, so derive
   // its `storageBackend` from the instance's own `storage` where recognisable; an unknown filesystem leaves it
   // omitted (`setStorageBackend` is first-wins, so a fallback-create is never clobbered).
-  if (options.pgliteInstance != null || adoptedPrecreated) {
+  if (options.pgwasmInstance != null || adoptedPrecreated) {
     const byoBackend = storageBackendFromStorage(pglite.storage);
     if (byoBackend) {
       openedStorageBackend = byoBackend;
@@ -2376,18 +2345,18 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // run, and the memory test lane has no meta machinery at all. The bounded meta read is kicked off HERE and folded
   // into `commitmentBarrierPending` at the milestone below, so it overlaps schema exec instead of preceding it.
   const adoptedCommitmentGate =
-    (options.pgliteInstance != null || adoptedPrecreated) && backendOverride !== "memory" && isOpfsRepackedStore(pglite)
+    (options.pgwasmInstance != null || adoptedPrecreated) && backendOverride !== "memory" && isOpfsRepackedStore(pglite)
       ? resolveAdoptedCommitmentBarrier(fallbackStorePath)
       : null;
   // The gate's rejection is observed at the milestone (fail closed, invariant 12); this only keeps an unrelated
   // earlier boot failure from surfacing it as an unhandled rejection in the meantime.
   if (adoptedCommitmentGate) void adoptedCommitmentGate.catch(() => undefined);
   // Whether THIS client owns the store's lifecycle (so `destroy()` may run the supervised destruction machine
-  // over it). A BYO `pgliteInstance` is the caller's to dispose of; every other provenance is ours.
-  const ownsStoreLifecycle = !options.pgliteInstance;
+  // over it). A BYO `pgwasmInstance` is the caller's to dispose of; every other provenance is ours.
+  const ownsStoreLifecycle = !options.pgwasmInstance;
 
   // Provision block (ADR-0034): when the boot adopted a pre-provisioned store and the provisioner stamped
-  // its create timing, report the spare's initdb cost + how long it sat ready, and leave `pgliteCreateMs`
+  // its create timing, report the spare's initdb cost + how long it sat ready, and leave `pgwasmCreateMs`
   // null (the create was paid at provision time, off this boot's clock).
   if (adoptedPrecreated && options.provisionStamp) {
     const stamp = await options.provisionStamp.catch(() => null);
@@ -2558,7 +2527,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       },
     });
 
-  if (!options.pgliteInstance) {
+  if (!options.pgwasmInstance) {
     if (options.prepareLocalDbBeforeSchema) {
       const prepareBeforeSchema = options.prepareLocalDbBeforeSchema;
       await bootReportBuilder.phase("prepare", "boot prepare(before-schema)", () => prepareBeforeSchema(pglite));
@@ -2626,8 +2595,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     registry: options.registry,
     batchWriteUrl: options.batchWriteUrl,
     // pgxsinkit owns the local schema (and the `pgxsinkit_local_meta` marker table) unless the caller
-    // supplied their own PGlite — then the marker is never touched and recovery runs unconditionally.
-    ownsMetaTable: !options.pgliteInstance,
+    // supplied their own pgwasm — then the marker is never touched and recovery runs unconditionally.
+    ownsMetaTable: !options.pgwasmInstance,
     onOrdinaryEnqueue: (tables) => activateOrdinaryWriteTables?.(tables),
     ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
     ...(writePathHeaders ? { requestHeaders: writePathHeaders } : {}),
@@ -2642,11 +2611,11 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // no driver is stood up), so there is no conditional to get wrong when a registry gains its first stream.
   // The ingestion endpoint is the mutation endpoint's sibling — derived from `batchWriteUrl` unless the
   // consumer names it — and it shares the write path's headers (same ingress, same gateway credentials).
-  // A caller-owned PGlite (`pgliteInstance`) never had the toolkit's schema applied, so the Outbox table may
+  // A caller-owned pgwasm (`pgwasmInstance`) never had the toolkit's schema applied, so the Outbox table may
   // not exist: the lane stays unconstructed there, exactly as the meta-table marker is left alone.
   const eventLaneUrl = options.batchEventUrl ?? deriveBatchEventUrl(options.batchWriteUrl);
   const eventLane: EventLaneRuntime | null =
-    eventLaneUrl != null && !options.pgliteInstance
+    eventLaneUrl != null && !options.pgwasmInstance
       ? createEventLaneRuntime({
           db: pglite,
           registry: options.registry,
@@ -2662,7 +2631,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     throw new Error(
       "pgxsinkit: the Event lane is not available on this client — either `batchWriteUrl` is not the canonical " +
         '"…/api/mutations" shape (pass `batchEventUrl` explicitly), or this client adopted a caller-owned ' +
-        "`pgliteInstance` (whose store pgxsinkit never provisioned, so it has no Outbox).",
+        "`pgwasmInstance` (whose store pgxsinkit never provisioned, so it has no Outbox).",
     );
   };
 
@@ -2682,13 +2651,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // quarantine, marker clear — and returns the honest `warmBoot` outcome (ADR-0034).
   const runBootRecoveryStage = async (): Promise<void> => {
     const recoveryOutcome = await bootReportBuilder.phase("journalRecovery", "boot journal recovery", () =>
-      mutationRuntime.runBootRecovery({ ownsMetaTable: !options.pgliteInstance, restore: restoreBoot }),
+      mutationRuntime.runBootRecovery({ ownsMetaTable: !options.pgwasmInstance, restore: restoreBoot }),
     );
     bootReportBuilder.setJournalRecovery(recoveryOutcome);
   };
 
   const runReconcileStage = async (): Promise<void> => {
-    if (options.pgliteInstance) return;
+    if (options.pgwasmInstance) return;
     versionEvent = await bootReportBuilder.phase("storeVersionReconcile", "boot store-version reconcile", () =>
       reconcileLocalStoreVersion({
         db: pglite,
@@ -2737,7 +2706,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // still in flight (React StrictMode mount/unmount is the canonical case). `disposed` lets the tail bail at
   // each stage boundary — before setting `isRunning`, before starting sync — so no shape stream starts after a
   // stop; and `stop`/`destroy` await `bootSettled` before teardown so the tail can never exec against a
-  // closing PGlite.
+  // closing pgwasm.
   let disposed = false;
   // Resolves the moment `sync` is wired (and the activation buffer replayed); rejects if the boot is disposed
   // or the tail fails before wiring — so a read seam awaiting it in the pre-wire window unblocks rather than
@@ -2760,7 +2729,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // called while the tail is still in flight (React StrictMode mount/unmount). Flag disposal so the tail bails
   // at its next stage boundary (never starting sync after this), gracefully release any read seam parked on
   // `syncWired` (it then falls through to the local-only path), then AWAIT `bootSettled` — swallowing a tail
-  // failure — so the tail has fully SETTLED before teardown touches the engine/PGlite. Any sync the tail did
+  // failure — so the tail has fully SETTLED before teardown touches the engine/pgwasm. Any sync the tail did
   // manage to start is assigned to `sync` by the time this resolves, for the caller's `sync?.unsubscribe()`.
   const quiesceTailForTeardown = async (): Promise<void> => {
     disposed = true;
@@ -3337,7 +3306,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // The worker host's guarded one-shot read (ADR-0032 decision 4) — `rawQuery` PLUS the shared gate+guard.
   // `defineSyncWorker`'s `guardedQuery` handler calls this on its owned in-process client (re-applying
   // drizzle's identity parsers — temporal OIDs + numeric[] — in `options` first, since that parser map cannot cross the bridge);
-  // the attach client's Drizzle-over-bridge routes reads here. Returns the full PGlite `Results` so drizzle's
+  // the attach client's Drizzle-over-bridge routes reads here. Returns the full pgwasm `Results` so drizzle's
   // own result mapping runs on the tab.
   const guardedRawQuery: SyncClient<TRegistry>["guardedRawQuery"] = async (sql, params, options, use) => {
     await gateAndGuardRead(sql, use);
@@ -3356,7 +3325,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
 
   const client: SyncClient<TRegistry> = {
     drizzle: drizzleDb,
-    pglite,
+    pgwasm: pglite,
     views: buildViews(options.registry),
     tables: Object.fromEntries(
       Object.keys(options.registry).map((tableKey) => [
@@ -3386,9 +3355,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       haltActivity();
       // ADR-0041: quiesce the background boot tail FIRST — flag disposal (so it never starts sync after this)
       // and await its settlement — so no shape stream is left running and nothing execs against the closing
-      // PGlite. Any sync the tail started before disposal is now in `sync` for the unsubscribe below.
+      // pgwasm. Any sync the tail started before disposal is now in `sync` for the unsubscribe below.
       await quiesceTailForTeardown();
-      // Await any in-flight convergence pass before closing PGlite, so a pass never queries a
+      // Await any in-flight convergence pass before closing pgwasm, so a pass never queries a
       // closed handle. The Event-lane flush pass is awaited on the same rule, for the same reason.
       await convergenceDriver?.stop();
       await eventFlushDriver?.stop();
@@ -3399,7 +3368,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // point PGlite's own close used to invoke the former extension's close hook (ADR-0032 S1). Order
       // preserved: convergence stop → sync unsubscribe → status → engine close → pglite close.
       sync?.unsubscribe();
-      // Dispose the live-query manager before closing PGlite (ADR-0040 decisions 1 & 6): it cancels any
+      // Dispose the live-query manager before closing pgwasm (ADR-0040 decisions 1 & 6): it cancels any
       // keep-alive timers and awaits every in-flight live `unsubscribe()`, so none races `pglite.close()`.
       await liveManager.dispose();
       await pglite.close();
@@ -3454,7 +3423,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         // Same teardown ordering as `stop`: abort the engine's streams before closing the DB, the moment
         // the former extension close hook fired during `pglite.close()` (ADR-0032 S1).
         sync?.unsubscribe();
-        // Dispose the live-query manager before closing PGlite — same close-vs-unsubscribe hang guard as
+        // Dispose the live-query manager before closing pgwasm — same close-vs-unsubscribe hang guard as
         // `stop()` (ADR-0040 decisions 1 & 6).
         await liveManager.dispose();
         await pglite.close();
@@ -3462,7 +3431,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         // now finish the store-meta / OPFS-namespace side. Every recorded browser store runs the full destructive
         // lifecycle (set `deleting` → delete commitment
         // sentinel → delete both possible backend stores → delete meta). Wiping application tables and closing
-        // PGlite do NOT delete its IndexedDB database; retaining that shell would make the next granted boot
+        // pgwasm do NOT delete its IndexedDB database; retaining that shell would make the next granted boot
         // classify it as an existing recordless idb store instead of a genuinely fresh path. A recordless lifecycle-owned
         // IDB store therefore enters the same machine; memory, filesystem, non-browser, and caller-owned stores
         // have no toolkit browser authority to finish.
@@ -3574,11 +3543,11 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     mutations: undefined as unknown as MutationsApi<TRegistry>,
     // Inspection surface (see the interface doc): straight through to the underlying store, no journal /
     // overlay involvement. The worker facade runs the identical call inside the worker's own client.
-    // `options.blob` is the single-statement COPY form: the bytes are wrapped into the `Blob` PGlite reads
+    // `options.blob` is the single-statement COPY form: the bytes are wrapped into the `Blob` pgwasm reads
     // from `/dev/blob` (see {@link toPgliteQueryOptions}) — a bulk load that needs no transaction around it.
     rawQuery: (sql, params, options) =>
       pglite.query(sql, params as unknown[] | undefined, toPgliteQueryOptions(options)),
-    // `rawExec` takes no blob: PGlite's `exec` runs a multi-statement script through the simple protocol,
+    // `rawExec` takes no blob: pgwasm's `exec` runs a multi-statement script through the simple protocol,
     // which has no `/dev/blob` hook — a COPY-from-blob load goes through `rawQuery`/`rawTransaction`.
     rawExec: (sql, options) => pglite.exec(sql, withoutCopyBlob(options)),
     // The atomic form of the same surface. `pglite.transaction` opens ONE transaction and rolls it back on a
@@ -3593,7 +3562,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         const results: Results[] = [];
         for (const statement of statements) {
           // A statement carrying `blob` is a `COPY … FROM '/dev/blob'` bulk load: its bytes become the
-          // `Blob` PGlite reads, for THAT statement only. Every other statement is unaffected.
+          // `Blob` pgwasm reads, for THAT statement only. Every other statement is unaffected.
           results.push(
             await tx.query(
               statement.sql,
@@ -3632,7 +3601,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // per-subscription `LiveRowsMaterializer` (the SAME piece `attachSyncClient` uses tab-side), so the
     // public `onRows(rows)` / `initialRows` contract is byte-unchanged — and unchanged rows now keep `===`
     // identity across diffs (a bonus the raw `results.rows` path did not give). Keyless (no `pkColumns`)
-    // exactly as the inline seam was: PGlite's `live.query` + the manager's value-identity diff.
+    // exactly as the inline seam was: pgwasm's `live.query` + the manager's value-identity diff.
     subscribeLiveRows: async ({ sql, params, fields, use, keepAliveMs }, onRows) => {
       // Read gate (ADR-0041): do not register a live query before the local-read core has finished (a
       // settled-promise await on the steady-state client — cheap, and stage-2-safe).
@@ -3688,7 +3657,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         unsubscribe: () => {
           unsubscribed = true;
           // Non-blocking for the caller; the manager retains the teardown promise so `dispose()` (called by
-          // `stop()`/`destroy()`) awaits it before closing PGlite (ADR-0040 decision 1 — the close race).
+          // `stop()`/`destroy()`) awaits it before closing pgwasm (ADR-0040 decision 1 — the close race).
           void subscription.unsubscribe();
         },
         ...(lazyTables.length > 0 ? { lazyTables } : {}),
@@ -3705,7 +3674,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // Await engine-ready first (ADR-0035: exports wait out a boot rather than rejecting during it), THEN
       // take the lifecycle slot — a concurrent export/lifecycle op is refused with a typed busy error.
       await ready;
-      // Name the backup from the configured plain store PATH (ADR-0036), never the PGlite instance's
+      // Name the backup from the configured plain store PATH (ADR-0036), never the pgwasm instance's
       // resolved dataDir URL — a resolved URL is internal plumbing and must not leak into an artefact name
       // as something to imitate. The store id is the path's last segment (see `deriveStoreId`).
       return lifecycleSlot.run("exportStore", () =>
@@ -3856,7 +3825,7 @@ function allGroupSubscriptionKeys<TRegistry extends SyncTableRegistry>(registry:
   return [...new Set(keys)];
 }
 
-async function resetSubscriptionsIfRequested(pglite: ClientPGlite, keys: string[] | undefined) {
+async function resetSubscriptionsIfRequested(pglite: PgwasmClient, keys: string[] | undefined) {
   if (!keys || keys.length === 0) {
     return;
   }
@@ -3876,7 +3845,7 @@ async function resetSubscriptionsIfRequested(pglite: ClientPGlite, keys: string[
 }
 
 function createDrizzleDatabase<TRegistry extends SyncTableRegistry>(
-  client: ClientPGlite,
+  client: PgwasmClient,
   schema: RegistryTables<TRegistry>,
 ) {
   const relations = defineRelations(schema) as RegistryRelations<TRegistry>;
@@ -3902,13 +3871,13 @@ function buildViews<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
  * identically. The `client` argument is the executor Drizzle runs against:
  * - Omit it (the default `{}` stub) for a BUILD-ONLY instance — Drizzle only compiles to SQL (`.toSQL()`)
  *   and the stub is never invoked; used where execution happens elsewhere (e.g. the live-rows bridge).
- * - Pass a `ClientPGlite`-shaped BRIDGE executor (its `query` routes to the worker's `guardedQuery` RPC) so
+ * - Pass a `PgwasmClient`-shaped BRIDGE executor (its `query` routes to the worker's `guardedQuery` RPC) so
  *   that awaiting a builder executes through the bridge and Drizzle's own result mapping (relational/nested
  *   queries included) runs on the tab — the one-shot read path `attachSyncClient` wires (ADR-0032 decision 4).
  */
 export function buildRegistryReadHandles<TRegistry extends SyncTableRegistry>(
   registry: TRegistry,
-  client: ClientPGlite = {} as ClientPGlite,
+  client: PgwasmClient = {} as PgwasmClient,
 ): {
   drizzle: PgwasmDatabase<RegistryRelations<TRegistry>>;
   views: RegistryViews<TRegistry>;
@@ -3918,7 +3887,7 @@ export function buildRegistryReadHandles<TRegistry extends SyncTableRegistry>(
    * without recomputing them. `attachSyncClient` uses it to give each `queryRaw`/`queryRawRow` its OWN
    * bridge executor carrying that call's `use` — a scoped db, never a shared mutable stash (no read races).
    */
-  drizzleFor: (client: ClientPGlite) => PgwasmDatabase<RegistryRelations<TRegistry>>;
+  drizzleFor: (client: PgwasmClient) => PgwasmDatabase<RegistryRelations<TRegistry>>;
 } {
   const drizzleFor = buildRegistryDrizzleFactory(registry);
   return {
@@ -3936,7 +3905,7 @@ export function buildRegistryReadHandles<TRegistry extends SyncTableRegistry>(
  */
 function buildRegistryDrizzleFactory<TRegistry extends SyncTableRegistry>(
   registry: TRegistry,
-): (client: ClientPGlite) => PgwasmDatabase<RegistryRelations<TRegistry>> {
+): (client: PgwasmClient) => PgwasmDatabase<RegistryRelations<TRegistry>> {
   const relations = defineRelations(buildSchema(registry)) as RegistryRelations<TRegistry>;
   return (client) => drizzle(client, { relations });
 }

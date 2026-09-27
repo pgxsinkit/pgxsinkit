@@ -14,7 +14,7 @@ import { harnessCall, PLACEMENT_SERVER_URL, serverControl, serverCount, uniqueSt
 // stamp (initdb ran once, at provision time, NOT re-run at attach — no double initdb, no second engine).
 //
 // The proof of adoption is the BootReport's `provision` stamp — initdb ran ONCE, at provision time — with a NULL
-// `phases.pgliteCreateMs` (the boot ran NO create of its own): the store the boot uses IS the pre-spawned one (no
+// `phases.pgwasmCreateMs` (the boot ran NO create of its own): the store the boot uses IS the pre-spawned one (no
 // double initdb, no second engine). This holds on every engine (chromium/firefox pre-spawn opfs-repacked, WebKit
 // idbfs); the adopted-opfs BootReport omits `storageBackend` (the opfs-repacked VFS reports no dataDir), so this
 // lane keys on the provision stamp, not the backend field.
@@ -32,7 +32,7 @@ test("provision-then-attach on one tab adopts the provision grant (no second eng
 
   const report = (await harnessCall(page, "bootReport", store)) as {
     ok: boolean;
-    report?: { provision?: { initdbMs?: number } | null; phases?: { pgliteCreateMs?: number | null } };
+    report?: { provision?: { initdbMs?: number } | null; phases?: { pgwasmCreateMs?: number | null } };
   };
   expect(report.ok).toBe(true);
   // Adopted: the boot carries the provision stamp (initdb ran at provision time) …
@@ -41,7 +41,7 @@ test("provision-then-attach on one tab adopts the provision grant (no second eng
     `boot should carry a provision stamp (adopted), got ${JSON.stringify(report.report?.provision)}`,
   ).not.toBeNull();
   // … and ran NO create of its own — the single initdb, never doubled.
-  expect(report.report?.phases?.pgliteCreateMs).toBeNull();
+  expect(report.report?.phases?.pgwasmCreateMs).toBeNull();
 
   await harnessCall(page, "cleanup", store);
 });

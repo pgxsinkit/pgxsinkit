@@ -603,7 +603,7 @@ describe("execution-limit verdict (incoming engine-retiring for the current engi
 
   // ADR-0049 step 11b follow-up 1: the DEFAULT ownership-release wait is the documented NO-OP
   // `resolvedOwnershipRelease` (the OPFS-repacked VFS uses exclusive sync-access handles, not a Web Lock, so the
-  // bounded wait lives in the SUCCESSOR'S OPEN PATH — `createOpfsRepacked` retries on `StoreOwnedError`). With the
+  // bounded wait lives in the SUCCESSOR'S OPEN PATH — `createOpfsPgwasm` retries on `StoreOwnedError`). With the
   // no-op the coordinator respawns immediately after a deliberate terminate — it never blocks on ownership here.
   it("with the default no-op ownership release → respawns immediately (the open path is the real gate)", async () => {
     const { deps, h } = makeHarness();

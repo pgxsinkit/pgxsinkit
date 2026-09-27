@@ -6,7 +6,7 @@ import { createSyncClient } from "@pgxsinkit/client";
 
 import { buildSyntheticRegistry } from "./support/synthetic-registry";
 
-// Registry-WIDTH lane for cold-engine WARM-store boot (PGlite-only, no containers). For each writable-table
+// Registry-WIDTH lane for cold-engine WARM-store boot (pgwasm-only, no containers). For each writable-table
 // width we boot a filesystem-backed client, let boot finish, close it cleanly (the store persists on disk),
 // then boot a SECOND client on the SAME store path — that second boot is the cold-engine/warm-store case the
 // warm-store fast paths target. We record the BootReport phase timings + `warmBoot` flags.
@@ -33,7 +33,7 @@ const WARM_BOOT_TMP_ROOT = path.resolve(process.cwd(), "tmp/perf-warm-boot");
 const EXTRA_COLUMN_COUNT = 4;
 
 // Unreachable sync endpoints: boot runs with sync OFF, so these are never dialled. Mirrors the
-// PGlite-only pattern in client-local-optimistic.perf.test.ts.
+// pgwasm-only pattern in client-local-optimistic.perf.test.ts.
 const DEAD_CONTROL_PLANE = "http://127.0.0.1:1";
 const DEAD_STREAM_BASE = "http://127.0.0.1:1/v1/stream";
 const UNREACHABLE_WRITE_URL = "http://127.0.0.1:1/api/mutations";
@@ -42,7 +42,7 @@ interface WarmBootMeasurement {
   schemaExecMs: number;
   journalRecoveryMs: number;
   storeVersionReconcileMs: number;
-  pgliteCreateMs: number | null;
+  pgwasmCreateMs: number | null;
   totalMs: number;
   // ADR-0041 staged-boot stages (offsets from boot start): local-read core done / write runtime + recovery done.
   localReadReadyMs: number | null;
@@ -84,7 +84,7 @@ async function bootAndCapture(tableCount: number, storePath: string): Promise<Wa
       schemaExecMs: report.phases.schemaExecMs,
       journalRecoveryMs: report.phases.journalRecoveryMs,
       storeVersionReconcileMs: report.phases.storeVersionReconcileMs,
-      pgliteCreateMs: report.phases.pgliteCreateMs,
+      pgwasmCreateMs: report.phases.pgwasmCreateMs,
       totalMs: report.totalMs,
       localReadReadyMs: report.localReadReadyMs,
       writeReadyMs: report.writeReadyMs,
@@ -94,7 +94,7 @@ async function bootAndCapture(tableCount: number, storePath: string): Promise<Wa
       schemaFingerprintMatch: report.warmBoot.schemaFingerprintMatch,
     };
   } finally {
-    // stop() closes the engine + PGlite but leaves the store on disk (distinct from destroy(), which
+    // stop() closes the engine + pgwasm but leaves the store on disk (distinct from destroy(), which
     // wipes it) — exactly the warm-store precondition for the next boot.
     await client.stop();
   }
@@ -152,7 +152,7 @@ describe("performance: warm-boot registry width (PGlite-only, no containers)", (
         schemaExecMs: median(width16Iterations.map((m) => m.schemaExecMs)),
         journalRecoveryMs: median(width16Iterations.map((m) => m.journalRecoveryMs)),
         storeVersionReconcileMs: median(width16Iterations.map((m) => m.storeVersionReconcileMs)),
-        pgliteCreateMs: median(width16Iterations.map((m) => m.pgliteCreateMs ?? 0)),
+        pgwasmCreateMs: median(width16Iterations.map((m) => m.pgwasmCreateMs ?? 0)),
         totalMs: median(width16Iterations.map((m) => m.totalMs)),
         localReadReadyMs: median(width16Iterations.map((m) => m.localReadReadyMs ?? 0)),
         writeReadyMs: median(width16Iterations.map((m) => m.writeReadyMs ?? 0)),
@@ -181,7 +181,7 @@ describe("performance: warm-boot registry width (PGlite-only, no containers)", (
         "journalRecoveryMs",
         "recSkipped",
         "storeVerReconcileMs",
-        "pgliteCreateMs",
+        "pgwasmCreateMs",
         "localReadReadyMs",
         "writeReadyMs",
         "totalMs",
@@ -199,7 +199,7 @@ describe("performance: warm-boot registry width (PGlite-only, no containers)", (
               fmt(row.measurement.journalRecoveryMs),
               String(row.measurement.journalRecoverySkipped),
               fmt(row.measurement.storeVersionReconcileMs),
-              fmt(row.measurement.pgliteCreateMs),
+              fmt(row.measurement.pgwasmCreateMs),
               fmt(row.measurement.localReadReadyMs),
               fmt(row.measurement.writeReadyMs),
               fmt(row.measurement.totalMs),

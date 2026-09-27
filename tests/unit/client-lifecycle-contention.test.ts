@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 // Lifecycle-slot ADOPTION on the in-process client (ADR-0035 decision 4): `destroy()`, `discardEphemeral()`,
 // and `dropReadCache()` now run inside the SAME single-occupancy slot the three exports use, so a destructive
 // op can never interleave a running export (nor an export interleave a destructive op) — the typed
-// {@link LifecycleBusyError} fires in BOTH directions. Uses a REAL in-memory PGlite (`syncEnabled: false`, no
+// {@link LifecycleBusyError} fires in BOTH directions. Uses a REAL in-memory pgwasm (`syncEnabled: false`, no
 // network); the contention is made deterministic by GATING the export's `dumpDataDir` on a barrier we
 // control, so the export provably holds the slot at the moment the second op is attempted (no timing races).
 
@@ -85,8 +85,8 @@ function holdSlotWithGatedExport(active: SyncClient<Registry>): {
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const realDump = active.pglite.dumpDataDir.bind(active.pglite);
-  spyOn(active.pglite, "dumpDataDir").mockImplementation(async (compression) => {
+  const realDump = active.pgwasm.dumpDataDir.bind(active.pgwasm);
+  spyOn(active.pgwasm, "dumpDataDir").mockImplementation(async (compression) => {
     // The export is inside the slot by the time `dumpDataDir` runs (slot claimed → CHECKPOINT → dump), so
     // signalling here means the slot is genuinely occupied; then block until the test releases us.
     markHeld();

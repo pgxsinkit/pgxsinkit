@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 // Diagnostic dump (ADR-0035, via the throwaway clone of the addendum) on the in-process client: a LIVE
-// datadir dump → memory-backed throwaway PGlite booted with `loadDataDir` → `pg_dump` against the clone →
-// the clone discarded, the live engine never touched. Uses a REAL in-memory PGlite (`syncEnabled: false`,
+// datadir dump → memory-backed throwaway pgwasm booted with `loadDataDir` → `pg_dump` against the clone →
+// the clone discarded, the live engine never touched. Uses a REAL in-memory pgwasm (`syncEnabled: false`,
 // no network) so the emitted SQL can be asserted directly. WASM-heavy (`pg_dump.wasm`): this file is in the
 // FULL unit lane only (`test:unit`), NOT `test:unit:fast`.
 
@@ -82,7 +82,7 @@ describe("exportDiagnostics throwaway-clone SQL dump (ADR-0035)", () => {
     });
     // Provision the pgxsinkit metadata schema exactly as the sync engine does at first sync — a real synced
     // store carries `subscriptions_metadata`, and `syncEnabled:false` never starts sync to create it itself.
-    await migrateSubscriptionMetadataTables({ pg: client.pglite, metadataSchema: DEFAULT_METADATA_SCHEMA });
+    await migrateSubscriptionMetadataTables({ pg: client.pgwasm, metadataSchema: DEFAULT_METADATA_SCHEMA });
 
     const { file, report } = await client.exportDiagnostics();
 

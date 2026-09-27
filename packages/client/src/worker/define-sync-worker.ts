@@ -33,8 +33,8 @@ import { setSyncDebugSink, syncDebug } from "../debug";
 import { describeErrorChain } from "../error-chain";
 import type { EventLaneOptions } from "../event-lane";
 import {
-  type ClientPGlite,
-  createClientPGlite,
+  type PgwasmClient,
+  createPgwasmClient,
   type CreateSyncClientOptions,
   createSyncClient,
   type DataExportOptions,
@@ -126,12 +126,12 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    */
   resolveRegistry?: (role: string | undefined) => TRegistry | undefined;
   /**
-   * How the worker creates its raw PGlite store (provision + fresh-attach paths). Defaults to
-   * {@link createClientPGlite}, which loads PGlite's own boot assets — in a browser worker those hit the
+   * How the worker creates its raw pgwasm store (provision + fresh-attach paths). Defaults to
+   * {@link createPgwasmClient}, which loads pgwasm's own boot assets — in a browser worker those hit the
    * same-origin HTTP cache the tab's login-screen warm already primed (ADR-0032 S3). Injected in tests.
    * Takes a plain store PATH (ADR-0036); the internal `backendOverride` is the test lane's memory selection.
    */
-  createPglite?: (storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>;
+  createStore?: (storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>;
   /**
    * How this scope imports a DECLARED store-engine module (ADR-0050 addendum 2026-09-08). Defaults to the
    * scope's own dynamic `import()`; injected by a unit test that has no module to load. It is consulted
@@ -202,14 +202,14 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
   /** Injected codec (ADR-0032 S2 §1). Defaults to the v1 identity codec. */
   codec?: BridgeCodec;
   /**
-   * A raw PGlite the worker uses instead of creating its own (forwarded to `createSyncClient`'s
-   * {@link CreateSyncClientOptions.precreatedPglite}) — the client still applies schema/reconcile. In a
+   * A raw pgwasm the worker uses instead of creating its own (forwarded to `createSyncClient`'s
+   * {@link CreateSyncClientOptions.precreatedPgwasm}) — the client still applies schema/reconcile. In a
    * browser worker the store is minted internally (`storePath`); this is the seam for a prepopulated store in
    * tests, and the future spare-worker claim (ADR-0032 decision 5).
    */
-  precreatedPglite?: CreateSyncClientOptions<TRegistry>["precreatedPglite"];
-  /** A fully-provisioned PGlite (forwarded to {@link CreateSyncClientOptions.pgliteInstance}; caller owns schema). */
-  pgliteInstance?: CreateSyncClientOptions<TRegistry>["pgliteInstance"];
+  precreatedPgwasm?: CreateSyncClientOptions<TRegistry>["precreatedPgwasm"];
+  /** A fully-provisioned pgwasm (forwarded to {@link CreateSyncClientOptions.pgwasmInstance}; caller owns schema). */
+  pgwasmInstance?: CreateSyncClientOptions<TRegistry>["pgwasmInstance"];
   /**
    * App-level schema prep run IN THE WORKER, against the engine's own local store, BEFORE the registry
    * schema exec — forwarded verbatim to {@link CreateSyncClientOptions.prepareLocalDbBeforeSchema}, same
@@ -219,8 +219,8 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    * a bespoke schema search_path). On a fresh store the registry-derived local tables do NOT yet exist when
    * this runs (that ordering is what distinguishes it from {@link prepareLocalDbAfterSchema}).
    *
-   * Runs on the storePath, {@link precreatedPglite}, and restore boots; SKIPPED entirely on the
-   * {@link pgliteInstance} path (the caller owns schema/prepare/reconcile there). On a restore boot it still
+   * Runs on the storePath, {@link precreatedPgwasm}, and restore boots; SKIPPED entirely on the
+   * {@link pgwasmInstance} path (the caller owns schema/prepare/reconcile there). On a restore boot it still
    * runs, but the store already carries the registry tables from the backup's datadir, so the "tables absent"
    * invariant does not hold there.
    */
@@ -232,17 +232,17 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    * tab never sees it — functions cannot cross the bridge). Use it for app-level indexes, views, or migrations
    * that depend on the registry's local tables, which DO exist by the time this runs.
    *
-   * Runs on the storePath, {@link precreatedPglite}, and restore boots; SKIPPED entirely on the
-   * {@link pgliteInstance} path (the caller owns schema/prepare/reconcile there).
+   * Runs on the storePath, {@link precreatedPgwasm}, and restore boots; SKIPPED entirely on the
+   * {@link pgwasmInstance} path (the caller owns schema/prepare/reconcile there).
    */
   prepareLocalDbAfterSchema?: CreateSyncClientOptions<TRegistry>["prepareLocalDbAfterSchema"];
   /**
    * Bounded zero-subscriber keep-alive for the live-query manager (ADR-0040 decision 4). When an entry's last
-   * subscriber leaves, a nonzero effective keep-alive retains its PGlite registration + diff state for a grace
+   * subscriber leaves, a nonzero effective keep-alive retains its pgwasm registration + diff state for a grace
    * period so a matching resubscribe (e.g. a re-mounted route across tabs) reuses it verbatim — no ~400 ms
    * re-materialization. Bounded by explicit budgets; DEFAULTS OFF (`defaultKeepAliveMs: 0` → tear a query
    * down the instant its last consumer leaves). The 0 default is justified: a retained entry STILL pays a
-   * full SQL rerun + diff on every dependent write — PGlite live queries cannot be paused — so retention
+   * full SQL rerun + diff on every dependent write — pgwasm live queries cannot be paused — so retention
    * only pays off for a genuinely hot, re-mounted query, and the default keeps worker memory bounded with
    * no surprise standing SQL reruns.
    */
@@ -297,7 +297,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     );
   }
   // ADR-0049 D1: the placement probe's OPFS grant for THIS SharedWorker lifetime. Set true only by a GRANTED
-  // `shared-worker` (SW-direct) probe, so both the provision-mint (default `createPglite` factory) and the boot
+  // `shared-worker` (SW-direct) probe, so both the provision-mint (default `createStore` factory) and the boot
   // create (below) resolve the OPFS-repacked backend. False is the honest capability-absence invariant — the
   // engine home in this scope opens IDBFS: the registry-declared `backend: "idbfs"` mode (no probe ran), or a
   // capability-absence fallback (every home's probe denied / the OPFS API absent). Read at CALL time — every mint
@@ -343,9 +343,9 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   const currentDurability = () =>
     engineStorage?.durability ?? getSyncRegistryStorage(options.registry)?.durability ?? "relaxed";
   const builtInCreatePglite: StoreEngineFactory =
-    options.createPglite ??
+    options.createStore ??
     ((storePath: string, backendOverride?: "memory") =>
-      createClientPGlite(storePath, {
+      createPgwasmClient(storePath, {
         ...(backendOverride ? { backendOverride } : {}),
         durability: currentDurability(),
         // SW-direct placement grant (ADR-0049 D1): a spare minted in-scope opens OPFS-repacked, matching the boot.
@@ -353,14 +353,14 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       }));
   // The DECLARED store engine (ADR-0050 addendum 2026-09-08). A store whose bound declaration carries
   // `storage.engine` is minted by THAT module, not by the built-in factory — generically: the toolkit
-  // imports a module URL and calls its `createPglite`, and knows nothing else about the engine behind it.
+  // imports a module URL and calls its `createStore`, and knows nothing else about the engine behind it.
   // Resolved per module URL and memoized (rejections included) for this scope's lifetime.
   const resolveStoreEngine = createStoreEngineResolver(options.loadStoreEngineModule);
   // Read at MINT time, never at construction: the declaration arrives on the first provision/attach payload,
   // long after this closure is built, and it is immutable once bound — so every mint of this store resolves
   // the same engine. A declared module that will not load or exports no factory throws LOUDLY here; it never
   // degrades to the built-in store, which would report a healthy engine for one that never ran.
-  const createPglite: StoreEngineFactory = async (storePath, backendOverride) => {
+  const createStore: StoreEngineFactory = async (storePath, backendOverride) => {
     const declaredEngine = engineStorage?.engine?.module;
     if (declaredEngine === undefined) return await builtInCreatePglite(storePath, backendOverride);
     const factory = await resolveStoreEngine(declaredEngine);
@@ -368,21 +368,21 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     return await factory(storePath, backendOverride);
   };
   // A testing acknowledgment (ADR-0036) spread into THIS worker's options — needed when a test injects a
-  // non-persistent BYO store (`precreatedPglite` / `pgliteInstance` / a memory-returning `createPglite`),
+  // non-persistent BYO store (`precreatedPgwasm` / `pgwasmInstance` / a memory-returning `createStore`),
   // which `createSyncClient` would otherwise refuse. Forwarded to the boot below. A browser worker never
   // sets it; a memory selection carried on the attach wire wins over it.
   const workerTestMarker = readTestStoreMarker(options);
 
   const ports = new Set<BridgePort>();
   const liveSubs = new Map<string, LiveSub>();
-  // The live-query lifecycle (PGlite registration, diff listener, and the ADR-0040 decision-1 awaited-teardown
+  // The live-query lifecycle (pgwasm registration, diff listener, and the ADR-0040 decision-1 awaited-teardown
   // set) lives in a single manager owned per engine. Created lazily on first subscribe because it needs the
   // booted client's `live` namespace (`active.pglite.live`); the worker never restarts its engine in place
   // (ADR-0040 decision 7), so one manager serves the host's whole lifetime. `close()` disposes it.
   let liveManager: LiveQueryManager | null = null;
   const ensureLiveManager = (active: SyncClient<TRegistry>): LiveQueryManager =>
     (liveManager ??= createLiveQueryManager({
-      live: active.pglite.live,
+      live: active.pgwasm.live,
       ...(options.liveQueries ? { policy: options.liveQueries } : {}),
     }));
   // Subscribes that have entered `handleSubscribe` but not yet reached `liveSubs.set` (they are mid-await on
@@ -411,14 +411,14 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   };
 
   // ─── Pre-spawned (schemaless) store — the spare flow (ADR-0032 decision 5) ────────────────────────
-  // A `provision` mints the raw PGlite (initdb only) and holds it idle here; the first real `attach`
-  // adopts it as `precreatedPglite` (the client still runs schema/journal recovery/reconcile). Provision
+  // A `provision` mints the raw pgwasm (initdb only) and holds it idle here; the first real `attach`
+  // adopts it as `precreatedPgwasm` (the client still runs schema/journal recovery/reconcile). Provision
   // is role-agnostic — the registry is chosen at attach — so the same warmed store serves either role.
   // `stamp` carries the spare's create timing (ADR-0034): a boot adopting this store reports the initdb cost
-  // as `BootReport.provision` (with `phases.pgliteCreateMs = null`) instead of timing a create it never ran.
+  // as `BootReport.provision` (with `phases.pgwasmCreateMs = null`) instead of timing a create it never ran.
   let provisioned: {
     storePath: string;
-    pglite: Promise<ClientPGlite>;
+    pglite: Promise<PgwasmClient>;
     stamp: Promise<{ initdbMs: number; provisionReadyAt: number }>;
   } | null = null;
   // A provision request performs a bounded authority read before it may mint. An attach that arrives during
@@ -684,7 +684,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     }
     // storePath-first, matching the `provision` handler's resolution (below): the board sends BOTH a bare
     // `storeId` (SharedWorker naming, tab-side) AND the real `storePath` (`pgxsinkit-board-<id>`), and the
-    // PGlite store lives at `storePath` — so the provisioned store's path must be what we adopt on.
+    // pgwasm store lives at `storePath` — so the provisioned store's path must be what we adopt on.
     // `storeId` is only a last-ditch fallback for a caller that passes it as the store path.
     const storePath = attach.storePath ?? attach.storeId ?? options.storePath ?? "pgxsinkit-overlay-v1";
     // The testing memory-backend override rides as an explicit wire field (a symbol does not survive
@@ -700,15 +700,15 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     const restoreFrom = attach.restore
       ? new Blob([attach.restore.buffer], { type: attach.restore.mimeType })
       : undefined;
-    // Adopt a matching pre-provisioned store (its initdb already ran off-thread) as `precreatedPglite`;
+    // Adopt a matching pre-provisioned store (its initdb already ran off-thread) as `precreatedPgwasm`;
     // createSyncClient falls back to a fresh `storePath` create if that promise rejects — a pure accelerator.
     // Never adopt when restoring (restore boots a brand-new store from the backup, not the provisioned one).
     const adoptingProvisioned = restoreFrom == null && provisioned != null && provisioned.storePath === storePath;
-    const precreatedPglite = adoptingProvisioned
+    const precreatedPgwasm = adoptingProvisioned
       ? provisioned!.pglite
       : restoreFrom
         ? undefined
-        : options.precreatedPglite;
+        : options.precreatedPgwasm;
     // The adopted spare's create timing feeds `BootReport.provision` (ADR-0034); absent otherwise.
     const provisionStamp = adoptingProvisioned ? provisioned!.stamp : undefined;
     if (adoptingProvisioned) {
@@ -741,8 +741,8 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       // omitted only for a plain test/Node scope with no browser placement.
       ...(placementEngineHome ? { engineHome: placementEngineHome } : {}),
       ...(provisionStamp ? { provisionStamp } : {}),
-      ...(precreatedPglite ? { precreatedPglite } : {}),
-      ...(options.pgliteInstance && restoreFrom == null ? { pgliteInstance: options.pgliteInstance } : {}),
+      ...(precreatedPgwasm ? { precreatedPgwasm } : {}),
+      ...(options.pgwasmInstance && restoreFrom == null ? { pgwasmInstance: options.pgwasmInstance } : {}),
       // App-level schema prep runs IN THE WORKER around the registry schema exec (before/after), exactly as
       // the in-process client. Worker-entry options, not attach options: functions cannot cross the bridge.
       ...(options.prepareLocalDbBeforeSchema ? { prepareLocalDbBeforeSchema: options.prepareLocalDbBeforeSchema } : {}),
@@ -755,7 +755,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       // SW-direct placement grant (ADR-0049 D1): thread a GRANTED probe's grant into the boot create so the engine
       // home in this SharedWorker scope opens the OPFS-repacked backend. Absent (false) is the honest IDBFS home —
       // the declared `backend: "idbfs"` mode or a capability-absence fallback. `createSyncClient` forwards it to
-      // its `createClientPGlite` boot create.
+      // its `createPgwasmClient` boot create.
       ...(placementOpfsAccess ? { hasOpfsSyncAccess: true } : {}),
       // ADR-0049 D1/D12: on a capability-absence fallback (OPFS was capable but no home could hold handles) the
       // engine boots IDBFS and stamps this verbatim reason into the BootReport's `storageFallbackReason`. Absent
@@ -813,7 +813,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       booted.onOutboxStatus((status) => broadcastEvent({ kind: "outbox-status", status }));
       booted.onEventLaneReport((report) => broadcastEvent({ kind: "event-lane-report", report }));
     } catch (error) {
-      // A client with no Event lane (a non-canonical write URL, or a caller-owned PGlite) refuses these
+      // A client with no Event lane (a non-canonical write URL, or a caller-owned pgwasm) refuses these
       // subscriptions. Nothing to bridge then — the RPCs refuse identically, so the tab still gets the
       // honest error at its own call site.
       syncDebug("worker: no Event lane to bridge", { error });
@@ -826,7 +826,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     // Drizzle-over-bridge arrives as the {@link GuardedQueryWireArgs} tuple `[sql, params?, { rowMode? }, use?]`:
     // the `parsers` map drizzle's pglite session normally passes could not cross the bridge (it is FUNCTIONS,
     // not clonable), so the tab stripped it and we re-apply the identical map here before executing. Without it
-    // PGlite's default parsers would turn the identity-parsed OIDs (temporal OIDs + `numeric[]`) into `Date`s
+    // pgwasm's default parsers would turn the identity-parsed OIDs (temporal OIDs + `numeric[]`) into `Date`s
     // and numbers, whereas the in-process drizzle session sees them as raw STRINGS — so a guarded read would
     // diverge from its in-process twin exactly on those columns. Typed against `GuardedQueryWireArgs` so the
     // decode here shares the wire contract with the tab-side encoders (attach-sync-client).
@@ -922,7 +922,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         // `ArrayBuffer` on the dispatch's transfer list, and a `Uint8Array` survives structured clone AS a
         // `Uint8Array` view over the transferred (zero-copy) buffer — so `args[0]` is already exactly the
         // `RawStatement[]` the in-process client takes, and the single `Uint8Array → Blob` wrap lives where
-        // it does in-process: inside that client, at the PGlite call. The tab's buffers are now detached.
+        // it does in-process: inside that client, at the pgwasm call. The tab's buffers are now detached.
         return active.rawTransaction(args[0] as readonly RawStatement[], args[1] as RawQueryOptions);
       case "guardedQuery":
         // Guarded one-shot Drizzle read (ADR-0032 decision 4): the ADR-0041 read gate + the ADR-0021
@@ -1131,7 +1131,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         const provision = payload as ProvisionPayload;
         const storePath = provision.storePath ?? provision.storeId ?? options.storePath ?? "pgxsinkit-overlay-v1";
         // The testing memory-backend override rides as an explicit wire field (ADR-0036) — a symbol does not
-        // survive structured clone, so the store's backend selection travels here and is passed to createPglite.
+        // survive structured clone, so the store's backend selection travels here and is passed to createStore.
         const backendOverride = provision.testStoreBackend;
         // ADR-0050: bind (or confirm) the store's storage declaration BEFORE the mint — the mint's durability
         // comes from it. An explicit disagreement with the bound declaration refuses THIS provision typed.
@@ -1251,7 +1251,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
           }
 
           const provisionStartedAt = nowStamp();
-          const pglite = Promise.resolve().then(() => createPglite(storePath, backendOverride));
+          const pglite = Promise.resolve().then(() => createStore(storePath, backendOverride));
           const stamp = pglite.then(() => {
             const readyAt = nowStamp();
             return { initdbMs: readyAt - provisionStartedAt, provisionReadyAt: readyAt };
@@ -1269,7 +1269,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
         provisionAttemptStorePath = storePath;
         provisionAttemptPending = true;
         // Heartbeat the pending attempt onto the rail so a stalled create is VISIBLE (the failure that
-        // motivated the budget showed `boot pglite.create start` and then nothing at all). Cleared on
+        // motivated the budget showed `boot pgwasm.create start` and then nothing at all). Cleared on
         // settlement below, so it never outlives the attempt it reports on.
         const heartbeat = setInterval(() => {
           syncDebug("worker store provision still pending", {
@@ -1412,7 +1412,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
           (error: unknown) => {
             // The engine boot rejected: tell THIS attaching tab so it rejects `attachSyncClient` instead of
             // hanging on the ack (ADR-0032 FIX 1), and clear `bootPromise` so a later attach retries the
-            // boot. Do NOT clear `provisioned`: a resolved provisioned PGlite holds the only open handle on
+            // boot. Do NOT clear `provisioned`: a resolved provisioned pgwasm holds the only open handle on
             // that store, so a retry must adopt it (createSyncClient falls back internally if it rejected).
             if (!alreadyBooted) bootPromise = null;
             postBridgeMessage(port, codec, "attach-ack", {

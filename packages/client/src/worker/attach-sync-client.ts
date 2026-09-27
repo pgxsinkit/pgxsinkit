@@ -32,7 +32,7 @@ import type { DiagnosticExportOptions, DiagnosticExportResult } from "../export-
 import type { StoreExportOptions, StoreExportResult } from "../export-store";
 import {
   buildRegistryReadHandles,
-  type ClientPGlite,
+  type PgwasmClient,
   ClientDisposedError,
   createMutationsApi,
   type LiveQueryDiagnostics,
@@ -151,7 +151,7 @@ export interface ElectedEngineWorker {
  * follow-up 1). The OPFS-repacked VFS enforces single-owner access with EXCLUSIVE OPFS sync-access handles
  * (`StoreOwnedError`), not a Web Lock, so there is no ownership lock to await from here without importing the
  * VFS. The bounded wait for the dead worker's agent to release the handle lives entirely in the SUCCESSOR'S OPEN
- * PATH: the respawned engine's `createOpfsRepacked` open retries on the owned-store contention error until it
+ * PATH: the respawned engine's `createOpfsPgwasm` open retries on the owned-store contention error until it
  * clears (the `openWithBoundedRetries` wrapper) — the fault-matrix "successor open retries on contention" row.
  * So the coordinator can respawn immediately after a deliberate terminate; its VFS open is the real gate.
  */
@@ -279,7 +279,7 @@ function resolveIdbDeleteSurface(meta?: StoreMetaDeps): IdbDeleteSurface | undef
   return (globalThis as { indexedDB?: IdbDeleteSurface }).indexedDB;
 }
 
-/** Delete-if-present the store's PGlite idb database; only `onsuccess` proves completion. */
+/** Delete-if-present the store's pgwasm idb database; only `onsuccess` proves completion. */
 function deleteStoreIdbDatabase(storePath: string, meta?: StoreMetaDeps): Promise<void> {
   const idb = resolveIdbDeleteSurface(meta);
   if (idb?.deleteDatabase == null) return Promise.resolve();
@@ -315,7 +315,7 @@ function deleteStoreIdbDatabase(storePath: string, meta?: StoreMetaDeps): Promis
 
 /**
  * Build the REAL {@link DestructionEffects} for a store — the OPFS commitment sentinel + store directory
- * (`opfs-effects.ts`), the meta record (`store-meta.ts`), and the PGlite idb database. The destruction machine is
+ * (`opfs-effects.ts`), the meta record (`store-meta.ts`), and the pgwasm idb database. The destruction machine is
  * backend-agnostic (`store-lifecycle.ts`): `deleteBackendStore` delete-if-presents BOTH the OPFS directory and
  * the idb database, so it works whichever backend the store used. Injectable IO (`opfs`/`meta`) so the wiring is
  * unit-testable with fakes.
@@ -749,8 +749,8 @@ export interface AttachSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * OPFS-repacked VFS enforces ownership with EXCLUSIVE OPFS sync-access handles (`StoreOwnedError` /
    * `STORE_OWNED`), NOT a Web Lock, so there is no lock name to `navigator.locks.request(..., { ifAvailable })`
    * against here. The bounded wait therefore lives in the SUCCESSOR'S OPEN PATH: the respawned elected engine
-   * worker's own `createOpfsRepacked` open throws the owned-store contention error and is retried with backoff
-   * (the `openWithBoundedRetries` wrapper in `createClientPGlite`) until the dead worker's agent releases the
+   * worker's own `createOpfsPgwasm` open throws the owned-store contention error and is retried with backoff
+   * (the `openWithBoundedRetries` wrapper in `createPgwasmClient`) until the dead worker's agent releases the
    * handle — exactly the fault-matrix row "VFS ownership-lock release lag → successor open retries on contention
    * until clear, bounded, then boot failure". Supply a custom async wait only to inject a real probe (tests do).
    */
@@ -2202,8 +2202,8 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   // ─── Assembled client ────────────────────────────────────────────────────────────────────────────
   const notSupported = (name: string) => (): never => {
     throw new Error(
-      `[pgxsinkit] ${name} is not available on a worker-attached client: the tab holds no local PGlite. ` +
-        `Direct store access (client.pglite) and store-lifecycle ops (destroy/dropReadCache) have no tab-local ` +
+      `[pgxsinkit] ${name} is not available on a worker-attached client: the tab holds no local pgwasm. ` +
+        `Direct store access (client.pgwasm) and store-lifecycle ops (destroy/dropReadCache) have no tab-local ` +
         `implementation. One-shot Drizzle reads (query/queryRow/queryRaw/queryRawRow), lazy activation ` +
         `(ensureSynced), and the write API ARE proxied to the worker.`,
     );
@@ -2230,7 +2230,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     const options = rowMode ? { rowMode } : {};
     return use ? [sql, params, options, use] : [sql, params, options];
   };
-  // A `ClientPGlite`-shaped bridge executor Drizzle runs reads against (ADR-0032 decision 4). Drizzle's pglite
+  // A `PgwasmClient`-shaped bridge executor Drizzle runs reads against (ADR-0032 decision 4). Drizzle's pglite
   // driver calls only `client.query` for reads and `client.transaction` for `.transaction()`. `query` routes
   // to the worker's `guardedQuery` RPC (stripping drizzle's non-serializable `parsers` to just `rowMode`; the
   // worker re-applies drizzle's identity parsers) and returns the full `Results` so Drizzle's mapping runs on
@@ -2239,12 +2239,12 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   // the builder in a microtask AFTER `queryRaw` returns, so a plain `query` issued synchronously in between
   // would drain its executor first and consume the wrong call's `use`. A per-read scoped executor cannot
   // cross-contaminate.
-  const makeBridgeExecutor = (use?: readonly string[]): ClientPGlite =>
+  const makeBridgeExecutor = (use?: readonly string[]): PgwasmClient =>
     ({
       query: (sql: string, params?: unknown[], options?: { rowMode?: "array" | "object" }): Promise<Results> =>
         rpc<Results>("guardedQuery", guardedQueryArgs(sql, params, options?.rowMode, use)),
       transaction: noBridgeTransaction,
-    }) as unknown as ClientPGlite;
+    }) as unknown as PgwasmClient;
   // The base (no-`use`) bridge database `client.drizzle` exposes, plus the cached factory that mints a fresh
   // database over a per-read `use`-carrying executor (the schema/relations are computed ONCE, ADR-0032
   // decision 4). `views` are unchanged.
@@ -2262,9 +2262,9 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   const client: AttachedSyncClient<TRegistry> = {
     drizzle,
     views,
-    // The tab has no local PGlite; reads go through the live-rows bridge. Touching `.pglite` is a misuse
+    // The tab has no local pgwasm; reads go through the live-rows bridge. Touching `.pgwasm` is a misuse
     // — the real trap is installed as a NON-ENUMERABLE throwing getter after this literal (see below).
-    pglite: undefined as never,
+    pgwasm: undefined as never,
     tables: Object.fromEntries(
       Object.keys(options.registry).map((tableKey) => [
         tableKey,
@@ -2570,14 +2570,14 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     },
   };
 
-  // The `pglite` misuse trap MUST be a NON-ENUMERABLE throwing getter, never an enumerable property
+  // The `pgwasm` misuse trap MUST be a NON-ENUMERABLE throwing getter, never an enumerable property
   // holding a throw-on-get Proxy: host tooling reflects over the client wherever the app hands it around
   // (React 19.2's dev-build render logging serializes prop diffs property-by-property — observed crashing
   // a <SyncClientProvider client={...}> re-render — and console inspection / object spreads do the same),
   // and an enumerable trap turns that passive reflection into a crash. Non-enumerable keeps the trap out
-  // of every enumeration path while a direct `client.pglite` touch still throws the misuse error.
-  Object.defineProperty(client, "pglite", {
-    get: notSupported("client.pglite"),
+  // of every enumeration path while a direct `client.pgwasm` touch still throws the misuse error.
+  Object.defineProperty(client, "pgwasm", {
+    get: notSupported("client.pgwasm"),
     enumerable: false,
     configurable: true,
   });
@@ -2621,7 +2621,7 @@ export type ProvisionSyncWorkerOptions<TRegistry extends SyncTableRegistry> = Pi
 
 /**
  * Pre-spawn a worker's store WITHOUT attaching (ADR-0032 decision 5). Sent at the board's login screen against a
- * freshly-named spare `SharedWorker`: the worker runs PGlite `create`/initdb only and holds the raw store idle
+ * freshly-named spare `SharedWorker`: the worker runs pgwasm `create`/initdb only and holds the raw store idle
  * until the real {@link attachSyncClient} claim adopts it. Resolves when the worker acks the provision (its initdb
  * settled); rejects if the worker reports the create failed, if it refuses the storage declaration, if the elected
  * engine is unconstructible, or — bounding the whole thing — with {@link ProvisionExpiredError} once

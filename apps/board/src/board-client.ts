@@ -12,10 +12,11 @@ import {
   type SyncClient,
 } from "@pgxsinkit/client";
 import { attachSyncRegistryStorage, type SyncRuntimeStatus } from "@pgxsinkit/contracts";
+import { createCBuild } from "@pgxsinkit/pgwasm-c";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 
 import { createOfflineControl, createWorkerOfflineControl, type OfflineControl } from "./board/offline";
-import { warmPgliteBootAssets } from "./board/pglite-warm";
+import { warmCBuildAssets } from "./board/pglite-warm";
 import {
   boardStorageDeclaration,
   readBackendPreference,
@@ -241,7 +242,7 @@ export async function createBoardSyncClient(
   // lives in this one scope, so stamping the boot-read demo preferences onto it IS the static declaration
   // `createSyncClient`'s single mint seam resolves. Same shape as the wire declaration
   // (`boardStorageDeclaration`: `durability` always, `backend: "idbfs"` only when forced, `engine` only when
-  // a drop-in is preferred). The precreate the store registry baked is already idb-only (createClientPGlite
+  // a drop-in is preferred). The precreate the store registry baked is already idb-only (createPgwasmClient
   // runs no opfs probe) and was minted by whatever engine the preference names (store-registry-default's
   // `createInProcessStore`), so this stamp only RECORDS the declared contract — it re-homes nothing.
   attachSyncRegistryStorage(
@@ -267,15 +268,15 @@ export async function createBoardSyncClient(
     // trips per catch-up hop (~1.2s) instead of following the caller (~300ms). See boardConfig.functionsRegion.
     ...(boardConfig.functionsRegion ? { writeRequestHeaders: { "x-region": boardConfig.functionsRegion } } : {}),
     // Consume the login-screen pre-warm (see ./board/pglite-warm): the WASM fetch+compile ran during
-    // identity-picker think-time, so `PGlite.create` skips its own cold asset load. The module-singleton
+    // identity-picker think-time, so the store's C build skips its own cold asset load. The module-singleton
     // returns the same promise the login mount already primed; a failed warm is caught internally and
-    // falls back to PGlite's own loading, so this never risks the boot.
-    pgliteBootAssets: warmPgliteBootAssets(),
+    // falls back to the build's own loading, so this never risks the boot.
+    build: createCBuild({ assets: warmCBuildAssets() }),
     getAuthToken: async () => {
       const { data } = await supabase.auth.getSession();
       return data.session?.user.id === userId ? data.session.access_token : undefined;
     },
-    ...(store.pglite ? { precreatedPglite: store.pglite } : {}),
+    ...(store.pglite ? { precreatedPgwasm: store.pglite } : {}),
     storePath: store.storePath,
     // Fresh-store prefetch overlap (ADR-0032 S4): the in-process fallback overlaps the shape catch-up with
     // schema exec + journal recovery + reconcile when the store is a just-claimed spare / fresh create.

@@ -26,7 +26,7 @@ import { closeOpenTestPgwasms, createFreshTestPgwasm } from "../support/pgwasm-s
 // error instead of a clean deny.
 //
 // These tests execute the real policies (built by the shipped builders, installed as CREATE POLICY DDL)
-// against the embedded PGlite engine. RLS is only enforced for a non-owner, non-superuser role, so the
+// against the embedded pgwasm engine. RLS is only enforced for a non-owner, non-superuser role, so the
 // session switches to `app_user` after seeding: the seed rows go in as the table owner (who bypasses
 // RLS), every assertion below runs as the governed role.
 

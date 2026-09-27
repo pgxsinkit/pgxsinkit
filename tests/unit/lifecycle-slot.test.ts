@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 // The single-occupancy engine lifecycle slot (ADR-0035 decision 4): one operation at a time, a second
-// entrant refused immediately with a typed busy error (no queueing). Pure — no PGlite, no bridge.
+// entrant refused immediately with a typed busy error (no queueing). Pure — no pgwasm, no bridge.
 
 import { createLifecycleSlot, LifecycleBusyError } from "../../packages/client/src/lifecycle-slot";
 

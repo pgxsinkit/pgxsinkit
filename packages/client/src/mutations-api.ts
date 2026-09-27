@@ -25,7 +25,7 @@ export type MutationSummaryDetail = MutationDetail;
 
 /**
  * Build-only Drizzle (compiles to SQL via `.toSQL()`; never executes) — same mock seam mutation.ts uses.
- * Lazily constructed: some unit suites mock `drizzle-orm/pglite`, so `drizzle.mock` is unavailable at module
+ * Lazily constructed: some unit suites mock `@pgxsinkit/pgwasm/drizzle`, so `drizzle.mock` is unavailable at module
  * load; a lazy builder is only reached when a real query is actually authored (never in those mocked boots).
  */
 let queryBuilderInstance: ReturnType<typeof drizzle.mock> | undefined;

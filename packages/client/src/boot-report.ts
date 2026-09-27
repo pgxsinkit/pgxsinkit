@@ -80,18 +80,18 @@ export interface BootReport {
   writeReadyMs: number | null;
   /**
    * Present only when the store was pre-provisioned (a spare's initdb ran off-thread before this boot
-   * adopted it); `null` otherwise. When present, `phases.pgliteCreateMs` is `null` — the create cost is
+   * adopted it); `null` otherwise. When present, `phases.pgwasmCreateMs` is `null` — the create cost is
    * reported here instead.
    */
   provision: {
-    /** The spare's PGlite create (initdb) cost, paid at provision time. */
+    /** The spare's pgwasm create (initdb) cost, paid at provision time. */
     initdbMs: number;
     /** How long the provisioned store sat ready before this boot adopted it. */
     provisionedMsBeforeBoot: number;
   } | null;
   phases: {
-    /** PGlite create cost, or `null` when the store was adopted from a spare (see {@link BootReport.provision}). */
-    pgliteCreateMs: number | null;
+    /** pgwasm create cost, or `null` when the store was adopted from a spare (see {@link BootReport.provision}). */
+    pgwasmCreateMs: number | null;
     schemaExecMs: number;
     journalRecoveryMs: number;
     storeVersionReconcileMs: number;
@@ -156,7 +156,7 @@ export interface BootReport {
      */
     fetchMs: number;
     /**
-     * Wall around this group's batch commits into PGlite. Includes waiting behind another group's
+     * Wall around this group's batch commits into pgwasm. Includes waiting behind another group's
      * transaction on the shared connection (single writer), so concurrent groups' `applyMs` can overlap.
      */
     applyMs: number;
@@ -174,7 +174,7 @@ type PhaseKey = "schemaExec" | "journalRecovery" | "storeVersionReconcile" | "sy
 export interface GroupBootStamp {
   /** A batch was delivered to the group's subscribe callback (one response). `changeCount` = its change rows. */
   onBatchDelivered: (changeCount: number) => void;
-  /** A commit transaction applied `ms` of work into PGlite for this group. */
+  /** A commit transaction applied `ms` of work into pgwasm for this group. */
   onApply: (ms: number) => void;
   /** The group reached its initial sync — stamp `readyAtMs` and freeze accumulation. */
   markReady: () => void;
@@ -329,7 +329,7 @@ export function createBootReportBuilder(init: BootReportInit): BootReportBuilder
   const bootStartPerf = nowMs();
   const durations = new Map<PhaseKey, number>();
   let prepareMs: number | null = null;
-  let pgliteCreateMs: number | null = null;
+  let pgwasmCreateMs: number | null = null;
   let provision: BootReport["provision"] = null;
   // Conservative defaults used until the boot path reports its actual schema and recovery outcomes through
   // the setters below.
@@ -369,7 +369,7 @@ export function createBootReportBuilder(init: BootReportInit): BootReportBuilder
       }
     },
     setPgliteCreateMs: (ms) => {
-      pgliteCreateMs = ms;
+      pgwasmCreateMs = ms;
     },
     setProvision: (value) => {
       provision = value;
@@ -432,7 +432,7 @@ export function createBootReportBuilder(init: BootReportInit): BootReportBuilder
         provision,
         warmBoot,
         phases: {
-          pgliteCreateMs,
+          pgwasmCreateMs,
           schemaExecMs: duration("schemaExec"),
           journalRecoveryMs: duration("journalRecovery"),
           storeVersionReconcileMs: duration("storeVersionReconcile"),

@@ -106,7 +106,7 @@ export interface AuthTokenSnapshot {
 
 /**
  * tab → worker: pre-spawn the store WITHOUT booting the engine (ADR-0032 decision 5). Sent at the
- * login screen against the freshly-named spare worker: the worker only runs PGlite `create`/initdb
+ * login screen against the freshly-named spare worker: the worker only runs pgwasm `create`/initdb
  * (off every thread that matters) and holds the raw store idle — no schema, no shape streams, no token
  * — until the real {@link AttachPayload} arrives (with config + token) and adopts the provisioned store.
  * Role-agnostic on purpose: the spare is minted before the user (and role) is known, so provisioning
@@ -154,7 +154,7 @@ export interface ProvisionAckPayload {
 export interface RestoreArtefactWire {
   /** The backup tarball bytes — transferred, not copied. */
   buffer: ArrayBuffer;
-  /** The backup file name (informational; PGlite's `loadDataDir` reads the bytes, not the name). */
+  /** The backup file name (informational; pgwasm's `loadDataDir` reads the bytes, not the name). */
   fileName: string;
   /** The backup MIME type (`application/x-gzip` / `application/x-tar`), used to rebuild the `Blob`. */
   mimeType: string;
@@ -333,7 +333,7 @@ export type RpcOp =
   // read to SQL on the tab and routes it here as the {@link GuardedQueryWireArgs} tuple
   // `[sql, params?, { rowMode? }, use?]`. Unlike `rawQuery` (raw inspection, no guard), the worker runs the
   // engine's `guardedRawQuery` — the ADR-0041 read gate + the ADR-0021 lazy-group guard (activating any lazy
-  // relation the SQL/`use` reference) — then returns the full PGlite `Results` over `rpc-result`, so Drizzle's
+  // relation the SQL/`use` reference) — then returns the full pgwasm `Results` over `rpc-result`, so Drizzle's
   // own result mapping runs on the tab. Only `rowMode` crosses in the options: drizzle's `parsers` map is
   // FUNCTIONS (non-serializable) and is stripped tab-side, then re-applied worker-side so the identity-parsed
   // OIDs (drizzle's identity parsers — temporal OIDs + numeric[]) round-trip as raw strings exactly as in-process.

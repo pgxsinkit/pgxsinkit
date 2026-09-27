@@ -303,7 +303,7 @@ describe("client facade contract", () => {
         // Simulate a returning user whose store was provisioned under an older registry
         // fingerprint, with nothing owed locally (a clean drain).
         const meta = getLocalMetaTable(projectsSyncRegistry);
-        await drizzleOver(firstClient.pglite as unknown as Pgwasm)
+        await drizzleOver(firstClient.pgwasm as unknown as Pgwasm)
           .update(meta)
           .set({ value: "older-fingerprint" })
           .where(eq(meta.key, "registry_fingerprint"));
@@ -589,7 +589,7 @@ describe("client facade contract", () => {
         expect(rejected).toHaveLength(1);
         expect(rejected[0]?.status).toBe("rejected");
         const overlayTable = getOverlayTable(projectsSyncRegistry, "projects");
-        const overlay = await drizzleOver(client.pglite as unknown as Pgwasm)
+        const overlay = await drizzleOver(client.pgwasm as unknown as Pgwasm)
           .select({ c: count() })
           .from(overlayTable)
           .where(eq(overlayTable["id"]!, projectId));

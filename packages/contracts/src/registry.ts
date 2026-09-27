@@ -128,7 +128,7 @@ type SyncTableInputGovernanceMarker<TGovernance> = {
 export interface SyncTableEntry<TTable extends AnyPgTable = AnyPgTable, TLocalTable extends AnyPgTable = TTable> {
   table: TTable;
   /**
-   * Projected client-side table for PGlite use. Columns listed in
+   * Projected client-side table for pgwasm use. Columns listed in
    * `clientProjection.omitColumns` (e.g. `created_by_id`) are absent from
    * both the runtime table definition and the TypeScript shape of this table.
    */
@@ -929,7 +929,7 @@ export function defineReadProjection<
   // accepted — `TOwnerTable` (the physical table) is what `columns`/`rowFilter` are typed against.
   owner: SyncTableEntry<TOwnerTable, TOwnerLocal>,
   opts: {
-    /** The projection's distinct local identity — its PGlite table name AND its `shapeKey`. */
+    /** The projection's distinct local identity — its pgwasm table name AND its `shapeKey`. */
     as: TAs;
     /** Column keys (of the owner) to sync locally + fetch on the shape. The PK is always kept. Omit → all. */
     columns?: TColumns;
@@ -1216,7 +1216,7 @@ export function defineSyncRegistry<const TRegistry extends { [TKey in keyof TReg
 }
 
 /** The local/shape identity an entry resolves to: its `shape.tableName` (the unique shape key a client
- * requests and the local PGlite table), falling back to the Drizzle table name when an entry has no
+ * requests and the local pgwasm table), falling back to the Drizzle table name when an entry has no
  * shape (a write-only table). A read projection carries a distinct `shape.tableName` (`as`) even though
  * its `table` is the owner's, so it is identified here by `as`, never by the shared physical table. */
 function localShapeIdentity(entry: SyncTableEntry<AnyPgTable>): string {
@@ -1225,7 +1225,7 @@ function localShapeIdentity(entry: SyncTableEntry<AnyPgTable>): string {
 
 /**
  * A registry must not declare the same local table twice. Every entry resolves to one local identity
- * ({@link localShapeIdentity}) — the PGlite table a client reads and the `shapeKey` the proxy resolves a
+ * ({@link localShapeIdentity}) — the pgwasm table a client reads and the `shapeKey` the proxy resolves a
  * request by — so two entries sharing it would collide locally (one shadows the other) and make the
  * shape unresolvable. A read PROJECTION over a shared physical table does NOT trip this: it carries a
  * DISTINCT local identity (`as`) and points at the owning table via the derived `shape.physicalTable`,
@@ -1281,7 +1281,7 @@ function validateRegistryLocalIndexNames(registry: SyncTableRegistry) {
  * A registry must not expose the same PUBLIC `shapeKey` twice. This is a DISTINCT identity from the
  * local table checked by {@link validateRegistryTableUniqueness}: `shapeKey` is what a subscription
  * request names on the wire and what the control plane resolves an entry by (`resolveEntryByShapeKey`
- * is first-match), while the local identity is the PGlite table a client reads into. They coincide by
+ * is first-match), while the local identity is the pgwasm table a client reads into. They coincide by
  * default (`shapeKey` falls back to `tableName`), so the local check already covers the common case,
  * and read projections over one physical table stay legal because `as` yields a distinct value for
  * BOTH identities. The only way to collide here is an EXPLICIT `shape.shapeKey` that diverges from the

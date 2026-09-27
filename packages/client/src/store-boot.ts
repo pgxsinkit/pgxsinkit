@@ -51,7 +51,7 @@ export type ResolvedStorageBackend = "opfs-repacked" | "idbfs" | "filesystem" | 
 
 /** The outcome of {@link resolveStoreBoot}: the URL to open the store at, its backend, and the boot verdict. */
 export interface StoreBootResolution {
-  /** The PGlite dataDir URL, always assembled by {@link resolveStoreDataDir} (the one URL assembler). */
+  /** The pgwasm dataDir URL, always assembled by {@link resolveStoreDataDir} (the one URL assembler). */
   dataDir: string;
   /** The resolved backend, for diagnostics. */
   storageBackend: ResolvedStorageBackend;
@@ -109,9 +109,9 @@ function resolveDeleteSurface(meta?: StoreMetaDeps): IdbDeleteSurface | undefine
 }
 
 /**
- * Delete-if-present the PGlite idb database for a store (`indexedDB.deleteDatabase`), backend-agnostic and
+ * Delete-if-present the pgwasm idb database for a store (`indexedDB.deleteDatabase`), backend-agnostic and
  * idempotent: absent counts as deleted, while a real failure rejects. The database name comes
- * ONLY from {@link storeIndexedDbDatabaseName} (store-path's sole owner of PGlite's `/pglite/` naming).
+ * ONLY from {@link storeIndexedDbDatabaseName} (store-path's sole owner of pgwasm's `/pglite/` naming).
  */
 function deleteIdbDatabase(storePath: string, meta?: StoreMetaDeps): Promise<void> {
   const idb = resolveDeleteSurface(meta);

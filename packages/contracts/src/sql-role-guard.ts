@@ -2,7 +2,7 @@
  * The single role-existence guard used by every pgxsinkit-emitted GRANT/REVOKE.
  *
  * pgxsinkit artifacts are portable: the same migration runs on a Supabase-shaped cluster (where
- * `anon`/`authenticated`/`service_role` exist), on a plain Postgres, and on a PGlite test lane
+ * `anon`/`authenticated`/`service_role` exist), on a plain Postgres, and on a pgwasm test lane
  * (where none of them do). A bare `REVOKE … FROM anon` is a hard error where the role is absent, so
  * every role-scoped grant/revoke is wrapped in a `DO $$ … IF EXISTS (SELECT 1 FROM pg_roles …)`
  * block and simply does nothing there.

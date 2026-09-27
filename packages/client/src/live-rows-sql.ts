@@ -2,7 +2,7 @@ import { quoteIdentifier } from "@pgxsinkit/contracts";
 
 // ─── Live-read materialization safety (ADR-0032 S2 §4) ───────────────────────────────────────────────
 //
-// The live-rows seam feeds the compiled SQL of a Drizzle-built select into PGlite's `live` extension,
+// The live-rows seam feeds the compiled SQL of a Drizzle-built select into pgwasm's `live` extension,
 // which MATERIALISES the query (a temp view + state table it diffs against). Drizzle emits no output
 // aliases — it maps result columns positionally — so a JOIN whose tables share a column name (two
 // `title`) compiles to a SELECT with duplicate OUTPUT column names. That is legal as a plain one-shot

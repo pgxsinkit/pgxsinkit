@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 //      `bootSettled` promises resolve off the attach-ack fold (late attach) AND off the `milestone`/
 //      `milestone-error` broadcasts (attached-when-it-crosses), and a tail failure rejects the downstream
 //      stages while the ALREADY-RESOLVED attach + `localReadReady` are unaffected.
-//   2. REAL-ENGINE tier (defineSyncWorker over a memory PGlite, no real Worker): the attach-ack is observed
+//   2. REAL-ENGINE tier (defineSyncWorker over a memory pgwasm, no real Worker): the attach-ack is observed
 //      BEFORE the milestone broadcasts (message-order proof), and a write issued the instant attach resolves
 //      — before the engine's `writeReady` — completes once the write runtime is up, with no error and no hang.
 
@@ -201,7 +201,7 @@ describe("ADR-0041 stage 2: a tail failure rejects the downstream stages, not th
   });
 });
 
-// ─── REAL-ENGINE tier — defineSyncWorker over a memory PGlite (no real Worker) ───────────────────────
+// ─── REAL-ENGINE tier — defineSyncWorker over a memory pgwasm (no real Worker) ───────────────────────
 
 const engineRegistry = defineSyncRegistry({
   todos: defineSyncTable({
@@ -302,7 +302,7 @@ describe("ADR-0041 stage 2: real engine — a write issued the instant attach re
     // The row landed in the engine's real (memory) store, proving the write actually ran (not a silent no-op).
     const readModel = getReadModelView(engineRegistry, "todos");
     const workerClient = await host.whenBooted();
-    const rows = await drizzleOver(workerClient.pglite as unknown as Pgwasm)
+    const rows = await drizzleOver(workerClient.pgwasm as unknown as Pgwasm)
       .select({ id: readModel.id })
       .from(readModel);
     expect(rows.map((r) => r.id)).toContain("11111111-1111-1111-1111-111111111111");

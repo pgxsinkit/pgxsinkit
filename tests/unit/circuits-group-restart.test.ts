@@ -29,7 +29,7 @@ import { createFreshTestPgwasm } from "../support/pgwasm-store";
 // and the group is the only layer that can re-subscribe, because the subscribe answer is what says
 // what the subject may still read.
 //
-// Every test here drives real control-plane handlers and a real PGlite; the edge is a fetch stub
+// Every test here drives real control-plane handlers and a real pgwasm; the edge is a fetch stub
 // whose per-path read COUNT is the script. Nothing waits on a clock: completion is signalled by
 // deferreds the stub resolves, so the only timing in play is the restart ladder's own backoff.
 
@@ -331,7 +331,7 @@ it("clears a scope revoked on re-mint and tells the caller after the clear", asy
     metadataSchema: METADATA_SCHEMA,
     onRefused: (entries) => {
       if (!entries.some((entry) => entry.scope?.[0] === OFF_B)) return;
-      // ENQUEUED from inside the callback: PGlite runs one connection FIFO, so this select sees
+      // ENQUEUED from inside the callback: pgwasm runs one connection FIFO, so this select sees
       // everything committed before `onRefused` fired and nothing committed after it.
       rowsForRevokedAtCallTime.push(
         drizzleOver(pg)

@@ -78,7 +78,7 @@ export function asReadonly<TTable extends AnyPgTable, TLocalTable extends AnyPgT
 
 /**
  * Project an entry onto a different **retention** (ADR-0021) — the per-table local-persistence axis:
- * `persistent` (the durable PGlite/OPFS backend) | `ephemeral` (the table's whole local cluster — read
+ * `persistent` (the durable pgwasm/OPFS backend) | `ephemeral` (the table's whole local cluster — read
  * cache, overlay, journal, sequence, views, reconcile function — emitted as `TEMP`/`pg_temp`, leaving no
  * durable trace). Returns a copy of `entry` with `retention` overridden and **everything else preserved
  * verbatim** (table, columns, mode, write contract, shape/row filter, the other lifecycle axes).

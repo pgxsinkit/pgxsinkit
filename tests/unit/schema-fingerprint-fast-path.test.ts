@@ -10,7 +10,7 @@ import { createSyncClient, type LocalStoreVersionEvent, type SyncClient } from "
 import { computeLocalSchemaFingerprint } from "../../packages/client/src/schema";
 
 // The DURABLE-schema fingerprint fast path. These tests boot a REAL
-// filesystem-backed PGlite client, close it (the fs store persists), then re-boot on the SAME path and assert
+// filesystem-backed pgwasm client, close it (the fs store persists), then re-boot on the SAME path and assert
 // the boot's `warmBoot.schemaSkipped` / `schemaFingerprintMatch` outcome plus the stamped
 // `local_schema_fingerprint`. The invariant: the durable schema replays only when the stored fingerprint is
 // absent/stale, and every full durable exec re-stamps the fingerprint so the NEXT boot can trust the skip.

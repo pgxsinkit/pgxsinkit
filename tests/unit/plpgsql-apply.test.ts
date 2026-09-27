@@ -260,7 +260,7 @@ describe("deny-by-default apply-function ACL (ADR-0054)", () => {
 
     // Unconditional: PUBLIC always exists, and every install recreates the exposure.
     expect(acl).toContain(`REVOKE ALL ON FUNCTION ${APPLY_SIGNATURE} FROM PUBLIC;`);
-    // Guarded: PGlite lanes and non-Supabase clusters have no such roles, and a bare REVOKE would error.
+    // Guarded: pgwasm lanes and non-Supabase clusters have no such roles, and a bare REVOKE would error.
     for (const role of ["anon", "authenticated", "service_role"]) {
       expect(acl).toContain(guarded(role, `REVOKE ALL ON FUNCTION ${APPLY_SIGNATURE} FROM "${role}"`));
     }

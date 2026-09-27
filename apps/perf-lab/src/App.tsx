@@ -164,7 +164,7 @@ export function App() {
   const [preparedScenario, setPreparedScenario] = useState<ScenarioInput | null>(null);
   const [preparedConnection, setPreparedConnection] = useState<ConnectionInput | null>(null);
   const [runtimeDescriptor, setRuntimeDescriptor] = useState<string | null>(null);
-  const replProxy = useMemo(() => (client ? createReplProxy(client.pglite) : null), [client]);
+  const replProxy = useMemo(() => (client ? createReplProxy(client.pgwasm) : null), [client]);
   const localSchemaName = bundle ? getSyncRegistrySchema(bundle.registry) : resolveLocalScenarioSchemaName(scenario);
 
   useEffect(() => {
@@ -1222,7 +1222,7 @@ async function measurePointReads(
     const statement = statementByTable.get(tableName)!;
     const rowId = buildSyntheticCreatePayload(target.tableIndex, target.rowIndex, extraColumnCount).id;
     const started = performance.now();
-    const result = await client.pglite.query<{ id: string }>(statement, [rowId]);
+    const result = await client.pgwasm.query<{ id: string }>(statement, [rowId]);
     timings.push(performance.now() - started);
 
     if (result.rows[0]?.id !== rowId) {
@@ -1624,7 +1624,7 @@ function resolveLocalScenarioSchemaName(scenario: ScenarioInput) {
 }
 
 async function truncateLocalPerfLabTables(client: PerfLabClient, bundle: SyntheticRegistryBundle) {
-  await truncateLocalPerfLabTablesInDb(client.pglite, bundle);
+  await truncateLocalPerfLabTablesInDb(client.pgwasm, bundle);
 }
 
 async function ensureLocalPerfLabPrerequisites(db: PerfLabDb, bundle: SyntheticRegistryBundle) {
