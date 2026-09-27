@@ -41,6 +41,16 @@ const C_BUILD_CAPABILITIES: BuildCapabilities = {
   blobDevice: true,
 };
 
+/**
+ * The C build's artefacts, fetched and compiled ahead of a boot (e.g. by an app's warm module on an earlier
+ * screen, from the URLs in `cBuildArtefacts`). A field left out is loaded by the build itself.
+ */
+export interface CBuildAssets {
+  readonly postgresWasmModule?: WebAssembly.Module;
+  readonly initdbWasmModule?: WebAssembly.Module;
+  readonly fsBundle?: Blob;
+}
+
 export interface CBuildOptions {
   /** The Postgres module, compiled ahead (e.g. on an earlier screen). */
   readonly postgresWasmModule?: WebAssembly.Module | Promise<WebAssembly.Module>;
@@ -48,6 +58,13 @@ export interface CBuildOptions {
   readonly initdbWasmModule?: WebAssembly.Module | Promise<WebAssembly.Module>;
   /** The filesystem bundle, fetched ahead. */
   readonly fsBundle?: Blob | Promise<Blob>;
+  /**
+   * The artefacts being warmed ahead. A boot waits for the promise to settle and uses each asset it
+   * resolves with in place of that artefact's own load. The warm-up is only an accelerator: a rejected
+   * promise never fails a boot, the build loads the artefacts itself instead. An explicit
+   * `postgresWasmModule`, `initdbWasmModule` or `fsBundle` wins over the same asset.
+   */
+  readonly assets?: Promise<CBuildAssets>;
   /** @internal A test's view of each Postgres module the build instantiates. */
   readonly onPostgresModule?: (module: PostgresModule) => void;
   /** @internal Every command line initdb runs through the host. */
@@ -204,16 +221,27 @@ class CMountedDataDirectory implements MountedDataDirectory {
  * defaults; a build object can boot any number of databases.
  */
 export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
+  // Settled once, and handled here: a failed warm-up means the lazy load, never an unhandled rejection.
+  const warmed: Promise<CBuildAssets | undefined> =
+    options.assets === undefined
+      ? Promise.resolve(undefined)
+      : options.assets.then(
+          (assets) => assets,
+          () => undefined,
+        );
   const resolved: Resolved = {
-    postgresWasm: () =>
-      options.postgresWasmModule === undefined
-        ? compileModule(cBuildArtefacts.postgresWasm)
-        : Promise.resolve(options.postgresWasmModule),
-    initdbWasm: () =>
-      options.initdbWasmModule === undefined
-        ? compileModule(cBuildArtefacts.initdbWasm)
-        : Promise.resolve(options.initdbWasmModule),
-    fsBundle: () => (options.fsBundle === undefined ? loadBundle(cBuildArtefacts.fsBundle) : bytesOf(options.fsBundle)),
+    postgresWasm: async () => {
+      const module = options.postgresWasmModule ?? (await warmed)?.postgresWasmModule;
+      return module === undefined ? compileModule(cBuildArtefacts.postgresWasm) : module;
+    },
+    initdbWasm: async () => {
+      const module = options.initdbWasmModule ?? (await warmed)?.initdbWasmModule;
+      return module === undefined ? compileModule(cBuildArtefacts.initdbWasm) : module;
+    },
+    fsBundle: async () => {
+      const bundle = options.fsBundle ?? (await warmed)?.fsBundle;
+      return bundle === undefined ? loadBundle(cBuildArtefacts.fsBundle) : bytesOf(bundle);
+    },
     options,
   };
 
@@ -221,12 +249,17 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
     identity: C_BUILD_IDENTITY,
     capabilities: C_BUILD_CAPABILITIES,
     async boot(request: BootRequest): Promise<MountedDataDirectory> {
-      // Start the downloads now; the boot needs them in turn.
-      if (options.postgresWasmModule === undefined) prefetch(cBuildArtefacts.postgresWasm);
-      if (options.initdbWasmModule === undefined) prefetch(cBuildArtefacts.initdbWasm);
       const extensionBundles = Promise.all(request.extensions.map((extension) => fetchExtensionBundle(extension)));
       // Awaited in start(); a failure before then must not surface as unhandled.
       extensionBundles.catch(() => undefined);
+      // Start the downloads the warm-up did not cover now; the boot needs them in turn.
+      const assets = await warmed;
+      if (options.postgresWasmModule === undefined && assets?.postgresWasmModule === undefined) {
+        prefetch(cBuildArtefacts.postgresWasm);
+      }
+      if (options.initdbWasmModule === undefined && assets?.initdbWasmModule === undefined) {
+        prefetch(cBuildArtefacts.initdbWasm);
+      }
 
       const mount = mountFor(request.storage);
       await mount.acquire();
