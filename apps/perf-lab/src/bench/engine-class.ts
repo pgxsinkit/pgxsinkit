@@ -1,10 +1,10 @@
 // Engine-class detection for the storage bench's default backend selection. Lives locally in the bench (the
 // idb-only client no longer performs any OPFS storage selection, so it does not export this): the bench is
-// the only consumer, and it needs the class to decide where the `opfs-ahp` column is default-ticked.
+// the only consumer, and it needs the class to decide where the `opfs-repacked-sw` column is default-ticked.
 
 /**
- * The engine CLASS the bench keys its `opfs-ahp` default on. Every AMBIGUOUS case folds into `"webkit-like"`
- * — the safe resolution, since that is where `opfs-ahp` is known unsupported (its ~252 sync-access-handle cap).
+ * The engine CLASS the bench keys its `opfs-repacked-sw` default on. Every AMBIGUOUS case folds into
+ * `"webkit-like"`.
  */
 export type OpfsEngineClass = "chromium-like" | "firefox" | "webkit-like";
 
@@ -35,7 +35,7 @@ function detectOpfsEngineNav(): OpfsEngineNav {
  * - Chromium-line → `"chromium-like"`: `navigator.userAgentData` is present (a Chromium-only API, in tab AND
  *   worker scopes) — a STRUCTURAL signal, not a UA-string sniff.
  * - Firefox → `"firefox"`: `navigator.userAgent` contains `"Firefox"` (a worker scope still exposes `userAgent`).
- * - Everything else, INCLUDING every ambiguity → `"webkit-like"`: the safe resolution for the `opfs-ahp` default.
+ * - Everything else, INCLUDING every ambiguity → `"webkit-like"`.
  */
 export function classifyOpfsEngineClass(nav: OpfsEngineNav = detectOpfsEngineNav()): OpfsEngineClass {
   if (nav.userAgentData != null) return "chromium-like";

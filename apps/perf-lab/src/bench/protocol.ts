@@ -14,17 +14,17 @@
 // stable contract regardless of which engine ran it.
 
 /**
- * The storage backends the suite compares: `idb` (the @pgxsinkit/pglite fork's IndexedDB VFS), `opfs-ahp`
- * (upstream PGlite's native OPFS VFS — known broken on WebKit and Linux Chrome, kept for the bench),
- * `opfs-repacked` (the constant-four-handle package factory, hosted in the cell's DEDICATED worker), and
- * `opfs-repacked-sw` (the identical factory hosted directly in a SharedWorker — runnable only where the
+ * The storage backends the suite compares: `idb` (pgwasm-c's IndexedDB filesystem), `opfs-repacked` (the
+ * constant-four-handle store from `@pgxsinkit/pgwasm/opfs`, hosted in the cell's DEDICATED worker), and
+ * `opfs-repacked-sw` (the identical store hosted directly in a SharedWorker — runnable only where the
  * engine grants `createSyncAccessHandle` in SharedWorker scope, i.e. WebKit; the side-by-side answer to
- * "does SharedWorker-direct hosting cost anything vs the dedicated worker on Safari").
+ * "does SharedWorker-direct hosting cost anything vs the dedicated worker on Safari"). The `opfs-ahp` column
+ * (upstream PGlite's OPFS filesystem) retired with the switch to pgwasm (ADR-0062 d4, d6).
  */
-export type BenchBackend = "idb" | "opfs-ahp" | "opfs-repacked" | "opfs-repacked-sw";
+export type BenchBackend = "idb" | "opfs-repacked" | "opfs-repacked-sw";
 
 /** All backends, in the order the suite runs them (the default column set). */
-export const BENCH_BACKENDS: readonly BenchBackend[] = ["idb", "opfs-ahp", "opfs-repacked", "opfs-repacked-sw"];
+export const BENCH_BACKENDS: readonly BenchBackend[] = ["idb", "opfs-repacked", "opfs-repacked-sw"];
 
 export type RepackedExtentSize = 8192 | 65_536;
 export const REPACKED_EXTENT_SIZES: readonly RepackedExtentSize[] = [8192, 65_536];
@@ -279,10 +279,8 @@ export interface RunMessage {
   /** Extent profile used when this cell constructs opfs-repacked. */
   repackedExtentSize: RepackedExtentSize;
   /**
-   * `true` (the page's `?debug=1`) passes PGlite's numeric `debug: 1` option to every store this cell opens.
-   * With `@pgxsinkit/pglite` ≥ 0.5.4-pgx.5 that level also reaches the opfs-ahp filesystem, which then traces
-   * its init phase-by-phase as `console.log('[opfs-ahp]', …)` — the delivery channel is the devtools / Safari
-   * remote-inspector console (not the progress lines), for diagnosing the opfs-ahp store-open hang.
+   * `true` (the page's `?debug=1`) passes the numeric `debug: 1` option to every store this cell opens; the
+   * output lands in the devtools / Safari remote-inspector console (not the progress lines).
    */
   debug?: boolean;
 }

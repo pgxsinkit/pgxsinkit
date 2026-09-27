@@ -231,12 +231,12 @@
   <body>
     <h1>pgxsinkit storage benchmarks</h1>
     <p class="lede">
-      A wa-sqlite-style suite of timed SQL batteries across four PGlite storage backends — <code>idb</code>,
-      <code>opfs-ahp</code>, the constant-four-handle <code>opfs-repacked</code> (per-cell dedicated worker), and
-      <code>opfs-repacked-sw</code>: the identical engine hosted directly in a SharedWorker, runnable only where the
-      engine grants sync-access handles there (WebKit) — the side-by-side hosting comparison. Durability is relaxed by
-      default; flip the strict toggle to measure per-commit flush cost. Open this page on a real device (iPhone/Safari)
-      to gather the per-engine numbers — nothing here needs a network.
+      A wa-sqlite-style suite of timed SQL batteries across three pgwasm storage backends — <code>idb</code>, the
+      constant-four-handle <code>opfs-repacked</code> (per-cell dedicated worker), and <code>opfs-repacked-sw</code>:
+      the identical engine hosted directly in a SharedWorker, runnable only where the engine grants sync-access handles
+      there (WebKit) — the side-by-side hosting comparison. Durability is relaxed by default; flip the strict toggle to
+      measure per-commit flush cost. Open this page on a real device (iPhone/Safari) to gather the per-engine numbers —
+      nothing here needs a network.
     </p>
 
     <div class="controls">
@@ -278,9 +278,7 @@
       batteries also show mean / p50 / p95 / max per operation. The final envelope is on
       <code>window.__benchResults</code>; <code>?auto=1</code> runs everything on load. Results survive a page reload —
       the latest envelope is mirrored to <code>sessionStorage</code> and restored behind a notice (iOS Safari may reload
-      the page under memory pressure). <code>?debug=1</code> turns on PGlite/VFS tracing (<code
-        >console.log('[opfs-ahp]', …)</code
-      >) in the console for diagnosing the opfs-ahp store-open hang.
+      the page under memory pressure). <code>?debug=1</code> turns on the engine's debug output in the console.
     </footer>
 
     <script type="module" src="/src/bench/main.ts"></script>

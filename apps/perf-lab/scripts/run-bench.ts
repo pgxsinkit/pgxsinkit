@@ -12,7 +12,7 @@ import { BATTERIES, type BatteryResult, type BatteryStep, type BenchResults } fr
 // locally available engine, waits for the automation hook (`window.__benchResults`), and prints the results
 // JSON plus a compact per-battery table per engine.
 //
-// CLI (all optional): --batteries=big-read,bulk-write (default: all) · --backends=idb,opfs-ahp
+// CLI (all optional): --batteries=big-read,bulk-write (default: all) · --backends=idb,opfs-repacked
 // (default: all) · --strict (run non-matrix batteries under strict durability).
 //
 // MANUAL/local by design: Chromium always runs; Firefox runs only if its Playwright browser is installed
@@ -34,10 +34,9 @@ function argValue(flag: string): string | undefined {
 }
 
 const batteriesArg = argValue("batteries");
-// Default to ALL backends EXPLICITLY: a bare `?auto=1` follows the page's engine-aware defaults, which
-// untick `opfs-ahp` off Firefox (it wedges headed browsers at store open — field evidence). The
-// headless driver is where `opfs-ahp` runs fine and its column is wanted, so it must opt in by name.
-const backendsArg = argValue("backends") ?? "idb,opfs-ahp,opfs-repacked";
+// Default to the dedicated-worker backends EXPLICITLY, so a run does not depend on the page's engine-aware
+// defaults.
+const backendsArg = argValue("backends") ?? "idb,opfs-repacked";
 const strictArg = process.argv.includes("--strict");
 const repackedExtentSizeArg = argValue("repacked-extent-size") ?? "65536";
 if (repackedExtentSizeArg !== "8192" && repackedExtentSizeArg !== "65536") {

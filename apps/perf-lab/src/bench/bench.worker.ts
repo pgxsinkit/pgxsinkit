@@ -1,4 +1,4 @@
-// Storage benchmark — the dedicated worker that owns every PGlite instance.
+// Storage benchmark — the dedicated worker that owns every pgwasm store.
 //
 // WHY this is a dedicated MODULE worker (and not the page, and not a SharedWorker): OPFS
 // `createSyncAccessHandle` is granted ONLY in a dedicated worker on Chromium/Firefox. Running `idb` here too
@@ -11,10 +11,10 @@
 // its steps, and cleans up. Batteries are independent so the checkbox UI can run any subset in any
 // combination — mirroring wa-sqlite's per-battery Run.
 
-import { PGlite } from "@electric-sql/pglite";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { createOpfsPgwasm, type OpfsDirectoryHandle } from "@pgxsinkit/pgwasm/opfs";
 
-import { createOpfsRepackedPGlite } from "../../../../packages/pglite-opfs-repacked/src/pglite-factory";
-import type { CreateOpfsRepackedPGliteOptions } from "../../../../packages/pglite-opfs-repacked/src/pglite-factory";
 import {
   BATTERIES,
   BENCH_BACKENDS,
@@ -101,35 +101,31 @@ function opsPerSec(ops: number, totalMs: number): number {
   return totalMs <= 0 ? 0 : Math.round((ops / totalMs) * 1000);
 }
 
-// `?debug=1` on the page (threaded through the run message) turns on PGlite's numeric `debug` option for
-// every store this cell opens. With @pgxsinkit/pglite ≥ 0.5.4-pgx.5 level 1 reaches the opfs-ahp filesystem,
-// which traces its init phase-by-phase via `console.log('[opfs-ahp]', …)` — visible in devtools / the Safari
-// remote inspector, for diagnosing the opfs-ahp store-open hang. Set once per run (each worker runs one cell).
+// `?debug=1` on the page (threaded through the run message) turns on the numeric `debug` option for every
+// store this cell opens. Set once per run (each worker runs one cell).
 let debugLevel: 0 | 1 = 0;
 let repackedExtentSize: RepackedExtentSize = 65_536;
-type RepackedDirectory = CreateOpfsRepackedPGliteOptions["directory"];
+type RepackedDirectory = OpfsDirectoryHandle;
 
-// The `idb`/`opfs-ahp` comparators go through PGlite's dataDir schemes. `opfs-repacked` always goes through
-// its package factory so the host awaits every sync and the VFS construction mode is the sole durability
-// authority. `debug` is PGlite's standard numeric option.
-async function createPglite(backend: BenchBackend, name: string, relaxedDurability: boolean): Promise<PGlite> {
+// `idb` goes through pgwasm-c's `idb://` dataDir scheme. `opfs-repacked` always goes through the
+// `@pgxsinkit/pgwasm/opfs` factory so the host awaits every sync and the store's construction mode is the sole
+// durability authority.
+async function createStore(backend: BenchBackend, name: string, relaxedDurability: boolean): Promise<Pgwasm> {
   if (backend === "idb") {
-    return PGlite.create({ dataDir: `idb://${name}`, relaxedDurability, debug: debugLevel });
-  }
-  if (backend === "opfs-ahp") {
-    return PGlite.create({ dataDir: `opfs-ahp://${name}`, relaxedDurability, debug: debugLevel });
+    return createPgwasm({ build: cBuild, dataDir: `idb://${name}`, relaxedDurability, debug: debugLevel });
   }
   const root = await navigator.storage.getDirectory();
   const directory = await root.getDirectoryHandle(name, { create: true });
-  return createOpfsRepackedPGlite({
+  return createOpfsPgwasm({
+    build: cBuild,
     directory: directory as unknown as RepackedDirectory,
     durability: relaxedDurability ? "relaxed" : "strict",
     extentSize: repackedExtentSize,
-    pglite: { debug: debugLevel },
+    pgwasm: { debug: debugLevel },
   });
 }
 
-// Delete an IndexedDB database by name. PGlite's `idb://<name>` maps to the database `/pglite/<name>`
+// Delete an IndexedDB database by name. pgwasm-c's `idb://<name>` maps to the database `/pglite/<name>`
 // (its WASM_PREFIX `/pglite`). Best-effort so a repeated run never accumulates stores.
 function deleteIdbDatabase(databaseName: string): Promise<void> {
   return new Promise((resolve) => {
@@ -146,7 +142,7 @@ function deleteIdbDatabase(databaseName: string): Promise<void> {
   });
 }
 
-// Remove an OPFS store directory recursively. `opfs-ahp://<name>` resolves `<name>` (no slashes) to a single
+// Remove an OPFS store directory recursively: an opfs-repacked store's `<name>` (no slashes) is a single
 // top-level directory under the OPFS root. Best-effort — the store must already be closed (handles released)
 // first.
 async function removeOpfsEntry(name: string): Promise<void> {
@@ -176,11 +172,11 @@ async function withStore<T>(
   relaxedDurability: boolean,
   name: string,
   label: string,
-  body: (pg: PGlite) => Promise<T>,
+  body: (pg: Pgwasm) => Promise<T>,
 ): Promise<StoreOutcome<T>> {
-  let pg: PGlite;
+  let pg: Pgwasm;
   try {
-    pg = await createPglite(backend, name, relaxedDurability);
+    pg = await createStore(backend, name, relaxedDurability);
   } catch (error) {
     const reason = describeError(error);
     progress(`⊘ ${label}: unavailable — ${reason}`);
@@ -220,7 +216,7 @@ function wideInsertSql(): string {
 }
 
 // Build the big-table fixtures once for a backend. `withToast` adds the ~100KB-text table (reads only).
-async function buildFixtures(pg: PGlite, withToast: boolean): Promise<number> {
+async function buildFixtures(pg: Pgwasm, withToast: boolean): Promise<number> {
   const started = performance.now();
   // big: a ~6-column indexed table. k is the indexed lookup/range key, wkey joins to `wide`.
   await pg.exec(
@@ -476,7 +472,7 @@ async function runBigRead(backends: BenchBackend[], relaxed: boolean, runId: str
 // Time a single query, capturing rows returned. `rowsTouched` overrides the returned-row count when the
 // query aggregates/scans more than it returns (so the "rows touched" column is meaningful).
 async function timeQuery(
-  pg: PGlite,
+  pg: Pgwasm,
   stepLabel: string,
   sql: string,
   note: string | undefined,
@@ -586,7 +582,7 @@ async function runUpdateDelete(backends: BenchBackend[], relaxed: boolean, runId
 // ---- orchestration ----
 
 export async function runSuite(message: WorkerInbound): Promise<void> {
-  // `?debug=1` (threaded from the page) → PGlite `debug: 1` for every store this cell opens (all backends).
+  // `?debug=1` (threaded from the page) → the numeric `debug: 1` for every store this cell opens (all backends).
   debugLevel = message.debug ? 1 : 0;
   repackedExtentSize = message.repackedExtentSize;
   const startedAt = new Date().toISOString();

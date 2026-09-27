@@ -8,7 +8,7 @@
 // final JSON envelope), and query params — `?auto=1` runs everything; `?batteries=a,b`, `?backends=idb`,
 // `?strict=1` narrow the run.
 
-import { defaultBackendChecked, normalizePlatform, opfsAhpWarning, opfsRepackedSwWarning } from "./backend-defaults";
+import { defaultBackendChecked, opfsRepackedSwWarning } from "./backend-defaults";
 import { classifyOpfsEngineClass } from "./engine-class";
 import {
   BATTERIES,
@@ -68,17 +68,9 @@ function makeCheckbox(
   return input;
 }
 
-// The engine class + OS platform drive the DEFAULT backend selection: native `opfs-ahp` is default-ticked
-// where it actually runs — Firefox everywhere, and Chromium on Windows/macOS — and default-unticked where it
-// wedges or is unsupported (Chromium/Linux's storage-service FD-limit wedge; WebKit's ~252 handle cap). See
-// backend-defaults for the proven mechanism.
+// The engine class drives the DEFAULT backend selection: `opfs-repacked-sw` is default-ticked only where the
+// engine grants sync-access handles in SharedWorker scope (WebKit). See backend-defaults.
 const engineClass = classifyOpfsEngineClass();
-// Platform gates the Chromium opfs-ahp default (Windows/macOS run it; Linux wedges).
-// `navigator.userAgentData.platform` is present exactly where chromium-like is (userAgentData is the
-// Chromium-only signal `classifyOpfsEngineClass` keys on); it is absent on Firefox/WebKit, which normalize to
-// "unknown" — harmless, as the engine class already decides those.
-const rawPlatform = (navigator as { userAgentData?: { platform?: unknown } }).userAgentData?.platform;
-const platform = normalizePlatform(typeof rawPlatform === "string" ? rawPlatform : undefined);
 
 for (const battery of BATTERIES) {
   makeCheckbox(batteryListEl, `bat-${battery.id}`, battery.id, battery.title, true);
@@ -89,17 +81,10 @@ for (const backend of BENCH_BACKENDS) {
     `bk-${backend}`,
     backend,
     backend,
-    defaultBackendChecked(backend, engineClass, platform),
+    defaultBackendChecked(backend, engineClass),
   );
-  // Warn next to `opfs-ahp` on the engine class / platform combinations where opening its store wedges the
-  // browser (Chromium/Linux) or is unsupported (WebKit); `undefined` on the combinations where it runs.
-  // Same pattern for `opfs-repacked-sw`, which only WebKit's SharedWorker scope can host.
-  const warning =
-    backend === "opfs-ahp"
-      ? opfsAhpWarning(engineClass, platform)
-      : backend === "opfs-repacked-sw"
-        ? opfsRepackedSwWarning(engineClass)
-        : undefined;
+  // Warn next to `opfs-repacked-sw` off WebKit, the only engine whose SharedWorker scope can host it.
+  const warning = backend === "opfs-repacked-sw" ? opfsRepackedSwWarning(engineClass) : undefined;
   if (warning) {
     const warn = document.createElement("span");
     warn.className = "warn";
@@ -328,13 +313,10 @@ function hideRestoreNotice(): void {
 // ---- run orchestration: per-cell worker isolation + inactivity watchdog ----
 //
 // Each CELL — one battery × one backend — runs in its OWN short-lived dedicated worker, spawned fresh and
-// terminated once the cell finishes. The PAGE drives the loop (not one long-lived worker): a wedged cell (an
-// opfs-ahp store-open that hits the Chromium/Linux storage-service FD-limit wedge) is now survivable, because
-// an INACTIVITY watchdog terminates the frozen worker, records the cell as `hung`, and continues with the
-// next cell instead of taking the whole suite down. All opfs-ahp cells are ALSO scheduled LAST (see
-// runBenchmark's two passes): the FD wedge is PROFILE-WIDE and non-recoverable, so a wedged ahp cell would
-// hang every cell scheduled after it — running ahp last means it can only ever take out other ahp cells,
-// never the idb/opfs-repacked columns. The per-cell partials are merged into ONE final `window.__benchResults`
+// terminated once the cell finishes. The PAGE drives the loop (not one long-lived worker): a wedged cell (a
+// store open that never returns) is survivable, because an INACTIVITY watchdog terminates the frozen worker,
+// records the cell as `hung`, and continues with the next cell instead of taking the whole suite down. The
+// per-cell partials are merged into ONE final `window.__benchResults`
 // envelope — the same shape the Playwright driver (scripts/run-bench.ts) consumes.
 
 /** Inactivity deadline: this many seconds with NO progress from a cell worker means it wedged. */
@@ -388,7 +370,7 @@ function runCell(
     };
 
     // INACTIVITY watchdog: every progress message re-arms it; silence for the deadline means the worker
-    // wedged (the opfs-ahp store-open freeze is a SYNCHRONOUS hang — no error fires, only this timer catches it).
+    // wedged (a store-open freeze is a SYNCHRONOUS hang — no error fires, only this timer catches it).
     const armWatchdog = (): void => {
       clearTimeout(timer);
       timer = setTimeout(onHang, WATCHDOG_INACTIVITY_MS) as unknown as number;
@@ -405,7 +387,7 @@ function runCell(
       finish({ result: message.results.batteries[0], hung: false });
     };
 
-    // A stray uncaught worker error (e.g. PGlite's non-fatal relaxed-durability idb close race, being fixed
+    // A stray uncaught worker error (e.g. the idb filesystem's non-fatal relaxed-durability idb close race, being fixed
     // upstream separately) must NOT kill the cell or the suite: log it scoped and let the watchdog arbitrate —
     // a truly dead worker stops emitting progress and trips the deadline, while the close race still posts "done".
     const onError = (event: ErrorEvent): void => {
@@ -533,9 +515,7 @@ async function runBenchmark(
   appendProgress("Starting…");
 
   // Merge per-cell partials into the shared envelope, one backend column at a time. Columns are kept in
-  // BENCH_BACKENDS order INDEPENDENT of execution order: opfs-ahp runs last (pass 2 below) but must still
-  // render in its BENCH_BACKENDS slot (the middle column), so each new column is INSERTED at its ranked
-  // position rather than pushed in run order.
+  // BENCH_BACKENDS order: each new column is INSERTED at its ranked position rather than pushed in run order.
   const byBattery = new Map<BatteryId, BatteryResult>();
   const backendRank = (backend: BenchBackend): number => BENCH_BACKENDS.indexOf(backend);
   const appendColumn = (batteryId: BatteryId, column: BatteryBackendResult): void => {
@@ -558,30 +538,11 @@ async function runBenchmark(
     appendColumn(batteryId, column ?? { backend, unavailable: "no result returned", steps: [] });
   };
 
-  // TWO PASSES so opfs-ahp always runs LAST: a wedged opfs-ahp cell poisons the PROFILE-WIDE Chrome storage
-  // service (FD exhaustion queues createSyncAccessHandle forever, non-recoverably), so any cell scheduled after
-  // it would also hang. Pass 1 = all selected batteries × every non-ahp backend; pass 2 = all selected
-  // batteries × opfs-ahp only. Column ORDER in the envelope stays BENCH_BACKENDS order regardless (appendColumn
-  // inserts by rank), independent of this order.
-  const nonAhpBackends = selectedBackends.filter((backend) => backend !== "opfs-ahp");
-  const ahpSelected = selectedBackends.includes("opfs-ahp");
-
-  // Pass 1 — every selected battery × every NON-ahp backend.
   for (const batteryId of orderedBatteries) {
     appendProgress(`══ battery: ${batteryId} ══`);
 
-    for (const backend of nonAhpBackends) {
+    for (const backend of selectedBackends) {
       mergeOutcome(batteryId, backend, await runCell(batteryId, backend, strict, debug, repackedExtentSize));
-      renderResults(results);
-      persistResults(results);
-    }
-  }
-
-  // Pass 2 — every selected battery × opfs-ahp, LAST. Skipped entirely when opfs-ahp is unselected.
-  if (ahpSelected) {
-    for (const batteryId of orderedBatteries) {
-      appendProgress(`══ battery: ${batteryId} (opfs-ahp, last pass) ══`);
-      mergeOutcome(batteryId, "opfs-ahp", await runCell(batteryId, "opfs-ahp", strict, debug, repackedExtentSize));
       renderResults(results);
       persistResults(results);
     }
@@ -624,9 +585,8 @@ const batteryParam = parseList<BatteryId>(
 const backendParam = parseList<BenchBackend>(params.get("backends"), BENCH_BACKENDS);
 const strictParam = params.get("strict") === "1";
 const repackedExtentSize = parseRepackedExtentSize(params.get("repackedExtentSize"));
-// `?debug=1` — pass PGlite's numeric `debug: 1` to every cell worker's stores. With @pgxsinkit/pglite ≥
-// 0.5.4-pgx.5 that reaches the opfs-ahp filesystem, which traces its init as `console.log('[opfs-ahp]', …)`;
-// output lands in devtools / the Safari remote inspector (not the progress log). For the opfs-ahp hang probe.
+// `?debug=1` — pass the numeric `debug: 1` option to every cell worker's stores; the output lands in devtools /
+// the Safari remote inspector (not the progress log).
 const debugEnabled = params.get("debug") === "1";
 const autoRun = params.get("auto") === "1";
 if (batteryParam.length > 0) {
@@ -644,11 +604,7 @@ strictToggleEl.checked = strictParam;
 // `?auto=1` — the automation hook: run immediately on load so the Playwright driver just navigates and
 // waits for `window.__benchResults`. It runs whatever the checkboxes now reflect, which is the SINGLE source
 // of truth: explicit `?batteries=`/`?backends=` params (reflected above) override the defaults exactly as
-// before, and with no `?backends=` the engine+platform-aware defaults apply — so a bare `?auto=1` on the
-// published page does NOT tick `opfs-ahp` where it wedges or is unsupported (Chromium/Linux's storage-service
-// FD-limit wedge; WebKit's handle cap), keeping the page from freezing on load.
-// Opting `opfs-ahp` in (via `?backends=` or the checkbox) is survivable — the watchdog plus the last-pass
-// scheduling contain a wedge to the ahp cells alone.
+// before, and with no `?backends=` the engine-aware defaults apply.
 if (autoRun) {
   runFromControls();
 } else {
