@@ -72,7 +72,7 @@ describe("rewriteSource — the closed rename lists", () => {
   it("leaves a local `pglite`, longer identifiers, other specifiers and the word PGlite alone", () => {
     const source = [
       "const pglite = await createPgliteFactory(myClientPGliteish);",
-      'import { PGlite } from "@electric-sql/pglite";',
+      "const db = PGlite;",
       'import "@electric-sql/pglite/live/extra";',
       "// Began as a copy of PGlite's tests.",
       "const key = 'pglite-opfs-repacked';",
@@ -84,6 +84,94 @@ describe("rewriteSource — the closed rename lists", () => {
 
   it("renames a whole token even when it sits next to punctuation", () => {
     expect(rewriteSource("x.pgliteInstance?.y;(ClientPGlite)").text).toBe("x.pgwasmInstance?.y;(PgwasmClient)");
+  });
+
+  it("renames the prepopulated filesystem's `dataDir` with its import, at its uses only", () => {
+    const source = [
+      'import { dataDir } from "@electric-sql/pglite-prepopulatedfs";',
+      "const blob = await dataDir();",
+      'const options = { loadDataDir: await dataDir(), dataDir: "idb://app" };',
+      "const fromConfig = config.dataDir ?? config?.dataDir;",
+      "const load = { dataDir };",
+      "const pick = ready ? dataDir : other;",
+    ].join("\n");
+    const result = rewriteSource(source);
+    expect(result).toEqual({
+      text: [
+        'import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";',
+        "const blob = await prepopulatedDataDir();",
+        'const options = { loadDataDir: await prepopulatedDataDir(), dataDir: "idb://app" };',
+        "const fromConfig = config.dataDir ?? config?.dataDir;",
+        "const load = { dataDir: prepopulatedDataDir };",
+        "const pick = ready ? prepopulatedDataDir : other;",
+      ].join("\n"),
+      changes: 6,
+    });
+    expect(rewriteSource(result.text).changes).toBe(0);
+  });
+
+  it("renames only the imported name of an aliased `dataDir`, and no `dataDir` from elsewhere", () => {
+    const aliased = [
+      'import { dataDir as basePrepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";',
+      "const blob = await basePrepopulatedDataDir();",
+      'const other = { dataDir: "idb://app" }; open(dataDir);',
+    ].join("\n");
+    expect(rewriteSource(aliased)).toEqual({
+      text: aliased.replace(
+        'dataDir as basePrepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs"',
+        'prepopulatedDataDir as basePrepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated"',
+      ),
+      changes: 2,
+    });
+    const elsewhere = ['import { dataDir } from "./paths";', "open(dataDir);"].join("\n");
+    expect(rewriteSource(elsewhere)).toEqual({ text: elsewhere, changes: 0 });
+  });
+
+  it("renames `PGlite` where it is imported from @electric-sql/pglite, leaving its construction sites", () => {
+    const source = [
+      "import {",
+      "  PGlite,",
+      "  type Results,",
+      '} from "@electric-sql/pglite";',
+      "",
+      "// Hands a PGlite to the store.",
+      "export async function open(pg: PGlite): Promise<PGlite> {",
+      "  const db = await PGlite.create({ dataDir: 'idb://app' });",
+      "  const other = new PGlite();",
+      "  return pg.PGlite ?? db ?? other;",
+      "}",
+    ].join("\n");
+    const result = rewriteSource(source);
+    expect(result).toEqual({
+      text: [
+        "import {",
+        "  Pgwasm,",
+        "  type Results,",
+        '} from "@electric-sql/pglite";',
+        "",
+        "// Hands a Pgwasm to the store.",
+        "export async function open(pg: Pgwasm): Promise<Pgwasm> {",
+        "  const db = await PGlite.create({ dataDir: 'idb://app' });",
+        "  const other = new PGlite();",
+        "  return pg.PGlite ?? db ?? other;",
+        "}",
+      ].join("\n"),
+      changes: 4,
+    });
+    expect(rewriteSource(result.text).changes).toBe(0);
+    // The construction sites are reported for a hand edit to createPgwasm({ build: cBuild, ... }).
+    expect(findManualSites(result.text).map(({ line, name }) => `${line}:${name}`)).toEqual([
+      '4:"@electric-sql/pglite"',
+      "8:PGlite.create",
+      "9:new PGlite",
+    ]);
+  });
+
+  it("renames only the imported name of an aliased `PGlite`", () => {
+    const source = ['import type { PGlite as Db } from "@electric-sql/pglite";', "let db: Db | typeof PGlite;"].join(
+      "\n",
+    );
+    expect(rewriteSource(source)).toEqual({ text: source.replace("{ PGlite as Db }", "{ Pgwasm as Db }"), changes: 1 });
   });
 
   it("only maps old names to new ones that are not themselves renamed", () => {
@@ -108,6 +196,60 @@ describe("findManualSites — structural replacements are reported, never rewrit
       "4:new PGlite",
       "6:.strictSync()",
     ]);
+  });
+});
+
+describe("findManualSites — old package names and drizzle's own-database forms", () => {
+  it("reports an old package name outside an import position, and leaves imports to the rewrite", () => {
+    const source = [
+      'import { PGlite } from "@electric-sql/pglite";',
+      "export default defineConfig({",
+      '  optimizeDeps: { exclude: ["@electric-sql/pglite", "@electric-sql/pglite-repl"] },',
+      "});",
+      'for (const pkg of ["@electric-sql/pglite-prepopulatedfs", "drizzle-kit"]) check(pkg);',
+      "const worker = '@electric-sql/pglite/worker';",
+      'import "@electric-sql/pglite/live";',
+      'const repl = await import("@electric-sql/pglite-repl");',
+    ].join("\n");
+    const sites = findManualSites(source);
+    expect(sites.map(({ line, name }) => `${line}:${name}`)).toEqual([
+      '1:"@electric-sql/pglite"',
+      '3:"@electric-sql/pglite"',
+      '3:"@electric-sql/pglite-repl"',
+      '5:"@electric-sql/pglite-prepopulatedfs"',
+      '6:"@electric-sql/pglite/worker"',
+    ]);
+    const guidance = sites.map((site) => site.guidance);
+    expect(guidance[0]).toContain("import `createPgwasm`");
+    expect(guidance[1]).toContain('optimizeDeps` list): use "@pgxsinkit/pgwasm" (and "@pgxsinkit/pgwasm-c")');
+    expect(guidance[2]).toContain('use "@pgxsinkit/pgwasm-repl"');
+    expect(guidance[3]).toContain('use "@pgxsinkit/pgwasm-c/prepopulated"');
+    expect(guidance[4]).toContain("replace or remove it by hand");
+    // Rewriting leaves the non-import names in place, so they are still reported afterwards.
+    expect(rewriteSource(source).text.split("\n").slice(2, 6)).toEqual(source.split("\n").slice(2, 6));
+  });
+
+  it('reports drizzle({ connection }), drizzle("…") and drizzle(), never the forms with a client', () => {
+    const source = [
+      'const a = drizzle({ connection: "idb://app" });',
+      "const b = drizzle({",
+      "  logger: true,",
+      "  connection: { dataDir: 'idb://app' },",
+      "});",
+      "const c = drizzle('postgres://localhost/app');",
+      "const d = drizzle();",
+      "const e = drizzle({ client: pg, logger: true });",
+      "const f = drizzle(pg, { relations });",
+      "const g = drizzle.mock();",
+    ].join("\n");
+    const sites = findManualSites(source);
+    expect(sites.map(({ line, name }) => `${line}:${name}`)).toEqual([
+      "1:drizzle({ connection",
+      "2:drizzle({ connection",
+      '6:drizzle("…")',
+      "7:drizzle()",
+    ]);
+    for (const site of sites) expect(site.guidance).toContain("drizzle({ client: pg, ...config })");
   });
 });
 

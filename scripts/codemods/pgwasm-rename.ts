@@ -12,8 +12,14 @@
 //   so `{@link ...}` references follow the rename.
 // - SPECIFIER_RENAMES: a listed module specifier, in a module-specifier position only.
 // - PHRASE_RENAMES: listed multi-word diagnostics strings (the boot rail lines and phases), matched exactly.
-// - MANUAL_SITES: names whose replacement is structural, not a rename (e.g. `pgliteBootAssets` becomes
-//   `build: createCBuild({ assets })`). They are reported with their guidance and never rewritten.
+// - IMPORTED_BINDING_RENAMES: a name imported from a listed old module (`dataDir` from the prepopulated
+//   filesystem, `PGlite` from `@electric-sql/pglite`). Renamed in its import clause and, when imported under
+//   its own name, at its uses in that file only (never at a member access or an object/type key; a shorthand
+//   property keeps its key). `import { dataDir as x }` renames the imported name only.
+// - MANUAL_SITES / MANUAL_PATTERNS: sites whose replacement is structural, not a rename (e.g.
+//   `pgliteBootAssets` becomes `build: createCBuild({ assets })`, `new PGlite(` becomes `createPgwasm(...)`,
+//   `drizzle({ connection })` needs a database passed in). They are reported with their guidance and never
+//   rewritten. So is an old package name left outside an import position (a Vite `optimizeDeps` list).
 //
 // `pglite` itself is also a common local variable name, so the property renames (`client.pglite`, React's
 // `{ pglite }`) are never matched textually. After the public types change, run the typecheck, and pass its
@@ -58,6 +64,27 @@ export const SPECIFIER_RENAMES: ReadonlyMap<string, string> = new Map([
   ["@pgxsinkit/pglite-opfs-repacked", "@pgxsinkit/pgwasm/opfs"],
 ]);
 
+/** A name imported from an old module whose import (and, unaliased, its uses) is renamed. */
+export interface ImportedBindingRename {
+  /** The old module the name is imported from. */
+  readonly specifier: string;
+  readonly from: string;
+  readonly to: string;
+  /** A use left alone (a structural site, reported instead), given the text around it. */
+  readonly keep?: (before: string, after: string) => boolean;
+}
+
+export const IMPORTED_BINDING_RENAMES: readonly ImportedBindingRename[] = [
+  { specifier: "@electric-sql/pglite-prepopulatedfs", from: "dataDir", to: "prepopulatedDataDir" },
+  {
+    specifier: "@electric-sql/pglite",
+    from: "PGlite",
+    to: "Pgwasm",
+    // `new PGlite(` / `PGlite.create(` become `createPgwasm({ build: cBuild, ... })`: see MANUAL_SITES.
+    keep: (before, after) => /\bnew\s*$/.test(before) || /^\s*\.\s*create\b/.test(after),
+  },
+];
+
 /** Old diagnostics phrase -> new phrase, matched exactly (the boot rail's line names and phases). */
 export const PHRASE_RENAMES: ReadonlyMap<string, string> = new Map([
   ["boot pglite.create", "boot pgwasm.create"],
@@ -80,6 +107,25 @@ export const MANUAL_SITES: ReadonlyMap<string, string> = new Map([
   [".strictSync()", "`instance.strictSync()` becomes `strictSync(pg)` from @pgxsinkit/pgwasm/opfs"],
 ]);
 
+const DRIZZLE_OWN_DATABASE =
+  "@pgxsinkit/pgwasm/drizzle never opens its own database: create it with `createPgwasm({ build: cBuild, ... })` " +
+  "and pass it, `drizzle(pg, config)` or `drizzle({ client: pg, ...config })`";
+
+/** Structural sites found by a pattern over the whole text (a call can span lines). */
+export const MANUAL_PATTERNS: readonly {
+  readonly name: string;
+  readonly pattern: RegExp;
+  readonly guidance: string;
+}[] = [
+  {
+    name: "drizzle({ connection",
+    pattern: /\bdrizzle\s*\(\s*\{[^()]*?\bconnection\s*[:,}]/g,
+    guidance: DRIZZLE_OWN_DATABASE,
+  },
+  { name: 'drizzle("…")', pattern: /\bdrizzle\s*\(\s*['"`]/g, guidance: DRIZZLE_OWN_DATABASE },
+  { name: "drizzle()", pattern: /\bdrizzle\s*\(\s*\)/g, guidance: DRIZZLE_OWN_DATABASE },
+];
+
 /** Property renames applied only at typecheck-reported positions. */
 export const TYPECHECK_PROPERTY_RENAMES: ReadonlyMap<string, string> = new Map([["pglite", "pgwasm"]]);
 
@@ -101,6 +147,60 @@ const SPECIFIER_PATTERN = new RegExp(
   "g",
 );
 
+// An old package name in quotes, with the module-specifier lead when it has one (so those can be skipped).
+const PACKAGE_NAME_PATTERN = new RegExp(
+  `${SPECIFIER_LEAD}?(['"])(@electric-sql/[^'"\\s]+|${[...SPECIFIER_RENAMES.keys()].map(escapeRegExp).join("|")})\\2`,
+  "g",
+);
+
+/** Rename `from` to `to` in each import clause from `specifier`; say whether it was imported unaliased. */
+function renameImportClauses(
+  text: string,
+  { specifier, from, to }: ImportedBindingRename,
+): { text: string; changes: number; unaliased: boolean } {
+  let changes = 0;
+  let unaliased = false;
+  const clause = new RegExp(
+    String.raw`\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*(['"])${escapeRegExp(specifier)}\2`,
+    "g",
+  );
+  // The imported name: not an alias (`x as dataDir`), and not inside a longer identifier.
+  const member = new RegExp(
+    String.raw`(?<![\w$])(?<!\bas\s+)${escapeRegExp(from)}(?![\w$])(\s+as\s+[A-Za-z_$][\w$]*)?`,
+    "g",
+  );
+  const rewritten = text.replace(clause, (whole: string, members: string) => {
+    const renamed = members.replace(member, (_name: string, alias: string | undefined) => {
+      changes += 1;
+      if (alias === undefined) unaliased = true;
+      return `${to}${alias ?? ""}`;
+    });
+    return whole.replace(`{${members}}`, `{${renamed}}`);
+  });
+  return { text: rewritten, changes, unaliased };
+}
+
+/** Rename a module-level binding at its uses: not a member access, not a key; a shorthand keeps its key. */
+function renameUses(text: string, { from, to, keep }: ImportedBindingRename): { text: string; changes: number } {
+  let changes = 0;
+  const token = new RegExp(String.raw`(?<![\w$])${escapeRegExp(from)}(?![\w$])`, "g");
+  const rewritten = text.replace(token, (name: string, offset: number) => {
+    const before = text.slice(Math.max(0, offset - 200), offset);
+    const after = text.slice(offset + name.length, offset + name.length + 200);
+    if (/(?<!\.)\.\s*$/.test(before) || keep?.(before, after)) return name;
+    const previous = before.trimEnd().at(-1);
+    const keyPosition = previous === "{" || previous === "," || previous === ";";
+    if (keyPosition && /^\s*\??:/.test(after)) return name;
+    changes += 1;
+    const shorthand =
+      (previous === "{" || previous === ",") &&
+      /^\s*[,}]/.test(after) &&
+      !/\b(?:export|import)\s+(?:type\s+)?\{[^{}]*$/.test(before);
+    return shorthand ? `${name}: ${to}` : to;
+  });
+  return { text: rewritten, changes };
+}
+
 export interface RewriteResult {
   readonly text: string;
   readonly changes: number;
@@ -114,6 +214,16 @@ export function rewriteSource(source: string): RewriteResult {
     const parts = text.split(from);
     changes += parts.length - 1;
     text = parts.join(to);
+  }
+  // Before the specifier rewrite: the clauses are found by their old module.
+  for (const rename of IMPORTED_BINDING_RENAMES) {
+    const clauses = renameImportClauses(text, rename);
+    text = clauses.text;
+    changes += clauses.changes;
+    if (!clauses.unaliased) continue;
+    const uses = renameUses(text, rename);
+    text = uses.text;
+    changes += uses.changes;
   }
   text = text.replace(SPECIFIER_PATTERN, (_match, lead: string, quote: string, specifier: string) => {
     changes += 1;
@@ -136,9 +246,31 @@ export interface ManualSite {
 
 const isIdentifierChar = (char: string | undefined): boolean => char !== undefined && /[\w$]/.test(char);
 
-/** The structural sites in a source text, one per (line, phrase). */
+function strayPackageGuidance(name: string): string {
+  const replacement =
+    name === "@electric-sql/pglite" ? '"@pgxsinkit/pgwasm" (and "@pgxsinkit/pgwasm-c")' : SPECIFIER_RENAMES.get(name);
+  return (
+    "an old package name outside an import (e.g. a Vite `optimizeDeps` list): " +
+    (replacement === undefined
+      ? "replace or remove it by hand"
+      : `use ${replacement.startsWith('"') ? replacement : `"${replacement}"`}`)
+  );
+}
+
+const lineAt = (source: string, index: number): number => source.slice(0, index).split("\n").length;
+
+/** The structural sites in a source text, one per (line, name), in line order. */
 export function findManualSites(source: string): ManualSite[] {
-  const sites: ManualSite[] = [];
+  const found: ManualSite[] = [];
+  for (const match of source.matchAll(PACKAGE_NAME_PATTERN)) {
+    if (match[1] !== undefined) continue;
+    const name = match[3] ?? "";
+    // At the quote, not at the lead the pattern may have tried.
+    found.push({ line: lineAt(source, match.index), name: `"${name}"`, guidance: strayPackageGuidance(name) });
+  }
+  for (const { name, pattern, guidance } of MANUAL_PATTERNS) {
+    for (const match of source.matchAll(pattern)) found.push({ line: lineAt(source, match.index), name, guidance });
+  }
   source.split("\n").forEach((line, index) => {
     for (const [phrase, guidance] of MANUAL_SITES) {
       let from = line.indexOf(phrase);
@@ -147,14 +279,22 @@ export function findManualSites(source: string): ManualSite[] {
           !(isIdentifierChar(phrase[0]) && isIdentifierChar(line[from - 1])) &&
           !(isIdentifierChar(phrase.at(-1)) && isIdentifierChar(line[from + phrase.length]));
         if (bounded) {
-          sites.push({ line: index + 1, name: phrase, guidance });
+          found.push({ line: index + 1, name: phrase, guidance });
           break;
         }
         from = line.indexOf(phrase, from + 1);
       }
     }
   });
-  return sites;
+  // One report per (line, name): an old package name outside an import keeps its own guidance.
+  const seen = new Set<string>();
+  const sites = found.filter(({ line, name }) => {
+    const key = `${line}:${name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return sites.sort((a, b) => a.line - b.line);
 }
 
 export interface PropertyDiagnostic {
