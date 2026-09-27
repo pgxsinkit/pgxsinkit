@@ -29,6 +29,18 @@ const EXPECTED_IMPORTS: Record<string, readonly string[]> = {
   // Only the /drizzle entry imports drizzle-orm (an optional peer); the rest of pgwasm imports nothing.
   "packages/pgwasm": ["drizzle-orm/pg-core/async/session"],
   "packages/pgwasm-c": ["@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm/build", "@pgxsinkit/pgwasm/fs"],
+  "packages/pgwasm-pg-dump": ["@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm/protocol"],
+  "packages/pgwasm-repl": [
+    "react",
+    "react/jsx-runtime",
+    "@uiw/react-codemirror",
+    "@uiw/codemirror-theme-github",
+    "@codemirror/commands",
+    "@codemirror/lang-sql",
+    "@codemirror/language",
+    "@codemirror/view",
+    "psql-describe",
+  ],
   "packages/pglite-opfs-repacked": ["@electric-sql/pglite"],
   "packages/client": ["@pgxsinkit/contracts", "drizzle-orm", "@electric-sql/pglite"],
   // zod is a server peer but its bundle never imports it directly — the zod usage the old inlined
@@ -190,7 +202,7 @@ for (const pkg of publicPackages) {
       expect(allSources.length).toBeGreaterThan(0);
     });
 
-    if (pkg.packageDir === "packages/react") {
+    if (pkg.packageDir === "packages/react" || pkg.packageDir === "packages/pgwasm-repl") {
       it("uses the production JSX runtime, never the dev runtime", () => {
         for (const bundle of bundles) {
           expect(bundle).not.toContain("react/jsx-dev-runtime");
@@ -199,7 +211,24 @@ for (const pkg of publicPackages) {
       });
     }
 
-    if (pkg.packageDir === "packages/pgwasm-c") {
+    if (pkg.packageDir === "packages/pgwasm-repl") {
+      // Not every bundler can load an imported stylesheet: the styles ship as a string the component renders.
+      it("imports no stylesheet", () => {
+        for (const bundle of bundles) {
+          expect(importSpecifiers(bundle).filter((specifier) => /\.css($|\?)/.test(specifier))).toEqual([]);
+          expect(bundle).toContain("pgwasm-repl-root");
+        }
+      });
+    }
+
+    const artefactReferences: Record<string, number> = {
+      // pglite.wasm, pglite.data, initdb.wasm (index), prepopulated.tar.gz, amcheck.tar.gz
+      "packages/pgwasm-c": 5,
+      // pg_dump.wasm (index)
+      "packages/pgwasm-pg-dump": 1,
+    };
+    const expectedReferences = artefactReferences[pkg.packageDir];
+    if (expectedReferences !== undefined) {
       // Bundlers copy and fingerprint the artefacts from these literals, so each must point at a file
       // the package ships, from wherever the bundle was emitted.
       it("references artefacts that exist next to every bundle", () => {
@@ -208,8 +237,7 @@ for (const pkg of publicPackages) {
             resolve(dirname(path), match[1] ?? ""),
           ),
         );
-        // pglite.wasm, pglite.data, initdb.wasm (index), prepopulated.tar.gz, amcheck.tar.gz
-        expect(references.length).toBe(5);
+        expect(references.length).toBe(expectedReferences);
         for (const target of references) {
           expect(target.startsWith(join(repoRoot, pkg.packageDir, "artefacts") + sep)).toBe(true);
           expect(existsSync(target)).toBe(true);

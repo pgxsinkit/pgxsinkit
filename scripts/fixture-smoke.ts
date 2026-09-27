@@ -18,7 +18,8 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARTEFACT_FILES } from "../packages/pgwasm-c/src/artefact-pins";
+import { ARTEFACT_FILES as C_BUILD_ARTEFACTS } from "../packages/pgwasm-c/src/artefact-pins";
+import { ARTEFACT_FILES as PG_DUMP_ARTEFACTS } from "../packages/pgwasm-pg-dump/src/artefact-pins";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -27,6 +28,8 @@ const PUBLIC_PACKAGES = [
   "contracts",
   "pgwasm",
   "pgwasm-c",
+  "pgwasm-pg-dump",
+  "pgwasm-repl",
   "pglite-opfs-repacked",
   "client",
   "server",
@@ -153,8 +156,13 @@ import { live } from "@pgxsinkit/pgwasm/live";
 import { protocol, serialize } from "@pgxsinkit/pgwasm/protocol";
 import { cBuild, cBuildArtefacts } from "@pgxsinkit/pgwasm-c";
 import { amcheck } from "@pgxsinkit/pgwasm-c/contrib/amcheck";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { pgDump, PgDumpError } from "@pgxsinkit/pgwasm-pg-dump";
+import { Repl } from "@pgxsinkit/pgwasm-repl";
 import { sql } from "drizzle-orm";
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
 
 // A consumer-defined registry, built through the published contracts entry point.
 const registry = defineSyncRegistry({
@@ -263,6 +271,17 @@ assert.deepEqual((await restored.query<{ one: number }>("SELECT 1 AS one")).rows
 await restored.close();
 await assert.rejects(createPgwasm({ build: cBuild, dataDir: "opfs-ahp://store" }), OpfsAhpRemovedError);
 
+// The prepopulated data directory, pg_dump and the REPL, from the packed install.
+const seeded = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
+await seeded.exec("CREATE TABLE dumped (id int); INSERT INTO dumped VALUES (7);");
+const dump = await pgDump({ pg: seeded });
+assert.ok((await dump.text()).includes("INSERT INTO public.dumped VALUES (7);"));
+await assert.rejects(pgDump({ pg: seeded, args: ["--table=no_such_table"] }), PgDumpError);
+assert.deepEqual((await seeded.query<{ id: number }>("SELECT id FROM dumped")).rows, [{ id: 7 }]);
+const replHtml = renderToString(createElement(Repl, { pg: seeded }));
+assert.match(replHtml, /pgwasm-repl-root/);
+await seeded.close();
+
 console.log("FIXTURE SMOKE OK");
 `;
 
@@ -312,17 +331,25 @@ export default defineConfig({
 `;
 
 /**
- * A Vite production consumer of the C build: proves that a bundler copies and fingerprints the
- * artefacts the package references with `new URL("…", import.meta.url)` (ADR-0062 decision 3). The
- * bundle is for browsers, so it is built, not run; the emitted assets are checked against the pins.
+ * A Vite production consumer of the pgwasm packages (the C build and its prepopulated data directory,
+ * pg_dump, the REPL): proves that a bundler copies and fingerprints the artefacts the packages reference
+ * with `new URL("…", import.meta.url)` (ADR-0062 decision 3). The bundle is for browsers, so it is
+ * built, not run; the emitted assets are checked against the pins.
  */
 const PGWASM_VITE_ENTRY = `
-import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
 import { cBuild, cBuildArtefacts } from "@pgxsinkit/pgwasm-c";
 import { amcheck } from "@pgxsinkit/pgwasm-c/contrib/amcheck";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { pgDump } from "@pgxsinkit/pgwasm-pg-dump";
+import { Repl } from "@pgxsinkit/pgwasm-repl";
 
 console.log(cBuildArtefacts.postgresWasm.href, cBuildArtefacts.fsBundle.href, cBuildArtefacts.initdbWasm.href);
-(globalThis as { bootPgwasm?: unknown }).bootPgwasm = () => createPgwasm({ build: cBuild, extensions: { amcheck } });
+const exposed = globalThis as { bootPgwasm?: unknown; seedPgwasm?: unknown; dumpPgwasm?: unknown; ReplComponent?: unknown };
+exposed.bootPgwasm = () => createPgwasm({ build: cBuild, extensions: { amcheck } });
+exposed.seedPgwasm = async () => createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
+exposed.dumpPgwasm = (pg: Pgwasm) => pgDump({ pg });
+exposed.ReplComponent = Repl;
 `;
 
 const PGWASM_VITE_CONFIG = `
@@ -340,7 +367,10 @@ export default defineConfig({
 });
 `;
 
-/** Every pinned artefact the C build loads by URL was emitted as a fingerprinted asset, byte-identical. */
+/**
+ * Every pinned artefact the build packages load by URL (the C build's, its prepopulated data directory,
+ * pg_dump's WebAssembly) was emitted as a fingerprinted asset, byte-identical.
+ */
 async function assertArtefactsFingerprinted(appDir: string): Promise<void> {
   const assetsDir = join(appDir, "dist-pgwasm", "assets");
   const emitted = new Map<string, string>();
@@ -348,8 +378,14 @@ async function assertArtefactsFingerprinted(appDir: string): Promise<void> {
     const bytes = new Uint8Array(await readFile(join(assetsDir, name)));
     emitted.set(new Bun.CryptoHasher("sha256").update(bytes).digest("hex"), name);
   }
-  for (const artefact of ["pglite.wasm", "pglite.data", "initdb.wasm", "amcheck.tar.gz"] as const) {
-    const assetName = emitted.get(ARTEFACT_FILES[artefact].sha256);
+  const byUrl = [
+    ...(["pglite.wasm", "pglite.data", "initdb.wasm", "amcheck.tar.gz", "prepopulated.tar.gz"] as const).map(
+      (name) => [name, C_BUILD_ARTEFACTS[name].sha256] as const,
+    ),
+    ["pg_dump.wasm", PG_DUMP_ARTEFACTS["pg_dump.wasm"].sha256] as const,
+  ];
+  for (const [artefact, sha256] of byUrl) {
+    const assetName = emitted.get(sha256);
     if (assetName === undefined) {
       throw new Error(`the Vite build emitted no byte-identical asset for ${artefact}`);
     }
@@ -481,7 +517,7 @@ async function main(): Promise<void> {
     console.log("[fixture-smoke] rendering SyncClientProvider from the production consumer bundle…");
     run("bun", [join("dist-consumer", "consumer.js")], appDir);
 
-    console.log("[fixture-smoke] building a Vite production consumer of the C build…");
+    console.log("[fixture-smoke] building a Vite production consumer of the pgwasm packages…");
     run(join(appDir, "node_modules", ".bin", "vite"), ["build", "--config", "vite.pgwasm.config.ts"], appDir, {
       NODE_ENV: "production",
     });

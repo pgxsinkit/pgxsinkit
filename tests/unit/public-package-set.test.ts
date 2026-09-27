@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// The publish surface is exactly these seven packages. Every other workspace member MUST set
+// The publish surface is exactly these nine packages. Every other workspace member MUST set
 // "private": true so it can never be published by accident — e.g. a future demo/support package
 // silently going public by omitting the flag (readiness review, "Other / Release and packaging").
 // scripts/build-public-packages.ts hardcodes the same set; this test guards the package.json side
@@ -13,6 +13,8 @@ const EXPECTED_PUBLIC = [
   "@pgxsinkit/pglite-opfs-repacked",
   "@pgxsinkit/pgwasm",
   "@pgxsinkit/pgwasm-c",
+  "@pgxsinkit/pgwasm-pg-dump",
+  "@pgxsinkit/pgwasm-repl",
   "@pgxsinkit/react",
   "@pgxsinkit/server",
 ];
@@ -62,7 +64,7 @@ describe("publish surface", () => {
   const packages = workspacePackages();
   const byName = (a: string, b: string) => a.localeCompare(b);
 
-  it("exposes exactly the seven public packages", () => {
+  it("exposes exactly the nine public packages", () => {
     const publishable = packages
       .filter((pkg) => !pkg.isPrivate)
       .map((pkg) => pkg.name)

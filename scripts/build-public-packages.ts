@@ -111,6 +111,22 @@ export const publicPackages: readonly PublicPackage[] = [
     verify: () => assertArtefactsVerified(artefactPackage("packages/pgwasm-c")),
   },
   {
+    // pg_dump: its artefacts sit in `artefacts/` like pgwasm-c's, referenced only from src/artefacts.ts,
+    // which is bundled into dist/index.js at its own depth.
+    packageDir: "packages/pgwasm-pg-dump",
+    entrypoints: ["src/index.ts"],
+    bundler: "bun",
+    relativeExternals: ["../artefacts/*"],
+    verify: () => assertArtefactsVerified(artefactPackage("packages/pgwasm-pg-dump")),
+  },
+  {
+    // A React component: built through Vite library mode for the production JSX runtime, like
+    // packages/react (see `bundler`).
+    packageDir: "packages/pgwasm-repl",
+    entrypoints: ["src/index.ts"],
+    bundler: "vite",
+  },
+  {
     packageDir: "packages/pglite-opfs-repacked",
     entrypoints: ["src/index.ts"],
     bundler: "bun",
