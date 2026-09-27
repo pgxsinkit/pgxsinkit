@@ -1,6 +1,3 @@
-// TEMPORARY shim (pgwasm step 3, B1; deleted in B5). The store lives in `@pgxsinkit/pgwasm/opfs`; this
-// package keeps only its PGlite adapter and factory, for the client while it still runs on PGlite, and
-// re-exports everything else from `@pgxsinkit/pgwasm/opfs` so the error classes keep one identity.
 export {
   CorruptStoreError,
   DurabilityModeMismatchError,
@@ -12,16 +9,18 @@ export {
   StoreOwnedError,
   StoreRecreationRequiredError,
   UnexpectedStoreEntryError,
-} from "@pgxsinkit/pgwasm/opfs";
+} from "./core/errors";
 export {
-  createOpfsRepackedPGlite,
-  type CreateOpfsRepackedPGliteOptions,
-  type OpfsRepackedCreatePhase,
-  type OpfsRepackedPGlite,
-} from "./pglite-factory";
+  createOpfsPgwasm,
+  strictSync,
+  type CreateOpfsPgwasmOptions,
+  type OpfsCreatePhase,
+  type OpfsPgwasm,
+  type OpfsPgwasmHostOptions,
+} from "./create";
 export { OpfsRepackedFS, type RepackedDurability } from "./opfs-repacked-fs";
 
-// The engine-agnostic store core: a `RepackedVfs` over any `RepackedPort`, with no PGlite, wasm, or
+// The engine-agnostic store core: a `RepackedVfs` over any `RepackedPort`, with no Postgres, wasm, or
 // OPFS anywhere in it. This is what a coordinator worker owns and what the sync broker serves.
 export {
   RepackedVfs,
@@ -29,20 +28,20 @@ export {
   type RepackedStat,
   type RepackedVfsMetrics,
   type RepackedVfsOpenOptions,
-} from "@pgxsinkit/pgwasm/opfs";
-export { MemoryRepackedPort, type MemoryFault, type MemoryOperation } from "@pgxsinkit/pgwasm/opfs";
+} from "./core/repacked-vfs";
+export { MemoryRepackedPort, type MemoryFault, type MemoryOperation } from "./core/memory-port";
 
 /**
  * Several stores as ONE tree, joined at path prefixes: a durable OPFS root with a memory-backed
  * mount at a chosen prefix, handed to the broker as a single store. Which prefix, which port, and
  * whether a mount is durable are the STORAGE OWNER's declarations — nothing is inferred.
  */
-export { MountedRepackedVfs, type MountedRepackedVfsOptions, type RepackedMount } from "@pgxsinkit/pgwasm/opfs";
-export type { RepackedFileHandle, RepackedPort, RepackedPortEntry } from "@pgxsinkit/pgwasm/opfs";
+export { MountedRepackedVfs, type MountedRepackedVfsOptions, type RepackedMount } from "./core/mounted-vfs";
+export type { RepackedFileHandle, RepackedPort, RepackedPortEntry } from "./core/port";
 
 /**
  * The OPFS-backed port for that same store core: four `FileSystemSyncAccessHandle`s over one dedicated
- * OPFS directory. `createOpfsRepackedPGlite` builds this internally, so a PGlite consumer never needs
+ * OPFS directory. `createOpfsPgwasm` builds this internally, so a pgwasm consumer never needs
  * it; it is exported for a host that owns the store itself — a coordinator worker serving the sync
  * broker to a wasm engine — and wants that store persisted rather than in memory. It must be
  * constructed in a scope where `createSyncAccessHandle()` actually SUCCEEDS (a dedicated worker in
@@ -51,7 +50,7 @@ export type { RepackedFileHandle, RepackedPort, RepackedPortEntry } from "@pgxsi
  * `OpfsDirectoryHandle` is the structural slice of `FileSystemDirectoryHandle` the port actually uses,
  * so a real handle satisfies it without a cast.
  */
-export { OpfsRepackedPort, type OpfsDirectoryHandle } from "@pgxsinkit/pgwasm/opfs";
+export { OpfsRepackedPort, type OpfsDirectoryHandle } from "./opfs-port";
 
 /**
  * The same store's four files in an ordinary DIRECTORY, over `node:fs`. The port a build step uses:
@@ -60,11 +59,11 @@ export { OpfsRepackedPort, type OpfsDirectoryHandle } from "@pgxsinkit/pgwasm/op
  * so neither side learns which one it is on. `node:fs` is imported lazily so the browser bundle can
  * carry this module without a static `node:` import being compiled to nothing (see `./file-port`).
  */
-export { FileRepackedPort } from "@pgxsinkit/pgwasm/opfs";
+export { FileRepackedPort } from "./file-port";
 
 // The synchronous broker: one coordinator worker owns the store, every other thread reaches it over a
 // SharedArrayBuffer channel and blocks in `Atomics.wait` for the answer.
-export { RepackedSyncBroker, type RepackedSyncBrokerOptions } from "@pgxsinkit/pgwasm/opfs";
+export { RepackedSyncBroker, type RepackedSyncBrokerOptions } from "./broker/server";
 export {
   RepackedBrokerStoreError,
   RepackedBrokerTransportError,
@@ -80,7 +79,7 @@ export {
   type BrokerSizeResult,
   type BrokerStatResult,
   type RepackedSyncClientOptions,
-} from "@pgxsinkit/pgwasm/opfs";
+} from "./broker/client";
 export {
   DEFAULT_PAYLOAD_BYTES,
   O_APPEND,
@@ -99,7 +98,7 @@ export {
   type BrokerStat,
   type OpenPlan,
   type RepackedChannelTransfer,
-} from "@pgxsinkit/pgwasm/opfs";
+} from "./broker/protocol";
 
 // The WASI preview1 filesystem adapter: the seam where a wasm engine's file calls reach ONE store
 // through the broker, with fds 0-2 and every non-filesystem import left to the host.
@@ -111,4 +110,4 @@ export {
   type WasiPreview1Fs,
   type WasiPreview1FsFunctions,
   type WasiPreview1FsOptions,
-} from "@pgxsinkit/pgwasm/opfs";
+} from "./wasi/preview1";

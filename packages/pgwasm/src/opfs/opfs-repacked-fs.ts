@@ -1,13 +1,12 @@
-import { BaseFilesystem } from "@electric-sql/pglite/basefs";
-import type { FsStats } from "@electric-sql/pglite/basefs";
+import { BaseFilesystem } from "../fs/base-filesystem";
+import type { FilesystemDescription, FsStats } from "../fs/base-filesystem";
+import { DurabilityModeMismatchError, StoreLimitError } from "./core/errors";
+import type { RepackedPort } from "./core/port";
+import { RepackedVfs } from "./core/repacked-vfs";
+import type { RepackedStat } from "./core/repacked-vfs";
 
-import { DurabilityModeMismatchError, RepackedVfs, StoreLimitError } from "@pgxsinkit/pgwasm/opfs";
-import type { RepackedPort, RepackedStat } from "@pgxsinkit/pgwasm/opfs";
-import type { RepackedDurability } from "@pgxsinkit/pgwasm/opfs";
-
-// TEMPORARY (pgwasm step 3, B1): the PGlite adapter the factory below still needs while the client runs
-// on PGlite. The store itself lives in `@pgxsinkit/pgwasm/opfs`; this package is deleted in B5.
-export type { RepackedDurability };
+/** Physical durability selected once for the lifetime of a store `createOpfsPgwasm` opens. */
+export type RepackedDurability = "relaxed" | "strict";
 
 export interface RepackedFilesystemOptions {
   /** Creation extent size: 8 KiB–16 MiB in 8 KiB steps. Defaults to 64 KiB. */
@@ -16,8 +15,10 @@ export interface RepackedFilesystemOptions {
   readonly durability?: RepackedDurability;
 }
 
+const DESCRIPTION: FilesystemDescription = Object.freeze({ name: "opfs-repacked", persistent: true });
+
 /**
- * PGlite filesystem adapter owned by `createOpfsRepackedPGlite`.
+ * The pgwasm filesystem adapter owned by `createOpfsPgwasm`.
  *
  * Direct construction is unsupported. The factory retains this adapter so it
  * can close all four handles when host initialization or shutdown fails.
@@ -30,6 +31,11 @@ export abstract class OpfsRepackedFS extends BaseFilesystem {
     super();
     this.#vfs = vfs;
     this.#durability = durability;
+  }
+
+  /** An OPFS-repacked store: its data directory outlives the page. */
+  override get description(): FilesystemDescription {
+    return DESCRIPTION;
   }
 
   override async initialSyncFs(): Promise<void> {
@@ -49,20 +55,12 @@ export abstract class OpfsRepackedFS extends BaseFilesystem {
   }
 
   /** @internal Factory lifecycle cleanup after host initialization fails. */
-  async cleanupFailedInit(): Promise<void> {
-    try {
-      this.#vfs.cleanupFailedInit();
-    } finally {
-      clearBootExitSentinel();
-    }
+  override async cleanupFailedInit(): Promise<void> {
+    this.#vfs.cleanupFailedInit();
   }
 
   override async closeFs(): Promise<void> {
-    try {
-      this.#vfs.close();
-    } finally {
-      clearBootExitSentinel();
-    }
+    this.#vfs.close();
   }
 
   chmod(path: string, mode: number): void {
@@ -161,23 +159,6 @@ export async function openOpfsRepackedFsForPort(
     ...(options.extentSize === undefined ? {} : { extentSize: options.extentSize }),
   });
   return new ConcreteOpfsRepackedFS(vfs, durability);
-}
-
-// The engine boots Postgres in single mode, which signals success by calling `proc_exit(99)`; Emscripten
-// writes that sentinel onto the host `process.exitCode`. The upstream engine already tries to swallow it
-// (a save/restore of `process.exitCode` around init and each sync exec), and for the default/node
-// filesystems `close()`'s `_emscripten_force_exit(0)` incidentally overwrites it back to 0. This VFS's
-// teardown leaves the runtime already-exited, so that incidental reset never fires and the benign 99
-// survives to process exit — under bun that force-exits an otherwise-green run with code 99. We clear the
-// sentinel here (in the browser there is no `process`, so this is a no-op) to match every other backend.
-// Only the exact 99 sentinel is cleared, so a real host exit code is never clobbered. A robust fix belongs
-// upstream in the engine's exit-code save/restore, but is deliberately left there to avoid carrying a fork
-// patch across rebases (backlog).
-function clearBootExitSentinel(): void {
-  const proc = (globalThis as { process?: { exitCode?: number } }).process;
-  if (proc && proc.exitCode === 99) {
-    proc.exitCode = 0;
-  }
 }
 
 function nowMs(): bigint {

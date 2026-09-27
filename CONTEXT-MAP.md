@@ -9,7 +9,7 @@ This repo holds three bounded contexts with deliberately separate vocabularies.
 - [Board demo](./apps/board/CONTEXT.md) — `apps/board`, the reference
   application: a Linear-style issue board with realtime chat that drives the
   toolkit end-to-end for a human to see. An exerciser, not the product.
-- [OPFS Repacked VFS](./packages/pglite-opfs-repacked/CONTEXT.md) —
+- [OPFS Repacked VFS](./packages/pgwasm/docs/opfs/CONTEXT.md) —
   `packages/pglite-opfs-repacked`, the packed-storage OPFS filesystem under
   pgwasm (moving into `@pgxsinkit/pgwasm/opfs`, ADR-0062). A storage engine, not sync: it deliberately shares no vocabulary with
   the Toolkit ("journal", "group") or with Postgres ("checkpoint", "WAL",

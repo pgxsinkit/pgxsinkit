@@ -41,7 +41,7 @@ const EXPECTED_IMPORTS: Record<string, readonly string[]> = {
     "@codemirror/view",
     "psql-describe",
   ],
-  "packages/pglite-opfs-repacked": ["@electric-sql/pglite"],
+  "packages/pglite-opfs-repacked": ["@electric-sql/pglite", "@pgxsinkit/pgwasm/opfs"],
   "packages/client": ["@pgxsinkit/contracts", "drizzle-orm", "@electric-sql/pglite"],
   // zod is a server peer but its bundle never imports it directly — the zod usage the old inlined
   // bundle showed belonged to the vendored contracts copy.

@@ -1,10 +1,14 @@
 {
   "name": "@pgxsinkit/pgwasm",
   "version": "0.0.0",
+  "keywords": [
+    "tanstack-intent"
+  ],
   "license": "MIT AND Apache-2.0",
   "files": [
     "dist",
     "src",
+    "skills",
     "README.md",
     "LICENSE",
     "LICENSE-APACHE-2.0",
@@ -34,6 +38,10 @@
     "./live": {
       "types": "./dist/live/index.d.ts",
       "default": "./dist/live/index.js"
+    },
+    "./opfs": {
+      "types": "./dist/opfs/index.d.ts",
+      "default": "./dist/opfs/index.js"
     },
     "./protocol": {
       "types": "./dist/protocol/index.d.ts",

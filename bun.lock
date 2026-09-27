@@ -144,6 +144,7 @@
       "version": "0.0.0",
       "peerDependencies": {
         "@electric-sql/pglite": ">=0.5.8-pgx.2",
+        "@pgxsinkit/pgwasm": "workspace:*",
       },
     },
     "packages/pgwasm": {

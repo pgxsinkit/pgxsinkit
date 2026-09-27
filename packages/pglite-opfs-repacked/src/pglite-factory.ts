@@ -1,8 +1,9 @@
 import { PGlite } from "@electric-sql/pglite";
 import type { Extensions, PGliteInterfaceExtensions, PGliteOptions } from "@electric-sql/pglite";
 
-import { OpfsRepackedPort } from "./opfs-port";
-import type { OpfsDirectoryHandle } from "./opfs-port";
+import { OpfsRepackedPort } from "@pgxsinkit/pgwasm/opfs";
+import type { OpfsDirectoryHandle } from "@pgxsinkit/pgwasm/opfs";
+
 import { openOpfsRepackedFsForPort } from "./opfs-repacked-fs";
 import type { OpfsRepackedFS, RepackedFilesystemOptions } from "./opfs-repacked-fs";
 

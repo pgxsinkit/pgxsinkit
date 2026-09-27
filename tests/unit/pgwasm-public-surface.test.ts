@@ -9,6 +9,7 @@ import * as drizzle from "../../packages/pgwasm/src/drizzle";
 import * as fs from "../../packages/pgwasm/src/fs";
 import * as main from "../../packages/pgwasm/src/index";
 import * as live from "../../packages/pgwasm/src/live";
+import * as opfs from "../../packages/pgwasm/src/opfs";
 import * as protocol from "../../packages/pgwasm/src/protocol";
 
 // ADR-0062 decision 5 keeps pgwasm's surface small, and every runtime export is a promise each build
@@ -42,6 +43,54 @@ const surfaces: [entry: string, module: object, exports: string[]][] = [
     ],
   ],
   ["@pgxsinkit/pgwasm/live", live, ["live"]],
+  [
+    // The OPFS-repacked store, whole (ADR-0062 d6): its factory, core, ports, errors, broker and WASI adapter.
+    "@pgxsinkit/pgwasm/opfs",
+    opfs,
+    [
+      "CorruptStoreError",
+      "DEFAULT_PAYLOAD_BYTES",
+      "DurabilityModeMismatchError",
+      "ExtentSizeMismatchError",
+      "FileRepackedPort",
+      "FsError",
+      "MemoryRepackedPort",
+      "MountedRepackedVfs",
+      "O_APPEND",
+      "O_CREAT",
+      "O_EXCL",
+      "O_NOFOLLOW",
+      "O_RDONLY",
+      "O_RDWR",
+      "O_TRUNC",
+      "O_WRONLY",
+      "OpfsRepackedFS",
+      "OpfsRepackedPort",
+      "RepackedBrokerStoreError",
+      "RepackedBrokerTransportError",
+      "RepackedChannel",
+      "RepackedDoorbell",
+      "RepackedSyncBroker",
+      "RepackedSyncClient",
+      "RepackedVfs",
+      "StoreClosedError",
+      "StoreFailedError",
+      "StoreLimitError",
+      "StoreOwnedError",
+      "StoreRecreationRequiredError",
+      "UnexpectedStoreEntryError",
+      "WASI_ERRNO",
+      "WASI_FILETYPE",
+      "createOpfsPgwasm",
+      "createWasiPreview1Fs",
+      "errnoName",
+      "fsErrorNameOf",
+      "normalizeWasiPath",
+      "planOpen",
+      "strictSync",
+      "throwOnErrno",
+    ],
+  ],
   ["@pgxsinkit/pgwasm/protocol", protocol, ["Modes", "Parser", "messages", "protocol", "serialize"]],
   [
     "@pgxsinkit/pgwasm/drizzle",

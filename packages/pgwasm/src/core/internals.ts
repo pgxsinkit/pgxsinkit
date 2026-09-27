@@ -70,3 +70,18 @@ export function protocolAccessOf(pg: object): PgwasmProtocol {
   }
   return access;
 }
+
+/**
+ * The strict sync of a database whose data directory is an OPFS-repacked store, registered by
+ * `createOpfsPgwasm` and run by `strictSync(pg)` from `@pgxsinkit/pgwasm/opfs`.
+ */
+const strictSyncs = new WeakMap<object, () => void>();
+
+export function registerStrictSync(pg: object, strictSync: () => void): void {
+  strictSyncs.set(pg, strictSync);
+}
+
+/** The registered strict sync of `pg`, or `undefined` when it has none (not an OPFS-repacked store). */
+export function strictSyncOf(pg: object): (() => void) | undefined {
+  return strictSyncs.get(pg);
+}

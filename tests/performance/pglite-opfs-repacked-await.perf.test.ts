@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
-import { PGlite } from "@electric-sql/pglite";
-
-import { OpfsRepackedPort } from "../../packages/pglite-opfs-repacked/src/opfs-port";
-import { openOpfsRepackedFsForPort } from "../../packages/pglite-opfs-repacked/src/opfs-repacked-fs";
-import { createOpfsRepackedPGlite } from "../../packages/pglite-opfs-repacked/src/pglite-factory";
-import { MemoryOpfsDirectory } from "../../packages/pglite-opfs-repacked/test/support/memory-opfs";
+import { cBuild } from "../../packages/pgwasm-c/src";
+import { createPgwasm, type Pgwasm } from "../../packages/pgwasm/src";
+import { createOpfsPgwasm } from "../../packages/pgwasm/src/opfs/create";
+import { OpfsRepackedPort } from "../../packages/pgwasm/src/opfs/opfs-port";
+import { openOpfsRepackedFsForPort } from "../../packages/pgwasm/src/opfs/opfs-repacked-fs";
+import { MemoryOpfsDirectory } from "../unit/support/pgwasm-opfs/memory-opfs";
 
 const WARMUP_QUERIES = 20;
 const MEASURED_QUERIES = 5_000;
@@ -19,7 +19,7 @@ interface Measurement {
 
 async function measureAwaited(): Promise<Measurement> {
   const directory = new MemoryOpfsDirectory();
-  const pg = await createOpfsRepackedPGlite({ directory, durability: "relaxed", extentSize: 8192 });
+  const pg = await createOpfsPgwasm({ build: cBuild, directory, durability: "relaxed", extentSize: 8192 });
   const timing = await measureQueries(pg);
   await pg.close();
   return { label: "awaited", ...timing, openHandlesAfterClose: directory.openHandleCount() };
@@ -43,9 +43,8 @@ async function measureDetached(): Promise<Measurement> {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const pg = new PGlite({ fs: detachedComparator, relaxedDurability: true });
   try {
-    await pg.waitReady;
+    const pg = await createPgwasm({ build: cBuild, fs: detachedComparator, relaxedDurability: true });
     adapter.strictSync();
     const timing = await measureQueries(pg);
     await pg.close();
@@ -56,7 +55,7 @@ async function measureDetached(): Promise<Measurement> {
   }
 }
 
-async function measureQueries(pg: PGlite): Promise<{ totalMs: number; perQueryMs: number }> {
+async function measureQueries(pg: Pgwasm): Promise<{ totalMs: number; perQueryMs: number }> {
   for (let index = 0; index < WARMUP_QUERIES; index += 1) await pg.exec("SELECT 1");
   const started = performance.now();
   for (let index = 0; index < MEASURED_QUERIES; index += 1) await pg.exec("SELECT 1");
@@ -64,7 +63,7 @@ async function measureQueries(pg: PGlite): Promise<{ totalMs: number; perQueryMs
   return { totalMs, perQueryMs: totalMs / MEASURED_QUERIES };
 }
 
-describe("performance: OPFS repacked awaited host boundary (PGlite-only, no containers)", () => {
+describe("performance: OPFS repacked awaited host boundary (pgwasm-only, no containers)", () => {
   it(
     "records awaited relaxed-query cost against the unsupported detached comparator",
     async () => {

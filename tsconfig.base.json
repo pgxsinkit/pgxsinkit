@@ -36,6 +36,7 @@
       "@pgxsinkit/pgwasm/drizzle": ["./packages/pgwasm/src/drizzle/index.ts"],
       "@pgxsinkit/pgwasm/fs": ["./packages/pgwasm/src/fs/index.ts"],
       "@pgxsinkit/pgwasm/live": ["./packages/pgwasm/src/live/index.ts"],
+      "@pgxsinkit/pgwasm/opfs": ["./packages/pgwasm/src/opfs/index.ts"],
       "@pgxsinkit/pgwasm/protocol": ["./packages/pgwasm/src/protocol/index.ts"],
       "@pgxsinkit/pgwasm-c": ["./packages/pgwasm-c/src/index.ts"],
       "@pgxsinkit/pgwasm-c/contrib/amcheck": ["./packages/pgwasm-c/src/contrib/amcheck.ts"],

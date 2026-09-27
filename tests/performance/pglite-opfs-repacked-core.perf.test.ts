@@ -1,12 +1,8 @@
 import { describe, expect, it } from "bun:test";
 
-import { RepackedVfs } from "../../packages/pglite-opfs-repacked/src/core/repacked-vfs";
-import {
-  applyTxn,
-  createInitialState,
-  planCreateFile,
-} from "../../packages/pglite-opfs-repacked/src/core/state-machine";
-import { MemoryRepackedPort } from "../../packages/pglite-opfs-repacked/test/support/memory-port";
+import { RepackedVfs } from "../../packages/pgwasm/src/opfs/core/repacked-vfs";
+import { applyTxn, createInitialState, planCreateFile } from "../../packages/pgwasm/src/opfs/core/state-machine";
+import { MemoryRepackedPort } from "../unit/support/pgwasm-opfs/memory-port";
 
 const EXTENT_SIZES = [8192, 65_536] as const;
 const SMALL_LOG_FRAMES = 128;

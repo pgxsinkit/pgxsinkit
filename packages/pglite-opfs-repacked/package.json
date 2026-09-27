@@ -1,16 +1,12 @@
 {
   "name": "@pgxsinkit/pglite-opfs-repacked",
   "version": "0.0.0",
-  "keywords": [
-    "tanstack-intent"
-  ],
   "license": "MIT",
   "files": [
     "dist",
     "src",
     "README.md",
-    "LICENSE",
-    "skills"
+    "LICENSE"
   ],
   "type": "module",
   "main": "./dist/index.js",
@@ -28,6 +24,7 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "peerDependencies": {
-    "@electric-sql/pglite": ">=0.5.8-pgx.2"
+    "@electric-sql/pglite": ">=0.5.8-pgx.2",
+    "@pgxsinkit/pgwasm": "workspace:*"
   }
 }

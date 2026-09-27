@@ -37,6 +37,12 @@ const repoRoot = resolve(__dirname, "..");
 const tscBinPath = resolve(repoRoot, "node_modules/.bin/tsc");
 const viteBinPath = resolve(repoRoot, "node_modules/.bin/vite");
 
+/** Where a browser bundle comes from and goes, relative to the package; `true` is the first entry into dist/. */
+export interface BrowserBundle {
+  readonly entrypoint: string;
+  readonly outFile: string;
+}
+
 export interface PublicPackage {
   packageDir: string;
   entrypoints: readonly string[];
@@ -61,7 +67,7 @@ export interface PublicPackage {
    * contract tests deliberately do not look at it — they pin `dist/index.js`, which is what consumers
    * install.
    */
-  browserBundle?: boolean;
+  browserBundle?: boolean | BrowserBundle;
   /**
    * Bundle every entry point in one build with code splitting, so modules the entries share are emitted
    * once, as chunks. Needed where entry points share runtime identity: pgwasm's error classes, protocol
@@ -94,10 +100,14 @@ export const publicPackages: readonly PublicPackage[] = [
       "src/drizzle/index.ts",
       "src/fs/index.ts",
       "src/live/index.ts",
+      "src/opfs/index.ts",
       "src/protocol/index.ts",
     ],
     bundler: "bun",
     splitting: true,
+    // The wasm hosts that drive the OPFS store's sync broker + WASI adapter (a wasm engine worker, a
+    // coordinator worker) are plain JS with no build step: they need one file they can import by URL.
+    browserBundle: { entrypoint: "src/opfs/index.ts", outFile: "dist/opfs/browser-bundle.js" },
   },
   {
     // The C Postgres build: its artefacts live in `artefacts/`, one level above both `src/` and `dist/`,
@@ -130,8 +140,8 @@ export const publicPackages: readonly PublicPackage[] = [
     packageDir: "packages/pglite-opfs-repacked",
     entrypoints: ["src/index.ts"],
     bundler: "bun",
-    // The wasm hosts that drive the sync broker + WASI adapter (a pgrust/PGlite worker, a coordinator
-    // worker) are plain JS with no build step: they need one file they can import by URL.
+    // TEMPORARY shim (pgwasm step 3, B1; deleted in B5): the store's own bundle is pgwasm's
+    // dist/opfs/browser-bundle.js; this one keeps the PGlite factory's hosts loading by URL until then.
     browserBundle: true,
   },
   {
@@ -273,7 +283,7 @@ export async function buildPackage(publicPackage: PublicPackage): Promise<void> 
     }
   }
 
-  if (publicPackage.browserBundle === true) {
+  if (publicPackage.browserBundle !== undefined && publicPackage.browserBundle !== false) {
     emitBrowserBundle(publicPackage);
   }
 
@@ -286,8 +296,12 @@ export async function buildPackage(publicPackage: PublicPackage): Promise<void> 
  * for anything imported afterwards in the same process.
  */
 export function emitBrowserBundle(publicPackage: PublicPackage): void {
-  const outFile = resolve(repoRoot, publicPackage.packageDir, "dist", "browser-bundle.js");
-  const entrypoint = resolve(repoRoot, publicPackage.packageDir, publicPackage.entrypoints[0]!);
+  const bundle =
+    typeof publicPackage.browserBundle === "object"
+      ? publicPackage.browserBundle
+      : { entrypoint: publicPackage.entrypoints[0]!, outFile: "dist/browser-bundle.js" };
+  const outFile = resolve(repoRoot, publicPackage.packageDir, bundle.outFile);
+  const entrypoint = resolve(repoRoot, publicPackage.packageDir, bundle.entrypoint);
   execFileSync("bun", ["build", entrypoint, "--target", "browser", "--format", "esm", "--outfile", outFile], {
     cwd: repoRoot,
     stdio: "inherit",
