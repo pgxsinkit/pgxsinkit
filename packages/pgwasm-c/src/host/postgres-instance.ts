@@ -41,18 +41,25 @@ export const DEFAULT_START_PARAMS: readonly string[] = [
 
 /**
  * Whether `error` is one of the exceptions the Emscripten runtime throws on purpose to unwind the wasm
- * stack, which the main loop handles:
+ * stack back to the main loop, which handles them:
  * - `'unwind'` from emscripten_exit_with_live_runtime(): how pgl_longjmp (pglitec.c) delivers Postgres'
  *   siglongjmp to its main-loop error handler, and how a Terminate message ends the loop;
- * - `ExitStatus` from exit()/proc_exit();
  * - the number an emscripten-mode longjmp throws, should one pass every invoke_* frame.
+ *
+ * An `ExitStatus` (from exit()/proc_exit(): a FATAL error) is not: the backend's exit callbacks have
+ * already torn its session down, so the loop cannot resume on it (see {@link exitStatusOf}).
  */
 export function isEmscriptenUnwind(error: unknown): boolean {
-  return (
-    error === "unwind" ||
-    typeof error === "number" ||
-    (typeof error === "object" && error !== null && (error as { name?: unknown }).name === "ExitStatus")
-  );
+  return error === "unwind" || typeof error === "number";
+}
+
+/** The status of the `ExitStatus` the runtime throws from exit()/proc_exit(), or undefined for anything else. */
+export function exitStatusOf(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || (error as { name?: unknown }).name !== "ExitStatus") {
+    return undefined;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : -1;
 }
 
 /**
@@ -114,7 +121,8 @@ export class PostgresInstance {
   #functionPointers: number[] = [];
   #failed = false;
   #exited = false;
-  // The last lines Postgres wrote to stderr, for the error when it fails to start.
+  // The last lines Postgres wrote to stderr (since the exchange began, during one), for the error when it
+  // fails to start or exits.
   readonly #stderr: string[] = [];
 
   private constructor(module: PostgresModule, debug: DebugLevel, stack: ShadowStack) {
@@ -347,8 +355,8 @@ export class PostgresInstance {
    * One exchange on the single session: feed `message` to Postgres and hand every backend byte it
    * produces to `onData`, synchronously. A startup packet (first byte 0) is processed as one; a
    * Terminate (`X`) is ignored, as the session ends with the instance. A throw that is not Postgres'
-   * own error unwind means the wasm stack was abandoned mid-function: it is rethrown and the session
-   * refuses every later exchange.
+   * own error unwind means the wasm stack was abandoned mid-function, and an exit (a FATAL error) means
+   * the backend tore its session down: either fails the session, which refuses every later exchange.
    */
   exchange(message: Uint8Array, onData: (chunk: Uint8Array) => void): void {
     if (this.#failed) throw new Error("The C build's session failed and cannot be used again");
@@ -356,12 +364,22 @@ export class PostgresInstance {
     this.#sink = onData;
     this.#input = message;
     this.#readOffset = 0;
+    this.#stderr.length = 0;
     try {
       if (message[0] === 0) {
         this.#processStartupPacket();
         return;
       }
       this.#runMainLoop(message);
+    } catch (error) {
+      const status = exitStatusOf(error);
+      if (status === undefined) throw error;
+      this.#failed = true;
+      const output = this.#stderr.join("\n").trim();
+      throw new Error(
+        `Postgres exited with status ${status} during an exchange: a FATAL error ended the C build's session${output ? `:\n${output}` : ""}`,
+        { cause: error },
+      );
     } finally {
       this.#sink = undefined;
       this.#input = new Uint8Array(0);
