@@ -178,6 +178,24 @@ carrying the wire protocol, and a statement of its capabilities; everything abov
 is pgwasm's, and a difference between builds is a capability, never a branch in shared code.
 _Avoid_: "engine" or "backend" for a build ("backend" is the storage axis, opfs or idbfs); "the wasm".
 
+**Data format**:
+The on-disk compatibility version a Postgres build declares (`dataFormat`: 1, 2, …), part of the
+build's identity next to its name (ADR-0063, ADR-0064). Releases of one build that declare the same
+data format open each other's data directories; each data format stands for exactly one Compatibility
+tuple, and a changed tuple is a new data format. How a store crosses a data format change is an open
+question (ADR-0064).
+_Avoid_: "Postgres version" or "catalog version" as a stand-in (a build's own flags can change the
+format within one major); "schema version" (the app's tables, not the on-disk layout).
+
+**Compatibility tuple**:
+The values Postgres compares with its own compiled-in values before it uses a data directory, and
+refuses the directory on a mismatch: twelve fields of `pg_control` (its version, the catalog version,
+alignment, float format, block and WAL block sizes, relation segment size, name length, index keys,
+TOAST chunk and large-object block sizes, and float8 pass-by-value) and the WAL page magic (ADR-0064). A Data
+format declares exactly one.
+_Avoid_: counting values Postgres takes from the directory or never compares (the WAL segment size,
+the checksum version) as part of it; "the Postgres major" as a proxy for it.
+
 ## Language — the local-first client
 
 **Local schema**:

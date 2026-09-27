@@ -76,5 +76,6 @@ complete as ADRs are added.
 - [ADR-0061 — Raw statements carry a COPY blob](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0061-raw-statements-carry-a-copy-blob.md)
 - [ADR-0062 — Absorb PGlite as pgwasm (upstream compatibility is an anti-goal)](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0062-absorb-pglite-as-pgwasm.md)
 - [ADR-0063 — Build permanence and `storage.build`](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0063-build-permanence-and-storage-build.md)
+- [ADR-0064 — The C build's supply chain](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0064-c-build-supply-chain.md)
 
 <!-- adr:list:end -->

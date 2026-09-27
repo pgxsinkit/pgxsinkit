@@ -232,6 +232,13 @@ engine's file calls to one store through that broker. The
 PostgreSQL 18 compiled to WebAssembly with Emscripten, single-threaded, with the memory, IndexedDB
 (`idb://`) and file (`file://`, Bun) filesystems. `cBuild` is the build; it is the client's default.
 
+The package ships the files of one [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres)
+release byte for byte. Each release is built from an upstream PostgreSQL release plus patches derived from
+ElectricSQL's [postgres-pglite](https://github.com/electric-sql/postgres-pglite), and `SELECT version()` names
+it: `PostgreSQL 18.3 (pgwasm-postgres 18.3.0) on wasm32-unknown-emscripten, …`. `C_BUILD_IDENTITY.release`
+gives the same name (`"pgwasm-postgres 18.3.0"`) in code. See
+[Postgres builds](/concepts/postgres-builds/#where-the-c-build-comes-from).
+
 The package ships its WebAssembly module, filesystem bundle and initdb as files next to its code,
 referenced as `new URL("…", import.meta.url)`, so bundlers copy and fingerprint them. With Vite, exclude it
 (and `@pgxsinkit/pgwasm-pg-dump`) from dependency pre-bundling, which would move the module away from its
@@ -283,7 +290,8 @@ await pg.exec("CREATE EXTENSION amcheck");
 ## `@pgxsinkit/pgwasm-pg-dump`
 
 `pg_dump` for a pgwasm database, run in the same page, worker or Bun process. The client's
-[data export](/concepts/export-and-restore/) uses it.
+[data export](/concepts/export-and-restore/) uses it. It is built from the same pgwasm-postgres release as the
+C build's server, so the two always match (`pg_dump` refuses a server of a newer major version).
 
 ```ts
 import { pgDump } from "@pgxsinkit/pgwasm-pg-dump";

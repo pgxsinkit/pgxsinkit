@@ -3,6 +3,8 @@
 Status: accepted (2026-09-26). Amends [ADR-0049](0049-capability-driven-engine-placement.md)
 decisions 7 and 9 (a store's build is fixed like its backend, and declared like its durability) and
 [ADR-0050](0050-storage-declaration-transport.md) (the declaration carries one more field).
+Amended by [ADR-0064](0064-c-build-supply-chain.md) (2026-09-27): its consequences gain the open question
+of how existing stores cross a data format change within a build, which blocks the first Postgres major.
 
 [ADR-0062](0062-absorb-pglite-as-pgwasm.md) makes the Postgres build a choice: the C build now, and
 the pgrust build as an experimental opt-in later. The two cannot open each other's data

@@ -15,6 +15,25 @@ Most apps never pick a build: every client, worker and store uses `cBuild` unles
 page matters when you supply a build yourself (to warm its files early, or to run another one), adopt a
 database you created, or restore a backup.
 
+## Where the C build comes from
+
+The C build is PostgreSQL itself, plus a small set of patches that let it run as a single WebAssembly
+module. The patches are derived from ElectricSQL's
+[postgres-pglite](https://github.com/electric-sql/postgres-pglite), the PostgreSQL fork behind PGlite.
+[pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres) applies them to an upstream
+PostgreSQL release and publishes each build as a release, tagged `<Postgres major>.<minor>.<revision>`:
+`18.3.0` is the first build of PostgreSQL 18.3. `@pgxsinkit/pgwasm-c` ships one release's files byte for
+byte, and `@pgxsinkit/pgwasm-pg-dump` ships `pg_dump` from the same release.
+
+`SELECT version()` names the release a database runs:
+
+```text
+PostgreSQL 18.3 (pgwasm-postgres 18.3.0) on wasm32-unknown-emscripten, …
+```
+
+The same name is the build's `identity.release` (`C_BUILD_IDENTITY.release` from `@pgxsinkit/pgwasm-c`),
+so code can read it without a query. Quote it when you report a problem with the database itself.
+
 ## A store belongs to its build
 
 A data directory records the build that created it, and the record is permanent. A store's build is fixed

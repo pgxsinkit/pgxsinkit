@@ -8,6 +8,9 @@ records the store-level rules that follow from having more than one Postgres bui
 Revised 2026-09-27 before implementation: filesystem mounting is build-specific (step 1 design).
 Amended 2026-09-27: emergent is the only downstream consumer. Decision 10's step-3 gate and step-4
 codemod cover emergent alone; genretv and magnetic are not continued as they are.
+Amended by [ADR-0064](0064-c-build-supply-chain.md) (2026-09-27): decision 9's C build home is the
+new patch-series repository `pgxsinkit/pgwasm-postgres`, not the renamed `pgxsinkit/postgres-pglite` fork,
+which is archived as the provenance of `b133782`.
 
 Status note (2026-09-27): decision 10's step 3 (the switch) is implemented in pgxsinkit, commits
 `71c5dbd^..da446f0` (B0–B7a) plus the B7b skills-and-records commit that adds this note. The client, React,
