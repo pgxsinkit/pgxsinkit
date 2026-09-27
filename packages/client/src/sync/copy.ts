@@ -1,6 +1,5 @@
-// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE) —
-// specifically a port of the serializer from electric-sql/pglite PR #1035.
-// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
+// Ports PostgreSQL's CopyAttributeOutText (src/backend/commands/copyto.c) and array_out
+// (src/backend/utils/adt/arrayfuncs.c) — PostgreSQL License, © The PostgreSQL Global Development Group (see NOTICE).
 /**
  * Serialization of JavaScript values into a PostgreSQL `COPY ... WITH (FORMAT
  * text)` stream.

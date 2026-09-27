@@ -100,6 +100,23 @@ const OPFS_REPACKED_RUNTIME_EXPORTS = [
   "normalizeWasiPath",
 ] as const;
 
+/**
+ * The files `bun pm pack` puts in a package's tarball — the same pack `bun publish` makes — listed by a
+ * dry run, so nothing is written. Paths are relative to the package root.
+ */
+function packedFiles(packageDir: string): string[] {
+  const output = execFileSync("bun", ["pm", "pack", "--dry-run", "--ignore-scripts"], {
+    cwd: join(repoRoot, packageDir),
+    encoding: "utf8",
+  });
+  return [...output.matchAll(/^packed\s+\S+\s+(\S.*)$/gm)].map((match) => match[1]!.trim());
+}
+
+/** Whether a package.json `license` expression names the Apache License 2.0 (`MIT AND Apache-2.0`). */
+function namesApache(license: string | undefined): boolean {
+  return /(?:^|[\s(])Apache-2\.0(?:$|[\s)])/.test(license ?? "");
+}
+
 /** Every static import specifier in an (unminified, double-quoted) ESM bundle. */
 function importSpecifiers(bundle: string): string[] {
   const specifiers = new Set<string>();
@@ -254,3 +271,46 @@ for (const pkg of publicPackages) {
     }
   });
 }
+
+// The licence files every published tarball must carry. Apache-2.0 §4 obliges a package that ships
+// Apache-licensed code to give recipients the licence text and keep its attribution notices, so a
+// package whose `license` names Apache-2.0 packs its NOTICE and LICENSE-APACHE-2.0 too. `bun pm pack`
+// adds a LICENSE by itself but neither of those: they reach the tarball only through `files`.
+//
+// These packages ship no LICENSE yet. They are MIT only and all their code is pgxsinkit's own, so no
+// third-party notice rides on them. One of them may lack a LICENSE; a LICENSE it has must still be packed.
+const LICENSE_OPTIONAL: ReadonlySet<string> = new Set([
+  "packages/contracts",
+  "packages/pglite-opfs-repacked",
+  "packages/react",
+  "packages/server",
+]);
+
+describe("published licence files", () => {
+  for (const pkg of publicPackages) {
+    it(`${pkg.packageDir} packs its LICENSE, and its NOTICE and LICENSE-APACHE-2.0 where Apache-2.0 applies`, () => {
+      const manifest = JSON.parse(readFileSync(join(repoRoot, pkg.packageDir, "package.json"), "utf8")) as {
+        license?: string;
+      };
+      const packed = packedFiles(pkg.packageDir);
+      // An unrecognised dry-run listing must fail here rather than pass by listing nothing.
+      expect(packed).toContain("package.json");
+
+      const required = new Set<string>();
+      if (!LICENSE_OPTIONAL.has(pkg.packageDir) || existsSync(join(repoRoot, pkg.packageDir, "LICENSE"))) {
+        required.add("LICENSE");
+      }
+      if (namesApache(manifest.license)) {
+        required.add("LICENSE");
+        required.add("NOTICE");
+        required.add("LICENSE-APACHE-2.0");
+      }
+      // A NOTICE the package keeps holds attributions its recipients are owed (pgwasm-c's reproduces the
+      // notices of the components compiled into its artefacts), whatever the package's own licence.
+      if (existsSync(join(repoRoot, pkg.packageDir, "NOTICE"))) required.add("NOTICE");
+
+      // Names exactly what the tarball lacks.
+      expect([...required].filter((file) => !packed.includes(file))).toEqual([]);
+    });
+  }
+});

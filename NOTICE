@@ -1,30 +1,54 @@
 pgxsinkit
 =========
 
-This product includes software vendored from third parties.
+This product includes software vendored from third parties. This file is the
+repository-wide record. Each published package that ships such code carries its own
+NOTICE for exactly what it ships: `packages/client/NOTICE`, `packages/pgwasm/NOTICE`,
+`packages/pgwasm-c/NOTICE` and `packages/pgwasm-pg-dump/NOTICE` (the last two also
+reproduce the notice of every component compiled into their artefacts), and
+`packages/pgwasm-repl/NOTICE`.
 
 ------------------------------------------------------------------------------
 ElectricSQL — @electric-sql/pglite, package `pglite-sync`
 ------------------------------------------------------------------------------
 
-The read-path sync engine under `packages/client/src/sync/` and the test suites
-listed below were originally seeded from ElectricSQL's `@electric-sql/pglite`
-monorepo, package `packages/pglite-sync`:
+The read-path sync engine of `@pgxsinkit/client` began as a copy of ElectricSQL's
+`@electric-sql/pglite` monorepo, package `packages/pglite-sync`:
 
   Source:  https://github.com/electric-sql/pglite/tree/main/packages/pglite-sync
   License: Apache License 2.0
   Copyright (c) ElectricSQL and contributors
 
-The engine and these suites are now fully internalized (ADR-0009) and owned; they
-diverge freely from upstream and upstream compatibility is an explicit anti-goal
-(ADR-0028). This attribution is retained because the code began as a copy — the
-Apache-2.0 terms are permanent. The seeded-from suites:
+These files derive from it, and each carries a header saying so:
 
-  - tests/unit/sync-engine.test.ts                     (from test/sync.test.ts)
-  - tests/integration/sync-engine-e2e.integration.test.ts  (from test-e2e/sync-e2e.test.ts)
+  - packages/client/src/sync/apply.ts
+  - packages/client/src/sync/subscription-state.ts
+  - packages/client/src/sync/types.ts
+  - packages/client/src/circuits/sync-engine.ts
 
-A copy of the Apache License 2.0 is available at:
-  https://www.apache.org/licenses/LICENSE-2.0
+The engine is fully internalized (ADR-0009) and owned; it diverges freely from
+upstream and upstream compatibility is an explicit anti-goal (ADR-0028). This
+attribution is retained because the code began as a copy — the Apache-2.0 terms are
+permanent. A copy of the Apache License 2.0 ships with the package in
+`packages/client/LICENSE-APACHE-2.0` (from
+https://www.apache.org/licenses/LICENSE-2.0.txt).
+
+------------------------------------------------------------------------------
+PostgreSQL — COPY TEXT field escaping and array literals
+------------------------------------------------------------------------------
+
+`packages/client/src/sync/copy.ts`, the client's COPY TEXT serializer, ports two
+PostgreSQL backend routines to TypeScript, with PostgreSQL 18 as the reference:
+`CopyAttributeOutText` (src/backend/commands/copyto.c) and `array_out`
+(src/backend/utils/adt/arrayfuncs.c).
+
+  Source:  https://www.postgresql.org
+  License: PostgreSQL License
+  Copyright (c) The PostgreSQL Global Development Group and The Regents of the
+  University of California
+
+PostgreSQL's notice, from its COPYRIGHT file, is reproduced in
+`packages/client/NOTICE`, which ships with the package.
 
 ------------------------------------------------------------------------------
 ElectricSQL — @electric-sql/pglite (packages `pglite`, `pg-protocol`, `pglite-utils`,
@@ -120,9 +144,11 @@ began as a copy of drizzle-orm's PGlite driver (`src/pglite/driver.ts`,
   Copyright (c) Drizzle Team and contributors
 
 Changes: the session, transaction and database classes are rebound from PGlite to
-pgwasm, and the driver never constructs its own database. The Apache-2.0 terms are
-permanent. A copy of the Apache License 2.0 is available at:
-  https://www.apache.org/licenses/LICENSE-2.0
+pgwasm; the driver never constructs its own database; it has its own JIT capability
+probe; `$cache.invalidate` is bound without changing the caller's cache. The
+Apache-2.0 terms are permanent. A copy of the Apache License 2.0 ships with the
+package in `packages/pgwasm/LICENSE-APACHE-2.0` (from
+https://www.apache.org/licenses/LICENSE-2.0.txt).
 
 ------------------------------------------------------------------------------
 postgres.js — type parsers and serializers

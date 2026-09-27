@@ -1,0 +1,81 @@
+@pgxsinkit/client
+=================
+
+This package includes software that began as a copy, or is a port, of third-party
+code. It is owned outright and diverges freely (ADR-0009, ADR-0028); these
+attributions are permanent.
+
+------------------------------------------------------------------------------
+ElectricSQL — @electric-sql/pglite, package `pglite-sync`
+------------------------------------------------------------------------------
+
+The read-path sync engine began as a copy of ElectricSQL's `@electric-sql/pglite`
+monorepo, package `packages/pglite-sync`:
+
+  Source:  https://github.com/electric-sql/pglite/tree/main/packages/pglite-sync
+  License: Apache License 2.0
+  Copyright (c) ElectricSQL and contributors
+
+These files derive from it, and each carries a header saying so:
+
+  - src/sync/apply.ts
+  - src/sync/subscription-state.ts
+  - src/sync/types.ts
+  - src/circuits/sync-engine.ts
+
+Their compiled form ships in `dist/`.
+
+Changes: the engine reads each shape from a durable stream rather than Electric's
+shape API (ADR-0055); commits each consistency group atomically through a
+single-flight commit queue that holds a failed batch instead of dropping it
+(ADR-0009); applies through an apply ladder chosen from the registry's column types,
+folding each batch to one operation per primary key (ADR-0014); serializes COPY in
+Postgres' TEXT format; keeps its metadata in its own `pgxsinkit` schema; and builds
+its statements with Drizzle (ADR-0028). The Apache-2.0 terms are permanent. A copy of
+the Apache License 2.0 ships with this package in LICENSE-APACHE-2.0 (from
+https://www.apache.org/licenses/LICENSE-2.0.txt).
+
+------------------------------------------------------------------------------
+PostgreSQL — COPY TEXT field escaping and array literals
+------------------------------------------------------------------------------
+
+`src/sync/copy.ts`, the COPY TEXT serializer, ports two PostgreSQL backend routines
+to TypeScript, with PostgreSQL 18 as the reference:
+
+  - `CopyAttributeOutText` (src/backend/commands/copyto.c): COPY TEXT field escaping
+  - `array_out` (src/backend/utils/adt/arrayfuncs.c): array literals
+
+  Source:  https://www.postgresql.org
+  License: PostgreSQL License
+  Copyright (c) The PostgreSQL Global Development Group and The Regents of the
+  University of California
+
+The file carries a header saying so, and its compiled form ships in `dist/`.
+PostgreSQL's notice, copied from its COPYRIGHT file as PostgreSQL 18.3 ships it
+(https://github.com/electric-sql/postgres-pglite at
+b133782cd759f08b3aeb263b80a963b39c7b7af1, file COPYRIGHT, unchanged from PostgreSQL's
+own; the same copy @pgxsinkit/pgwasm-c's NOTICE reproduces):
+
+    PostgreSQL Database Management System
+    (also known as Postgres, formerly known as Postgres95)
+
+    Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+
+    Portions Copyright (c) 1994, The Regents of the University of California
+
+    Permission to use, copy, modify, and distribute this software and its
+    documentation for any purpose, without fee, and without a written agreement
+    is hereby granted, provided that the above copyright notice and this
+    paragraph and the following two paragraphs appear in all copies.
+
+    IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR
+    DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+    LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS
+    DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
+
+    THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+    INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+    AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+    ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
+    PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.

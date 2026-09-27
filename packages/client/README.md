@@ -32,3 +32,10 @@ placement from the browser name.
 
 See [Worker mode](https://pgxsinkit.github.io/concepts/worker-mode/) for the complete factory,
 relocation, adoption, destruction, and durability contract.
+
+## License
+
+MIT, except the parts of the read-path sync engine that began as ElectricSQL's
+`@electric-sql/pglite-sync`, which stay under the Apache License 2.0 (`LICENSE-APACHE-2.0`); the
+package license is `MIT AND Apache-2.0`. The COPY serializer ports two PostgreSQL routines and keeps
+PostgreSQL's notice. `NOTICE` lists those files and has every attribution.

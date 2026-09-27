@@ -107,4 +107,5 @@ packages at that one version — there is no version bump. See [`RELEASING.md`](
 
 ## License
 
-[MIT](./LICENSE) © pgxsinkit contributors.
+[MIT](./LICENSE) © pgxsinkit contributors. Some published packages include parts under the Apache
+License 2.0 or the PostgreSQL License; each such package's `NOTICE` says which.

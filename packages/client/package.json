@@ -4,11 +4,14 @@
   "keywords": [
     "tanstack-intent"
   ],
-  "license": "MIT",
+  "license": "MIT AND Apache-2.0",
   "files": [
     "dist",
     "src",
     "README.md",
+    "LICENSE",
+    "LICENSE-APACHE-2.0",
+    "NOTICE",
     "skills",
     "oxlint-plugin.js"
   ],

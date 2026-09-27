@@ -1,3 +1,5 @@
+// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
+// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
 import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 

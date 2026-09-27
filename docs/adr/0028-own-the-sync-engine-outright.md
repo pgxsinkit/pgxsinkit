@@ -2,6 +2,12 @@
 
 Status: accepted (2026-07-02); implemented (2026-07-03)
 
+Amended (2026-09-27): decision 3 no longer applies to `copy.ts`. Its serializer is the maintainer's
+own work (his unmerged electric-sql/pglite PR #1035) and a port of PostgreSQL's `CopyAttributeOutText`
+and `array_out`, so the file carries PostgreSQL's attribution (PostgreSQL License) in its header and in
+`packages/client/NOTICE` instead of the pglite-sync header; see
+[docs/history/pglite-sync-vendoring.md](../history/pglite-sync-vendoring.md).
+
 [ADR-0009](0009-internalize-read-path-sync.md) internalized the read-path engine into
 `@pgxsinkit/client` (`packages/client/src/sync/`) and dissolved the
 `@pgxsinkit/pglite-sync` vendoring boundary — superseding [ADR-0007](0007-absorb-sync-engine.md)

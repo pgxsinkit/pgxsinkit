@@ -5,6 +5,13 @@
 > and diverge freely; upstream compatibility is an anti-goal. Kept as the changelog of the vendoring
 > era. Filenames and script names below reflect that era and are no longer current.
 
+> **2026-09-27: `copy.ts` is not pglite-sync code.** Its COPY TEXT serializer is the maintainer's own
+> work, offered upstream as `electric-sql/pglite` PR #1035 and never merged, and it is a port of two
+> PostgreSQL routines (`CopyAttributeOutText` and `array_out`). It therefore carries PostgreSQL's
+> attribution (PostgreSQL License, © The PostgreSQL Global Development Group) in its header and in
+> `packages/client/NOTICE`, not the pglite-sync (Apache-2.0, © ElectricSQL) header it carried until
+> then.
+
 The read-path sync engine — internalized at `packages/client/src/sync/` (ADR-0009 Phase 1),
 originally vendored from ElectricSQL's `@electric-sql/pglite` (package `pglite-sync`) — is being
 rewritten by [ADR-0009](../adr/0009-internalize-read-path-sync.md): consistency groups, a type-driven
@@ -54,12 +61,12 @@ transforms, swap the top import block for the shim, and update the pinned SHA he
   `tests/unit/apply-ladder.test.ts` (each tier on the pinned PGlite, incl. jsonb + bigint[] via the
   `columnTypes` json path). The two oracle COPY tests and the camelCase json test stay green on the
   fallback path, unchanged. The COPY path itself now serializes via a faithful port of Postgres' own
-  COPY **TEXT** format (`CopyAttributeOutText` + `array_out`, in `sync/copy.ts`, ported from upstream
-  `electric-sql/pglite` PR #1035), replacing the hand-rolled CSV encoder that mangled arrays,
-  json/jsonb, bytea and embedded delimiters — proven by `tests/unit/copy.test.ts` (serializer units +
-  real-PGlite `COPY FROM` round-trips for scalars/arrays/multi-dim/json/jsonb/`jsonb[]`/timestamps/
-  bytea). json/jsonb disambiguation comes from the registry `columnTypes` (information_schema only as
-  the generic-caller fallback), like the json path.
+  COPY **TEXT** format (`CopyAttributeOutText` + `array_out`, in `sync/copy.ts`, ported from the
+  maintainer's own, unmerged `electric-sql/pglite` PR #1035), replacing the hand-rolled CSV encoder
+  that mangled arrays, json/jsonb, bytea and embedded delimiters — proven by `tests/unit/copy.test.ts`
+  (serializer units + real-PGlite `COPY FROM` round-trips for scalars/arrays/multi-dim/json/jsonb/
+  `jsonb[]`/timestamps/bytea). json/jsonb disambiguation comes from the registry `columnTypes`
+  (information_schema only as the generic-caller fallback), like the json path.
 - **`pgxsinkit.syncing` flag set during sync** → decision 6 (the sync-origin GUC, renamed from the
   upstream `electric.syncing` to our own metadata namespace; the oracle now asserts the new name).
 - **Subscription persist/resume, clears+restarts on refetch, must-refetch** → decision 4/5
