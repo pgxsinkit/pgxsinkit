@@ -10,6 +10,7 @@ import { PgDialect } from "drizzle-orm/pg-core/dialect";
 import type { DrizzlePgConfig } from "drizzle-orm/pg-core/utils";
 import type { AnyRelations, EmptyRelations } from "drizzle-orm/relations";
 
+import { PgwasmError } from "../errors";
 import type { Pgwasm } from "../interface";
 import { pgwasmCodecs } from "./codecs";
 import { PgwasmSession, type PgwasmQueryResultHKT, type PgwasmSessionClient } from "./session";
@@ -59,12 +60,70 @@ function construct<TRelations extends AnyRelations, TClient extends PgwasmSessio
   return Object.assign(db, { $client: client });
 }
 
-/** A Drizzle database over a pgwasm database. */
+/** drizzle's object form: its config, with the pgwasm database as `client`. */
+export type PgwasmDrizzleConfig<
+  TRelations extends AnyRelations = EmptyRelations,
+  TClient extends Pgwasm = Pgwasm,
+> = DrizzlePgConfig<TRelations> & { client: TClient };
+
+/** The form of a `drizzle()` call that would have the driver open its own database. */
+export type UnsupportedDrizzleForm = "connection" | "connection string" | "no client";
+
+/**
+ * A `drizzle()` call without a pgwasm database: `drizzle({ connection })`, `drizzle("…")`, `drizzle()`, or a
+ * `client` that is not a pgwasm database. The driver never opens its own database: create one with
+ * `createPgwasm()` and pass it in.
+ */
+export class UnsupportedDrizzleConfigError extends PgwasmError {
+  override name = "UnsupportedDrizzleConfigError";
+  readonly form: UnsupportedDrizzleForm;
+
+  constructor(form: UnsupportedDrizzleForm) {
+    const given =
+      form === "connection"
+        ? "drizzle({ connection })"
+        : form === "connection string"
+          ? "drizzle(connectionString)"
+          : "a drizzle() call without a pgwasm database";
+    super(
+      `@pgxsinkit/pgwasm/drizzle does not open its own database, so ${given} is not supported: create the ` +
+        "database with createPgwasm() and pass it as drizzle(pg, config) or drizzle({ client: pg, ...config }).",
+    );
+    this.form = form;
+  }
+}
+
+function isPgwasm(value: unknown): value is Pgwasm {
+  return typeof value === "object" && value !== null && typeof (value as Partial<Pgwasm>).query === "function";
+}
+
+/**
+ * A Drizzle database over a pgwasm database: `drizzle(pg, config)`, or drizzle's object form
+ * `drizzle({ client: pg, ...config })`, which is the same thing. The driver never opens its own database, so
+ * the forms that would (`{ connection }`, a connection string) are not accepted; at runtime they throw
+ * {@link UnsupportedDrizzleConfigError}.
+ */
 export function drizzle<TRelations extends AnyRelations = EmptyRelations, TClient extends Pgwasm = Pgwasm>(
   client: TClient,
   config?: DrizzlePgConfig<TRelations>,
-): PgwasmDatabase<TRelations> & { $client: TClient } {
-  return construct(client, config);
+): PgwasmDatabase<TRelations> & { $client: TClient };
+export function drizzle<TRelations extends AnyRelations = EmptyRelations, TClient extends Pgwasm = Pgwasm>(
+  config: PgwasmDrizzleConfig<TRelations, TClient>,
+): PgwasmDatabase<TRelations> & { $client: TClient };
+export function drizzle<TRelations extends AnyRelations = EmptyRelations>(
+  clientOrConfig: Pgwasm | PgwasmDrizzleConfig<TRelations>,
+  config?: DrizzlePgConfig<TRelations>,
+): PgwasmDatabase<TRelations> & { $client: Pgwasm } {
+  const given: unknown = clientOrConfig;
+  if (isPgwasm(given)) return construct(given, config);
+  if (typeof given === "string") throw new UnsupportedDrizzleConfigError("connection string");
+  if (typeof given === "object" && given !== null) {
+    const { client, ...rest } = given as Partial<PgwasmDrizzleConfig<TRelations>> & { connection?: unknown };
+    // A `connection` next to a pgwasm `client` is ignored, as drizzle's own drivers do.
+    if (isPgwasm(client)) return construct(client, rest);
+    if (client === undefined && "connection" in given) throw new UnsupportedDrizzleConfigError("connection");
+  }
+  throw new UnsupportedDrizzleConfigError("no client");
 }
 
 const unavailable: PgwasmSessionClient = {

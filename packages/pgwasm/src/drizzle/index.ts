@@ -1,4 +1,10 @@
-export { drizzle, PgwasmDatabase } from "./driver";
+export {
+  drizzle,
+  PgwasmDatabase,
+  UnsupportedDrizzleConfigError,
+  type PgwasmDrizzleConfig,
+  type UnsupportedDrizzleForm,
+} from "./driver";
 export {
   PgwasmSession,
   PgwasmTransaction,

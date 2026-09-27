@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { eq, sql } from "drizzle-orm";
+import { defineRelations, eq, sql } from "drizzle-orm";
 import { Cache } from "drizzle-orm/cache/core/cache";
 import type { MutationOption } from "drizzle-orm/cache/core/cache";
 import {
@@ -19,7 +19,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { PgDialect } from "drizzle-orm/pg-core/dialect";
 
-import { drizzle } from "../../packages/pgwasm/src/drizzle";
+import { drizzle, type PgwasmDatabase, UnsupportedDrizzleConfigError } from "../../packages/pgwasm/src/drizzle";
 import { jitMappersUsable } from "../../packages/pgwasm/src/drizzle/driver";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { rejectionOf } from "./support/rejection";
@@ -181,6 +181,57 @@ describe("the pgwasm Drizzle driver", () => {
   it("keeps a callable no-op $cache.invalidate when no cache is configured", async () => {
     const db = drizzle(await createTestPgwasm());
     expect(await db.$cache.invalidate({ tables: "users" })).toBeUndefined();
+  });
+
+  describe("drizzle's object form, drizzle({ client, ...config })", () => {
+    const mappers = (db: object) => (db as { dialect: PgDialect }).dialect.mapperGenerators.rows.name;
+
+    it("is drizzle(client, config): the same $client, config and queries", async () => {
+      const { client } = await database();
+      const relations = defineRelations({ users });
+      const db = drizzle({ client, relations, jit: true });
+      // The type matches the positional form's.
+      const typed: PgwasmDatabase<typeof relations> & { $client: typeof client } = db;
+      expect(typed.$client).toBe(client);
+      expect(mappers(db)).toBe(mappers(drizzle(client, { relations, jit: true })));
+      expect(mappers(db)).toBe("makeJitQueryMapper");
+      await db.transaction(async (tx) => {
+        await tx.insert(users).values([{ name: "ada" }, { name: "grace" }]);
+      });
+      expect((await db.query.users.findMany({ orderBy: { id: "asc" } })).map((row) => row.name)).toEqual([
+        "ada",
+        "grace",
+      ]);
+      expect(mappers(drizzle({ client }))).toBe("makeDefaultQueryMapper");
+    });
+
+    it("rejects, with a typed error, the forms that would open their own database", () => {
+      const attempts: [() => unknown, string][] = [
+        // @ts-expect-error -- the driver never opens its own database
+        [() => drizzle({ connection: "idb://app" }), "connection"],
+        // @ts-expect-error -- the driver never opens its own database
+        [() => drizzle({ connection: { dataDir: "idb://app" }, logger: true }), "connection"],
+        // @ts-expect-error -- the driver never opens its own database
+        [() => drizzle("idb://app"), "connection string"],
+        // @ts-expect-error -- the driver never opens its own database
+        [() => drizzle("idb://app", { logger: true }), "connection string"],
+        // @ts-expect-error -- the driver never opens its own database
+        [() => drizzle(), "no client"],
+        // @ts-expect-error -- a client that is not a pgwasm database
+        [() => drizzle({ client: { exec: async () => [] } }), "no client"],
+      ];
+      for (const [attempt, form] of attempts) {
+        let error: unknown;
+        try {
+          attempt();
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(UnsupportedDrizzleConfigError);
+        expect(error).toMatchObject({ name: "UnsupportedDrizzleConfigError", form });
+        expect((error as Error).message).toContain("drizzle({ client: pg, ...config })");
+      }
+    });
   });
 
   describe("JIT row mappers", () => {

@@ -95,7 +95,15 @@ const surfaces: [entry: string, module: object, exports: string[]][] = [
   [
     "@pgxsinkit/pgwasm/drizzle",
     drizzle,
-    ["PgwasmDatabase", "PgwasmSession", "PgwasmTransaction", "drizzle", "drizzleParsers", "pgwasmCodecs"],
+    [
+      "PgwasmDatabase",
+      "PgwasmSession",
+      "PgwasmTransaction",
+      "UnsupportedDrizzleConfigError",
+      "drizzle",
+      "drizzleParsers",
+      "pgwasmCodecs",
+    ],
   ],
   ["@pgxsinkit/pgwasm/fs", fs, ["BaseFilesystem", "ERRNO_CODES"]],
   [

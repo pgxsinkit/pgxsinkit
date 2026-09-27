@@ -61,15 +61,15 @@ A database records the build that created it. Opening it with another build fail
 the data directory) and the `loadDataDir` option restores one into an empty data directory; the backup
 carries the same record, so it restores only into its own build.
 
-| Import                       | What it gives you                                                                              |
-| ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| `@pgxsinkit/pgwasm`          | `createPgwasm`, the `Pgwasm` interface and option types, the typed errors                      |
-| `@pgxsinkit/pgwasm/live`     | the `live` extension: `live.query`, `live.incrementalQuery`, `live.changes` (`PgwasmWithLive`) |
-| `@pgxsinkit/pgwasm/drizzle`  | a Drizzle ORM driver: `drizzle(pg)` returns a `PgwasmDatabase`; needs `drizzle-orm`            |
-| `@pgxsinkit/pgwasm/protocol` | `protocol(pg)`: wire-level access and an exclusive session, for tools such as `pg_dump`        |
-| `@pgxsinkit/pgwasm/opfs`     | the OPFS-repacked store: `createOpfsPgwasm`, `strictSync`, its errors and its low-level parts  |
-| `@pgxsinkit/pgwasm/fs`       | the filesystem contract a custom storage implements                                            |
-| `@pgxsinkit/pgwasm/build`    | the contract a Postgres build package implements                                               |
+| Import                       | What it gives you                                                                                                |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `@pgxsinkit/pgwasm`          | `createPgwasm`, the `Pgwasm` interface and option types, the typed errors                                        |
+| `@pgxsinkit/pgwasm/live`     | the `live` extension: `live.query`, `live.incrementalQuery`, `live.changes` (`PgwasmWithLive`)                   |
+| `@pgxsinkit/pgwasm/drizzle`  | a Drizzle ORM driver: `drizzle(pg)` or `drizzle({ client: pg })` returns a `PgwasmDatabase`; needs `drizzle-orm` |
+| `@pgxsinkit/pgwasm/protocol` | `protocol(pg)`: wire-level access and an exclusive session, for tools such as `pg_dump`                          |
+| `@pgxsinkit/pgwasm/opfs`     | the OPFS-repacked store: `createOpfsPgwasm`, `strictSync`, its errors and its low-level parts                    |
+| `@pgxsinkit/pgwasm/fs`       | the filesystem contract a custom storage implements                                                              |
+| `@pgxsinkit/pgwasm/build`    | the contract a Postgres build package implements                                                                 |
 
 The pgxsinkit client's store type is `PgwasmClient` (from `@pgxsinkit/client`), which is `PgwasmWithLive`:
 a pgwasm database with the `live` extension. The React hooks' `{ pgwasm }` option and the
