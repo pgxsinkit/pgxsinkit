@@ -103,7 +103,7 @@ Built in dependency order, each phase its own `validate:full`-green commit on `d
   `validateSyncTableEntry` rejects an undeclared policy on a writable table (the third hard-require,
   right after the Server-version one). Swept every writable registry: demo `authors`=last-write-wins
   / `todos`=reject-if-stale, integration `projects`=reject-if-stale + the rest last-write-wins, perf +
-  test fixtures. The raw `TableSpecInput`-shaped test configs (client-sync-reset / perf-lab-pglite /
+  test fixtures. The raw `TableSpecInput`-shaped test configs (client-sync-reset / perf-lab-pgwasm /
   shape-sync) bypass `validateSyncTableEntry`, so they need no policy.
 - **P1 — Base server version capture.** Optional `baseServerVersion` on `mutationEnvelopeSchema`. The
   enqueue path stamps a chain head's base = the synced Server version at enqueue (captured BEFORE the

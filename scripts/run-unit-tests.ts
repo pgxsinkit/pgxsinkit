@@ -25,7 +25,7 @@ const ISOLATED = new Set([
   "client-sync-reset",
   "write-activation-diagnostic",
   "staged-boot-readiness",
-  "perf-lab-pglite",
+  "perf-lab-pgwasm",
   "pgwasm-opfs-factory-host-reject",
   "pgwasm-opfs-factory-init-reject",
   "pgwasm-opfs-factory-poison",

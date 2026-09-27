@@ -8,6 +8,11 @@ platforms. The still-open full-engine-in-real-Safari-SharedWorker question below
 2026-07-21 real-device runs returned `granted-and-persisted` with SharedWorker-direct timings within
 noise of the dedicated-worker column.
 
+Status note (2026-09-27): the store now lives at `@pgxsinkit/pgwasm/opfs` (ADR-0062 decision 6, step 3,
+9c08026); the `@pgxsinkit/pglite-opfs-repacked` package is removed (f2d762d). The factory is
+`createOpfsPgwasm({ build, pgwasm, … })` and the strict boundary is `strictSync(pg)`; the decisions below are
+unchanged and keep the old names they were made under.
+
 Amended by [ADR-0062](0062-absorb-pglite-as-pgwasm.md) (2026-09-26): the store moves inside
 `@pgxsinkit/pgwasm` as its only OPFS filesystem (`@pgxsinkit/pgwasm/opfs`), `opfs-ahp` is removed,
 and the rule below against relying on fork-only host behavior is retired, because the store and the

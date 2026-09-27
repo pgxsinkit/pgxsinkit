@@ -10,8 +10,8 @@ This repo holds three bounded contexts with deliberately separate vocabularies.
   application: a Linear-style issue board with realtime chat that drives the
   toolkit end-to-end for a human to see. An exerciser, not the product.
 - [OPFS Repacked VFS](./packages/pgwasm/docs/opfs/CONTEXT.md) —
-  `packages/pglite-opfs-repacked`, the packed-storage OPFS filesystem under
-  pgwasm (moving into `@pgxsinkit/pgwasm/opfs`, ADR-0062). A storage engine, not sync: it deliberately shares no vocabulary with
+  `@pgxsinkit/pgwasm/opfs` (`packages/pgwasm/src/opfs`), the packed-storage OPFS filesystem under
+  pgwasm (moved from `packages/pglite-opfs-repacked` in ADR-0062 step 3). A storage engine, not sync: it deliberately shares no vocabulary with
   the Toolkit ("journal", "group") or with Postgres ("checkpoint", "WAL",
   "page" are reserved upward and banned here).
 

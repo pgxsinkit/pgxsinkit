@@ -3,6 +3,12 @@
 Status: accepted (2026-07-24) — amended by [ADR-0063](0063-build-permanence-and-storage-build.md)
 (2026-09-26): the declaration gains `build`.
 
+Status note (2026-09-27): the declaration gains `build` (`"c"` | `"pgrust"`, ADR-0063), which travels with
+it and is checked against the supplied build (`StorageBuildMismatchError`). D1's outcome for step 3: the
+declared store-engine module (`storage.engine`, `loadStoreEngineModule`) is kept, retyped to return a
+`PgwasmClient`, and its fallback named export is `createStore` (was `createPglite`); its retirement is decided
+with phase 2's design. The decisions below are unchanged.
+
 The board demo added a storage-preference switch (backend `opfs`/`idbfs`, durability
 `relaxed`/`strict`) and threaded both preferences through the SharedWorker **name**
 (`<storePath>?durability=…&backend=…`). That made configuration part of the worker's dedup

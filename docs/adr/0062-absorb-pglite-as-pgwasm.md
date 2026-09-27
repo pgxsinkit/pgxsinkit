@@ -9,6 +9,10 @@ Revised 2026-09-27 before implementation: filesystem mounting is build-specific 
 Amended 2026-09-27: emergent is the only downstream consumer. Decision 10's step-3 gate and step-4
 codemod cover emergent alone; genretv and magnetic are not continued as they are.
 
+Status note (2026-09-27): decision 10's step 3 (the switch) is implemented in pgxsinkit, commits
+`71c5dbd^..da446f0` (B0–B7a) plus the B7b skills-and-records commit that adds this note. The client, React,
+apps and tests run on pgwasm; the fork, the `@electric-sql/*` dependencies and the store shim are gone.
+
 ## Context
 
 pgxsinkit runs on PGlite through a fork. The root `overrides` alias `@electric-sql/pglite` to

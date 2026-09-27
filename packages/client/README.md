@@ -1,9 +1,9 @@
 # @pgxsinkit/client
 
 The [pgxsinkit](https://pgxsinkit.github.io) client: `createSyncClient` stages writes
-into a local PGlite overlay and a durable mutation journal, flushes them to the write
+into a local pgwasm overlay and a durable mutation journal, flushes them to the write
 API, and subscribes through the read path's control plane to read durable-streams into
-local PGlite.
+local pgwasm store.
 
 ```bash
 bun add @pgxsinkit/client @pgxsinkit/contracts
@@ -13,7 +13,7 @@ See the [documentation](https://pgxsinkit.github.io) for the read and write path
 
 ## Browser storage and worker placement
 
-`createSyncClient` is the in-process client. For browser apps, worker mode moves PGlite off the
+`createSyncClient` is the in-process client. For browser apps, worker mode moves pgwasm off the
 main thread with capability-driven placement (ADR-0049) as the default:
 
 - real macOS/iOS Safari grants synchronous OPFS handles in a `SharedWorker`, so the engine runs there

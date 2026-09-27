@@ -290,6 +290,28 @@ Against `@electric-sql/pglite-tools` (pg_dump), `@electric-sql/pglite-repl` and
 - The prepopulated data directory is fetched by URL in Bun as in browsers; the fork read it with
   Node's `fs` there. Databases created from it are marked (ADR-0063).
 
+## pgwasm step 3 drift (ADR-0062 decision 10, 2026-09-27)
+
+The switch moved the client, React, the apps and every test from the PGlite fork onto pgwasm. What changed
+in the test estate:
+
+- **Lane renames.** The store's browser lane moved from `tests/e2e/opfs-repacked/` to
+  `tests/e2e/pgwasm-opfs/` (`pgwasm-opfs.browser.test.ts`, now also run in WebKit), and its perf tests became
+  `pgwasm-opfs-await.perf.test.ts` and `pgwasm-opfs-core.perf.test.ts`. The unit test
+  `perf-lab-pglite.test.ts` is now `perf-lab-pgwasm.test.ts`.
+- **The test-store seam contract, retyped.** `@pgxsinkit/client/testing` keeps its names
+  (`memoryStoreForTests`, `testStoreAcknowledgment`); what it guards is now a `PgwasmClient`. A caller-owned
+  `pgwasmInstance` / `precreatedPgwasm` is refused as non-persistent when it is a memory store or a
+  filesystem that declares `persistent: false`; a custom filesystem that declares nothing is accepted, as
+  before. Store factories (`defineSyncWorker`'s `createStore`, the declared store-engine module's
+  fallback export) return a `PgwasmClient`. Supplied and adopted builds are checked against
+  `storage.build`, and the typed build refusals are never retried by the OPFS open loop.
+- **Fixtures.** The fork-made legacy data directory and Store backup are checked in under
+  `tests/unit/fixtures/pgwasm-legacy/` (see the pgwasm section above), so no test needs the fork at run time.
+- **Retired halves.** Restoring a pgwasm backup into the fork (maintainer decision D4); the perf lab's
+  opfs-ahp comparator column (published results stay as history); the PGlite-fork override runbook and the
+  store shim package's own suite, which now runs as pgwasm's `/opfs` tests.
+
 ## Offline return (board ADR-0010)
 
 The board demo's app shell is served offline by a hand-rolled, runtime-capture service worker

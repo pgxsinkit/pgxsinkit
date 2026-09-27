@@ -2,6 +2,10 @@
 
 Status: accepted (2026-07-10)
 
+Status note (2026-09-27): `defineSyncWorker`'s store factory option `createPglite` is now `createStore`,
+`(storePath, backendOverride?) => Promise<PgwasmClient>` (ADR-0062 step 3), and `pgliteInstance` /
+`precreatedPglite` are `pgwasmInstance` / `precreatedPgwasm`. The contract below is unchanged.
+
 pgxsinkit's durability semantics assume a persisted store. `retention: "persistent"` means "survives
 a restart"; the optimistic Mutation journal is the correctness backstop that lets a background flush
 be safe — lose the store, lose acked-but-unobserved work. On a memory-backed PGlite both promises

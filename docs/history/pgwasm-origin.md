@@ -127,3 +127,15 @@ New, with no source: `/protocol`'s `runExclusiveSession` (w: `src/core/pgwasm.ts
 | `packages/pglite-tools/tests/pg_dump.test.ts`                 | `tests/unit/pgwasm-pg-dump.test.ts`, with `pgwasm-pg-dump-session.test.ts` and `pgwasm-pg-dump-framing.test.ts` new |
 | `packages/pglite-prepopulatedfs/tests/prepopulatedfs.test.ts` | dropped (a timing comparison with initdb); `tests/unit/pgwasm-c-prepopulated.test.ts` is new                        |
 | (the REPL had none)                                           | `tests/unit/pgwasm-repl.test.ts`, `tests/pgwasm-repl-types.ts`, and the REPL case of `tests/e2e/pgwasm-idb/`        |
+
+## The OPFS-repacked store
+
+`@pgxsinkit/pgwasm/opfs` did not come from PGlite. It is this repository's own constant-handle OPFS store
+(ADR-0048), first published as `@pgxsinkit/pglite-opfs-repacked` (`packages/pglite-opfs-repacked`), a
+filesystem for the PGlite fork. Step 3 moved its whole surface into `@pgxsinkit/pgwasm/opfs` (9c08026, ADR-0062
+decision 6) with the store's docs under `packages/pgwasm/docs/opfs/`, and removed the old package (f2d762d).
+Only names that carried PGlite changed: `createOpfsRepackedPGlite({ pglite, … })` became
+`createOpfsPgwasm({ build, pgwasm, … })`, `CreateOpfsRepackedPGliteOptions` / `OpfsRepackedPGlite` /
+`OpfsRepackedCreatePhase` became `CreateOpfsPgwasmOptions` / `OpfsPgwasm` / `OpfsCreatePhase`, and
+`instance.strictSync()` became `strictSync(pg)`. "Repacked", the on-disk format's name, stays: the ports,
+`RepackedVfs`, `OpfsRepackedFS` and the store errors keep their names.

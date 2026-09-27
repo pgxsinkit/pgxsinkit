@@ -10,7 +10,7 @@
 
 # pgxsinkit
 
-`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> Circuits engine -> durable-streams -> PGlite` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/board`), the minimal reference server (`apps/write-api`), and the integration + performance harness exist to prove and harden them.
+`pgxsinkit` is an offline-first **sync toolkit** for a `PostgreSQL -> Circuits engine -> durable-streams -> pgwasm` read path and a `client -> write API -> PostgreSQL` write path. The `@pgxsinkit/*` packages are the product; the demo app (`apps/board`), the minimal reference server (`apps/write-api`), and the integration + performance harness exist to prove and harden them.
 
 Canonical timestamps are stored as bigint microseconds since the unix epoch and cross API/sync boundaries as decimal strings.
 
@@ -37,7 +37,7 @@ client reads through a token-gated stream edge. Three things it requires:
 ```bash
 bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 # React bindings (optional): bun add @pgxsinkit/react
-# Constant-handle OPFS storage (optional): bun add @pgxsinkit/pglite-opfs-repacked
+# Constant-handle OPFS storage, standalone (the client already bundles it): bun add @pgxsinkit/pgwasm, then import @pgxsinkit/pgwasm/opfs
 ```
 
 The packages are published to public npm; install them with whichever package manager you use
@@ -79,7 +79,7 @@ and [`CONTEXT.md`](./CONTEXT.md). The repository is a Bun workspace:
 - `apps/board` — the substantial demo (Linear-style board + chat) on a partial Supabase + Circuits stack.
 - `apps/write-api` — the minimal `@pgxsinkit/server` reference (Bun, no web framework).
 - `packages/contracts` · `client` · `server` · `react` — the published sync toolkit.
-- `packages/pglite-opfs-repacked` — the published OPFS storage engine for PGlite.
+- `packages/pgwasm` — the Postgres-in-WASM runtime; its `/opfs` entry is the constant-handle OPFS-repacked store.
 - `packages/schema`, `packages/board-schema` — example/demo registries (your app defines its own).
 - `infra/`, `tests/`, `supabase/functions` — compose stacks, suites, and the demo's edge functions.
 
@@ -87,7 +87,7 @@ Scripts are check-default (a bare verb never mutates):
 
 ```bash
 bun run validate         # fast pre-commit gate: format, lint, typecheck, fast unit subset
-bun run validate:full    # pre-push + CI gate: adds the PGlite-backed unit suite
+bun run validate:full    # pre-push + CI gate: adds the pgwasm-backed unit suite
 bun run test:integration # container-backed suites on isolated, ephemeral compose stacks
 ```
 
