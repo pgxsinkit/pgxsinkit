@@ -7,10 +7,12 @@ node_modules/*
 coverage/*
 dist/*
 packages/*/dist/*
-# The C Postgres build's artefacts: pinned by checksum in packages/pgwasm-c/src/artefact-pins.ts and fetched
-# by the root postinstall (scripts/pgwasm-artefacts.ts), never committed. The glue's type declarations are.
+# The build packages' artefacts: pinned by checksum in each package's src/artefact-pins.ts and fetched by the
+# root postinstall (scripts/pgwasm-artefacts.ts), never committed. The glue's type declarations are.
 packages/pgwasm-c/artefacts/*
 !packages/pgwasm-c/artefacts/*.d.ts
+packages/pgwasm-pg-dump/artefacts/*
+!packages/pgwasm-pg-dump/artefacts/*.d.ts
 apps/board/dist/*
 apps/perf-lab/dist/*
 apps/docs/dist/*

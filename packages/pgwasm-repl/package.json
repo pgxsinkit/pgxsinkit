@@ -1,0 +1,43 @@
+{
+  "name": "@pgxsinkit/pgwasm-repl",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "bun --cwd ../.. run build:public-packages"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "6.20.3",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-sql": "6.10.0",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/view": "6.43.13",
+    "@uiw/codemirror-theme-github": "4.25.12",
+    "@uiw/codemirror-themes": "4.25.12",
+    "@uiw/react-codemirror": "4.25.12",
+    "psql-describe": "0.1.7"
+  },
+  "peerDependencies": {
+    "react": ">=19.3.0"
+  }
+}

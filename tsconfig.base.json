@@ -39,6 +39,9 @@
       "@pgxsinkit/pgwasm/protocol": ["./packages/pgwasm/src/protocol/index.ts"],
       "@pgxsinkit/pgwasm-c": ["./packages/pgwasm-c/src/index.ts"],
       "@pgxsinkit/pgwasm-c/contrib/amcheck": ["./packages/pgwasm-c/src/contrib/amcheck.ts"],
+      "@pgxsinkit/pgwasm-c/prepopulated": ["./packages/pgwasm-c/src/prepopulated.ts"],
+      "@pgxsinkit/pgwasm-pg-dump": ["./packages/pgwasm-pg-dump/src/index.ts"],
+      "@pgxsinkit/pgwasm-repl": ["./packages/pgwasm-repl/src/index.ts"],
       "@pgxsinkit/server": ["./packages/server/src/index.ts"],
       "@pgxsinkit/test-utils": ["./packages/test-utils/src/index.ts"],
       "@pgxsinkit/react": ["./packages/react/src/index.ts"]

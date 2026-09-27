@@ -1,0 +1,40 @@
+{
+  "name": "@pgxsinkit/pgwasm-pg-dump",
+  "version": "0.0.0",
+  "private": true,
+  "license": "PostgreSQL",
+  "files": [
+    "artefacts",
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "browser": {
+    "crypto": false,
+    "fs": false,
+    "module": false,
+    "path": false,
+    "url": false,
+    "ws": false
+  },
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "bun --cwd ../.. run build:public-packages"
+  },
+  "peerDependencies": {
+    "@pgxsinkit/pgwasm": "workspace:*"
+  }
+}

@@ -20,6 +20,7 @@
     "apps/perf-lab/src/bench",
     "apps/docs",
     "tests/e2e",
-    "packages/client/type-tests"
+    "packages/client/type-tests",
+    "packages/pgwasm-repl"
   ]
 }

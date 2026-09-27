@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { verifyPgwasmArtefacts } from "./pgwasm-artefacts";
+import { artefactPackage, assertArtefactsVerified } from "./pgwasm-artefacts";
 
 interface BuildLog {
   message?: string;
@@ -107,16 +107,7 @@ export const publicPackages: readonly PublicPackage[] = [
     entrypoints: ["src/index.ts", "src/contrib/amcheck.ts"],
     bundler: "bun",
     relativeExternals: ["../artefacts/*", "../../artefacts/*"],
-    verify: async () => {
-      const problems = await verifyPgwasmArtefacts();
-      if (problems.length > 0) {
-        throw new Error(
-          `packages/pgwasm-c/artefacts/ does not hold the pinned files (${problems
-            .map(({ name, problem }) => `${name}: ${problem}`)
-            .join("; ")}); run \`bun install\`.`,
-        );
-      }
-    },
+    verify: () => assertArtefactsVerified(artefactPackage("packages/pgwasm-c")),
   },
   {
     packageDir: "packages/pglite-opfs-repacked",

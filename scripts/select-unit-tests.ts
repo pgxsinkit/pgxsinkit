@@ -34,10 +34,15 @@ const GLOBALS = [
 const FS_INPUTS: Record<string, string[]> = {
   "public-package-set": ["packages/*/package.json"],
   "public-package-artifacts": ["packages/**", "scripts/build-public-packages.ts"],
-  // Hashes the C build's artefacts against their pins. The binaries are gitignored (fetched by the root
-  // postinstall), so only the committed files here join the fingerprint; the pins themselves are on-graph,
-  // and the postinstall re-verifies the binaries on every install.
-  "pgwasm-c-artefacts": ["packages/pgwasm-c/src/**", "packages/pgwasm-c/artefacts/**"],
+  // Hashes the build packages' artefacts against their pins. The binaries are gitignored (fetched by the
+  // root postinstall), so only the committed files here join the fingerprint; the pins themselves are
+  // on-graph, and the postinstall re-verifies the binaries on every install.
+  "pgwasm-artefacts": [
+    "packages/pgwasm-c/src/**",
+    "packages/pgwasm-c/artefacts/**",
+    "packages/pgwasm-pg-dump/src/**",
+    "packages/pgwasm-pg-dump/artefacts/**",
+  ],
   // The mount guard scans every source tree for `createStreamGate` callers; the drift guard reads the
   // INSTALLED ds client, which only moves with the lockfile.
   "stream-edge-cors": ["scripts/*.ts", "apps/*/src/**", "packages/*/src/**", "bun.lock"],
