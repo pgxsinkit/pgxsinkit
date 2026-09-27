@@ -17,7 +17,7 @@ import {
 
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
 import { createTablesFromSchema, drizzleOver } from "../../tests/support/drizzle";
-import { createFreshTestPGlite } from "../../tests/support/pglite";
+import { createFreshTestPgwasm } from "../../tests/support/pgwasm-store";
 
 const METADATA_SCHEMA = "pgxsinkit";
 const GROUP = "two-local-projections";
@@ -44,7 +44,7 @@ const first = firstEntry.localTable;
 const second = secondEntry.localTable;
 
 test("two public projections survive engine deduplication onto one shared stream handle", async () => {
-  const pg = await createFreshTestPGlite();
+  const pg = await createFreshTestPgwasm();
   await createTablesFromSchema(pg, { first, second });
   await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
 

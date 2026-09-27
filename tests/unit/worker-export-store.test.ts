@@ -3,12 +3,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 // `attachSyncClient` over a bun `MessageChannel` — NO actual Worker. The worker runs the LIVE export on its
 // owned client and the dump crosses back as a transferred `ArrayBuffer`, rebuilt into a `File` tab-side.
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -40,7 +41,7 @@ let hosts: SyncWorkerHost<TodosRegistry>[] = [];
 let channels: MessageChannel[] = [];
 
 async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry: todosRegistry,
     controlPlaneUrl: "http://127.0.0.1:1",

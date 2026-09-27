@@ -8,11 +8,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 //      BEFORE the milestone broadcasts (message-order proof), and a write issued the instant attach resolves
 //      — before the engine's `writeReady` — completes once the write runtime is up, with no error and no hang.
 
-import type { PGlite } from "@electric-sql/pglite";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 import { pgTable } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable, type SyncTableRegistry } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import {
   attachSyncClient,
@@ -302,7 +302,7 @@ describe("ADR-0041 stage 2: real engine — a write issued the instant attach re
     // The row landed in the engine's real (memory) store, proving the write actually ran (not a silent no-op).
     const readModel = getReadModelView(engineRegistry, "todos");
     const workerClient = await host.whenBooted();
-    const rows = await drizzleOver(workerClient.pglite as unknown as PGlite)
+    const rows = await drizzleOver(workerClient.pglite as unknown as Pgwasm)
       .select({ id: readModel.id })
       .from(readModel);
     expect(rows.map((r) => r.id)).toContain("11111111-1111-1111-1111-111111111111");

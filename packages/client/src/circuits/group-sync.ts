@@ -1,7 +1,7 @@
-import type { PGliteInterface } from "@electric-sql/pglite";
 import { and, eq, getTableName, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { PredicateValue, SyncTableEntry, SyncTableRegistry } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import type { BootStampCollector, GroupBootStamp } from "../boot-report";
 import { resolveApplyTarget, type ApplyTarget } from "../local-tables";
@@ -371,7 +371,7 @@ const SUBSCRIBE_RETRY_BASE_MS = 250;
 const SUBSCRIBE_RETRY_MAX_MS = 10_000;
 
 export async function startCircuitsSync(
-  pg: PGliteInterface,
+  pg: Pgwasm,
   options: CircuitsGroupSyncOptions,
 ): Promise<CircuitsGroupSyncResult> {
   const specs = deriveSpecs(options.registry);

@@ -3,10 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { count, eq } from "drizzle-orm";
 
 import { createSyncClient } from "@pgxsinkit/client";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 import { authorsTable, demoSyncRegistry, todosTable } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import {
@@ -21,7 +21,7 @@ import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
-import { createCircuitsTestPGlite } from "../support/circuits-pglite";
+import { createCircuitsTestPgwasm } from "../support/circuits-pgwasm";
 import { drizzleOver } from "../support/drizzle";
 
 // Lazy on-demand activation, end-to-end against the REAL engine (postgres → Circuits → durable-streams
@@ -55,7 +55,7 @@ const ephemeralRegistry = {
 const ephemeralSchemaSql = generateLocalSchemaSql(ephemeralRegistry);
 
 async function createStore(schemaSql: string) {
-  const pg = await createCircuitsTestPGlite();
+  const pg = await createCircuitsTestPgwasm();
   await pg.exec(schemaSql);
   return pg;
 }
@@ -246,7 +246,7 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
     const storePath = await mkdtemp(join(tmpdir(), "pgxsinkit-ephemeral-restart-"));
     const countClientTodo = async (client: { pglite: unknown }) =>
       (
-        await drizzleOver(client.pglite as PGlite)
+        await drizzleOver(client.pglite as Pgwasm)
           .select({ count: count() })
           .from(todosTable)
           .where(eq(todosTable.id, todoId))

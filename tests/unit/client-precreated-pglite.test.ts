@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import {
   buildCopyFromBlobStatement,
@@ -80,7 +80,7 @@ afterEach(async () => {
 });
 
 async function assertProvisioned(active: SyncClient<SyncTableRegistry>): Promise<void> {
-  const db = drizzleOver(active.pglite as unknown as PGlite);
+  const db = drizzleOver(active.pglite as unknown as Pgwasm);
   // The registry's synced read table exists → schema exec ran.
   expect(await db.select().from(profileTable)).toEqual([]);
   // The store-version reconcile stamped the registry fingerprint into the local-meta table.
@@ -146,7 +146,7 @@ describe("createSyncClient raw inspection surface", () => {
       rowMode: "array",
     });
     expect(Array.isArray(arrayResult.rows[0])).toBe(true);
-    expect((arrayResult.rows[0] as unknown[])[1]).toBe("Ada");
+    expect((arrayResult.rows[0] as unknown as unknown[])[1]).toBe("Ada");
   });
 
   it("rawExec runs a multi-statement script and returns one Results per statement", async () => {
@@ -201,7 +201,7 @@ describe("createSyncClient rawTransaction", () => {
     expect(results.length).toBe(2);
     expect(results[1]?.rows).toEqual([{ id: "33333333-3333-3333-3333-333333333333", name: "Grace" }]);
     // Committed: the row survives the transaction.
-    const db = drizzleOver(client.pglite as unknown as PGlite);
+    const db = drizzleOver(client.pglite as unknown as Pgwasm);
     expect(await db.select().from(profileTable)).toEqual([
       { id: "33333333-3333-3333-3333-333333333333", name: "Grace" },
     ]);
@@ -225,13 +225,13 @@ describe("createSyncClient rawTransaction", () => {
     expect(rejected.length).toBeGreaterThan(0);
 
     // All-or-nothing: the FIRST statement's row is gone too.
-    const db = drizzleOver(client.pglite as unknown as PGlite);
+    const db = drizzleOver(client.pglite as unknown as Pgwasm);
     expect(await db.select().from(profileTable)).toEqual([]);
   });
 
   it("resolves [] for an empty list WITHOUT opening a transaction", async () => {
     client = await bootClient("raw-transaction-empty");
-    const transaction = spyOn(client.pglite as unknown as PGlite, "transaction");
+    const transaction = spyOn(client.pglite as unknown as Pgwasm, "transaction");
     try {
       expect(await client.rawTransaction([])).toEqual([]);
       expect(transaction).not.toHaveBeenCalled();

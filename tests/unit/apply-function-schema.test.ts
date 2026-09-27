@@ -6,7 +6,7 @@ import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { buildPlpgsqlBatchFunctionDdl, createSyncServer, expectedApplyFingerprint } from "@pgxsinkit/server";
 
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { closeOpenTestPGlites, createFreshTestPGlite } from "../support/pglite";
+import { closeOpenTestPgwasms, createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // `pgxsinkit-generate --function-schema <schema>` installs the apply function into a schema of the
 // deployment's choosing. The generate path always honoured it; the RUNTIME did not — the server both
@@ -37,7 +37,7 @@ const APPLY_FUNCTION_SCHEMA = "app_fns";
  * apply call itself and nothing else.
  */
 async function createSchemaQualifiedServer(options: { applyFunctionSchema?: string }) {
-  const pg = await createFreshTestPGlite();
+  const pg = await createFreshTestPgwasm();
   const schemaItems = schemaRegistry.schema_items.table;
   await createTablesFromSchema(pg, { schemaItems });
   await pg.exec(`CREATE SCHEMA ${APPLY_FUNCTION_SCHEMA};`);
@@ -70,7 +70,7 @@ function createBatch(id: string, title: string, mutationId: string) {
 }
 
 afterEach(async () => {
-  await closeOpenTestPGlites();
+  await closeOpenTestPgwasms();
 });
 
 describe("--function-schema end to end (generate flag ⇄ server option)", () => {

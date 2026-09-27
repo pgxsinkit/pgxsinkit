@@ -10,7 +10,7 @@ import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { buildDropReadCacheSql, generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { pgViews } from "../support/catalog-tables";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0011 proofs for the Convergence model: the per-table `<table>_sync_state` view derives every
 // convergence fact from synced + overlay + journal, and its acked-unobserved status uses the SAME
@@ -22,11 +22,11 @@ const batchWriteUrl = "http://localhost:3001/api/mutations";
 const AUTHOR_ID = "01963227-d4c7-72db-b858-f89f6af80001";
 
 async function createContext() {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   return { db, runtime: createMutationRuntime({ db, registry: demoSyncRegistry, batchWriteUrl }) };
 }
 
-type PGliteDb = Awaited<ReturnType<typeof createSchemaTestPGlite>>;
+type PGliteDb = Awaited<ReturnType<typeof createSchemaTestPgwasm>>;
 type DemoRuntime = Awaited<ReturnType<typeof createContext>>["runtime"];
 
 async function seedSyncedAuthor(db: PGliteDb, id: string, version: number) {

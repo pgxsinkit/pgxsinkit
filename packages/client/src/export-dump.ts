@@ -12,13 +12,13 @@
 // it. The live engine is never touched — the addendum's whole point — so tabs never notice beyond the
 // lifecycle slot reporting busy.
 //
-// `@electric-sql/pglite-tools` is loaded ONLY via the dynamic `import()` below (ADR-0035 decision 7): its
+// `@pgxsinkit/pgwasm-pg-dump` is loaded ONLY via the dynamic `import()` below (ADR-0035 decision 7): its
 // ~700 kB `pg_dump.wasm` (+ ~100 kB JS) stays off boot and off every non-exporting bundle, fetched on first
 // `exportDiagnostics`.
 
-import { PGlite } from "@electric-sql/pglite";
-
 import type { MutationDiagnostics } from "@pgxsinkit/contracts";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
 
 import { compactTimestamp, type DiagnosticDumpReport, deriveStoreId, nowMs, performDatadirDump } from "./export-store";
 import type { ClientPGlite } from "./index";
@@ -54,16 +54,6 @@ export interface DiagnosticExportDeps {
    * not leak into an artefact name as something to imitate.
    */
   storePath?: string;
-}
-
-/**
- * The shape of `@electric-sql/pglite-tools/pg_dump` — declared locally so the dynamic `import()` stays
- * typed without a static top-level dependency on the module (which would pull its WASM into the boot
- * bundle). `pgDump` runs the WASM `pg_dump` on the given instance's single connection and returns the SQL
- * as a `File`. We run it against the THROWAWAY clone only, never the live engine.
- */
-interface PgliteToolsModule {
-  pgDump: (opts: { pg: PGlite; args?: string[]; fileName?: string }) => Promise<File>;
 }
 
 /**
@@ -114,7 +104,7 @@ export interface CloneDumpResult {
  * `performDataExport` cannot drift on the clone plumbing, the memory-scheme selection, or the timing house
  * style — the ONLY differences between the two dumps are the `pg_dump` args and the artefact assembly.
  *
- * `@electric-sql/pglite-tools` is loaded ONLY via the dynamic `import()` here (ADR-0035 decision 7): its
+ * `@pgxsinkit/pgwasm-pg-dump` is loaded ONLY via the dynamic `import()` here (ADR-0035 decision 7): its
  * ~700 kB `pg_dump.wasm` (+ ~100 kB JS) stays off boot and off every non-exporting bundle.
  */
 export interface CloneDumpOptions {
@@ -126,7 +116,7 @@ export interface CloneDumpOptions {
    * triggers `pg_dump -t` would otherwise pull into the artefact (see `buildDataExportCloneCleanupSql`); a
    * diagnostic dump passes none (it wants the store verbatim).
    */
-  prepareClone?: (clone: PGlite) => Promise<void>;
+  prepareClone?: (clone: Pgwasm) => Promise<void>;
 }
 
 export async function runThrowawayCloneDump(
@@ -153,7 +143,12 @@ export async function runThrowawayCloneDump(
   // → discarded), so it has no idb flush to relax — the flag is a no-op on the memory backend and is set
   // purely to state intent (a throwaway never needs synchronous durability) and stay correct if the clone's
   // backend ever changes.
-  const throwaway = await PGlite.create({ dataDir: cloneDataDir, loadDataDir: dumped, relaxedDurability: true });
+  const throwaway = await createPgwasm({
+    build: cBuild,
+    dataDir: cloneDataDir,
+    loadDataDir: dumped,
+    relaxedDurability: true,
+  });
   const cloneBootMs = nowMs() - cloneBootStartPerf;
 
   let sqlBytes: Uint8Array<ArrayBuffer>;
@@ -167,12 +162,12 @@ export async function runThrowawayCloneDump(
       await options.prepareClone(throwaway);
     }
 
-    // Step 3 — the lazy `pg_dump`. The subpath specifier (its export map's `./pg_dump` entry) keeps the
-    // main pglite-tools entry — and its WASM — off this import. The caller rebuilds the artefact `File`
+    // Step 3 — the lazy `pg_dump`. The dynamic `import()` keeps `@pgxsinkit/pgwasm-pg-dump` — and its WASM —
+    // off the boot bundle. The caller rebuilds the artefact `File`
     // from the returned bytes, so `fileName` here is cosmetic only.
     pgDumpStartedAtMs = nowMs() - startPerf;
     const pgDumpStartPerf = nowMs();
-    const { pgDump } = (await import("@electric-sql/pglite-tools/pg_dump")) as PgliteToolsModule;
+    const { pgDump } = await import("@pgxsinkit/pgwasm-pg-dump");
     const dumpFile = await pgDump({
       pg: throwaway,
       ...(options.pgDumpArgs != null ? { args: options.pgDumpArgs } : {}),

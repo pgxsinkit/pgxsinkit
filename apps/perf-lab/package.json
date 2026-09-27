@@ -11,6 +11,7 @@
     "@electric-sql/pglite-repl": "0.4.8",
     "@pgxsinkit/client": "workspace:*",
     "@pgxsinkit/contracts": "workspace:*",
+    "@pgxsinkit/pgwasm-repl": "workspace:*",
     "@pgxsinkit/schema": "workspace:*",
     "react": "19.3.0",
     "react-dom": "19.3.0"

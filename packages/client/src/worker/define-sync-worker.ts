@@ -7,8 +7,6 @@
 // port) behind {@link SyncWorkerHost.connect} — the same entry a test drives with a plain `MessageChannel`
 // port, so no real Worker is needed to exercise the whole protocol.
 
-import { type ParserOptions, type QueryOptions, types } from "@electric-sql/pglite";
-
 import type {
   ResolvedStorageDeclaration,
   SyncRuntimeStatus,
@@ -27,6 +25,8 @@ import {
   resolveStorageDeclaration,
   StorageDeclarationRefusedError,
 } from "@pgxsinkit/contracts";
+import type { QueryOptions } from "@pgxsinkit/pgwasm";
+import { drizzleParsers } from "@pgxsinkit/pgwasm/drizzle";
 
 import { type ConvergenceTrigger, createIntervalConvergenceTrigger } from "../convergence";
 import { setSyncDebugSink, syncDebug } from "../debug";
@@ -97,28 +97,11 @@ import {
 import { decideSwPlacement, type SwPlacementResult } from "./sw-placement";
 import { createWorkerTokenCache } from "./token-cache";
 
-// The identity-parser map a guarded bridge read re-applies before executing (ADR-0032 decision 4). It
-// MIRRORS the fixed `parsers` constant in `drizzle-orm/pglite`'s session VERBATIM (pinned to
-// drizzle-orm@1.0.0-rc.4, `drizzle-orm/pglite/session.js`): identity parsers so the listed OIDs come back as
-// raw STRINGS — exactly what the in-process drizzle session receives, because it passes this same map into
-// `pglite.query`. The members are: the scalar OIDs `types.TIMESTAMP` / `TIMESTAMPTZ` / `INTERVAL` / `DATE`,
-// and the array OIDs 1115 = `timestamp[]`, 1185 = `timestamptz[]`, 1187 = `interval[]`, 1182 = `date[]`, and
-// 1231 = `numeric[]` (NOT temporal — drizzle's list is mirrored verbatim, whatever its members). Over the
-// bridge the map is FUNCTIONS (non-serializable), so the attach side strips the options down to `rowMode`
-// and this worker re-applies the identical map. We do NOT import drizzle's private constant — this is a
-// deliberate, version-pinned mirror.
-const identityParser = (value: string): string => value;
-const DRIZZLE_PGLITE_IDENTITY_PARSERS: ParserOptions = {
-  [types.TIMESTAMP]: identityParser,
-  [types.TIMESTAMPTZ]: identityParser,
-  [types.INTERVAL]: identityParser,
-  [types.DATE]: identityParser,
-  1231: identityParser,
-  1115: identityParser,
-  1185: identityParser,
-  1187: identityParser,
-  1182: identityParser,
-};
+// The identity-parser map a guarded bridge read re-applies before executing (ADR-0032 decision 4) is
+// `drizzleParsers` from `@pgxsinkit/pgwasm/drizzle`: the SAME map the in-process drizzle session passes into
+// `pg.query`, so the listed OIDs (the temporal scalars and arrays, and `numeric[]`) come back as raw STRINGS
+// exactly as they do in process. Over the bridge the map is FUNCTIONS (non-serializable), so the attach side
+// strips the options down to `rowMode` and this worker re-applies the identical map.
 
 /**
  * Cadence (ms) of the "worker store provision still pending" heartbeat rail line, emitted from the moment a
@@ -851,7 +834,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       const [sql, params, options, use] = args as unknown as GuardedQueryWireArgs;
       const queryOptions: QueryOptions = {
         ...(options?.rowMode ? { rowMode: options.rowMode } : {}),
-        parsers: DRIZZLE_PGLITE_IDENTITY_PARSERS,
+        parsers: drizzleParsers,
       };
       return active.guardedRawQuery(sql, params, queryOptions, use as readonly SyncTableName<TRegistry>[] | undefined);
     };

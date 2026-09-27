@@ -17,7 +17,7 @@
 // are per-subscriber pre-/post-steps that never influence the shared registration or its rows; in particular
 // `use` NEVER reaches here, so differing `use` sets share one registration.
 
-import type { LiveNamespace, LiveQuery, LiveQueryResults } from "@electric-sql/pglite/live";
+import type { LiveNamespace, LiveQuery, LiveQueryResults } from "@pgxsinkit/pgwasm/live";
 
 import { syncDebug } from "../debug";
 import { computeLiveDiff, type LiveDiffState, seedLiveDiffState } from "./live-diff";

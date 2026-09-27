@@ -8,7 +8,7 @@ import { demoSyncRegistry } from "@pgxsinkit/schema";
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0006 decision 4 + ADR-0005 congestion cap: a flush failure is either transient
 // (retryable `failed`) or permanent (terminal `quarantined`, surfaced, never retried).
@@ -17,7 +17,7 @@ const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const batchWriteUrl = "http://localhost:3001/api/mutations";
 
 async function createAuthorsRuntime(overrides: Partial<Parameters<typeof createMutationRuntime>[0]> = {}) {
-  const db = await createSchemaTestPGlite(overlaySchemaSql);
+  const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
   const runtime = createMutationRuntime({
     db,
@@ -322,7 +322,7 @@ describe("mutation quarantine (ADR-0006)", () => {
 describe("discardQuarantined (ADR-0006 — symmetric rollback)", () => {
   const authorsView = demoSyncRegistry.authors.view!;
 
-  async function readReadModel(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, id: string) {
+  async function readReadModel(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>, id: string) {
     const rows = await drizzleOver(db)
       .select({ name: authorsView.name, overlayKind: authorsView.overlay_kind })
       .from(authorsView)
@@ -330,7 +330,7 @@ describe("discardQuarantined (ADR-0006 — symmetric rollback)", () => {
     return rows[0];
   }
 
-  async function journalCount(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, id: string) {
+  async function journalCount(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>, id: string) {
     const journal = getJournalTable(demoSyncRegistry, "authors");
     const rows = await drizzleOver(db).select({ c: count() }).from(journal).where(eq(journal["id"]!, id));
     return rows[0]?.c ?? 0;

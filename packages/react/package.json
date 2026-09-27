@@ -29,7 +29,8 @@
   },
   "dependencies": {
     "@pgxsinkit/client": "workspace:*",
-    "@pgxsinkit/contracts": "workspace:*"
+    "@pgxsinkit/contracts": "workspace:*",
+    "@pgxsinkit/pgwasm": "workspace:*"
   },
   "peerDependencies": {
     "@electric-sql/pglite": ">=0.5.8-pgx.2",

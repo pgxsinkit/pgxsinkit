@@ -9,7 +9,7 @@ import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0039 — the mutation runtime reports the DISTINCT non-blind table keys of every enqueue through
 // `onOrdinaryEnqueue`, so the client can fire-and-forget activate each target's lazy consistency group.
@@ -53,7 +53,7 @@ const batchWriteUrl = "http://localhost:3001/api/mutations";
 const NOTE_ID = "01963227-d4c7-72db-b858-00000000e101";
 const LEDGER_ID = "01963227-d4c7-72db-b858-00000000e001";
 
-type Db = Awaited<ReturnType<typeof createSchemaTestPGlite>>;
+type Db = Awaited<ReturnType<typeof createSchemaTestPgwasm>>;
 
 async function seedNote(db: Db) {
   await drizzleOver(db).insert(registry.notes.localTable).values({ id: NOTE_ID, body: "seed", updatedAtUs: 1000n });
@@ -67,7 +67,7 @@ async function journalCount(db: Db, table: "notes" | "ledger") {
 
 describe("ordinary-enqueue activation hook (ADR-0039)", () => {
   it("an ordinary create reports its table exactly once", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const reported: string[][] = [];
     const runtime = createMutationRuntime({
       db,
@@ -84,7 +84,7 @@ describe("ordinary-enqueue activation hook (ADR-0039)", () => {
   });
 
   it("an ordinary update and delete each report their table", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const reported: string[][] = [];
     const runtime = createMutationRuntime({
       db,
@@ -103,7 +103,7 @@ describe("ordinary-enqueue activation hook (ADR-0039)", () => {
   });
 
   it("a purely-blind batch reports nothing (the hook is not invoked)", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const reported: string[][] = [];
     const runtime = createMutationRuntime({
       db,
@@ -123,7 +123,7 @@ describe("ordinary-enqueue activation hook (ADR-0039)", () => {
   });
 
   it("a mixed batch reports only the ordinary items' tables, never the blind one", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const reported: string[][] = [];
     const runtime = createMutationRuntime({
       db,
@@ -146,7 +146,7 @@ describe("ordinary-enqueue activation hook (ADR-0039)", () => {
   });
 
   it("a throwing hook never fails the enqueue — the write still lands", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const runtime = createMutationRuntime({
       db,
       registry,

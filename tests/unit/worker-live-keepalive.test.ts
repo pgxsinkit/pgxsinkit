@@ -6,12 +6,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 // wall-clock): unsubscribe then resubscribe the same SQL reuses the retained registration (one registration
 // total), and `host.close()` disposes cleanly with a retained entry present (its timer cancelled — no hang).
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -47,7 +48,7 @@ let channels: MessageChannel[] = [];
 let liveRegistrations = 0;
 
 async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const realQuery = pg.live.query.bind(pg.live);
   const realIncremental = pg.live.incrementalQuery.bind(pg.live);
   pg.live.query = ((...args: Parameters<typeof realQuery>) => {

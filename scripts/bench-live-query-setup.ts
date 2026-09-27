@@ -20,8 +20,9 @@
 // must never sit on a blocking path. Heap scaling stays in the perf lab (native memoryUsage would not model
 // the browser/WASM deployment). See tmp/agents/live-query-setup-decomposition-results.md.
 
-import { PGlite } from "@electric-sql/pglite";
-import { live } from "@electric-sql/pglite/live";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import { createLiveQueryManager, type LiveSubscriber } from "../packages/client/src/worker/live-query-manager";
 
@@ -38,7 +39,7 @@ const AGGREGATE_SQL = `
 
 const noopSubscriber: LiveSubscriber = { deliverInitial: () => {}, deliverDiff: () => {} };
 
-async function createSchema(pg: PGlite): Promise<void> {
+async function createSchema(pg: Pgwasm): Promise<void> {
   await pg.exec(`
     create table author (id int primary key, name text not null);
     create table book (id int primary key, author_id int not null, title text not null);
@@ -46,7 +47,7 @@ async function createSchema(pg: PGlite): Promise<void> {
   `);
 }
 
-async function seed(pg: PGlite, authors: number): Promise<void> {
+async function seed(pg: Pgwasm, authors: number): Promise<void> {
   if (authors === 0) return;
   const authorRows: string[] = [];
   const bookRows: string[] = [];
@@ -88,7 +89,7 @@ async function timed(fn: () => Promise<void>, iterations: number): Promise<{ med
 }
 
 async function measure(authors: number): Promise<Record<string, { median: number; min: number }>> {
-  const pg = await PGlite.create({ extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, extensions: { live } });
   await createSchema(pg);
   await seed(pg, authors);
 
@@ -183,7 +184,7 @@ async function measurePropagation(
   });
 
   const run = async (independent: boolean): Promise<{ median: number; min: number }> => {
-    const pg = await PGlite.create({ extensions: { live } });
+    const pg = await createPgwasm({ build: cBuild, extensions: { live } });
     await createSchema(pg);
     await seed(pg, Math.max(authors, 1)); // at least one review row must exist to update
     const manager = createLiveQueryManager({ live: pg.live });
@@ -251,7 +252,7 @@ const STATUSES = ["pending", "sending", "acked", "failed", "conflicted", "reject
 
 // Build `tables` journal-shaped tables + the UNION ALL `pgxsinkit_all_mutations` view, pre-seeded with
 // `rowsPerTable` rows each, exactly the shape `client.mutations.subscribeSummary` reruns on every write.
-async function createUnionRegistry(pg: PGlite, tables: number, rowsPerTable: number): Promise<void> {
+async function createUnionRegistry(pg: Pgwasm, tables: number, rowsPerTable: number): Promise<void> {
   const branches: string[] = [];
   for (let t = 0; t < tables; t++) {
     const journal = `j${t}`;
@@ -304,7 +305,7 @@ async function measureUnionSummary(
   rowsPerTable: number,
   iterations: number,
 ): Promise<Record<string, { median: number; min: number }>> {
-  const pg = await PGlite.create({ extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, extensions: { live } });
   await createUnionRegistry(pg, tables, rowsPerTable);
   const manager = createLiveQueryManager({ live: pg.live });
 

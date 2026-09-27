@@ -12,13 +12,13 @@ import {
   expectedApplyFingerprint,
 } from "../../packages/server/src/mutations/plpgsql-apply";
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0030: the apply function now takes a trailing p_expected_fingerprint and verifies itself against
 // its stamped comment before touching any table. For the behavioural tests below (which are NOT testing
 // drift), read back the fingerprint the installed function was stamped with, so the self-check passes and
 // the apply runs. The dedicated self-verification suite exercises the mismatch/absent-comment paths.
-async function installedApplyFingerprint(db: Awaited<ReturnType<typeof createFreshTestPGlite>>): Promise<string> {
+async function installedApplyFingerprint(db: Awaited<ReturnType<typeof createFreshTestPgwasm>>): Promise<string> {
   const res = await db.query<{ fp: string | null }>(
     `SELECT obj_description(to_regprocedure('public.pgxsinkit_apply_mutations(jsonb,text,boolean,boolean,jsonb,text)')::oid, 'pg_proc') AS fp`,
   );
@@ -314,7 +314,7 @@ describe("deny-by-default apply-function ACL (ADR-0054)", () => {
   });
 
   it("installs with the ACL applied — owner-only, PUBLIC stripped", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     const composite = compositeThingsRegistry.compositeThings.table;
     await createTablesFromSchema(db, { composite });
     await db.exec(buildPlpgsqlBatchFunctionDdl(compositeThingsRegistry));
@@ -353,7 +353,7 @@ describe("deny-by-default apply-function ACL (ADR-0054)", () => {
   });
 
   it("revokes a grantee it cannot name — an inherited ALTER DEFAULT PRIVILEGES grant — while keeping the allowlist", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     const composite = compositeThingsRegistry.compositeThings.table;
     await createTablesFromSchema(db, { composite });
 
@@ -456,7 +456,7 @@ function compositeBatch(
   };
 }
 
-async function applyBatch(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, batch: unknown) {
+async function applyBatch(db: Awaited<ReturnType<typeof createFreshTestPgwasm>>, batch: unknown) {
   const fp = await installedApplyFingerprint(db);
   await db.query(
     `SELECT * FROM pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb, $2::text)`,
@@ -524,7 +524,7 @@ describe("array columns in the write path", () => {
   });
 
   it("round-trips empty, non-empty and null arrays through create and update", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     const arrayItems = arrayItemsRegistry.arrayItems.table;
     await createTablesFromSchema(db, { arrayItems });
     await db.exec(buildPlpgsqlBatchFunctionDdl(arrayItemsRegistry));
@@ -571,7 +571,7 @@ describe("array columns in the write path", () => {
   });
 
   it("leaves an array column untouched when its key is absent from the payload", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     const arrayItems = arrayItemsRegistry.arrayItems.table;
     await createTablesFromSchema(db, { arrayItems });
     await db.exec(buildPlpgsqlBatchFunctionDdl(arrayItemsRegistry));
@@ -710,7 +710,7 @@ describe("json[] / jsonb[] columns keep each element's JSON value", () => {
   });
 
   it("round-trips a string element as a JSON STRING (the corruption pin), plus objects, nulls and []", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     const jsonArrayItems = jsonArrayRegistry.jsonArrayItems.table;
     await createTablesFromSchema(db, { jsonArrayItems });
     await db.exec(buildPlpgsqlBatchFunctionDdl(jsonArrayRegistry));
@@ -824,7 +824,7 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
   });
 
   it("applies update/delete to exactly the addressed row of a composite-PK table", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
 
     const composite = compositeThingsRegistry.compositeThings.table;
     try {
@@ -865,7 +865,7 @@ describe("canonical entity identity — composite + renamed PK (ADR-0012)", () =
   });
 
   it("keeps the Server version strictly monotonic even when the wall clock is behind (GREATEST)", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
 
     const composite = compositeThingsRegistry.compositeThings.table;
     try {
@@ -937,7 +937,7 @@ function todoMutation(
   };
 }
 
-async function applyMutations(db: Awaited<ReturnType<typeof createFreshTestPGlite>>, mutations: unknown[]) {
+async function applyMutations(db: Awaited<ReturnType<typeof createFreshTestPgwasm>>, mutations: unknown[]) {
   const fp = await installedApplyFingerprint(db);
   await db.query(
     `SELECT * FROM pgxsinkit_apply_mutations($1::jsonb, '/test'::text, false, false, '{}'::jsonb, $2::text)`,
@@ -947,7 +947,7 @@ async function applyMutations(db: Awaited<ReturnType<typeof createFreshTestPGlit
 
 describe("set-based apply — (table, kind, column-set) grouping (ADR-0014 Phase 4)", () => {
   async function freshDb() {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await createTablesFromSchema(db, { groupTodos: groupTodosRegistry.todos.table });
     await db.exec(buildPlpgsqlBatchFunctionDdl(groupTodosRegistry));
     return db;
@@ -1072,7 +1072,7 @@ const createOnlyManagedRegistry = defineSyncRegistry({
 
 describe("create-only managed fields are inert on update", () => {
   it("applies the ordinary columns and leaves the create-only managed columns at their stored values", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     const notes = createOnlyManagedRegistry.notes.table;
 
     try {
@@ -1179,7 +1179,7 @@ function conflictMutation(
 
 /** Applies a batch and returns the conflicts the function reports (ADR-0015). */
 async function applyForConflicts(
-  db: Awaited<ReturnType<typeof createFreshTestPGlite>>,
+  db: Awaited<ReturnType<typeof createFreshTestPgwasm>>,
   mutations: unknown[],
 ): Promise<Array<{ mutationId: string; tableName: string; currentServerVersion: string }>> {
   const fp = await installedApplyFingerprint(db);
@@ -1193,7 +1193,7 @@ async function applyForConflicts(
 
 describe("stale-write conflict detection (ADR-0015 Phase 3)", () => {
   async function seedThing(table: AnyPgTable, registry: Parameters<typeof buildPlpgsqlBatchFunctionDdl>[0]) {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await createTablesFromSchema(db, { table });
     await db.exec(buildPlpgsqlBatchFunctionDdl(registry));
     // The row sits at version 100; an external writer then advances it to 200 (the interleave).
@@ -1355,7 +1355,7 @@ describe("derived (non-UUID) mutation ids flow through text, not uuid", () => {
   const DERIVED_ID = "50000000-0000-4000-8000-00000000000a:membership:2";
 
   it("records a non-UUID mutation id in operations_log when p_log_enabled = true", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     try {
       const things = lwwConflictRegistry.things.table;
       await createTablesFromSchema(db, { things, operationsLogTable });
@@ -1397,7 +1397,7 @@ describe("derived (non-UUID) mutation ids flow through text, not uuid", () => {
   });
 
   it("returns a non-UUID mutation id verbatim on a reject-if-stale conflict", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     try {
       await createTablesFromSchema(db, { table: rejectThings });
       await db.exec(buildPlpgsqlBatchFunctionDdl(rejectConflictRegistry));
@@ -1434,7 +1434,7 @@ describe("self-verifying apply function (ADR-0030)", () => {
   const SELF_VERIFY_ID = "70000000-0000-4000-8000-00000000000a";
 
   async function freshSelfVerifyDb() {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await createTablesFromSchema(db, { things: lwwConflictRegistry.things.table });
     await db.exec(buildPlpgsqlBatchFunctionDdl(lwwConflictRegistry));
     return db;
@@ -1456,7 +1456,7 @@ describe("self-verifying apply function (ADR-0030)", () => {
     });
   }
 
-  async function rowCount(db: Awaited<ReturnType<typeof createFreshTestPGlite>>): Promise<number> {
+  async function rowCount(db: Awaited<ReturnType<typeof createFreshTestPgwasm>>): Promise<number> {
     const things = lwwConflictRegistry.things.table;
     const rows = await drizzleOver(db).select({ n: count() }).from(things);
     return Number(rows[0]?.n ?? 0);

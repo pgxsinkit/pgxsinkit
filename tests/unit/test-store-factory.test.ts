@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { fileURLToPath } from "node:url";
 
-import { resolveTestStoreFactory, TEST_STORE_FACTORY_ENV } from "../support/pglite";
+import { resolveTestStoreFactory, TEST_STORE_FACTORY_ENV } from "../support/pgwasm-store";
 
 // The store seam's resolution logic (see `tests/support/pglite.ts`): unset means PGlite, exactly as
 // before; set means that module builds the suite's stores instead. Only the RESOLUTION is under test —

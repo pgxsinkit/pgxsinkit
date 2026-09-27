@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { asc } from "drizzle-orm";
 import { jsonb, text, uuid } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable, type StreamEnvelope } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import { envelopeToChange } from "../../packages/client/src/circuits/envelope-to-change";
 import { resolveApplyTarget } from "../../packages/client/src/local-tables";
@@ -15,7 +15,7 @@ import {
   applyUpsertsToTable,
 } from "../../packages/client/src/sync/apply";
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // THE WIRE CARRIES A JSON COLUMN AS TEXT. The engine's cell model is five scalars and its Postgres type
 // map routes everything that is not int/float/bool through `Text`, so a `jsonb` cell arrives as a JSON
@@ -69,10 +69,10 @@ function wireUpsert(type: string, key: string, value: Record<string, string | nu
 }
 
 describe("json columns arrive as Postgres text and are decoded once, at the wire boundary", () => {
-  let pg: PGlite;
+  let pg: Pgwasm;
 
   beforeAll(async () => {
-    pg = await createFreshTestPGlite();
+    pg = await createFreshTestPgwasm();
     await createTablesFromSchema(pg, { goals, tagSets });
   });
 

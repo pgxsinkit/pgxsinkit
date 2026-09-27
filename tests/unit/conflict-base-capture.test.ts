@@ -8,7 +8,7 @@ import { projectsSyncRegistry } from "@pgxsinkit/schema";
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0015 Phase 1 — the Base server version capture rule (decision 2), proven in isolation BEFORE
 // any server-side detection lands. A chain head (the first staged write on an entity) stamps the
@@ -24,7 +24,7 @@ const SYNCED_VERSION = "1000"; // the Server version the synced row was last obs
 const ACKED_VERSION = "2000"; // the Server version the server assigns when it acks m1
 
 async function createProjectsRuntime() {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   // Seed the synced read cache with one project at SYNCED_VERSION — the value the user "sees".
   await drizzleOver(db)
     .insert(projectsSyncRegistry.projects.localTable)
@@ -73,7 +73,7 @@ async function withFetch<T>(fetchMock: unknown, fn: () => Promise<T>): Promise<T
   }
 }
 
-async function readJournalBase(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, mutationSeq: number) {
+async function readJournalBase(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>, mutationSeq: number) {
   const journal = getJournalTable(projectsSyncRegistry, "projects");
   const rows = await drizzleOver(db)
     .select({

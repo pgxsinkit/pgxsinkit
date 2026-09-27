@@ -1,15 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { asc, eq } from "drizzle-orm";
 import { boolean, text, uuid } from "drizzle-orm/pg-core";
 
 import { syncCircuitsShapes, type ConvergenceBarrier } from "@pgxsinkit/client";
 import { defineSyncRegistry, defineSyncTable, type StreamEnvelope } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // The native read path end to end (ADR-0055 + ADR-0056): K durable-streams subscriptions through the
 // edge, envelopes translated, folded, and applied into one PGlite table. Two properties are the
@@ -99,10 +99,10 @@ async function settle(): Promise<void> {
 }
 
 describe("circuits sync engine", () => {
-  let pg: PGlite;
+  let pg: Pgwasm;
 
   beforeAll(async () => {
-    pg = await createFreshTestPGlite();
+    pg = await createFreshTestPgwasm();
     await createTablesFromSchema(pg, { content });
     await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
   });

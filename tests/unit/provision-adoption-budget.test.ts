@@ -19,12 +19,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 //      once the stalled create finally completes, a later attach boots on the adopted spare;
 //   3. the clone-safe wire form round-trips to the class, and never claims an unrelated detail.
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -81,7 +82,7 @@ const settle = async (n = 8) => {
 };
 
 async function makePglite(): Promise<ClientPGlite> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   return pg as unknown as ClientPGlite;
 }
 

@@ -707,8 +707,8 @@ describe("createClientPGlite — opfs:// factory routing", () => {
     const directoryHandle = { opfsDir: true };
     await createClientPGlite("opfs-default", {
       hasOpfsSyncAccess: true,
-      pgliteFactories: {
-        createOpfsRepacked: async (options: CapturedFactoryOptions) => {
+      opfsFactories: {
+        createOpfsPgwasm: async (options: CapturedFactoryOptions) => {
           captured.push(options);
           return { engineless: true } as never;
         },
@@ -727,8 +727,8 @@ describe("createClientPGlite — opfs:// factory routing", () => {
     await createClientPGlite("opfs-strict", {
       hasOpfsSyncAccess: true,
       durability: "strict",
-      pgliteFactories: {
-        createOpfsRepacked: async (options: CapturedFactoryOptions) => {
+      opfsFactories: {
+        createOpfsPgwasm: async (options: CapturedFactoryOptions) => {
           captured.push(options);
           return { engineless: true } as never;
         },
@@ -743,8 +743,8 @@ describe("createClientPGlite — opfs:// factory routing", () => {
     let calls = 0;
     const result = await createClientPGlite("opfs-retry", {
       hasOpfsSyncAccess: true,
-      pgliteFactories: {
-        createOpfsRepacked: async () => {
+      opfsFactories: {
+        createOpfsPgwasm: async () => {
           calls += 1;
           if (calls <= 2) throw new Error("UnknownError: transient VFS open failure");
           return { engineless: true } as never;
@@ -761,8 +761,8 @@ describe("createClientPGlite — opfs:// factory routing", () => {
     // Guard: a throwing factory is injected but never reached, because no `hasOpfsSyncAccess` means the store
     // resolves to the memory backend (this test lane) — the byte-identical baseline.
     const guard = await createClientPGlite(memoryStoreForTests("guard-no-opfs"), {
-      pgliteFactories: {
-        createOpfsRepacked: async () => {
+      opfsFactories: {
+        createOpfsPgwasm: async () => {
           throw new Error("opfs factory must not be reached");
         },
         getStoreDirectoryHandle: async () => {

@@ -1,17 +1,18 @@
 import { afterEach, describe, expect, it } from "bun:test";
 // The BYO-instance refusal (ADR-0036 decision 4): `createSyncClient` refuses a caller-owned PGlite that is
-// PROVABLY non-persistent (a `new PGlite()` default, or an explicit memory store), unless a testing
+// PROVABLY non-persistent (a bare `createPgwasm({ build })` default, or an explicit memory store), unless a testing
 // acknowledgment is spread into the options. Anything else present — including a real filesystem store —
-// passes (the guard is not a storage-backend whitelist). Uses REAL PGlite instances so the `.dataDir` the
+// passes (the guard is not a storage-backend whitelist). Uses REAL pgwasm instances so the `.storage` the
 // guard inspects is the genuine one.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { PGlite } from "@electric-sql/pglite";
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
 
 import {
   type ClientPGlite,
@@ -45,7 +46,7 @@ const commonOptions = {
 } as const;
 
 let client: SyncClient<SyncTableRegistry> | undefined;
-const looseInstances: PGlite[] = [];
+const looseInstances: Pgwasm[] = [];
 const tempDirs: string[] = [];
 
 afterEach(async () => {
@@ -56,8 +57,8 @@ afterEach(async () => {
 });
 
 describe("BYO refusal (ADR-0036 decision 4)", () => {
-  it("refuses a bare `new PGlite()` (in-memory default) supplied as pgliteInstance", async () => {
-    const bare = new PGlite();
+  it("refuses a bare `createPgwasm({ build })` (in-memory default) supplied as pgliteInstance", async () => {
+    const bare = await createPgwasm({ build: cBuild });
     looseInstances.push(bare);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
@@ -67,7 +68,7 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
 
   it("refuses an explicit memory store supplied as pgliteInstance", async () => {
     const memory = await createClientPGlite(memoryStoreForTests("byo-refuse-instance"));
-    looseInstances.push(memory as unknown as PGlite);
+    looseInstances.push(memory as unknown as Pgwasm);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(createSyncClient({ ...commonOptions, pgliteInstance: memory })).rejects.toBeInstanceOf(
       NonPersistentStoreError,
@@ -78,7 +79,7 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
     // The precreated path falls back to a fresh create ONLY when the promise REJECTS. A SUCCESSFULLY
     // resolved-but-non-persistent instance must raise NonPersistentStoreError, not silently boot a fresh store.
     const memory = await createClientPGlite(memoryStoreForTests("byo-refuse-precreated"));
-    looseInstances.push(memory as unknown as PGlite);
+    looseInstances.push(memory as unknown as Pgwasm);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(
       createSyncClient({ ...commonOptions, precreatedPglite: Promise.resolve(memory) }),
@@ -86,8 +87,8 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
   });
 
   it("PASSES a real filesystem-backed instance (not a whitelist — anything else present is allowed)", async () => {
-    // A genuine on-disk store under the repo-local tmp tree — its dataDir is `file://…`, which the guard
-    // passes. Proves the predicate catches only the two accidental non-persistent shapes.
+    // A genuine on-disk store under the repo-local tmp tree — its storage is `file`, which the guard
+    // passes. Proves the predicate catches only the accidental non-persistent shapes.
     const dir = await mkdtemp(join(tmpdir(), "pgxsinkit-byo-file-"));
     tempDirs.push(dir);
     const fileStore = await createClientPGlite(join(dir, "store"));

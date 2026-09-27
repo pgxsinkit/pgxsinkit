@@ -15,7 +15,7 @@ import {
   UnknownEventStreamError,
 } from "../../packages/client/src/event-lane";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { closeOpenTestPGlites, createSchemaTestPGlite } from "../support/pglite";
+import { closeOpenTestPgwasms, createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // The Outbox + `appendEvent` (ADR-0053 decision 2), against a REAL PGlite carrying the generated local
 // schema. What is pinned here: the shape of the library-owned Outbox table (public contract), the four
@@ -62,11 +62,11 @@ const EVENT_URL = "http://localhost:3001/api/events";
 const schemaSql = generateLocalSchemaSql(streamRegistry);
 
 afterEach(async () => {
-  await closeOpenTestPGlites();
+  await closeOpenTestPgwasms();
 });
 
 async function makeRuntime(registry: typeof streamRegistry | typeof streamlessRegistry = streamRegistry) {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   return { db, runtime: createEventLaneRuntime({ db, registry, batchEventUrl: EVENT_URL }) };
 }
 
@@ -75,7 +75,7 @@ const ISSUE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 describe("Outbox DDL (ADR-0053 decision 2 — the shape is public contract)", () => {
   it("provisions ONE shared, stream-independent table with the contracted columns", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const columns = await db.query<{ column_name: string; data_type: string; is_nullable: string }>(
       `SELECT column_name, data_type, is_nullable FROM information_schema.columns
        WHERE table_name = 'pgxsinkit_outbox' ORDER BY ordinal_position`,
@@ -107,7 +107,7 @@ describe("Outbox DDL (ADR-0053 decision 2 — the shape is public contract)", ()
   });
 
   it("indexes all three access patterns, including the acked ledger's (ADR-0060)", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const indexes = await db.query<{ indexname: string; indexdef: string }>(
       `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'pgxsinkit_outbox' ORDER BY indexname`,
     );

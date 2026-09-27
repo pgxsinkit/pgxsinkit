@@ -1,6 +1,6 @@
-import type { PGliteInterface } from "@electric-sql/pglite";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
-import type { TestStoreFactory } from "./pglite";
+import type { TestStoreFactory } from "./pgwasm-store";
 
 // A minimal, engine-less {@link TestStoreFactory} — the module `tests/unit/test-store-factory.test.ts`
 // points `PGXSINKIT_TEST_STORE_FACTORY` at to prove the seam RESOLVES. It builds no store: the
@@ -10,10 +10,10 @@ import type { TestStoreFactory } from "./pglite";
 const fixture: TestStoreFactory = {
   cacheKeyPrefix: "pgxsinkit-fixture-schema-",
   cacheIdentity: "test-store-factory-fixture@1",
-  createFresh(): Promise<PGliteInterface> {
+  createFresh(): Promise<Pgwasm> {
     throw new Error("the resolution fixture builds no store");
   },
-  createFromDump(): Promise<PGliteInterface> {
+  createFromDump(): Promise<Pgwasm> {
     throw new Error("the resolution fixture builds no store");
   },
 };

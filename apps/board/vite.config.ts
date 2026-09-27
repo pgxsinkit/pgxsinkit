@@ -1,5 +1,3 @@
-import { createRequire } from "node:module";
-import { dirname } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 
 import react from "@vitejs/plugin-react";
@@ -12,15 +10,6 @@ const workspaceAliases = {
   "@pgxsinkit/contracts": fileURLToPath(new URL("../../packages/contracts/src/index.ts", import.meta.url)),
   "@pgxsinkit/react": fileURLToPath(new URL("../../packages/react/src/index.ts", import.meta.url)),
 };
-
-// PGlite's boot-asset pre-warm (board optimisation A) needs to `?url`-import the wasm/data files, but
-// PGlite's package `exports` field does not expose `./dist/*`, so a bare `@electric-sql/pglite/dist/…`
-// specifier is rejected by the resolver. Resolve the dist directory from the package main and alias a
-// `pglite-boot-asset/<file>` prefix onto the real absolute paths, so `pglite-boot-asset/pglite.wasm?url`
-// resolves (with the `?url` query preserved) in both `vite dev` and `vite build`. The regex form keeps
-// the trailing `?url` on the captured group.
-const pgliteDistDir = dirname(createRequire(import.meta.url).resolve("@electric-sql/pglite"));
-const pgliteAssetAlias = { find: /^pglite-boot-asset\/(.+)$/, replacement: `${pgliteDistDir}/$1` };
 
 // The hosted GitHub Pages /demo build (`bun run demo:build`, board ADR-0009) sets these so the same
 // board builds into a subpath of the docs-site publish: BOARD_DEMO_BASE rewrites asset/index URLs to
@@ -46,20 +35,42 @@ const isolationHeaders =
     ? { "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp" }
     : undefined;
 
+// The pgwasm packages from source (their package exports point at a build): every importer — the client's
+// source, pgwasm-c, pgwasm-pg-dump — must reach the same modules, or error classes and the wire registry
+// would be other instances than the page's.
+const pgwasmSource = [
+  ["@pgxsinkit/pgwasm", "pgwasm/src/index.ts"],
+  ["@pgxsinkit/pgwasm/build", "pgwasm/src/build/index.ts"],
+  ["@pgxsinkit/pgwasm/drizzle", "pgwasm/src/drizzle/index.ts"],
+  ["@pgxsinkit/pgwasm/fs", "pgwasm/src/fs/index.ts"],
+  ["@pgxsinkit/pgwasm/live", "pgwasm/src/live/index.ts"],
+  ["@pgxsinkit/pgwasm/opfs", "pgwasm/src/opfs/index.ts"],
+  ["@pgxsinkit/pgwasm/protocol", "pgwasm/src/protocol/index.ts"],
+  ["@pgxsinkit/pgwasm-c", "pgwasm-c/src/index.ts"],
+  ["@pgxsinkit/pgwasm-c/prepopulated", "pgwasm-c/src/prepopulated.ts"],
+  ["@pgxsinkit/pgwasm-pg-dump", "pgwasm-pg-dump/src/index.ts"],
+  ["@pgxsinkit/pgwasm-repl", "pgwasm-repl/src/index.ts"],
+].map(([name, path]) => ({
+  find: new RegExp(`^${name!.replace(/[/.]/g, "\\$&")}$`),
+  replacement: fileURLToPath(new URL(`../../packages/${path}`, import.meta.url)),
+}));
+
 export default defineConfig({
   envDir: workspaceRoot,
   base: demoBase ?? "/",
   ...(demoOutDir ? { build: { outDir: demoOutDir, emptyOutDir: true } } : {}),
   plugins: [react()],
   resolve: {
-    alias: [
-      ...Object.entries(workspaceAliases).map(([find, replacement]) => ({ find, replacement })),
-      pgliteAssetAlias,
-    ],
+    alias: [...Object.entries(workspaceAliases).map(([find, replacement]) => ({ find, replacement })), ...pgwasmSource],
     dedupe: ["react", "react-dom"],
   },
   optimizeDeps: {
-    exclude: ["@electric-sql/pglite", ...Object.keys(workspaceAliases)],
+    exclude: [
+      "@pgxsinkit/pgwasm",
+      "@pgxsinkit/pgwasm-c",
+      "@pgxsinkit/pgwasm-pg-dump",
+      ...Object.keys(workspaceAliases),
+    ],
   },
   // The e2e lane (`test:integration:worker`) serves the BUILT app via `vite preview` on 5173 — the
   // board's established origin in every CORS allow-list (board-compose, packages/server defaults,

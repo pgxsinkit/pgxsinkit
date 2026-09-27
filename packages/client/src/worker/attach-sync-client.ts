@@ -13,8 +13,6 @@
 // and pushes (ADR-0059). The only members that stay unsupported are the genuinely tab-local ones — `pglite`
 // (no local store) and `dropReadCache` (an engine-wide cache rebuild) — each throwing a clear error saying why.
 
-import type { Results } from "@electric-sql/pglite";
-
 import type {
   MutationDiagnostics,
   SyncRuntimeStatus,
@@ -24,6 +22,7 @@ import type {
   WriteMode,
 } from "@pgxsinkit/contracts";
 import { StorageDeclarationRefusedError } from "@pgxsinkit/contracts";
+import type { Results } from "@pgxsinkit/pgwasm";
 
 import type { BootReport } from "../boot-report";
 import { syncDebug } from "../debug";

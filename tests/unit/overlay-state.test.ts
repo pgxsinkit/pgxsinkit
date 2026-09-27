@@ -17,7 +17,7 @@ import {
 } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite, createSchemaTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm, createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const batchWriteUrl = "http://localhost:3001/api/mutations";
@@ -136,7 +136,7 @@ function fakeJwtWithSub(sub: string): string {
 }
 
 async function createOverlayTestContext() {
-  const db = await createSchemaTestPGlite(overlaySchemaSql);
+  const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
   return {
     db,
@@ -184,7 +184,7 @@ describe("overlay state helpers", () => {
   });
 
   it("allows batch mutation runtime setup without per-table routes", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(routeOptionalBatchRegistry));
 
     const runtime = createMutationRuntime({
@@ -206,7 +206,7 @@ describe("overlay state helpers", () => {
   });
 
   it("materialises NOT NULL column defaults into the optimistic overlay row on create", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(defaultedColumnRegistry));
 
     const runtime = createMutationRuntime({
@@ -243,7 +243,7 @@ describe("overlay state helpers", () => {
   });
 
   it("keeps caller-supplied values over column defaults on create", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(defaultedColumnRegistry));
 
     const runtime = createMutationRuntime({
@@ -278,7 +278,7 @@ describe("overlay state helpers", () => {
   });
 
   it("materialises a custom-named Server version on optimistic create (governance-driven, not by convention) — finding 4", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(customServerVersionRegistry));
     const runtime = createMutationRuntime({ db, registry: customServerVersionRegistry, batchWriteUrl });
 
@@ -302,7 +302,7 @@ describe("overlay state helpers", () => {
   });
 
   it("stamps an authClaim create-managed field into the optimistic overlay from the decoded claim — board Phase 7", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(authOwnedRegistry));
     const subject = "01963227-d4c7-72db-b858-f89f6af8fc10";
     const runtime = createMutationRuntime({
@@ -341,7 +341,7 @@ describe("overlay state helpers", () => {
   });
 
   it("re-stamps a custom-named Server version on optimistic update — finding 4", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(customServerVersionRegistry));
     const runtime = createMutationRuntime({ db, registry: customServerVersionRegistry, batchWriteUrl });
 
@@ -377,7 +377,7 @@ describe("overlay state helpers", () => {
     });
     const tableName = tableNames[0]!;
     const rowId = "01963227-d4c7-72db-b858-f89f6af8f901";
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(registry));
     const runtime = createMutationRuntime({
       db,
@@ -1144,7 +1144,7 @@ describe("overlay state helpers", () => {
   });
 
   it("resets failed mutations for immediate retry", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     const runtime = createMutationRuntime({
       db,
       registry: demoSyncRegistry,
@@ -1205,7 +1205,7 @@ describe("overlay state helpers", () => {
   });
 
   it("forwards auth headers on batch mutation flushes", async () => {
-    const db = await createSchemaTestPGlite(overlaySchemaSql);
+    const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,
@@ -1267,7 +1267,7 @@ describe("overlay state helpers", () => {
   });
 
   it("serializes concurrent batch flushes for the same mutation", async () => {
-    const db = await createSchemaTestPGlite(overlaySchemaSql);
+    const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,
@@ -1330,7 +1330,7 @@ describe("overlay state helpers", () => {
   });
 
   it("uses an explicit batch endpoint as-is without appending implicit path segments", async () => {
-    const db = await createSchemaTestPGlite(overlaySchemaSql);
+    const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,
@@ -1378,7 +1378,7 @@ describe("overlay state helpers", () => {
   });
 
   it("drains multiple batch slices in a single flush call", async () => {
-    const db = await createSchemaTestPGlite(overlaySchemaSql);
+    const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
     // A small flush slice exercises the multi-slice drain (3 HTTP rounds) with 15 mutations instead
     // of 205 — the behaviour under test is the slicing, not the count.
@@ -1439,7 +1439,7 @@ describe("overlay state helpers", () => {
   });
 
   it("reconciles acknowledged batch updates after the full drain completes", async () => {
-    const db = await createSchemaTestPGlite(overlaySchemaSql);
+    const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
     // Small flush slice: 6 mutations across 2 HTTP rounds, not 101 — same multi-slice drain.
     const flushBatchSize = 5;
@@ -1502,7 +1502,7 @@ describe("overlay state helpers", () => {
   });
 
   it("applies mixed batch acknowledgements without row-by-row status drift", async () => {
-    const db = await createSchemaTestPGlite(overlaySchemaSql);
+    const db = await createSchemaTestPgwasm(overlaySchemaSql);
 
     const runtime = createMutationRuntime({
       db,
@@ -1578,7 +1578,7 @@ describe("overlay state helpers", () => {
 
 describe("canonical entity identity — property≠column PK (ADR-0012)", () => {
   it("persists the column-keyed identity in the journal for create and update", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(generateLocalSchemaSql(renamedPkRegistry));
     const runtime = createMutationRuntime({ db, registry: renamedPkRegistry, batchWriteUrl });
 

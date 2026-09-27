@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { eq } from "drizzle-orm";
 import { bigint, QueryBuilder, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -223,7 +224,7 @@ describe("subscribeLiveRows over a duplicate-output-name query (worker bridge se
   });
 
   async function makeHost(): Promise<SyncWorkerHost<SoloRegistry>> {
-    const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+    const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: soloRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
@@ -336,7 +337,7 @@ describe("subscribeLiveRows over a same-named-column JOIN (worker bridge seam)",
   });
 
   it("WITH aliases a keyless JOIN materialises across the bridge, carries BOTH titles, and fires on write", async () => {
-    const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+    const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: collidingRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",

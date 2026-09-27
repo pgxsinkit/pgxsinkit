@@ -55,22 +55,21 @@ const recoverSendingMock = mock(async (): Promise<void> => undefined);
 
 describe("createSyncClient subscription reset", () => {
   beforeAll(async () => {
-    await mock.module("@electric-sql/pglite", () => ({
-      PGlite: {
-        create: async () => ({
-          exec: execMock,
-          close: async () => undefined,
-        }),
-      },
+    const realPgwasm = await import("@pgxsinkit/pgwasm");
+    await mock.module("@pgxsinkit/pgwasm", () => ({
+      ...realPgwasm,
+      createPgwasm: async () => ({
+        exec: execMock,
+        close: async () => undefined,
+      }),
     }));
 
-    await mock.module("@electric-sql/pglite/live", () => ({
+    await mock.module("@pgxsinkit/pgwasm/live", () => ({
       live: {},
     }));
 
-    await mock.module("drizzle-orm/pglite", () => ({
-      drizzle: () => ({ mocked: true }),
-    }));
+    const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
+    await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
 
     // The reset path calls the subscription metadata store DIRECTLY (there is no engine namespace to
     // route through any more), so this is the module the ordering assertions observe. Every export

@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
 import { defineEventStream, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -55,7 +56,7 @@ let hosts: SyncWorkerHost<Registry>[] = [];
 let channels: MessageChannel[] = [];
 
 async function makeHost(eventOptions: { ackedRetentionMs?: number } = {}): Promise<SyncWorkerHost<Registry>> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker<Registry>({
     registry,
     controlPlaneUrl: "http://127.0.0.1:1",

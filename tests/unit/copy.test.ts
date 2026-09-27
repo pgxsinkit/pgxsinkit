@@ -6,7 +6,7 @@ import { integer, jsonb, pgSchema, pgTable, text } from "drizzle-orm/pg-core";
 import { buildCopyFromBlobStatement, generateCopyData, serializeCopyValue } from "../../packages/client/src/sync/copy";
 import { informationSchemaColumns } from "../support/catalog-tables";
 import { drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // COPY TEXT serializer (ported from upstream @electric-sql/pglite PR #1035): a faithful port of
 // Postgres' CopyAttributeOutText / array_out, so every built-in type round-trips through COPY ... FROM
@@ -132,7 +132,7 @@ describe("COPY TEXT serializer", () => {
     });
 
     it("loads its own bytes through a real PGlite COPY", async () => {
-      const pg = await createFreshTestPGlite();
+      const pg = await createFreshTestPgwasm();
       await pg.exec(`CREATE TABLE definition_cache (id int primary key, entry jsonb not null);`);
       const statement = buildCopyFromBlobStatement({
         table: bare,
@@ -177,7 +177,7 @@ describe("COPY TEXT serializer", () => {
       columns: string[],
       rows: Record<string, unknown>[],
     ): Promise<Record<string, unknown>[]> {
-      const pg = await createFreshTestPGlite();
+      const pg = await createFreshTestPgwasm();
       await pg.exec(`CREATE TABLE t (${columnsDdl});`);
 
       const columnTypes = Object.fromEntries(
@@ -337,7 +337,7 @@ describe("COPY TEXT serializer", () => {
       copyValue: unknown = paramValue,
       setup?: string,
     ): Promise<{ inserted: string | null; copied: string | null }> {
-      const pg = await createFreshTestPGlite();
+      const pg = await createFreshTestPgwasm();
       if (setup) await pg.exec(setup);
       await pg.exec(`CREATE TABLE t (id int, v ${columnType});`);
 

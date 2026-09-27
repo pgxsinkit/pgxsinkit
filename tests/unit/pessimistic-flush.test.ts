@@ -10,7 +10,7 @@ import { projectsSyncRegistry } from "@pgxsinkit/schema";
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0022 C2/D — the client routing of a pessimistic write-unit to the authoritative endpoint, and the
 // three per-mutation dispositions: `acked` (converges normally), `conflicted` (overlay KEPT, ADR-0015),
@@ -23,7 +23,7 @@ const SYNCED_VERSION = "1000";
 const ACKED_VERSION = "2000";
 
 async function seededRuntime(onReject?: (rejected: MutationDetail[]) => void, runtimeBatchWriteUrl = batchWriteUrl) {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   await drizzleOver(db)
     .insert(projectsSyncRegistry.projects.localTable)
     .values({
@@ -89,7 +89,7 @@ async function enqueuePessimisticUpdate(runtime: RuntimeOf, unitId: string, name
   });
 }
 
-async function readJournalRow(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>) {
+async function readJournalRow(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>) {
   const journal = getJournalTable(projectsSyncRegistry, "projects");
   const rows = await drizzleOver(db)
     .select({
@@ -105,7 +105,7 @@ async function readJournalRow(db: Awaited<ReturnType<typeof createSchemaTestPGli
   return rows[0];
 }
 
-async function overlayCount(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>) {
+async function overlayCount(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>) {
   const overlay = getOverlayTable(projectsSyncRegistry, "projects");
   const rows = await drizzleOver(db).select({ c: count() }).from(overlay).where(eq(overlay["id"]!, PROJECT_ID));
   return rows[0]?.c;
@@ -113,7 +113,7 @@ async function overlayCount(db: Awaited<ReturnType<typeof createSchemaTestPGlite
 
 describe("pessimistic write-unit flush (ADR-0022 C2/D)", () => {
   it("rejects a non-canonical batchWriteUrl when the runtime is constructed", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     try {
       for (const invalidUrl of [
         "http://localhost:3001/mutations",
@@ -247,7 +247,7 @@ const seatsSchemaSql = generateLocalSchemaSql(seatsRegistry);
 
 describe("statically-pessimistic table foreground-routes its plain writes (ADR-0022 §2)", () => {
   it("create() on a static-pessimistic table posts the write to the authoritative endpoint", async () => {
-    const db = await createSchemaTestPGlite(seatsSchemaSql);
+    const db = await createSchemaTestPgwasm(seatsSchemaSql);
     const runtime = createMutationRuntime({ db, registry: seatsRegistry, batchWriteUrl });
     const fetchMock = unitFetch("acked");
     const SEAT_ID = "01963227-d4c7-72db-b858-00000000d001";
@@ -271,7 +271,7 @@ describe("statically-pessimistic table foreground-routes its plain writes (ADR-0
   });
 
   it("a rejected static-pessimistic create auto-discards its overlay (no stuck optimistic state)", async () => {
-    const db = await createSchemaTestPGlite(seatsSchemaSql);
+    const db = await createSchemaTestPgwasm(seatsSchemaSql);
     const runtime = createMutationRuntime({ db, registry: seatsRegistry, batchWriteUrl });
     const fetchMock = unitFetch("rejected");
     const SEAT_ID = "01963227-d4c7-72db-b858-00000000d002";

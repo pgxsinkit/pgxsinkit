@@ -1,3 +1,5 @@
+import type { StorageDescription } from "@pgxsinkit/pgwasm";
+
 // Store path contract (ADR-0036). The public seams (`createSyncClient`, `createClientPGlite`, the worker
 // attach/provision messages, the board store registry) take a `storePath` — a PLAIN path/name, never a
 // PGlite storage URL. The storage backend is DERIVED from the engine home's capabilities here, never chosen by
@@ -34,20 +36,21 @@ export class InvalidStorePathError extends Error {
 }
 
 /**
- * Thrown when a caller-owned PGlite handed to {@link CreateSyncClientOptions.pgliteInstance} /
+ * Thrown when a caller-owned store handed to {@link CreateSyncClientOptions.pgliteInstance} /
  * {@link CreateSyncClientOptions.precreatedPglite} is PROVABLY non-persistent (ADR-0036 decision 4): its
- * `dataDir` is `undefined` (PGlite's in-memory default — the `new PGlite()` a copy-paste reaches) or begins
- * `memory://`. Names both the why (durability semantics assume a persisted store) and the two exits, so a
- * consumer is never left guessing which store to hand us instead.
+ * `storage` is memory (pgwasm's default — the bare `createPgwasm({ build })` a copy-paste reaches — or an
+ * explicit `memory://`), or a filesystem that reports itself non-persistent. Names both the why (durability
+ * semantics assume a persisted store) and the two exits, so a consumer is never left guessing which store to
+ * hand us instead.
  */
 export class NonPersistentStoreError extends Error {
-  constructor(observed: "in-memory-default" | "memory-scheme") {
+  constructor(observed: NonPersistentStorage) {
     const reason =
-      observed === "in-memory-default"
-        ? "its dataDir is undefined — PGlite's default is an in-memory store (`new PGlite()`)"
-        : "its dataDir is a memory-backed store";
+      observed === "memory"
+        ? "its storage is in memory (pgwasm's default without a `dataDir`, or `memory://`)"
+        : "its storage is a filesystem that reports itself non-persistent";
     super(
-      `[pgxsinkit] refusing a non-persistent PGlite instance: ${reason}. pgxsinkit's durability semantics ` +
+      `[pgxsinkit] refusing a non-persistent store: ${reason}. pgxsinkit's durability semantics ` +
         "(persistent retention, the optimistic Mutation journal) assume a persisted store — a memory store " +
         "would silently forget acked-but-unflushed writes. Either hand a persisted instance (open it under a " +
         "plain store path so the backend is derived), or, for a test/ephemeral store, acknowledge it with " +
@@ -323,18 +326,19 @@ export function storeIndexedDbDatabaseName(storePath: string): string {
   return `/pglite/${storePath}`;
 }
 
+/** The provably-non-persistent storage shapes {@link classifyNonPersistentStorage} reports. */
+export type NonPersistentStorage = "memory" | "non-persistent-vfs";
+
 /**
- * Classify a PGlite instance's `dataDir` for the BYO refusal (ADR-0036 decision 4). Returns the offending
- * shape when the instance is PROVABLY non-persistent (`undefined` = PGlite's in-memory default; a
- * `memory://` prefix = an explicit memory store), or `null` when it passes — anything else present,
- * including exotic custom-VFS configs we cannot classify, is the caller's own call (the guard catches the
- * two accidental non-persistent shapes, it is not a storage-backend whitelist).
+ * Classify a store's own `pg.storage` for the BYO refusal (ADR-0036 decision 4). Returns the offending shape
+ * when the store is PROVABLY non-persistent (`memory`, pgwasm's default or an explicit `memory://`; a `vfs`
+ * filesystem reporting `persistent: false`), or `null` when it passes: `idb`, `file` and a persistent `vfs`
+ * (the OPFS-repacked store). The guard catches the accidental non-persistent shapes; it is not a
+ * storage-backend whitelist.
  */
-export function classifyNonPersistentDataDir(
-  dataDir: string | undefined,
-): "in-memory-default" | "memory-scheme" | null {
-  if (dataDir == null) return "in-memory-default";
-  if (dataDir.startsWith("memory://")) return "memory-scheme";
+export function classifyNonPersistentStorage(storage: StorageDescription): NonPersistentStorage | null {
+  if (storage.kind === "memory") return "memory";
+  if (storage.kind === "vfs" && !storage.persistent) return "non-persistent-vfs";
   return null;
 }
 

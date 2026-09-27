@@ -19,7 +19,7 @@ import {
 
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
 import { createTablesFromSchema, drizzleOver } from "../../tests/support/drizzle";
-import { createFreshTestPGlite } from "../../tests/support/pglite";
+import { createFreshTestPgwasm } from "../../tests/support/pgwasm-store";
 
 const METADATA_SCHEMA = "pgxsinkit";
 const OFFERING = "11111111-1111-4111-8111-111111111111";
@@ -80,7 +80,7 @@ function oneShotRouter(options: {
 }
 
 test("a shared scope revoked while offline is cleared on the next public sync start", async () => {
-  const pg = await createFreshTestPGlite();
+  const pg = await createFreshTestPgwasm();
   await createTablesFromSchema(pg, { content });
   await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
   const key = await importStreamTokenKey("offline-shared-revocation-repro");
@@ -139,7 +139,7 @@ test("a shared scope revoked while offline is cleared on the next public sync st
 });
 
 test("refresh-time shared-scope revocation clears that scope and stops its stream", async () => {
-  const pg = await createFreshTestPGlite();
+  const pg = await createFreshTestPgwasm();
   await createTablesFromSchema(pg, { content });
   await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
 

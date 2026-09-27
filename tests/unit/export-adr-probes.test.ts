@@ -8,10 +8,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 // so this file is FULL unit lane only (`test:unit`), never `test:unit:fast`. Fresh stores are booted straight
 // from the artefact via `loadDataDir` through the same resolution module the toolkit uses (ADR-0036).
 
-import { PGlite } from "@electric-sql/pglite";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
 
 import { createSyncClient, type SyncClient } from "../../packages/client/src/index";
 import { resolveStoreDataDir } from "../../packages/client/src/store-path";
@@ -57,7 +58,7 @@ const registry = defineSyncRegistry({
 type Registry = typeof registry;
 
 let client: SyncClient<Registry> | undefined;
-const freshStores: PGlite[] = [];
+const freshStores: Pgwasm[] = [];
 
 afterEach(async () => {
   await client?.stop().catch(() => undefined);
@@ -77,8 +78,12 @@ async function makeClient(storePath: string): Promise<SyncClient<Registry>> {
 }
 
 /** Boot a bare, engine-less PGlite straight from a store-backup artefact via `loadDataDir` (a restore/boot). */
-async function bootFromBackup(storePath: string, backup: File | Blob): Promise<PGlite> {
-  const fresh = await PGlite.create({ dataDir: resolveStoreDataDir(storePath, "memory"), loadDataDir: backup });
+async function bootFromBackup(storePath: string, backup: File | Blob): Promise<Pgwasm> {
+  const fresh = await createPgwasm({
+    build: cBuild,
+    dataDir: resolveStoreDataDir(storePath, "memory"),
+    loadDataDir: backup,
+  });
   freshStores.push(fresh);
   return fresh;
 }
@@ -214,7 +219,10 @@ describe("ADR-0035 probe (c): data-export clone fidelity", () => {
     // is EXECed into a plain fresh store (never `loadDataDir`) — exactly as a `psql -f` load into a vanilla
     // Postgres would apply it.
     const { file } = await client.exportData();
-    const target = await PGlite.create({ dataDir: resolveStoreDataDir("probe-clone-fidelity-target", "memory") });
+    const target = await createPgwasm({
+      build: cBuild,
+      dataDir: resolveStoreDataDir("probe-clone-fidelity-target", "memory"),
+    });
     freshStores.push(target);
     await target.exec(await file.text());
 

@@ -24,7 +24,8 @@ import {
   type PgColumn,
   type PgInsertValue,
 } from "drizzle-orm/pg-core";
-import { drizzle } from "drizzle-orm/pglite";
+
+import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 
 import {
   clearMutationRecoveryMarkerIfSettled,

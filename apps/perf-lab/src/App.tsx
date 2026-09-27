@@ -1,10 +1,10 @@
-import { Repl } from "@electric-sql/pglite-repl";
 import { count, eq, sql } from "drizzle-orm";
 import { startTransition, useEffect, useMemo, useState } from "react";
 
 import { getReadModelView } from "@pgxsinkit/client";
 import type { MutationBatchItem, MutationDetail, MutationDiagnostics } from "@pgxsinkit/client";
 import { getSyncRegistrySchema, quoteIdentifier, quoteSqlLiteral, type SyncTableEntry } from "@pgxsinkit/contracts";
+import { Repl } from "@pgxsinkit/pgwasm-repl";
 import {
   buildSyntheticRegistrySchemaName,
   buildSyntheticCreatePayload,

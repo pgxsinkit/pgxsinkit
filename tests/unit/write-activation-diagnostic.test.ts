@@ -92,13 +92,14 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
   let warnings: string[] = [];
 
   beforeAll(async () => {
-    await mock.module("@electric-sql/pglite", () => ({
-      PGlite: {
-        create: async () => ({ exec: async () => undefined, close: async () => undefined }),
-      },
+    const realPgwasm = await import("@pgxsinkit/pgwasm");
+    await mock.module("@pgxsinkit/pgwasm", () => ({
+      ...realPgwasm,
+      createPgwasm: async () => ({ exec: async () => undefined, close: async () => undefined }),
     }));
-    await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
-    await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
+    await mock.module("@pgxsinkit/pgwasm/live", () => ({ live: {} }));
+    const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
+    await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
     // The subscription metadata store, which the reset path now calls directly (there is no engine
     // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.
     await mock.module("../../packages/client/src/sync/subscription-state", () => ({

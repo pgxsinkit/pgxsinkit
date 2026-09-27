@@ -22,7 +22,7 @@ import {
 } from "../../packages/client/src/schema";
 import { informationSchemaTables } from "../support/catalog-tables";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0006: the fingerprint-keyed local store + drain-then-drop read-cache rebuild.
 
@@ -30,12 +30,12 @@ const schemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const batchWriteUrl = "http://localhost:3001/api/mutations";
 
 async function provisioned() {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   const runtime = createMutationRuntime({ db, registry: demoSyncRegistry, batchWriteUrl });
   return { db, runtime };
 }
 
-async function tableExists(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, name: string): Promise<boolean> {
+async function tableExists(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>, name: string): Promise<boolean> {
   const rows = await drizzleOver(db)
     .select({ count: count() })
     .from(informationSchemaTables)
@@ -43,7 +43,7 @@ async function tableExists(db: Awaited<ReturnType<typeof createSchemaTestPGlite>
   return (rows[0]?.count ?? 0) > 0;
 }
 
-async function rowCount(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, table: AnyPgTable): Promise<number> {
+async function rowCount(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>, table: AnyPgTable): Promise<number> {
   const rows = await drizzleOver(db).select({ count: count() }).from(table);
   return rows[0]?.count ?? 0;
 }

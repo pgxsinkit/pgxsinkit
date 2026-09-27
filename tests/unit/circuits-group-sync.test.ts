@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { boolean, text, uuid } from "drizzle-orm/pg-core";
 
 import { startCircuitsSync } from "@pgxsinkit/client";
@@ -12,6 +11,7 @@ import {
   type StreamEnvelope,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 import {
   barrierPath,
   createBarrierHandler,
@@ -28,7 +28,7 @@ import {
 
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // Native consistency-group orchestration against the REAL control-plane handlers: derive groups from
 // the registry, subscribe each, and let the shared tier fan out. The property this exists for is the
@@ -279,10 +279,10 @@ async function outcomeWithin(promise: Promise<unknown>, ms: number): Promise<"se
 }
 
 describe("circuits group sync", () => {
-  let pg: PGlite;
+  let pg: Pgwasm;
 
   beforeAll(async () => {
-    pg = await createFreshTestPGlite();
+    pg = await createFreshTestPgwasm();
     await createTablesFromSchema(pg, { content, note, draft });
     await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
   });

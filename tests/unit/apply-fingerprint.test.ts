@@ -8,7 +8,7 @@ import {
   buildPlpgsqlBatchFunctionDdl,
   expectedApplyFingerprint,
 } from "../../packages/server/src/mutations/plpgsql-apply";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0018: the generated apply function is stamped with a fingerprint of its exact DDL body, so CI
 // (pre-deploy, via `pgxsinkit-generate --check`) and the function itself (ADR-0030, in-body on every
@@ -109,7 +109,7 @@ describe("apply-function fingerprint (ADR-0018)", () => {
   });
 
   it("installs the COMMENT so obj_description reads back the exact fingerprint", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(`CREATE TABLE fp_items (
       id uuid PRIMARY KEY,
       owner_id uuid NOT NULL,

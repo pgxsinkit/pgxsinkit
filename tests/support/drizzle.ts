@@ -1,9 +1,9 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { getColumns } from "drizzle-orm";
 import type { AnyPgTable, PgColumn } from "drizzle-orm/pg-core";
-import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 
 import { normalizeCastPositionType } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
+import { drizzle, type PgwasmDatabase } from "@pgxsinkit/pgwasm/drizzle";
 import { renderPgxsinkitUtilitiesMigration } from "@pgxsinkit/server";
 
 import { scalarJsonColumnNames, type ApplyTarget } from "../../packages/client/src/local-tables";
@@ -11,16 +11,13 @@ import { scalarJsonColumnNames, type ApplyTarget } from "../../packages/client/s
 // One drizzle handle per PGlite instance, so every converted call site in a file shares a builder
 // without re-wrapping. Wrapping is cheap, but a single identity also keeps `.toSQL()`-rendered
 // statements comparable across helpers.
-const handles = new WeakMap<PGlite, PgliteDatabase<never>>();
+const handles = new WeakMap<Pgwasm, PgwasmDatabase<never>>();
 
 /** A (memoized) Drizzle handle over any test PGlite instance — the tier-① authoring surface. */
-export function drizzleOver(pg: PGlite): PgliteDatabase<never> {
+export function drizzleOver(pg: Pgwasm): PgwasmDatabase<never> {
   let db = handles.get(pg);
   if (!db) {
-    // MUST be the `{ client }` config form: drizzle's pglite driver destructures `{ connection, client }`
-    // from a bare first argument, so `drizzle(pg)` misdetects the instance as a config and silently
-    // constructs a NEW in-memory PGlite — every read would then target an empty database.
-    db = drizzle({ client: pg as never }) as PgliteDatabase<never>;
+    db = drizzle(pg as never) as PgwasmDatabase<never>;
     handles.set(pg, db);
   }
   return db;
@@ -83,7 +80,7 @@ export function makeApplyTarget(
  * integration databases alike. Only meaningful for fixture tables that do not already exist.
  */
 export async function createTablesFromSchema(
-  db: { execute: (query: string) => Promise<unknown> } | PGlite,
+  db: { execute: (query: string) => Promise<unknown> } | Pgwasm,
   schema: Record<string, unknown>,
 ): Promise<void> {
   const { generateDrizzleJson, generateMigration } = await import("drizzle-kit/api-postgres");
@@ -97,7 +94,7 @@ export async function createTablesFromSchema(
     if ("execute" in db && typeof db.execute === "function") {
       await (db as { execute: (query: string) => Promise<unknown> }).execute(statement);
     } else {
-      await (db as PGlite).exec(statement);
+      await (db as Pgwasm).exec(statement);
     }
   }
 }

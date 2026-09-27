@@ -1,6 +1,3 @@
-// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
-// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
-import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 
 import {
@@ -9,6 +6,9 @@ import {
   type PredicateValue,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
+// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
+// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
+import type { Pgwasm, Transaction } from "@pgxsinkit/pgwasm";
 
 import { nowMs, type GroupBootStamp } from "../boot-report";
 import { resolveApplyTarget, type ApplyTarget } from "../local-tables";
@@ -91,7 +91,7 @@ export interface CircuitsShapeSpec {
 }
 
 export interface CircuitsSyncOptions {
-  pg: PGliteInterface;
+  pg: Pgwasm;
   registry: SyncTableRegistry;
   /** Subscription key for persisted resume state; `null` disables persistence. */
   key: string | null;
@@ -621,7 +621,7 @@ async function assertClearLeftNoResidue({
   shapeName,
   soleOccupant,
 }: {
-  pg: PGliteInterface | Transaction;
+  pg: Pgwasm | Transaction;
   target: ApplyTarget;
   shapeName: string;
   soleOccupant: boolean;

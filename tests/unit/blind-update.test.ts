@@ -10,7 +10,7 @@ import { projectsSyncRegistry } from "@pgxsinkit/schema";
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0022 addendum — a BLIND pessimistic update: an update-by-key whose target is EXCLUDED from the actor's
 // read shape (its rows never stream here). It plans a journal row ONLY (no overlay, no local base-row check),
@@ -83,7 +83,7 @@ async function withFetch<T>(fetchMock: unknown, fn: () => Promise<T>): Promise<T
   }
 }
 
-type Db = Awaited<ReturnType<typeof createSchemaTestPGlite>>;
+type Db = Awaited<ReturnType<typeof createSchemaTestPgwasm>>;
 
 async function journalCount(db: Db, registry: typeof ledgerRegistry | typeof projectsSyncRegistry, table: string) {
   const journal = getJournalTable(registry as never, table as never);
@@ -113,7 +113,7 @@ async function journalStatus(db: Db, registry: typeof ledgerRegistry | typeof pr
 
 describe("blind pessimistic update (ADR-0022 addendum)", () => {
   it("flushes an entity absent from the read model, acks, writes NO overlay, and retires with no echo", async () => {
-    const db = await createSchemaTestPGlite(ledgerSchemaSql);
+    const db = await createSchemaTestPgwasm(ledgerSchemaSql);
     const runtime = createMutationRuntime({ db, registry: ledgerRegistry, batchWriteUrl });
     const fetchMock = unitFetch("acked");
     try {
@@ -152,7 +152,7 @@ describe("blind pessimistic update (ADR-0022 addendum)", () => {
   });
 
   it("throws at enqueue for an optimistic-routed blind write (nothing enqueued)", async () => {
-    const db = await createSchemaTestPGlite(projectsSchemaSql);
+    const db = await createSchemaTestPgwasm(projectsSchemaSql);
     const runtime = createMutationRuntime({ db, registry: projectsSyncRegistry, batchWriteUrl });
     try {
       // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects matchers return a real promise typed as void
@@ -170,7 +170,7 @@ describe("blind pessimistic update (ADR-0022 addendum)", () => {
   });
 
   it("does NOT weaken the presence check: a plain (non-blind) update on an absent entity still throws", async () => {
-    const db = await createSchemaTestPGlite(projectsSchemaSql);
+    const db = await createSchemaTestPgwasm(projectsSchemaSql);
     const runtime = createMutationRuntime({ db, registry: projectsSyncRegistry, batchWriteUrl });
     try {
       // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects matchers return a real promise typed as void
@@ -186,7 +186,7 @@ describe("blind pessimistic update (ADR-0022 addendum)", () => {
   });
 
   it("the optimistic background flusher does NOT pick up a pending pessimistic-blind row", async () => {
-    const db = await createSchemaTestPGlite(ledgerSchemaSql);
+    const db = await createSchemaTestPgwasm(ledgerSchemaSql);
     const runtime = createMutationRuntime({ db, registry: ledgerRegistry, batchWriteUrl });
     const fetchMock = unitFetch("acked");
     try {
@@ -204,7 +204,7 @@ describe("blind pessimistic update (ADR-0022 addendum)", () => {
 
   it("rejected blind: journal row kept as rejected, onReject fires, no overlay side-effects", async () => {
     const rejected: MutationDetail[] = [];
-    const db = await createSchemaTestPGlite(ledgerSchemaSql);
+    const db = await createSchemaTestPgwasm(ledgerSchemaSql);
     const runtime = createMutationRuntime({
       db,
       registry: ledgerRegistry,
@@ -232,7 +232,7 @@ describe("blind pessimistic update (ADR-0022 addendum)", () => {
   });
 
   it("statically-pessimistic table: a blind update in a pessimistic unit flushes + acks + retires", async () => {
-    const db = await createSchemaTestPGlite(ledgerSchemaSql); // ledger is statically writeMode: "pessimistic"
+    const db = await createSchemaTestPgwasm(ledgerSchemaSql); // ledger is statically writeMode: "pessimistic"
     const runtime = createMutationRuntime({ db, registry: ledgerRegistry, batchWriteUrl });
     const fetchMock = unitFetch("acked");
     try {

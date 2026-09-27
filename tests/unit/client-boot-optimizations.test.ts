@@ -5,8 +5,9 @@ import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 // Covers the two boot-path client options wired for the board optimisations:
-//   1. `pgliteBootAssets` (Part A) — a pre-warmed WASM/fs bundle promise, awaited and passed into
-//      `PGlite.create`; a REJECTED warm must be caught to `undefined` and still boot (fallback).
+//   1. `pgliteBootAssets` (Part A) — a pre-warmed WASM/fs bundle promise, handed to the store's C build
+//      (`createCBuild({ assets })`) and on to `createPgwasm`; a REJECTED warm must still boot (the build
+//      falls back to its own lazy asset load).
 //   2. `writeRequestHeaders` — write-only headers merged over `requestHeaders` on the mutation-flush
 //      path, while the read/shape path keeps `requestHeaders` alone (region-pin geometry).
 // The real merge/await logic lives in `createSyncClient` (packages/client/src/index.ts); its collaborators
@@ -29,6 +30,8 @@ function bootRegistry(): SyncTableRegistry {
 
 // Captured collaborator inputs, refreshed per test.
 let capturedCreateOptions: Record<string, unknown> | undefined;
+let capturedBuildOptions: { assets?: Promise<Record<string, unknown>> } | undefined;
+const fakeWarmBuild = { fake: "warm build" };
 let capturedMutationOptions: Record<string, unknown> | undefined;
 let capturedSyncOptions: Record<string, unknown> | undefined;
 
@@ -46,22 +49,28 @@ const startCircuitsSyncMock = mock(async (_pg: unknown, options: Record<string, 
 
 describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)", () => {
   beforeAll(async () => {
-    await mock.module("@electric-sql/pglite", () => ({
-      PGlite: {
-        create: async (_dataDir: string, options: Record<string, unknown>) => {
-          capturedCreateOptions = options;
-          return {
-            exec: async () => undefined,
-            close: async () => undefined,
-          };
-        },
+    const realPgwasm = await import("@pgxsinkit/pgwasm");
+    await mock.module("@pgxsinkit/pgwasm", () => ({
+      ...realPgwasm,
+      createPgwasm: async (options: Record<string, unknown>) => {
+        capturedCreateOptions = options;
+        return {
+          exec: async () => undefined,
+          close: async () => undefined,
+        };
       },
-      // `defineSyncWorker` imports `types` as a runtime value (the identity-parser OID map). The relaxed-
-      // durability worker-plumbing test below imports it, so the mocked module must carry these OIDs.
-      types: { TIMESTAMP: 1114, TIMESTAMPTZ: 1184, INTERVAL: 1186, DATE: 1082 },
     }));
-    await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
-    await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
+    const realPgwasmC = await import("@pgxsinkit/pgwasm-c");
+    await mock.module("@pgxsinkit/pgwasm-c", () => ({
+      ...realPgwasmC,
+      createCBuild: (options: { assets?: Promise<Record<string, unknown>> }) => {
+        capturedBuildOptions = options;
+        return fakeWarmBuild;
+      },
+    }));
+    await mock.module("@pgxsinkit/pgwasm/live", () => ({ live: {} }));
+    const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
+    await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
     // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so its namespace now comes
     // from `createSyncEngine`'s return rather than the mocked `PGlite.create` instance.
     // The subscription metadata store, which the reset path now calls directly (there is no engine
@@ -164,26 +173,28 @@ describe("createSyncClient boot options (pgliteBootAssets + writeRequestHeaders)
     return client;
   }
 
-  it("passes resolved pre-warmed boot assets straight into PGlite.create", async () => {
+  it("hands resolved pre-warmed boot assets to the store's C build, and that build to createPgwasm", async () => {
     const pgliteWasmModule = { fake: "wasm" } as unknown as WebAssembly.Module;
     const fsBundle = new Blob([new Uint8Array([1, 2, 3])]);
     await makeClient({ pgliteBootAssets: Promise.resolve({ pgliteWasmModule, fsBundle }) });
 
-    expect(capturedCreateOptions?.["pgliteWasmModule"]).toBe(pgliteWasmModule);
-    expect(capturedCreateOptions?.["fsBundle"]).toBe(fsBundle);
+    expect(capturedCreateOptions?.["build"]).toBe(fakeWarmBuild);
+    const assets = await capturedBuildOptions?.assets;
+    expect(assets?.["postgresWasmModule"]).toBe(pgliteWasmModule);
+    expect(assets?.["fsBundle"]).toBe(fsBundle);
     // The extensions are still wired alongside the pre-warmed assets.
     expect(capturedCreateOptions?.["extensions"]).toBeDefined();
   });
 
-  it("boots (fallback) when the pre-warm promise REJECTS — no asset fields reach PGlite.create", async () => {
-    // A failed warm must never fail the boot: createSyncClient catches it to undefined so PGlite.create
-    // falls back to loading its own assets.
+  it("boots (fallback) when the pre-warm promise REJECTS — the build gets the rejection, never the boot", async () => {
+    // A failed warm must never fail the boot: the rejection reaches the C build's `assets`, where the build
+    // falls back to loading its own assets (pgwasm-c's contract); createSyncClient itself boots normally.
     const client = await makeClient({ pgliteBootAssets: Promise.reject(new Error("warm failed")) });
 
     expect(client).toBeDefined();
-    expect(capturedCreateOptions).toBeDefined();
-    expect(capturedCreateOptions?.["pgliteWasmModule"]).toBeUndefined();
-    expect(capturedCreateOptions?.["fsBundle"]).toBeUndefined();
+    expect(capturedCreateOptions?.["build"]).toBe(fakeWarmBuild);
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(capturedBuildOptions?.assets).rejects.toThrow("warm failed");
     // Extensions still wired — the boot completed normally.
     expect(capturedCreateOptions?.["extensions"]).toBeDefined();
   });

@@ -11,7 +11,7 @@ import {
   generateEphemeralLocalSchemaSql,
   generateLocalSchemaSql,
 } from "../../packages/client/src/schema";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 const projectedClientRegistry = defineSyncRegistry({
   projectedItems: defineSyncTable({
@@ -145,7 +145,7 @@ describe("client local schema generation", () => {
     const schemaName = buildSyntheticRegistrySchemaName({ tableCount: 1, extraColumnCount: 4 });
     const { registry } = buildSyntheticRegistry({ tableCount: 1, extraColumnCount: 4, schemaName });
 
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     try {
       // generate → drop the read cache → regenerate: exercises both the CREATE and DROP paths for the
       // schema-qualified function (qualified) and trigger (unqualified).

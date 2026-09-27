@@ -27,7 +27,7 @@ import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
 import { installPlpgsqlBatchFunction } from "../../packages/server/src/mutations/plpgsql-apply";
-import { createCircuitsTestPGlite } from "../support/circuits-pglite";
+import { createCircuitsTestPgwasm } from "../support/circuits-pgwasm";
 import { claimsFromTestHeader } from "../support/claims";
 import { drizzleOver } from "../support/drizzle";
 
@@ -35,7 +35,7 @@ const env = readIntegrationEnv();
 const localSchemaSql = generateLocalSchemaSql(membershipFanoutSyncRegistry);
 
 async function createLocalStore() {
-  const pg = await createCircuitsTestPGlite();
+  const pg = await createCircuitsTestPgwasm();
   await pg.exec(localSchemaSql);
   return pg;
 }

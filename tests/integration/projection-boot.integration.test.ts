@@ -22,7 +22,7 @@ import { startCircuitsSync } from "../../packages/client/src/circuits/group-sync
 import { getSyncedLocalTable } from "../../packages/client/src/local-tables";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { DEFAULT_METADATA_SCHEMA } from "../../packages/client/src/sync/metadata-tables";
-import { createCircuitsTestPGlite } from "../support/circuits-pglite";
+import { createCircuitsTestPgwasm } from "../support/circuits-pgwasm";
 import { drizzleOver } from "../support/drizzle";
 
 // Class guard for the two entry-transform drops fixed in this change (asReadonly / defineReadProjection
@@ -60,7 +60,7 @@ const PROJECT_ONE = "c1000000-0000-4000-8000-000000000001";
 const PROJECT_TWO = "c1000000-0000-4000-8000-000000000002";
 
 async function createLocalStore() {
-  const pg = await createCircuitsTestPGlite();
+  const pg = await createCircuitsTestPgwasm();
   await pg.exec(localSchemaSql);
   return pg;
 }
@@ -205,7 +205,7 @@ describe("client projection with a predicate-pinned composite server key", () =>
   });
 
   it("syncs projected backfill and live upserts, then deletes by the narrowed local key", async () => {
-    const pg = await createCircuitsTestPGlite();
+    const pg = await createCircuitsTestPgwasm();
     await pg.exec(projectedLocalSchemaSql);
 
     let rejectOnSyncError: ((error: Error) => void) | null = null;

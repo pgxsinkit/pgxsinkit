@@ -90,16 +90,17 @@ function fakeBuilder<T>(sqlText: string, rows: T[]): DrizzleQueryBuilder<T[]> {
 
 describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
   beforeAll(async () => {
-    await mock.module("@electric-sql/pglite", () => ({
-      PGlite: {
-        create: async () => ({
-          exec: async () => undefined,
-          close: async () => undefined,
-        }),
-      },
+    const realPgwasm = await import("@pgxsinkit/pgwasm");
+    await mock.module("@pgxsinkit/pgwasm", () => ({
+      ...realPgwasm,
+      createPgwasm: async () => ({
+        exec: async () => undefined,
+        close: async () => undefined,
+      }),
     }));
-    await mock.module("@electric-sql/pglite/live", () => ({ live: {} }));
-    await mock.module("drizzle-orm/pglite", () => ({ drizzle: () => ({ mocked: true }) }));
+    await mock.module("@pgxsinkit/pgwasm/live", () => ({ live: {} }));
+    const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
+    await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
     // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so the recording namespace
     // now lives on `createSyncEngine`'s return rather than on the mocked `PGlite.create` instance.
     // The subscription metadata store, which the desync/discard paths now call directly (there is no

@@ -1,15 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { performance } from "node:perf_hooks";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { bigint, boolean, text } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import { resolveApplyTarget } from "../../packages/client/src/local-tables";
 import { applyInsertsToTable, applyMessageToTable } from "../../packages/client/src/sync/apply";
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // Small REAL registry built through the production registry-definition API (ADR-0029 D1): the appliers
 // resolve their target from `(registry, tableKey)`, exactly as the engine does. The entries' local
@@ -75,10 +75,10 @@ async function measureTiming<T>(label: string, operation: () => Promise<T>): Pro
 }
 
 describe("sync apply", () => {
-  let pg: PGlite;
+  let pg: Pgwasm;
 
   beforeAll(async () => {
-    pg = await measureTiming("suite:PGlite.create", () => createFreshTestPGlite());
+    pg = await measureTiming("suite:PGlite.create", () => createFreshTestPgwasm());
     await measureTiming("suite:createTablesFromSchema", () =>
       createTablesFromSchema(pg, { authors, todos, readState }),
     );

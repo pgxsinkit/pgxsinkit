@@ -13,13 +13,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // Drizzle, schema, mutation, local store) runs unmocked. mock.module → this file is registered in the
 // ISOLATED set of scripts/run-unit-tests.ts so it runs in its own process.
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { eq } from "drizzle-orm";
 import { bigint, boolean, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable, type SyncTableName } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import type { ClientPGlite, SyncClient } from "../../packages/client/src/index";
 import type { SyncWorkerHost } from "../../packages/client/src/worker/define-sync-worker";
@@ -159,7 +160,7 @@ async function tables() {
 async function makeHost(syncEnabled: boolean): Promise<SyncWorkerHost<Registry>> {
   const { defineSyncWorker } = await indexModule();
   const { testStoreAcknowledgment } = await import("../../packages/client/src/testing");
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry,
     controlPlaneUrl: "http://127.0.0.1:1",

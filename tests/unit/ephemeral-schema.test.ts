@@ -11,7 +11,7 @@ import { getSyncedLocalTable } from "../../packages/client/src/local-tables";
 import { buildDesyncTableSql, generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { pgClass, pgNamespace } from "../support/catalog-tables";
 import { drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0021 §3: an `ephemeral` table's whole local cluster is emitted as TEMP / pg_temp.
 const examEntry = defineSyncTable({
@@ -54,7 +54,7 @@ describe("ephemeral cluster DDL (ADR-0021 §3)", () => {
   });
 
   it("executes: the ephemeral cluster lands in pg_temp, the persistent one in the schema, and both work", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(ddl);
 
     const ns = await drizzleOver(db)
@@ -126,7 +126,7 @@ describe("ephemeral cluster DDL (ADR-0021 §3)", () => {
   });
 
   it("buildDesyncTableSql clean-truncates a cluster's read cache for both retentions (ADR-0021 §2 desync)", async () => {
-    const db = await createFreshTestPGlite();
+    const db = await createFreshTestPgwasm();
     await db.exec(ddl);
 
     // Seed a synced row + an optimistic overlay row in each cluster (persistent authors, ephemeral exam).

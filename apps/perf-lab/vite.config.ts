@@ -22,15 +22,41 @@ const benchPublish = benchBase !== undefined || benchOutDir !== undefined;
 const indexEntry = fileURLToPath(new URL("./index.html", import.meta.url));
 const benchEntry = fileURLToPath(new URL("./bench.html", import.meta.url));
 
+// The pgwasm packages from source (their package exports point at a build): every importer — the client's
+// source, pgwasm-c, pgwasm-pg-dump — must reach the same modules, or error classes and the wire registry
+// would be other instances than the page's.
+const pgwasmSource = [
+  ["@pgxsinkit/pgwasm", "pgwasm/src/index.ts"],
+  ["@pgxsinkit/pgwasm/build", "pgwasm/src/build/index.ts"],
+  ["@pgxsinkit/pgwasm/drizzle", "pgwasm/src/drizzle/index.ts"],
+  ["@pgxsinkit/pgwasm/fs", "pgwasm/src/fs/index.ts"],
+  ["@pgxsinkit/pgwasm/live", "pgwasm/src/live/index.ts"],
+  ["@pgxsinkit/pgwasm/opfs", "pgwasm/src/opfs/index.ts"],
+  ["@pgxsinkit/pgwasm/protocol", "pgwasm/src/protocol/index.ts"],
+  ["@pgxsinkit/pgwasm-c", "pgwasm-c/src/index.ts"],
+  ["@pgxsinkit/pgwasm-c/prepopulated", "pgwasm-c/src/prepopulated.ts"],
+  ["@pgxsinkit/pgwasm-pg-dump", "pgwasm-pg-dump/src/index.ts"],
+  ["@pgxsinkit/pgwasm-repl", "pgwasm-repl/src/index.ts"],
+].map(([name, path]) => ({
+  find: new RegExp(`^${name!.replace(/[/.]/g, "\\$&")}$`),
+  replacement: fileURLToPath(new URL(`../../packages/${path}`, import.meta.url)),
+}));
+
 export default defineConfig({
   envDir: workspaceRoot,
   base: benchBase ?? "/",
   plugins: [react()],
   resolve: {
-    alias: workspaceAliases,
+    alias: [...Object.entries(workspaceAliases).map(([find, replacement]) => ({ find, replacement })), ...pgwasmSource],
   },
   optimizeDeps: {
-    exclude: ["@electric-sql/pglite", ...Object.keys(workspaceAliases)],
+    exclude: [
+      "@electric-sql/pglite",
+      "@pgxsinkit/pgwasm",
+      "@pgxsinkit/pgwasm-c",
+      "@pgxsinkit/pgwasm-pg-dump",
+      ...Object.keys(workspaceAliases),
+    ],
   },
   // Two entries (MPA): the existing React perf lab, and the plain storage benchmark page. The
   // benchmark page is deliberately a second entry so the existing lab is untouched. The docs publish emits

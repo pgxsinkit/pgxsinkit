@@ -1,9 +1,9 @@
-// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
-// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
-import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 
 import { quoteIdentifier, type PredicateValue } from "@pgxsinkit/contracts";
+// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
+// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
+import type { Pgwasm, Transaction } from "@pgxsinkit/pgwasm";
 
 import { renderCreateTableSql } from "../schema";
 import { drizzleOverPg } from "./drizzle-executor";
@@ -41,7 +41,7 @@ export interface ShapeSubscriptionState {
 }
 
 export interface GetSubscriptionStateOptions {
-  readonly pg: PGliteInterface | Transaction;
+  readonly pg: Pgwasm | Transaction;
   readonly metadataSchema: string;
   readonly subscriptionKey: SubscriptionKey;
   /**
@@ -93,7 +93,7 @@ export async function getSubscriptionState({
 }
 
 export interface UpdateSubscriptionStateOptions {
-  pg: PGliteInterface | Transaction;
+  pg: Pgwasm | Transaction;
   metadataSchema: string;
   subscriptionKey: SubscriptionKey;
   shapeMetadata: Record<string, ShapeSubscriptionState>;
@@ -128,7 +128,7 @@ export async function updateSubscriptionState({
 }
 
 export interface DeleteSubscriptionStateOptions {
-  pg: PGliteInterface | Transaction;
+  pg: Pgwasm | Transaction;
   metadataSchema: string;
   subscriptionKey: SubscriptionKey;
 }
@@ -146,7 +146,7 @@ export async function deleteSubscriptionState({ pg, metadataSchema, subscription
 }
 
 export interface MigrateSubscriptionMetadataTablesOptions {
-  pg: PGliteInterface | Transaction;
+  pg: Pgwasm | Transaction;
   metadataSchema: string;
 }
 

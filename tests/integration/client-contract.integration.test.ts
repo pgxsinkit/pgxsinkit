@@ -3,7 +3,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { count, eq } from "drizzle-orm";
 
 import {
@@ -13,6 +12,7 @@ import {
   getOverlayTable,
   type MutationDetail,
 } from "@pgxsinkit/client";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 import { projectsSyncRegistry, projectsTable, type CreateProjectInput } from "@pgxsinkit/schema";
 import { createSyncServer } from "@pgxsinkit/server";
 import {
@@ -303,7 +303,7 @@ describe("client facade contract", () => {
         // Simulate a returning user whose store was provisioned under an older registry
         // fingerprint, with nothing owed locally (a clean drain).
         const meta = getLocalMetaTable(projectsSyncRegistry);
-        await drizzleOver(firstClient.pglite as unknown as PGlite)
+        await drizzleOver(firstClient.pglite as unknown as Pgwasm)
           .update(meta)
           .set({ value: "older-fingerprint" })
           .where(eq(meta.key, "registry_fingerprint"));
@@ -589,7 +589,7 @@ describe("client facade contract", () => {
         expect(rejected).toHaveLength(1);
         expect(rejected[0]?.status).toBe("rejected");
         const overlayTable = getOverlayTable(projectsSyncRegistry, "projects");
-        const overlay = await drizzleOver(client.pglite as unknown as PGlite)
+        const overlay = await drizzleOver(client.pglite as unknown as Pgwasm)
           .select({ c: count() })
           .from(overlayTable)
           .where(eq(overlayTable["id"]!, projectId));

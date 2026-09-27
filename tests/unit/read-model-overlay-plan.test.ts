@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { bigint, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // The read model's cost, pinned to a PLAN rather than a wall clock.
 //
@@ -65,7 +65,7 @@ const seatsEntry = defineSyncTable({
 
 const registry = defineSyncRegistry({ cards: cardsEntry, seats: seatsEntry });
 
-async function explain(pg: PGlite, sql: string): Promise<string> {
+async function explain(pg: Pgwasm, sql: string): Promise<string> {
   const result = await pg.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, TIMING) ${sql}`);
   return result.rows.map((row) => row["QUERY PLAN"]).join("\n");
 }
@@ -76,10 +76,10 @@ function executionMs(plan: string): number {
 }
 
 describe("read model overlay non-membership plan", () => {
-  let pg: PGlite;
+  let pg: Pgwasm;
 
   beforeAll(async () => {
-    pg = await createFreshTestPGlite();
+    pg = await createFreshTestPgwasm();
     await pg.exec(generateLocalSchemaSql(registry));
     // Bulk fixture in ONE statement: 100k rows round-tripped through JS would dominate the test, and
     // nothing here depends on the values — only on the row count and the resulting plan.

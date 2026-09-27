@@ -8,14 +8,16 @@ import { afterEach, describe, expect, it } from "bun:test";
 //
 // Bun has no browser IndexedDB / OPFS, so both surfaces are faked on `globalThis` (the boot's gate and barrier
 // read the real defaults) exactly as worker-provision-offline.test.ts does; the adopted store is a real memory
-// PGlite branded as opfs-repacked, with a recording `strictSync()`.
+// pgwasm that reports itself as opfs-repacked (`pg.storage`), with a recording strict sync registered where
+// `strictSync(pg)` from `@pgxsinkit/pgwasm/opfs` finds it.
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   type ClientPGlite,
@@ -32,6 +34,7 @@ import {
   storeIndexedDbDatabaseName,
 } from "../../packages/client/src/store-path";
 import { testStoreAcknowledgment } from "../../packages/client/src/testing";
+import { registerStrictSync } from "../../packages/pgwasm/src/core/internals";
 
 // ---------------------------------------------------------------------------------------------------------
 // Fake OPFS + meta IndexedDB — the shape fresh-commitment.test.ts fakes, with a shared ORDER log so the
@@ -230,34 +233,33 @@ function installBrowserGlobals(root: FakeDir, metaIdb: FakeMetaIdb): void {
   });
 }
 
-const OPFS_REPACKED_PERSISTENT = Symbol.for("pgxsinkit.opfsRepackedPersistent");
-
 const openInstances: ClientPGlite[] = [];
 
 /**
- * A real (memory) PGlite standing in for a provisioned store. `branded` stamps the opfs-repacked brand the
- * gate keys on — the only proof an adopted instance carries — and installs a recording `strictSync()` the
- * commitment barrier drives.
+ * A real (memory) pgwasm standing in for a provisioned store. `branded` makes it report the opfs-repacked
+ * storage the gate keys on — the only proof an adopted instance carries — and registers the recording strict
+ * sync the commitment barrier drives.
  */
 async function makeAdoptedPglite(options: {
   branded: boolean;
   log?: string[];
   strictSyncFails?: boolean;
 }): Promise<ClientPGlite> {
-  const pg = (await PGlite.create({
+  const pg = (await createPgwasm({
+    build: cBuild,
     loadDataDir: await prepopulatedDataDir(),
     extensions: { live },
   })) as unknown as ClientPGlite;
   openInstances.push(pg);
-  Object.defineProperty(pg, "strictSync", {
-    value: async () => {
-      options.log?.push("strictSync");
-      if (options.strictSyncFails) throw new Error("strict-sync-failure");
-    },
-    configurable: true,
+  registerStrictSync(pg, () => {
+    options.log?.push("strictSync");
+    if (options.strictSyncFails) throw new Error("strict-sync-failure");
   });
   if (options.branded) {
-    Object.defineProperty(pg, OPFS_REPACKED_PERSISTENT, { value: true, enumerable: false, configurable: true });
+    Object.defineProperty(pg, "storage", {
+      value: { kind: "vfs", name: "opfs-repacked", persistent: true },
+      configurable: true,
+    });
   }
   return pg;
 }

@@ -4,7 +4,7 @@ import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0014 Phase 5 — the Per-entity flush serialization invariant is now a CORRECTNESS dependency of
 // the set-based write-path apply (Phase 4): a POSTed batch must hold at most one mutation per Entity
@@ -16,7 +16,7 @@ const overlaySchemaSql = generateLocalSchemaSql(demoSyncRegistry);
 const batchWriteUrl = "http://localhost:3001/api/mutations";
 
 async function createAuthorsRuntime(flushBatchSize?: number) {
-  const db = await createSchemaTestPGlite(overlaySchemaSql);
+  const db = await createSchemaTestPgwasm(overlaySchemaSql);
   return {
     db,
     runtime: createMutationRuntime({

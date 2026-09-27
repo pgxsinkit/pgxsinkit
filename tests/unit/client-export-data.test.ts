@@ -7,10 +7,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 // asserted directly and re-loaded into a FRESH bare store. WASM-heavy (`pg_dump.wasm`): FULL unit lane only
 // (`test:unit`), NOT `test:unit:fast`.
 
-import { PGlite } from "@electric-sql/pglite";
 import { bigint, boolean, pgEnum, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
 
 import { DataExportDrainError } from "../../packages/client/src/export-data";
 import { createSyncClient, LifecycleBusyError, type SyncClient } from "../../packages/client/src/index";
@@ -57,7 +58,7 @@ const registry = defineSyncRegistry({
 type Registry = typeof registry;
 
 let client: SyncClient<Registry> | undefined;
-const freshStores: PGlite[] = [];
+const freshStores: Pgwasm[] = [];
 
 afterEach(async () => {
   await client?.stop();
@@ -128,7 +129,10 @@ describe("exportData portable SQL export (ADR-0035)", () => {
 
     // THE PROOF: exec the artefact verbatim into a fresh, bare, engine-less PGlite (booted through the same
     // resolution module the toolkit uses) and assert it stands up on its own.
-    const fresh = await PGlite.create({ dataDir: resolveStoreDataDir("export-data-fresh-verify", "memory") });
+    const fresh = await createPgwasm({
+      build: cBuild,
+      dataDir: resolveStoreDataDir("export-data-fresh-verify", "memory"),
+    });
     freshStores.push(fresh);
     await fresh.exec(sql);
 

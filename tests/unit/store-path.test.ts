@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  classifyNonPersistentDataDir,
+  classifyNonPersistentStorage,
   InvalidStorePathError,
   normaliseStorePathInput,
   readTestStoreMarker,
@@ -75,16 +75,16 @@ describe("storeIndexedDbDatabaseName — browser-only operational helper (ADR-00
   });
 });
 
-describe("classifyNonPersistentDataDir — the BYO predicate (ADR-0036 decision 4)", () => {
-  it("flags the two provably non-persistent shapes", () => {
-    expect(classifyNonPersistentDataDir(undefined)).toBe("in-memory-default");
-    expect(classifyNonPersistentDataDir("memory://x")).toBe("memory-scheme");
+describe("classifyNonPersistentStorage — the BYO predicate (ADR-0036 decision 4)", () => {
+  it("flags the provably non-persistent shapes", () => {
+    expect(classifyNonPersistentStorage({ kind: "memory" })).toBe("memory");
+    expect(classifyNonPersistentStorage({ kind: "vfs", name: "custom", persistent: false })).toBe("non-persistent-vfs");
   });
 
-  it("passes anything else — including exotic configs it cannot classify (not a whitelist)", () => {
-    expect(classifyNonPersistentDataDir("idb://x")).toBeNull();
-    expect(classifyNonPersistentDataDir("file:///var/data/x")).toBeNull();
-    expect(classifyNonPersistentDataDir("some-custom-vfs-handle")).toBeNull();
+  it("passes anything else — idb, file and a persistent filesystem (not a whitelist)", () => {
+    expect(classifyNonPersistentStorage({ kind: "idb", name: "x" })).toBeNull();
+    expect(classifyNonPersistentStorage({ kind: "file", path: "/var/data/x" })).toBeNull();
+    expect(classifyNonPersistentStorage({ kind: "vfs", name: "opfs-repacked", persistent: true })).toBeNull();
   });
 });
 

@@ -1,5 +1,6 @@
 import { bigint, pgSchema, text } from "drizzle-orm/pg-core";
-import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
+
+import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 
 import type { PerfLabDb } from "./pglite";
 
@@ -29,13 +30,8 @@ const replHistory = pgSchema("debug").table("repl_history", {
 
 const MAX_RESULT_BYTES = 8192;
 
-// Same shape-cast the toolkit's own `createDrizzleDatabase` uses: the live/electric-extended PGlite
-// interface (`ClientPGlite`) is not type-assignable to drizzle's `client` param, though it is the same
-// runtime object.
-const createHistoryDatabase = drizzle as unknown as (config: { client: PerfLabDb }) => PgliteDatabase;
-
 export function createReplProxy(db: PerfLabDb): PerfLabDb {
-  const history = createHistoryDatabase({ client: db });
+  const history = drizzle(db);
   let historyTableReady: Promise<void> | null = null;
 
   function ensureHistoryTable(): Promise<void> {

@@ -1,5 +1,5 @@
-import type { PGlite, PGliteInterface, Transaction } from "@electric-sql/pglite";
-import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
+import type { Pgwasm, Transaction } from "@pgxsinkit/pgwasm";
+import { drizzle, type PgwasmDatabase } from "@pgxsinkit/pgwasm/drizzle";
 
 /**
  * A Drizzle handle whose executor is an already-open PGlite connection *or* an open PGlite
@@ -25,9 +25,8 @@ import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
  * which a `Transaction` is not, and (b) open a nested boundary the engine does not expect. Do not expose
  * or use it.
  *
- * MUST be the `{ client }` config form: drizzle's pglite driver destructures `{ connection, client }`
- * from a bare first argument, so `drizzle(pg)` misdetects the handle as a config object and silently
- * constructs a NEW in-memory PGlite — every statement would then hit an empty, throwaway database.
+ * pgwasm.s driver takes the database as its first argument; a `Transaction` carries the `query` the
+ * session needs, hence the cast.
  */
 
 // One drizzle handle per underlying connection/transaction object. The handle for a given `Transaction`
@@ -35,13 +34,13 @@ import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 // commit — the tag-store hot path — so memoizing per handle avoids re-wrapping on every statement while
 // never leaking across transactions (a `Transaction` object is a fresh identity each commit, and the
 // WeakMap drops it once the commit's closure is collected).
-const handles = new WeakMap<PGliteInterface | Transaction, PgliteDatabase<never>>();
+const handles = new WeakMap<Pgwasm | Transaction, PgwasmDatabase<never>>();
 
 /** A (memoized) Drizzle handle over an open PGlite connection or transaction — engine-internal. */
-export function drizzleOverPg(pg: PGliteInterface | Transaction): PgliteDatabase<never> {
+export function drizzleOverPg(pg: Pgwasm | Transaction): PgwasmDatabase<never> {
   let db = handles.get(pg);
   if (!db) {
-    db = drizzle({ client: pg as unknown as PGlite }) as PgliteDatabase<never>;
+    db = drizzle(pg as unknown as Pgwasm) as PgwasmDatabase<never>;
     handles.set(pg, db);
   }
   return db;

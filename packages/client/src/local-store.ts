@@ -1,7 +1,7 @@
 import { and, eq, like, notExists, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/pglite";
 
 import { type MutationDiagnostics, type SyncTableRegistry } from "@pgxsinkit/contracts";
+import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 
 import { syncDebug } from "./debug";
 import { getJournalTable, getLocalMetaTable } from "./local-tables";

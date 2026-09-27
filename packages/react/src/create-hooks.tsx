@@ -1,4 +1,3 @@
-import type { LiveQuery, LiveQueryResults } from "@electric-sql/pglite/live";
 import { createContext, type DependencyList, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
 import {
@@ -11,6 +10,7 @@ import {
   syncDebug,
 } from "@pgxsinkit/client";
 import type { MutationSummary, SyncTableName, SyncTableRegistry } from "@pgxsinkit/contracts";
+import type { LiveQuery, LiveQueryResults } from "@pgxsinkit/pgwasm/live";
 
 import { liveFieldAliases, remapAliasedLiveRow, remapLiveRow, type SelectedFields } from "./remap-live-row";
 

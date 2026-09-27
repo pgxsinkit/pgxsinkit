@@ -5,12 +5,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 // as a transferred `ArrayBuffer`, rebuilt into a `File` tab-side. WASM-heavy (`pg_dump.wasm`): FULL unit lane
 // only (`test:unit`), NOT `test:unit:fast`.
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, pgEnum, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -44,8 +45,8 @@ type TodosRegistry = typeof todosRegistry;
 let hosts: SyncWorkerHost<TodosRegistry>[] = [];
 let channels: MessageChannel[] = [];
 
-async function makeHost(): Promise<{ host: SyncWorkerHost<TodosRegistry>; pg: PGlite }> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+async function makeHost(): Promise<{ host: SyncWorkerHost<TodosRegistry>; pg: Pgwasm }> {
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry: todosRegistry,
     controlPlaneUrl: "http://127.0.0.1:1",

@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import type { SQL } from "drizzle-orm";
 import { getTableConfig, PgDialect, pgRole, pgTable, uuid, type AnyPgTable } from "drizzle-orm/pg-core";
 
@@ -14,9 +13,10 @@ import {
   type GrantScopeAccessOptions,
   type JwtClaims,
 } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import { createTablesFromSchema } from "../support/drizzle";
-import { closeOpenTestPGlites, createFreshTestPGlite } from "../support/pglite";
+import { closeOpenTestPgwasms, createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // A signed JWT is not a SCHEMA-checked one: a custom-access-token-hook rollout (or a plain claim-schema
 // mistake) can mint `roles: "admin"` instead of `["admin"]`, or an object where an array belongs. The JS
@@ -87,7 +87,7 @@ function renderPolicyText(table: AnyPgTable, command: string): string {
   return fragment ? dialect.sqlToQuery(fragment).sql : "";
 }
 
-let db: PGlite;
+let db: Pgwasm;
 
 async function useClaims(claims: JwtClaims): Promise<void> {
   await db.query(`select set_config('request.jwt.claims', $1, false)`, [JSON.stringify(claims)]);
@@ -109,7 +109,7 @@ async function errorFrom(run: () => Promise<unknown>): Promise<string | null> {
 }
 
 beforeAll(async () => {
-  db = await createFreshTestPGlite();
+  db = await createFreshTestPgwasm();
   await db.exec(`create role app_user;`);
   await createTablesFromSchema(db, { ownedRows, scopedRows, bypassRows });
 
@@ -136,7 +136,7 @@ beforeAll(async () => {
   `);
 });
 
-afterAll(closeOpenTestPGlites);
+afterAll(closeOpenTestPgwasms);
 
 describe("malformed claim arrays deny in RLS instead of erroring (owner-or-admin)", () => {
   it("grants the admin bypass on a well-formed roles array (the guard leaves the happy path alone)", async () => {

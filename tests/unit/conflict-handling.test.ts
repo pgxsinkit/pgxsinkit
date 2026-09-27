@@ -8,7 +8,7 @@ import { projectsSyncRegistry } from "@pgxsinkit/schema";
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0015 Phase 4: the client side of a reject-if-stale conflict. A conflicted ack moves the
 // mutation to the terminal `conflicted` status, KEEPS the optimistic Overlay (the user's edit is
@@ -23,7 +23,7 @@ const SYNCED_VERSION = "100";
 const SERVER_VERSION = "200"; // the external writer advanced the row to here
 
 async function createProjectsRuntime(onConflict?: (conflicted: MutationDetail[]) => void) {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   await drizzleOver(db)
     .insert(projectsSyncRegistry.projects.localTable)
     .values({ id: PROJECT_ID, name: "seed", createdAtUs: BigInt(SYNCED_VERSION), updatedAtUs: BigInt(SYNCED_VERSION) });
@@ -97,7 +97,7 @@ async function withFetch<T>(fetchMock: unknown, fn: () => Promise<T>): Promise<T
   }
 }
 
-async function readReadModel(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>) {
+async function readReadModel(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>) {
   const view = projectsSyncRegistry.projects.view!;
   const rows = await drizzleOver(db)
     .select({ name: view.name, overlayKind: view.overlay_kind })
@@ -106,7 +106,7 @@ async function readReadModel(db: Awaited<ReturnType<typeof createSchemaTestPGlit
   return rows[0];
 }
 
-async function readJournalStatus(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, seq: number) {
+async function readJournalStatus(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>, seq: number) {
   const journal = getJournalTable(projectsSyncRegistry, "projects");
   const rows = await drizzleOver(db)
     .select({
@@ -125,7 +125,7 @@ async function readJournalStatus(db: Awaited<ReturnType<typeof createSchemaTestP
 // journal row once the synced row is gone. This proves the trigger-skip is compensated by the loop.
 describe("truncate-wipe reconcile completeness (ADR-0029 D4)", () => {
   it("the reconcile loop clears an acked-delete journal row after a TRUNCATE wipe (trigger skipped)", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const runtime = createMutationRuntime({ db, registry: projectsSyncRegistry, batchWriteUrl });
 
     const synced = projectsSyncRegistry.projects.localTable;
@@ -291,7 +291,7 @@ describe("reject-if-stale conflict handling (ADR-0015 Phase 4)", () => {
     // post-flush `reconcileTable` pass, the acked resolver is gone before reconcileTable's
     // supersede-retire can see it, and the conflicted row ORPHANS — its `conflict_state` surfaces a
     // resolved conflict forever. The trigger must do the retire itself (it has the echo context).
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     await drizzleOver(db)
       .insert(projectsSyncRegistry.projects.localTable)
       .values({

@@ -6,12 +6,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 // receive a local mutation's diff; unsubscribing/closing one tab leaves the other live; and two tabs with
 // DIFFERENT `use` sets on the same SQL still share one registration (`use` is excluded from the fingerprint).
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -59,7 +60,7 @@ let liveRegistrations = 0;
 
 /** Boot a host over a prepopulated in-memory PGlite whose `live` registrations are counted. */
 async function makeHost(): Promise<SyncWorkerHost<TodosRegistry>> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   // Count every registration so dedup is provable — the manager must call these ONCE per fingerprint.
   const realQuery = pg.live.query.bind(pg.live);
   const realIncremental = pg.live.incrementalQuery.bind(pg.live);

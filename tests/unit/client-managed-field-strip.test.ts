@@ -6,7 +6,7 @@ import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // The CLIENT twin of the server's create-only-managed-field rule (tests/unit/update-managed-field-guard.test.ts):
 // a field declared `applyOn: ["create"]` is stamped at birth and INERT on update — the generated apply
@@ -92,7 +92,7 @@ function untyped<T>(payload: Record<string, unknown>): T {
 
 describe("client-side managed-field stripping (twin of the server's write-route guards)", () => {
   it("strips a CREATE-ONLY managed field from an update payload, keeping the ordinary edit", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const runtime = createMutationRuntime({ db, registry: ownedRegistry, batchWriteUrl });
     const { fetchMock, sent } = capturingAckFetch();
 
@@ -123,7 +123,7 @@ describe("client-side managed-field stripping (twin of the server's write-route 
   });
 
   it("keeps the create path unchanged — a create-managed field is stripped there as before", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const runtime = createMutationRuntime({ db, registry: ownedRegistry, batchWriteUrl });
     const { fetchMock, sent } = capturingAckFetch();
 
@@ -149,7 +149,7 @@ describe("client-side managed-field stripping (twin of the server's write-route 
   });
 
   it("does not over-strip: an update carrying only ordinary keys reaches the wire intact", async () => {
-    const db = await createSchemaTestPGlite(schemaSql);
+    const db = await createSchemaTestPgwasm(schemaSql);
     const runtime = createMutationRuntime({ db, registry: ownedRegistry, batchWriteUrl });
     const { fetchMock, sent } = capturingAckFetch();
 

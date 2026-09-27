@@ -8,7 +8,7 @@ import { projectsSyncRegistry } from "@pgxsinkit/schema";
 import { createMutationRuntime } from "../../packages/client/src/mutation";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
 import { drizzleOver } from "../support/drizzle";
-import { createSchemaTestPGlite } from "../support/pglite";
+import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0022-B — the durable write-unit tag substrate. A `batch(items, unit)` stamps every journal row of
 // the batch with one shared `write_unit` id + `write_mode` (what a dynamic `transaction({ mode })` block
@@ -22,7 +22,7 @@ const P2 = "01963227-d4c7-72db-b858-000000000002";
 const SYNCED_VERSION = "1000";
 
 async function seededRuntime() {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   for (const id of [P1, P2]) {
     await drizzleOver(db)
       .insert(projectsSyncRegistry.projects.localTable)
@@ -31,7 +31,7 @@ async function seededRuntime() {
   return { db, runtime: createMutationRuntime({ db, registry: projectsSyncRegistry, batchWriteUrl }) };
 }
 
-async function readTag(db: Awaited<ReturnType<typeof createSchemaTestPGlite>>, mutationSeq: number) {
+async function readTag(db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>, mutationSeq: number) {
   const journal = getJournalTable(projectsSyncRegistry, "projects");
   const rows = await drizzleOver(db)
     .select({ writeUnit: journal.writeUnit, writeMode: journal.writeMode })

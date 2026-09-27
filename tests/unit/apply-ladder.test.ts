@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { asc, count, eq, sql } from "drizzle-orm";
 import { bigint, boolean, integer, jsonb, pgTable, text } from "drizzle-orm/pg-core";
+
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import {
   applyInsertsToTable,
@@ -10,7 +11,7 @@ import {
   applyMessagesToTableWithJson,
 } from "../../packages/client/src/sync/apply";
 import { createTablesFromSchema, drizzleOver, makeApplyTarget } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // Tier-① fixture tables for the ladder's ad-hoc apply targets. The appliers receive a resolved
 // {@link ApplyTarget} built from the real `pgTable` via `makeApplyTarget` (ADR-0029 D1/D2), so the
@@ -54,10 +55,10 @@ const upsert = (key: string, value: Record<string, unknown>): UpsertMsg => ({
 });
 
 describe("apply ladder", () => {
-  let pg: PGlite;
+  let pg: Pgwasm;
 
   beforeAll(async () => {
-    pg = await createFreshTestPGlite();
+    pg = await createFreshTestPgwasm();
   });
 
   afterAll(async () => {

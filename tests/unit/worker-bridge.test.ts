@@ -5,9 +5,6 @@ import { afterEach, describe, expect, it } from "bun:test";
 // bridge (initial snapshot → diff-only updates, tab-side identity preservation, unsubscribe), and event
 // fanout to two ports.
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 
 import {
@@ -16,6 +13,10 @@ import {
   defineSyncTable,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
+import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -94,7 +95,7 @@ let channels: MessageChannel[] = [];
 // Boot the worker over a PREPOPULATED memory PGlite (skips the ~2s initdb) handed in as `precreatedPglite`
 // — the client still applies schema + reconcile, exactly the `storePath` path a browser worker would take.
 async function makeHost(executionLimit?: { maxDispatchMs?: number }): Promise<SyncWorkerHost<TodosRegistry>> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   const host = defineSyncWorker({
     registry: todosRegistry,
     controlPlaneUrl: "http://127.0.0.1:1",
@@ -182,7 +183,7 @@ describe("memory-override store over the bridge (ADR-0036)", () => {
     // A write lands in the worker's real (memory) store — the whole default path booted on the override.
     await client.tables.todos.create({ id: "f1000000-0000-0000-0000-000000000000", title: "mem", done: false });
     const workerClient = await host.whenBooted();
-    const rows = await drizzleOver(workerClient.pglite as unknown as PGlite)
+    const rows = await drizzleOver(workerClient.pglite as unknown as Pgwasm)
       .select({ id: readModel.id, title: readModel.title })
       .from(readModel);
     expect(rows).toEqual([{ id: "f1000000-0000-0000-0000-000000000000", title: "mem" }]);
@@ -199,7 +200,7 @@ describe("app-schema prepare hooks run IN THE WORKER (consumer app-level schema)
     let syncedTableBeforeSchema: string | null = "unset";
     let syncedTableAfterSchema: string | null = "unset";
 
-    const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+    const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",
@@ -511,7 +512,7 @@ describe("write RPC round trip (ADR-0032 decision 4)", () => {
 
     // Read the WORKER-side store directly through its booted in-process client.
     const workerClient = await host.whenBooted();
-    const rows = await drizzleOver(workerClient.pglite as unknown as PGlite)
+    const rows = await drizzleOver(workerClient.pglite as unknown as Pgwasm)
       .select({ id: readModel.id, title: readModel.title })
       .from(readModel);
     expect(rows).toEqual([{ id: "11111111-1111-1111-1111-111111111111", title: "buy milk" }]);
@@ -615,9 +616,9 @@ describe("raw inspection RPC round trip (ADR-0032 S2)", () => {
       { rowMode: "array" },
     );
     expect(Array.isArray(arrayQueried.rows[0])).toBe(true);
-    expect((arrayQueried.rows[0] as unknown[])[0]).toBe("inspect me");
+    expect((arrayQueried.rows[0] as unknown as unknown[])[0]).toBe("inspect me");
     const arrayExeced = await client.rawExec("select 1 as a, 2 as b;", { rowMode: "array" });
-    expect(arrayExeced[0]?.rows[0]).toEqual([1, 2]);
+    expect(arrayExeced[0]?.rows[0] as unknown).toEqual([1, 2]);
 
     // A rejection propagates across the bridge. try/catch, not `expect().rejects` — a MessageChannel-driven
     // rejection does not settle the bun matcher here (see the boot-failure test above).
@@ -922,7 +923,8 @@ describe("boot observability (ADR-0034)", () => {
       // The worker mints a MEMORY store here (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
       createPglite: async () =>
-        (await PGlite.create({
+        (await createPgwasm({
+          build: cBuild,
           loadDataDir: await prepopulatedDataDir(),
           extensions: { live },
         })) as unknown as ClientPGlite,

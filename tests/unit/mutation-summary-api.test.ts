@@ -2,9 +2,6 @@ import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import {
@@ -13,6 +10,10 @@ import {
   type MutationSummary,
   type SyncTableRegistry,
 } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -333,7 +334,7 @@ describe("registry-wide mutation-status API (slice 4)", () => {
 
 describe("registry-wide mutation-status API — worker parity (slice 4)", () => {
   async function makeHost(): Promise<SyncWorkerHost<SyncTableRegistry>> {
-    const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+    const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: multiRegistry,
       controlPlaneUrl: DEAD_CONTROL_PLANE,

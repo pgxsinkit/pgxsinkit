@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach } from "bun:test";
 
-import { closeOpenTestPGlites, closeTestScopedPGlites, markTestScope } from "./pglite";
+import { closeOpenTestPgwasms, closeTestScopedPgwasms, markTestScope } from "./pgwasm-store";
 
 // Global test setup (bunfig `[test].preload`). `bun test` runs files sequentially in one process and
 // never frees an un-closed PGlite's (multi-MB) WASM heap — so across a many-file run the heaps pile up
@@ -11,5 +11,5 @@ import { closeOpenTestPGlites, closeTestScopedPGlites, markTestScope } from "./p
 // any single test, so we snapshot what's open at each test start and close only what that test opened;
 // shared stores are closed once at `afterAll`.
 beforeEach(markTestScope);
-afterEach(closeTestScopedPGlites);
-afterAll(closeOpenTestPGlites);
+afterEach(closeTestScopedPgwasms);
+afterAll(closeOpenTestPgwasms);

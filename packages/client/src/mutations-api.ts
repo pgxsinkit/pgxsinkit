@@ -10,9 +10,9 @@
 // names.
 
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/pglite";
 
 import type { MutationSummary, SyncTableName, SyncTableRegistry } from "@pgxsinkit/contracts";
+import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 
 import { getAllMutationsView } from "./local-tables";
 import type { MutationDetail, MutationKind } from "./mutation";

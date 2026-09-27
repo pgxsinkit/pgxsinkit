@@ -12,7 +12,7 @@ import {
   updateSubscriptionState,
 } from "../../packages/client/src/sync/subscription-state";
 import { createTablesFromSchema } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // ADR-0028 slice E — the internal Drizzle executor adapter (`drizzleOverPg`) that lets the sync engine's
 // metadata-store DML run as tier-① Drizzle over BOTH a plain PGlite connection and an open PGlite
@@ -28,7 +28,7 @@ const widgets = pgTable("widgets", {
 
 describe("drizzleOverPg adapter (ADR-0028)", () => {
   it("runs select/insert/delete over a plain PGlite connection", async () => {
-    const pg = await createFreshTestPGlite();
+    const pg = await createFreshTestPgwasm();
     await createTablesFromSchema(pg, { widgets });
     const db = drizzleOverPg(pg);
 
@@ -50,13 +50,13 @@ describe("drizzleOverPg adapter (ADR-0028)", () => {
   });
 
   it("memoizes one handle per connection object", async () => {
-    const pg = await createFreshTestPGlite();
+    const pg = await createFreshTestPgwasm();
     expect(drizzleOverPg(pg)).toBe(drizzleOverPg(pg));
     await pg.close();
   });
 
   it("executes inside pg.transaction on THAT transaction — a rollback discards the write", async () => {
-    const pg = await createFreshTestPGlite();
+    const pg = await createFreshTestPgwasm();
     await createTablesFromSchema(pg, { widgets });
 
     // A committed transaction persists the drizzle-issued write.
@@ -80,7 +80,7 @@ describe("drizzleOverPg adapter (ADR-0028)", () => {
   });
 
   it("hands a DISTINCT handle to a transaction vs its parent connection", async () => {
-    const pg = await createFreshTestPGlite();
+    const pg = await createFreshTestPgwasm();
     const parentHandle = drizzleOverPg(pg);
     await pg.transaction(async (tx) => {
       expect(drizzleOverPg(tx)).not.toBe(parentHandle);
@@ -95,7 +95,7 @@ describe("drizzleOverPg adapter (ADR-0028)", () => {
 // that rendered path, then exercise the same pgTables through the executor against the live schema.
 describe("metadata provisioning round-trip (ADR-0029)", () => {
   it("the ③-provisioned relations accept insert/select through the pgTables", async () => {
-    const pg = await createFreshTestPGlite();
+    const pg = await createFreshTestPgwasm();
     await migrateSubscriptionMetadataTables({ pg, metadataSchema: META });
     const { subscriptionsMetadata, shapeRowTags } = getMetadataTables(META);
     const db = drizzleOverPg(pg);
@@ -129,7 +129,7 @@ describe("metadata provisioning round-trip (ADR-0029)", () => {
   });
 
   it("the subscription-state helpers round-trip against the ③-provisioned schema", async () => {
-    const pg = await createFreshTestPGlite();
+    const pg = await createFreshTestPgwasm();
     await migrateSubscriptionMetadataTables({ pg, metadataSchema: META });
 
     await updateSubscriptionState({

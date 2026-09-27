@@ -1,7 +1,3 @@
-import { PGlite, type PGliteOptions, type QueryOptions, type Results } from "@electric-sql/pglite";
-import { live, type PGliteWithLive } from "@electric-sql/pglite/live";
-import type { PgliteDatabase } from "drizzle-orm/pglite";
-import { drizzle } from "drizzle-orm/pglite";
 import { defineRelations } from "drizzle-orm/relations";
 
 import type {
@@ -27,10 +23,21 @@ import {
   isClaimsDependentRowFilter,
   resolveStorageDeclaration,
 } from "@pgxsinkit/contracts";
-// Type-only import (erased at runtime): the opfs-repacked factory's option/return types for the `opfs://`
-// branch. The factory VALUE is loaded lazily via dynamic `import()` inside that branch so a Bun unit test
-// mocking `@electric-sql/pglite` never evaluates the factory's `class ... extends PGlite` module top level.
-import type { CreateOpfsRepackedPGliteOptions, OpfsRepackedPGlite } from "@pgxsinkit/pglite-opfs-repacked";
+import {
+  createPgwasm,
+  type PgwasmOptions,
+  type PostgresBuild,
+  type QueryOptions,
+  type Results,
+} from "@pgxsinkit/pgwasm";
+import { cBuild, createCBuild } from "@pgxsinkit/pgwasm-c";
+import type { PgwasmDatabase } from "@pgxsinkit/pgwasm/drizzle";
+import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
+import { live, type PgwasmWithLive } from "@pgxsinkit/pgwasm/live";
+// Type-only import (erased at runtime): the OPFS store factory's option/return types for the `opfs://`
+// branch. The `/opfs` VALUES (`createOpfsPgwasm`, `strictSync`) are loaded lazily via dynamic `import()`, so the
+// store's code stays off every bundle and boot that never opens an OPFS store.
+import type { CreateOpfsPgwasmOptions, OpfsPgwasm } from "@pgxsinkit/pgwasm/opfs";
 
 import { type BootReport, type BootReportBuilder, createBootReportBuilder } from "./boot-report";
 import { startCircuitsSync, type CircuitsGroupSyncResult } from "./circuits/group-sync";
@@ -106,7 +113,7 @@ import {
   writeStoreMetaRecord,
 } from "./store-meta";
 import {
-  classifyNonPersistentDataDir,
+  classifyNonPersistentStorage,
   NonPersistentStoreError,
   normaliseStorePathInput,
   readTestStoreMarker,
@@ -413,16 +420,17 @@ export class ClientDisposedError extends Error {
   }
 }
 
-// The store carries PGlite's own `live` extension and nothing else. The pgxsinkit sync runtime is not an
+// The store carries pgwasm's own `live` extension and nothing else. The pgxsinkit sync runtime is not an
 // extension at all (ADR-0032 S1): `createSyncClient` starts it BESIDE the store (`startCircuitsSync`)
-// rather than attaching a namespace to the instance, so a store's type is exactly PGlite + `live`
+// rather than attaching a namespace to the instance, so a store's type is exactly pgwasm + `live`
 // whether or not sync ever runs on it.
-export type ClientPGlite = PGliteWithLive;
+export type ClientPGlite = PgwasmWithLive;
 
 /**
- * The pre-warmed PGlite boot assets (the WASM modules + filesystem bundle), consumed by
+ * The pre-warmed boot assets of the C build (the WASM modules + filesystem bundle), consumed by
  * {@link createClientPGlite} / {@link CreateSyncClientOptions.pgliteBootAssets}. The host fetches +
- * compiles these on an earlier screen and hands the promise in, so `PGlite.create` skips its own lazy
+ * compiles these on an earlier screen and hands the promise in; the store's build takes them
+ * (`createCBuild({ assets })`, `pgliteWasmModule` as its `postgresWasmModule`) and skips its own lazy
  * asset load — see the field's JSDoc for the accelerator geometry.
  */
 export interface PgliteBootAssets {
@@ -434,9 +442,9 @@ export interface PgliteBootAssets {
 /** Options for {@link createClientPGlite}. */
 export interface CreateClientPGliteOptions {
   /**
-   * Pre-warmed PGlite boot assets (see {@link CreateSyncClientOptions.pgliteBootAssets}). Awaited and
-   * passed into `PGlite.create`; a rejected warm is caught to `undefined` (falls back to PGlite's own
-   * asset load), so it never fails the create.
+   * Pre-warmed boot assets (see {@link CreateSyncClientOptions.pgliteBootAssets}), handed to the store's
+   * C build (`createCBuild({ assets })`); a rejected warm falls back to the build's own asset load, so it
+   * never fails the create.
    */
   bootAssets?: Promise<PgliteBootAssets>;
   /**
@@ -479,9 +487,11 @@ export interface CreateClientPGliteOptions {
    * implementations (`createOpfsRepackedPGlite` via a lazy `import()`, and the OPFS effects' store directory
    * handle). Never consumer-facing.
    */
-  pgliteFactories?: {
-    /** The opfs-repacked PGlite factory; defaults to a lazily-imported `createOpfsRepackedPGlite`. */
-    createOpfsRepacked?: (options: CreateOpfsRepackedPGliteOptions) => Promise<OpfsRepackedPGlite>;
+  opfsFactories?: {
+    /** The OPFS store factory; defaults to a lazily-imported `createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`. */
+    createOpfsPgwasm?: (
+      options: CreateOpfsPgwasmOptions<{ live: typeof live }>,
+    ) => Promise<OpfsPgwasm<{ live: typeof live }>>;
     /** The create-if-absent store directory handle for the factory; defaults to the real OPFS effects. */
     getStoreDirectoryHandle?: () => Promise<unknown>;
     /** Backoff between bounded open retries (ms); defaults to a small real delay. Tests pass `0`. */
@@ -522,22 +532,33 @@ const CONTROL_PLANE_UNREACHABLE = "control plane unreachable: subscribe is faili
  */
 const STREAM_LOST = "read stream lost; re-subscribing";
 /**
- * Non-enumerable brand stamped on an opfs-repacked instance {@link createClientPGlite} mints (ADR-0049): the
- * opfs-repacked VFS owns its store on a dedicated OPFS directory and reports NO `dataDir` (a custom VFS, the
- * field is honestly `undefined`), so the BYO "non-persistent" guard ({@link classifyNonPersistentDataDir},
- * which reads only `dataDir`) would wrongly reject it as an in-memory default when it is adopted as a
- * `precreatedPglite` (the provision-then-attach path). This brand lets the guard recognise it as PROVABLY
- * persistent. `Symbol.for` so the brand survives even if the instance is inspected via a different module copy.
+ * Is this instance on an OPFS-repacked store? The store reports itself through `pg.storage` (the filesystem's
+ * own description, `{ kind: "vfs", name: "opfs-repacked", persistent: true }`), so an ADOPTED instance is
+ * recognised without any brand: it is the one provenance that carries the OPFS commitment machinery, which a
+ * BYO idb/file/memory instance does not.
  */
-const OPFS_REPACKED_PERSISTENT = Symbol.for("pgxsinkit.opfsRepackedPersistent");
+function isOpfsRepackedStore(instance: ClientPGlite): boolean {
+  const storage = instance.storage;
+  return storage.kind === "vfs" && storage.name === OPFS_REPACKED_STORAGE_NAME;
+}
+
+/** The name the OPFS-repacked filesystem reports in `pg.storage` (`OpfsRepackedFS`'s `description`). */
+const OPFS_REPACKED_STORAGE_NAME = "opfs-repacked";
 
 /**
- * Was this instance minted by the opfs-repacked factory ({@link OPFS_REPACKED_PERSISTENT})? The brand is the
- * ONLY proof available for an adopted instance: an opfs-repacked store reports no `dataDir`, so nothing else
- * distinguishes it from a BYO idb/file/memory instance — which carries no OPFS commitment machinery at all.
+ * The build a client-owned store runs on. Without pre-warmed assets it is the shared `cBuild`; with them it is a
+ * C build that takes the warmed modules (`createCBuild({ assets })`), where a rejected warm falls back to the
+ * build's own lazy asset load, so it never fails the create.
  */
-function isOpfsRepackedPersistent(instance: ClientPGlite): boolean {
-  return (instance as Record<symbol, unknown>)[OPFS_REPACKED_PERSISTENT] === true;
+function buildFor(bootAssets: Promise<PgliteBootAssets> | undefined): PostgresBuild {
+  if (bootAssets === undefined) return cBuild;
+  return createCBuild({
+    assets: bootAssets.then((assets) => ({
+      ...(assets.pgliteWasmModule ? { postgresWasmModule: assets.pgliteWasmModule } : {}),
+      ...(assets.initdbWasmModule ? { initdbWasmModule: assets.initdbWasmModule } : {}),
+      ...(assets.fsBundle ? { fsBundle: assets.fsBundle } : {}),
+    })),
+  });
 }
 
 /**
@@ -580,7 +601,7 @@ async function openWithBoundedRetries<T>(open: () => Promise<T>, backoffMs: numb
  * initdb (+ persistent-store open), which is the dominant cold-boot cost once the WASM is pre-warmed.
  *
  * `bootAssets` is the pre-warmed WASM/fs bundle (see {@link CreateSyncClientOptions.pgliteBootAssets}); a
- * rejected warm is caught to `undefined`, so PGlite falls back to loading its own assets — never a failure.
+ * rejected warm makes the C build load its own assets — never a failure.
  */
 export async function createClientPGlite(
   store: StorePathInput,
@@ -615,9 +636,10 @@ export async function createClientPGlite(
   const dataDirScheme = dataDir.slice(0, dataDir.indexOf(":") + 1);
   // Resolve any pre-warmed boot assets BEFORE (and outside) the `boot pglite.create` stamp: the
   // fetch+compile was kicked off on an earlier screen, so this await just retrieves the already-settled
-  // result and the stamp measures the create itself. A rejected warm is caught to `undefined` so a failed
-  // pre-warm silently falls back to PGlite's own asset loading rather than failing the boot.
-  const bootAssets = options?.bootAssets ? await options.bootAssets.catch(() => undefined) : undefined;
+  // result and the stamp measures the create itself. A rejected warm is caught here only to settle it; the
+  // build itself falls back to its own lazy asset loading on a rejected `assets`, so it never fails the boot.
+  if (options?.bootAssets) await options.bootAssets.catch(() => undefined);
+  const build = buildFor(options?.bootAssets);
   // Durability (ADR-0047) is registry-declared and resolved by createSyncClient; the resolved mode is threaded
   // in via the internal `durability` carrier. Every store minting path (createSyncClient's own create, the
   // worker's default createPglite factory, spare/prewarm mints) funnels through this function, so the
@@ -626,9 +648,9 @@ export async function createClientPGlite(
   // synchronous flush dominates write latency; relaxing it schedules the flush asynchronously instead.
   const relaxedDurability = (options?.durability ?? "relaxed") !== "strict";
 
-  // ADR-0049 step 10a — the `opfs://` branch. PGlite does NOT accept `opfs://` as a dataDir; instead the
-  // opfs-repacked factory owns the store on a dedicated OPFS directory. The factory is loaded LAZILY (a
-  // dynamic `import()`) and both it and the store-directory handle are injectable (`pgliteFactories`) so a Bun
+  // ADR-0049 step 10a — the `opfs://` branch. pgwasm does NOT accept `opfs://` as a dataDir; instead the
+  // OPFS store factory owns the store on a dedicated OPFS directory. The factory is loaded LAZILY (a
+  // dynamic `import()`) and both it and the store-directory handle are injectable (`opfsFactories`) so a Bun
   // unit test drives this branch with no real WASM/OPFS. Durability maps from the same `relaxedDurability`
   // resolution above (ADR-0047's default logic is untouched): `relaxed` → the factory's `"relaxed"`, else
   // `"strict"`. The open is retried a bounded number of times for transient failures, then propagates.
@@ -636,67 +658,58 @@ export async function createClientPGlite(
     const opfsPglite = (await timeAsync(
       "boot pglite.create",
       async () => {
-        const createOpfsRepacked =
-          options?.pgliteFactories?.createOpfsRepacked ??
-          (await import("@pgxsinkit/pglite-opfs-repacked")).createOpfsRepackedPGlite;
+        const createOpfsStore =
+          options?.opfsFactories?.createOpfsPgwasm ?? (await import("@pgxsinkit/pgwasm/opfs")).createOpfsPgwasm;
         // A create that never returns used to leave the rail at `boot pglite.create start` with nothing after
         // it — indistinguishable from a lost worker. These four phase lines split the create into its long
         // steps (module load, directory handle, handle acquisition, PGlite boot), so a stall is attributable.
         syncDebug("boot pglite.create phase", { phase: "module-loaded" });
         const getStoreDirectoryHandle =
-          options?.pgliteFactories?.getStoreDirectoryHandle ??
+          options?.opfsFactories?.getStoreDirectoryHandle ??
           (() => createOpfsEffects(storePath).getStoreDirectoryHandle());
         const directory = await getStoreDirectoryHandle();
         syncDebug("boot pglite.create phase", { phase: "directory-ready" });
         return openWithBoundedRetries(
           () =>
-            createOpfsRepacked({
-              directory: directory as CreateOpfsRepackedPGliteOptions["directory"],
+            createOpfsStore({
+              build,
+              directory: directory as CreateOpfsPgwasmOptions["directory"],
               durability: relaxedDurability ? "relaxed" : "strict",
               extentSize: OPFS_STORE_EXTENT_SIZE,
-              // The factory's own two phases: handles acquired (`vfs-opened`) and PGlite booted
-              // (`pglite-ready`). Same rail line, so one grep shows the whole create.
+              // The factory's own two phases: handles acquired (`store-opened`) and pgwasm booted
+              // (`pgwasm-ready`). Same rail line, so one grep shows the whole create.
               onPhase: (phase) => syncDebug("boot pglite.create phase", { phase }),
               // The store is engine-less by construction (only `live` is a create-time extension); the sync
-              // engine attaches post-create (ADR-0032 S1). Restore + pre-warmed boot assets ride the same
-              // `pglite` sub-options the idb path uses.
-              pglite: {
-                ...(bootAssets ?? {}),
+              // engine attaches post-create (ADR-0032 S1). Restore rides the same `pgwasm` sub-options the
+              // idb path uses; the pre-warmed boot assets ride the `build`.
+              pgwasm: {
                 ...(options?.restoreFrom ? { loadDataDir: options.restoreFrom } : {}),
                 extensions: { live },
               },
             }),
-          options?.pgliteFactories?.retryDelayMs ?? OPFS_OPEN_BACKOFF_MS,
+          options?.opfsFactories?.retryDelayMs ?? OPFS_OPEN_BACKOFF_MS,
         );
       },
       { ...(dataDirScheme ? { dataDir: dataDirScheme } : {}), relaxedDurability },
-    )) as unknown as ClientPGlite;
-    // Brand it PROVABLY persistent: the opfs-repacked VFS reports no `dataDir`, so without this the BYO
-    // non-persistent guard would reject it when it is adopted as a `precreatedPglite` (provision-then-attach).
-    try {
-      Object.defineProperty(opfsPglite, OPFS_REPACKED_PERSISTENT, {
-        value: true,
-        enumerable: false,
-        configurable: true,
-      });
-    } catch {
-      // A frozen/exotic instance — the guard still falls back to its dataDir classification (best-effort brand).
-    }
+    )) as ClientPGlite;
+    // No brand is needed: the store reports itself as persistent through `pg.storage`, so the BYO
+    // non-persistent guard accepts it when it is adopted as a `precreatedPglite` (provision-then-attach).
     return opfsPglite;
   }
 
   const pglite = (await timeAsync(
     "boot pglite.create",
     () => {
-      const createOptions: PGliteOptions = {
-        ...(bootAssets ?? {}),
+      const createOptions: PgwasmOptions<{ live: typeof live }> = {
+        build,
+        dataDir,
         relaxedDurability,
         // Restore (ADR-0035 decision 6): seed the brand-new store from the backup tarball. PGlite's
         // `loadDataDir` unpacks it into the datadir being created, so the store boots ON the backup's bytes —
         // the whole synced cache, Overlay, and Mutation journal that travelled inside it. Absent on a normal
         // create (the store initdbs empty).
         ...(options?.restoreFrom ? { loadDataDir: options.restoreFrom } : {}),
-        // Only PGlite's own `live` extension is a create-time extension; the pgxsinkit sync runtime is NOT
+        // Only pgwasm's own `live` extension is a create-time extension; the pgxsinkit sync runtime is NOT
         // (ADR-0032 S1) — `createSyncClient` starts it beside the store, never on it. So a store minted here
         // is deliberately SYNC-LESS by construction: a spare/pre-warmed store (e.g. the board's login-screen
         // mint) carries no subscription session, no shape streams, and no open stream connections until it
@@ -705,15 +718,15 @@ export async function createClientPGlite(
           live,
         },
       };
-      // idb/file/memory take the dataDir-string form; upstream PGlite's own scheme parser selects the backend.
-      return PGlite.create(dataDir, createOptions);
+      // idb/file/memory take the dataDir-string form; pgwasm's own scheme parser selects the backend.
+      return createPgwasm(createOptions);
     },
     // Stamp the resolved durability mode + store scheme so every boot-rail capture shows the mode and lane the
     // store was created under (ADR-0047 diagnosability).
     { ...(dataDirScheme ? { dataDir: dataDirScheme } : {}), relaxedDurability },
-    // `as unknown as` because the raw store is deliberately sync-less here (only `live` is a create-time
-    // extension); the sync runtime never lands on the instance at all (ADR-0032 S1).
-  )) as unknown as ClientPGlite;
+    // The raw store is deliberately sync-less here (only `live` is a create-time extension); the sync runtime
+    // never lands on the instance at all (ADR-0032 S1).
+  )) as ClientPGlite;
   return pglite;
 }
 
@@ -777,6 +790,26 @@ function storageBackendFromDataDir(dataDir: string | undefined): NonNullable<Boo
   if (dataDir.startsWith("file://")) return "filesystem";
   if (dataDir.startsWith("memory://")) return "memory";
   return undefined;
+}
+
+/**
+ * Map an instance's own `pg.storage` to the ADR-0049 decision 12 `storageBackend` diagnostic, for a BYO or adopted
+ * store the toolkit did not mint here. Returns `undefined` for a filesystem it does not recognise, so the field is
+ * then honestly omitted.
+ */
+function storageBackendFromStorage(
+  storage: ClientPGlite["storage"],
+): NonNullable<BootReport["storageBackend"]> | undefined {
+  switch (storage.kind) {
+    case "memory":
+      return "memory";
+    case "idb":
+      return "idbfs";
+    case "file":
+      return "filesystem";
+    case "vfs":
+      return storage.name === OPFS_REPACKED_STORAGE_NAME ? "opfs-repacked" : undefined;
+  }
 }
 
 /** Does a boot verdict stand up an UNCOMMITTED opfs candidate the commitment barrier must promote (invariant 3)? */
@@ -861,19 +894,18 @@ export async function resolveFreshBoot(
  * for unit tests via {@link FreshCommitmentSeams}.
  */
 /**
- * Extract the live engine's `strictSync()` from an opfs-repacked store for the commitment barrier. The barrier
- * requires it (data-before-authority, invariant 3); a store that does not expose it is not an OPFS-repacked
- * engine, which is a boot invariant violation.
+ * Resolve the live engine's strict sync (`strictSync(pg)` from `@pgxsinkit/pgwasm/opfs`) for the commitment
+ * barrier. The barrier requires it (data-before-authority, invariant 3); a store that is not on the OPFS-repacked
+ * filesystem has none, which is a boot invariant violation. `/opfs` is imported lazily, as the factory is.
  */
 function resolveEngineStrictSync(pglite: ClientPGlite): () => Promise<void> {
-  const strictSync = (pglite as unknown as { strictSync?: () => Promise<void> }).strictSync;
-  if (typeof strictSync !== "function") {
+  if (!isOpfsRepackedStore(pglite)) {
     throw new Error(
-      "[pgxsinkit] fresh commitment: the opfs store does not expose `strictSync()` — the commitment barrier " +
-        "requires an OPFS-repacked engine (data-before-authority, invariant 3).",
+      "[pgxsinkit] fresh commitment: the store is not on the OPFS-repacked filesystem, so it has no strict " +
+        "sync — the commitment barrier requires an OPFS-repacked engine (data-before-authority, invariant 3).",
     );
   }
-  return () => strictSync.call(pglite);
+  return async () => (await import("@pgxsinkit/pgwasm/opfs")).strictSync(pglite);
 }
 
 export async function runFreshCommitmentBarrier(
@@ -1062,14 +1094,14 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    */
   hasOpfsSyncAccess?: boolean;
   /**
-   * Pre-warmed PGlite boot assets (the WASM modules + filesystem bundle), awaited and passed straight
-   * into `PGlite.create`. The intent is to hide PGlite's ~2.5s cold `boot pglite.create` cost —
+   * Pre-warmed boot assets of the C build (the WASM modules + filesystem bundle), handed to the store's
+   * build (`createCBuild({ assets })`). The intent is to hide the ~2.5s cold `boot pglite.create` cost —
    * dominated by the WASM fetch+compile — behind user think-time: the host starts fetching/compiling
    * these on an earlier screen (e.g. the login/identity picker) and hands the still-pending promise
-   * here, so by the time a store is opened the assets are already resolved and `PGlite.create` skips
+   * here, so by the time a store is opened the assets are already resolved and the build skips
    * its own lazy asset load. Ignored when {@link pgliteInstance} is supplied (the caller owns that
-   * instance's boot). A rejected/failed warm is caught to `undefined` and never fails the boot — PGlite
-   * falls back to loading its own assets, so this is a pure best-effort accelerator.
+   * instance's boot). A rejected/failed warm never fails the boot — the build falls back to loading its
+   * own assets, so this is a pure best-effort accelerator.
    */
   pgliteBootAssets?: Promise<PgliteBootAssets>;
   resetSubscriptionKeys?: string[];
@@ -1439,7 +1471,7 @@ export interface PreparedQueryResult<TTable extends string = string> {
 }
 
 export interface SyncClient<TRegistry extends SyncTableRegistry> {
-  drizzle: PgliteDatabase<RegistryRelations<TRegistry>>;
+  drizzle: PgwasmDatabase<RegistryRelations<TRegistry>>;
   pglite: ClientPGlite;
   views: RegistryViews<TRegistry>;
   tables: {
@@ -2215,21 +2247,16 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   };
 
   // Refuse a caller-owned instance that is PROVABLY non-persistent (ADR-0036 decision 4), unless a testing
-  // acknowledgment is present. `classifyNonPersistentDataDir` inspects the instance's own dataDir (the
-  // `ClientPGlite` interface hides it, so via a narrow cast) — the two provably-non-persistent shapes are
-  // an undefined dataDir (PGlite's in-memory default) and an explicit memory store. Checked AFTER a
+  // acknowledgment is present. `classifyNonPersistentStorage` inspects the instance's own `storage` — the
+  // provably-non-persistent shapes are a memory store (pgwasm's default, or an explicit `memory://`) and a
+  // filesystem that reports itself non-persistent. Checked AFTER a
   // successful resolution of the BYO promise, so the refusal PROPAGATES rather than being swallowed by the
   // `precreatedPglite` reject-fallback below (which only catches a create that never produced a store).
   const refuseIfNonPersistent = (instance: ClientPGlite): void => {
     if (testStoreMarker !== undefined) return; // a deliberate test store — acknowledged.
-    // An opfs-repacked instance is PROVABLY persistent (a dedicated OPFS directory) yet reports no `dataDir`
-    // (custom VFS), so honour its brand before the dataDir classification — otherwise adopting a provisioned
-    // opfs store (provision-then-attach, ADR-0049) would be wrongly refused as an in-memory default.
-    if (isOpfsRepackedPersistent(instance)) return;
-    const observedDataDir = (instance as { dataDir?: string }).dataDir;
-    // The two provably-non-persistent shapes: an undefined dataDir (a raw `new PGlite()` in-memory default)
-    // and a `memory://` store. Every store the funnel mints carries a real `idb://`/`file://` dataDir string.
-    const observed = classifyNonPersistentDataDir(observedDataDir);
+    // An opfs-repacked instance reports `{ kind: "vfs", persistent: true }`, so adopting a provisioned opfs
+    // store (provision-then-attach, ADR-0049) passes; every store the funnel mints is idb/file/opfs.
+    const observed = classifyNonPersistentStorage(instance.storage);
     if (observed !== null) throw new NonPersistentStoreError(observed);
   };
 
@@ -2333,10 +2360,10 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     bootReportBuilder.setStorageFallbackReason(options.storageFallbackReason);
   }
   // ADR-0049 decision 12: a BYO instance / adopted-precreated store was created OUTSIDE the mint seam, so derive
-  // its `storageBackend` from the instance's own dataDir where recognisable; an opfs-repacked wrapper (or an
-  // unknown scheme) leaves it omitted (`setStorageBackend` is first-wins, so a fallback-create is never clobbered).
+  // its `storageBackend` from the instance's own `storage` where recognisable; an unknown filesystem leaves it
+  // omitted (`setStorageBackend` is first-wins, so a fallback-create is never clobbered).
   if (options.pgliteInstance != null || adoptedPrecreated) {
-    const byoBackend = storageBackendFromDataDir((pglite as { dataDir?: string }).dataDir);
+    const byoBackend = storageBackendFromStorage(pglite.storage);
     if (byoBackend) {
       openedStorageBackend = byoBackend;
       bootReportBuilder.setStorageBackend(byoBackend);
@@ -2349,9 +2376,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // run, and the memory test lane has no meta machinery at all. The bounded meta read is kicked off HERE and folded
   // into `commitmentBarrierPending` at the milestone below, so it overlaps schema exec instead of preceding it.
   const adoptedCommitmentGate =
-    (options.pgliteInstance != null || adoptedPrecreated) &&
-    backendOverride !== "memory" &&
-    isOpfsRepackedPersistent(pglite)
+    (options.pgliteInstance != null || adoptedPrecreated) && backendOverride !== "memory" && isOpfsRepackedStore(pglite)
       ? resolveAdoptedCommitmentBarrier(fallbackStorePath)
       : null;
   // The gate's rejection is observed at the milestone (fail closed, invariant 12); this only keeps an unrelated
@@ -3856,12 +3881,7 @@ function createDrizzleDatabase<TRegistry extends SyncTableRegistry>(
 ) {
   const relations = defineRelations(schema) as RegistryRelations<TRegistry>;
 
-  const createDatabase = drizzle as unknown as (config: {
-    client: ClientPGlite;
-    relations: RegistryRelations<TRegistry>;
-  }) => PgliteDatabase<RegistryRelations<TRegistry>>;
-
-  return createDatabase({ client, relations });
+  return drizzle(client, { relations });
 }
 
 function buildSchema<TRegistry extends SyncTableRegistry>(registry: TRegistry) {
@@ -3890,7 +3910,7 @@ export function buildRegistryReadHandles<TRegistry extends SyncTableRegistry>(
   registry: TRegistry,
   client: ClientPGlite = {} as ClientPGlite,
 ): {
-  drizzle: PgliteDatabase<RegistryRelations<TRegistry>>;
+  drizzle: PgwasmDatabase<RegistryRelations<TRegistry>>;
   views: RegistryViews<TRegistry>;
   /**
    * A drizzle-database FACTORY over this registry's schema (ADR-0032 decision 4): `(client) => db`, reusing
@@ -3898,7 +3918,7 @@ export function buildRegistryReadHandles<TRegistry extends SyncTableRegistry>(
    * without recomputing them. `attachSyncClient` uses it to give each `queryRaw`/`queryRawRow` its OWN
    * bridge executor carrying that call's `use` — a scoped db, never a shared mutable stash (no read races).
    */
-  drizzleFor: (client: ClientPGlite) => PgliteDatabase<RegistryRelations<TRegistry>>;
+  drizzleFor: (client: ClientPGlite) => PgwasmDatabase<RegistryRelations<TRegistry>>;
 } {
   const drizzleFor = buildRegistryDrizzleFactory(registry);
   return {
@@ -3916,11 +3936,7 @@ export function buildRegistryReadHandles<TRegistry extends SyncTableRegistry>(
  */
 function buildRegistryDrizzleFactory<TRegistry extends SyncTableRegistry>(
   registry: TRegistry,
-): (client: ClientPGlite) => PgliteDatabase<RegistryRelations<TRegistry>> {
+): (client: ClientPGlite) => PgwasmDatabase<RegistryRelations<TRegistry>> {
   const relations = defineRelations(buildSchema(registry)) as RegistryRelations<TRegistry>;
-  const createDatabase = drizzle as unknown as (config: {
-    client: ClientPGlite;
-    relations: RegistryRelations<TRegistry>;
-  }) => PgliteDatabase<RegistryRelations<TRegistry>>;
-  return (client) => createDatabase({ client, relations });
+  return (client) => drizzle(client, { relations });
 }

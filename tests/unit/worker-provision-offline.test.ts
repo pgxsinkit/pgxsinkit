@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
+
+import { attachSyncRegistryStorage, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 // Protocol-tier tests for the ADR-0032 S3 bridge extensions: the pre-spawned (schemaless) store the spare
 // flow needs (`provision` → `provision-ack`, adopted by the first `attach`), the role-selected registry
 // (`config.role` → `resolveRegistry`), and the Offline toggle over the bridge (`set-online` gating the
 // worker's outbound convergence). Driven over a bun `MessageChannel` — NO actual Worker — exactly like
 // worker-bridge.test.ts.
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
-import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
-
-import { attachSyncRegistryStorage, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -268,7 +269,7 @@ async function sentinelPresent(root: FakeOpfsDir, storePath: string): Promise<bo
 
 /** A fresh prepopulated memory PGlite (skips the ~2s initdb) as the raw store the worker would `create`. */
 async function makePglite(): Promise<ClientPGlite> {
-  const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+  const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   return pg as unknown as ClientPGlite;
 }
 

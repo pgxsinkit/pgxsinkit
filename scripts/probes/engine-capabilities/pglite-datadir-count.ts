@@ -10,7 +10,8 @@ import path from "node:path";
 //
 // Uses the root `@electric-sql/pglite` dependency, which package.json aliases to the
 // @pgxsinkit fork.
-import { PGlite } from "@electric-sql/pglite";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
 
 export interface DatadirCountResult {
   files: number;
@@ -50,7 +51,7 @@ export async function countDatadirFiles(): Promise<DatadirCountResult> {
     dir = mkdtempSync(path.join(tmpdir(), "pglite-datadir-"));
   }
   try {
-    const pg = await PGlite.create({ dataDir: `file://${dir}` });
+    const pg = await createPgwasm({ build: cBuild, dataDir: `file://${dir}` });
     await pg.query("SELECT 1");
     await pg.close();
     const counts = await countRegularFiles(dir);

@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import type { PGlite } from "@electric-sql/pglite";
 import { asc, sql } from "drizzle-orm";
 import { bigint, integer, jsonb, pgEnum, pgTable, primaryKey, real, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 import { classifyApplyStrategy } from "@pgxsinkit/contracts";
+import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import {
   applyBulkDeletesToTable,
@@ -17,7 +17,7 @@ import {
 } from "../../packages/client/src/sync/apply";
 import { foldChangeBatch } from "../../packages/client/src/sync/fold";
 import { createTablesFromSchema, drizzleOver, makeApplyTarget } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // Tier-① fixture tables for the ad-hoc apply targets. The appliers now receive a resolved
 // {@link ApplyTarget} built from the real `pgTable` via `makeApplyTarget` (ADR-0029 D1) — no name strings.
@@ -79,9 +79,9 @@ function msg(key: string, operation: Operation, value: Record<string, unknown>):
 }
 
 describe("bulk apply (ADR-0014 Phase 3)", () => {
-  let pg: PGlite;
+  let pg: Pgwasm;
   beforeAll(async () => {
-    pg = await createFreshTestPGlite();
+    pg = await createFreshTestPgwasm();
   });
   afterAll(async () => {
     await pg.close();

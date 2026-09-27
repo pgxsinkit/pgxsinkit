@@ -44,6 +44,8 @@
         "@pgxsinkit/board-schema": "workspace:*",
         "@pgxsinkit/client": "workspace:*",
         "@pgxsinkit/contracts": "workspace:*",
+        "@pgxsinkit/pgwasm-c": "workspace:*",
+        "@pgxsinkit/pgwasm-repl": "workspace:*",
         "@pgxsinkit/react": "workspace:*",
         "@supabase/supabase-js": "2.116.0",
         "@tanstack/react-router": "1.170.36",
@@ -89,6 +91,7 @@
         "@electric-sql/pglite-repl": "0.4.8",
         "@pgxsinkit/client": "workspace:*",
         "@pgxsinkit/contracts": "workspace:*",
+        "@pgxsinkit/pgwasm-repl": "workspace:*",
         "@pgxsinkit/schema": "workspace:*",
         "react": "19.3.0",
         "react-dom": "19.3.0",
@@ -124,6 +127,9 @@
         "@electric-sql/pglite-tools": "0.4.8",
         "@pgxsinkit/contracts": "workspace:*",
         "@pgxsinkit/pglite-opfs-repacked": "workspace:*",
+        "@pgxsinkit/pgwasm": "workspace:*",
+        "@pgxsinkit/pgwasm-c": "workspace:*",
+        "@pgxsinkit/pgwasm-pg-dump": "workspace:*",
       },
       "peerDependencies": {
         "@electric-sql/pglite": ">=0.5.8-pgx.2",
@@ -195,6 +201,7 @@
       "dependencies": {
         "@pgxsinkit/client": "workspace:*",
         "@pgxsinkit/contracts": "workspace:*",
+        "@pgxsinkit/pgwasm": "workspace:*",
       },
       "peerDependencies": {
         "@electric-sql/pglite": ">=0.5.8-pgx.2",

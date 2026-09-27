@@ -8,12 +8,13 @@ import { describe, expect, it } from "bun:test";
 // unsubscribes and IMMEDIATELY closes with NO intervening macrotask tick, and the whole file must
 // still exit cleanly — the pre-fix shape would hang the runner here.
 
-import { PGlite } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-import { live } from "@electric-sql/pglite/live";
 import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   attachSyncClient,
@@ -46,7 +47,7 @@ const TODO_ID = "a0000000-0000-0000-0000-000000000000";
 
 describe("awaited live-query teardown (ADR-0040 Slice 1)", () => {
   it("worker host.close() immediately after unsubscribe resolves cleanly (no macrotask tick)", async () => {
-    const pg = await PGlite.create({ loadDataDir: await prepopulatedDataDir(), extensions: { live } });
+    const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
     const host = defineSyncWorker({
       registry: todosRegistry,
       controlPlaneUrl: "http://127.0.0.1:1",

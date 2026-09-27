@@ -1,10 +1,10 @@
-// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
-// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
-import type { PGliteInterface, Transaction } from "@electric-sql/pglite";
 import { and, eq, fillPlaceholders, type SQL, sql } from "drizzle-orm";
 import { getTableConfig, type PgColumn } from "drizzle-orm/pg-core";
 
 import { jsonUdtName, quoteIdentifier, type SyncChange, type SyncColumnType, type SyncRow } from "@pgxsinkit/contracts";
+// Started life as a copy of @electric-sql/pglite-sync (Apache-2.0, © ElectricSQL — see NOTICE).
+// Fully internalized (ADR-0009); upstream compatibility is an explicit anti-goal (ADR-0028) — evolve freely.
+import type { Pgwasm, Transaction } from "@pgxsinkit/pgwasm";
 
 import type { ApplyTarget } from "../local-tables";
 import { buildCopyFromBlobStatement } from "./copy";
@@ -86,7 +86,7 @@ function castTypeFor(column: SyncColumnType, tableSchema: string | undefined): s
 }
 
 export interface ApplyMessageToTableOptions {
-  pg: PGliteInterface | Transaction;
+  pg: Pgwasm | Transaction;
   target: ApplyTarget;
   message: SyncChange;
   debug: boolean;
@@ -121,7 +121,7 @@ export async function applyMessageToTable({ pg, target, message, debug }: ApplyM
 }
 
 export interface BulkApplyMessagesToTableOptions {
-  pg: PGliteInterface | Transaction;
+  pg: Pgwasm | Transaction;
   target: ApplyTarget;
   messages: UpsertChangeMessage[];
   debug: boolean;
@@ -163,7 +163,7 @@ function renderInsert(
  * byte-identical to a plain `.values()` bind), then run the pre-rendered statement on the executor.
  */
 async function executeInsertBatch(
-  pg: PGliteInterface | Transaction,
+  pg: Pgwasm | Transaction,
   db: ReturnType<typeof drizzleOverPg>,
   target: ApplyTarget,
   colNames: string[],
@@ -571,7 +571,7 @@ function recordsetColumnCasts(target: ApplyTarget, columnNames: string[]): JsonR
 }
 
 export interface BulkKeyedApplyOptions {
-  pg: PGliteInterface | Transaction;
+  pg: Pgwasm | Transaction;
   target: ApplyTarget;
   /** Folded messages: for deletes the value carries the PK; for updates the PK plus merged columns. */
   messages: SyncChange[];

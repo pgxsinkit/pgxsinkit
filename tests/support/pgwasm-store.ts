@@ -4,8 +4,15 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PGlite, type PGliteInterface, type PGliteInterfaceExtensions, type PGliteOptions } from "@electric-sql/pglite";
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
+import {
+  createPgwasm,
+  type Extensions,
+  type Pgwasm,
+  type PgwasmOptions,
+  type PgwasmWithExtensions,
+} from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
 
 // createRequire anchored to THIS file (not cwd): the unit runner spawns processes whose cwd is the
 // repo root, but dependency resolution — the store factory below included — must follow this module's
@@ -16,9 +23,9 @@ const requireFromHere = createRequire(import.meta.url);
 //
 // Every store these helpers hand out is built by ONE of two paths:
 //
-//   * unset `PGXSINKIT_TEST_STORE_FACTORY` (the default, and what CI runs) — PGlite, exactly as this
-//     file has always built it: the `@electric-sql/pglite-prepopulatedfs` base image, `PGlite.create`,
-//     and the two-tier schema-dump cache below;
+//   * unset `PGXSINKIT_TEST_STORE_FACTORY` (the default, and what CI runs) — pgwasm on the C build:
+//     the `@pgxsinkit/pgwasm-c/prepopulated` base image, `createPgwasm({ build: cBuild, … })`, and the
+//     two-tier schema-dump cache below;
 //   * `PGXSINKIT_TEST_STORE_FACTORY=<module>` — that module builds the stores instead, so the SAME
 //     unit suite can be run against another PostgreSQL-shaped engine without a line of engine-specific
 //     code in the repo. Nothing here knows or names any particular engine.
@@ -27,19 +34,21 @@ const requireFromHere = createRequire(import.meta.url);
 // {@link TestStoreFactory}:
 //
 //   * `createFresh(options?)` — a fresh, empty store on the factory's OWN seed image, honouring what
-//     it can of the PGlite create options the caller passed (`extensions` above all) and ignoring what
-//     it cannot. It replaces `PGlite.create({ ...options, loadDataDir: <prepopulatedfs base> })`.
+//     it can of the create options ({@link TestPgwasmOptions}) the caller passed (`extensions` above
+//     all) and ignoring what it cannot. It replaces
+//     `createPgwasm({ build: cBuild, ...options, loadDataDir: <prepopulated base> })`. A pgrust lane's
+//     factory is `createPgwasm({ build: pgrustBuild, … })` (ADR-0062 d9).
 //   * `createFromDump(dump, options?)` — a store booted ON a datadir dump THIS factory produced (the
 //     `loadDataDir` create option). Dumps are never portable between engines, which is why the
 //     factory both writes (`dumpDataDir`) and reads them.
 //   * `cacheKeyPrefix?` — the filename prefix for the schema-dump disk cache under `tmp/pglite-cache/`.
 //     It MUST be distinct per engine (a dump one engine wrote will not boot on another), and it is the
 //     one thing that keeps two engines' snapshots from colliding on one file. Default:
-//     `pgxsinkit-schema-`, the name this file has always used.
+//     `pgwasm-c-schema-`.
 //   * `cacheIdentity?` — extra fingerprint material (engine name + version). Folded into the cache key
 //     so a factory upgrade invalidates its own snapshots.
 //   * `closeAll?()` — teardown for anything the factory owns BEYOND the instances it handed back
-//     (those are closed individually). Called from `closeOpenTestPGlites`, possibly many times per
+//     (those are closed individually). Called from `closeOpenTestPgwasms`, possibly many times per
 //     process, so it must be idempotent.
 //
 // **The module is loaded with `require`, not `import()`.** A computed `import()` here would make every
@@ -54,9 +63,9 @@ export const TEST_STORE_FACTORY_ENV = "PGXSINKIT_TEST_STORE_FACTORY";
 /** The engine-agnostic store contract; see the block above for the full description of each member. */
 export interface TestStoreFactory {
   /** A fresh, empty store on the factory's own seed image. */
-  createFresh(options?: PGliteOptions): Promise<PGliteInterface>;
+  createFresh(options?: TestPgwasmOptions): Promise<Pgwasm>;
   /** A store booted on a datadir dump this same factory produced. */
-  createFromDump(dump: Blob | File, options?: PGliteOptions): Promise<PGliteInterface>;
+  createFromDump(dump: Blob | File, options?: TestPgwasmOptions): Promise<Pgwasm>;
   /** Schema-dump cache filename prefix; MUST be distinct per engine. */
   readonly cacheKeyPrefix?: string;
   /** Extra cache-fingerprint material — the engine's identity and version. */
@@ -65,15 +74,15 @@ export interface TestStoreFactory {
   closeAll?(): Promise<void>;
 }
 
-/** The name this file has always given its snapshots — kept for the default path so caches survive. */
-const DEFAULT_CACHE_KEY_PREFIX = "pgxsinkit-schema-";
+/** The default lane's snapshot filename prefix: the C build's dumps. */
+const DEFAULT_CACHE_KEY_PREFIX = "pgwasm-c-schema-";
 
 // Resolution is memoized against the env var's CURRENT value rather than once per process: the seam's
 // own test sets and clears it, and a stale memo would answer for the wrong lane.
 let factoryMemo: { source: string; factory: TestStoreFactory | undefined } | undefined;
 
 /**
- * The active store factory, or `undefined` for the default PGlite path.
+ * The active store factory, or `undefined` for the default C-build path.
  *
  * Synchronous by construction (see the `require` note above), so every call site can stay on the code
  * path it had.
@@ -87,7 +96,7 @@ export function resolveTestStoreFactory(): TestStoreFactory | undefined {
 }
 
 // A misconfigured factory FAILS LOUDLY (unlike the disk cache, which degrades silently): the whole
-// point of setting the variable is to run against that engine, so silently falling back to PGlite
+// point of setting the variable is to run against that engine, so silently falling back to the C build
 // would report a green suite for a lane that never ran.
 function loadTestStoreFactory(source: string): TestStoreFactory {
   let loaded: Record<string, unknown>;
@@ -96,7 +105,7 @@ function loadTestStoreFactory(source: string): TestStoreFactory {
   } catch (error) {
     throw new Error(
       `${TEST_STORE_FACTORY_ENV}=${source} could not be loaded. It must be require-loadable from ` +
-        `tests/support/pglite.ts — an absolute path, and no top-level await anywhere in its import graph.`,
+        `tests/support/pgwasm-store.ts — an absolute path, and no top-level await anywhere in its import graph.`,
       { cause: error },
     );
   }
@@ -115,39 +124,40 @@ function loadTestStoreFactory(source: string): TestStoreFactory {
   return candidate as TestStoreFactory;
 }
 
-/** A fresh, empty store: the factory's when one is set, the prepopulatedfs PGlite otherwise. */
-async function createStore(options?: PGliteOptions): Promise<PGliteInterface> {
+/** The create options a test passes: pgwasm's own, minus `build`, which the active lane supplies. */
+export type TestPgwasmOptions<E extends Extensions = Extensions> = Omit<PgwasmOptions<E>, "build">;
+
+/** A fresh, empty store: the factory's when one is set, the prepopulated C-build store otherwise. */
+async function createStore(options?: TestPgwasmOptions): Promise<Pgwasm> {
   const factory = resolveTestStoreFactory();
   if (factory) return await factory.createFresh(options);
-  return await PGlite.create({
-    ...options,
-    loadDataDir: await prepopulatedDataDir(),
-  });
+  return await createPgwasm({ build: cBuild, ...options, loadDataDir: await prepopulatedDataDir() });
 }
 
 /** A store booted on a dump the ACTIVE lane produced — the `loadDataDir` half of the same seam. */
-async function createStoreFromDump(dump: Blob | File, options?: PGliteOptions): Promise<PGliteInterface> {
+async function createStoreFromDump(dump: Blob | File, options?: TestPgwasmOptions): Promise<Pgwasm> {
   const factory = resolveTestStoreFactory();
   if (factory) return await factory.createFromDump(dump, options);
-  return await PGlite.create({ ...options, loadDataDir: dump });
+  return await createPgwasm({ build: cBuild, ...options, loadDataDir: dump });
 }
 
 // Every instance these helpers hand out is tracked so a test file can close them all in one
-// `afterEach(closeOpenTestPGlites)`. This matters for more than tidiness: an un-closed PGlite keeps its
+// `afterEach(closeOpenTestPgwasms)`. This matters for more than tidiness: an un-closed PGlite keeps its
 // (multi-MB) WASM heap alive, so a file that boots one per test and never closes them accumulates
 // memory across the run — later tests then boot and operate **progressively slower** under the growing
 // heap (and bun force-exits with code 99 on the leaked handles). A factory's instance can be a whole
 // engine (processes, worker threads), where a leak does not merely slow the run down but hangs it.
 // Closing each test's instance keeps every boot cheap and the run flat.
-const openInstances = new Set<PGliteInterface>();
+const openInstances = new Set<Pgwasm>();
 
-export async function createFreshTestPGlite<TOptions extends PGliteOptions>(options?: TOptions) {
+export async function createFreshTestPgwasm<E extends Extensions = Record<never, never>>(
+  options?: TestPgwasmOptions<E>,
+): Promise<PgwasmWithExtensions<E>> {
   const pg = await createStore(options);
   openInstances.add(pg);
-  // The declared type stays PGlite's: the callers are written against it, and a factory's instance is
-  // required to behave as one. This cast is the seam's single point of untruth.
-  return pg as PGlite &
-    PGliteInterfaceExtensions<TOptions extends { extensions: infer TExtensions } ? TExtensions : Record<string, never>>;
+  // The declared type carries the requested extensions' namespaces: a factory's instance is required to
+  // honour `extensions`. This cast is the seam's single point of untruth.
+  return pg as PgwasmWithExtensions<E>;
 }
 
 // A fresh, isolated store that already has `schemaSql` applied, WITHOUT re-running the DDL each time.
@@ -162,8 +172,8 @@ export async function createFreshTestPGlite<TOptions extends PGliteOptions>(opti
 //
 // The fingerprint (sha256, 16 hex chars) covers everything that determines the snapshot's bytes: this
 // support file's own source (it decides HOW the dump is built), the exact `schemaSql` (the callers'
-// `generateLocalSchemaSql(...)` output — the seed schema itself), the resolved `version` of
-// `@electric-sql/pglite` + `@electric-sql/pglite-prepopulatedfs` (the base image + engine), and the
+// `generateLocalSchemaSql(...)` output — the seed schema itself), a hash of the C build's artefact pins
+// (`packages/pgwasm-c/src/artefact-pins.ts`: the base image + engine), and the
 // active factory's `cacheIdentity`. Any of those changing yields a new key, so a stale tar is never
 // loaded. The FILENAME carries the lane's `cacheKeyPrefix` on top of that, because a dump is only ever
 // readable by the engine that wrote it: two engines must never so much as consider each other's file.
@@ -171,11 +181,11 @@ export async function createFreshTestPGlite<TOptions extends PGliteOptions>(opti
 // The disk cache is strictly a best-effort accelerator: EVERY disk failure (unresolvable fingerprint,
 // read/write error, or a corrupt/truncated tar that fails to boot) degrades silently to the in-memory
 // build path. A broken cache must never fail a test run. Each instance is still a separate store, so
-// per-test isolation is unchanged. Use this instead of `createFreshTestPGlite()` + `db.exec(schemaSql)`
+// per-test isolation is unchanged. Use this instead of `createFreshTestPgwasm()` + `db.exec(schemaSql)`
 // in a file that boots the same schema many times.
 const schemaDumpCache = new Map<string, Promise<Blob | File>>();
 
-// This file lives at `<repoRoot>/tests/support/pglite.ts`, so the repo root is two levels up.
+// This file lives at `<repoRoot>/tests/support/pgwasm-store.ts`, so the repo root is two levels up.
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const cacheDir = path.join(repoRoot, "tmp", "pglite-cache");
 const cacheKeyPrefix = () => resolveTestStoreFactory()?.cacheKeyPrefix ?? DEFAULT_CACHE_KEY_PREFIX;
@@ -187,7 +197,7 @@ const cacheFileFor = (fingerprint: string) => path.join(cacheDir, `${cacheKeyPre
 const cacheFileNamePattern = () =>
   new RegExp(`^${cacheKeyPrefix().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[0-9a-f]{16}\\.tar$`);
 
-export async function createSchemaTestPGlite(schemaSql: string): Promise<PGlite> {
+export async function createSchemaTestPgwasm(schemaSql: string): Promise<Pgwasm> {
   let dump = schemaDumpCache.get(schemaSql);
   if (!dump) {
     dump = resolveSchemaDump(schemaSql);
@@ -195,7 +205,7 @@ export async function createSchemaTestPGlite(schemaSql: string): Promise<PGlite>
   }
   const pg = await createStoreFromDump(await dump);
   openInstances.add(pg);
-  return pg as PGlite;
+  return pg as Pgwasm;
 }
 
 // Two-tier resolution: try the disk cache, else build and best-effort persist it. Never throws for a
@@ -316,51 +326,28 @@ async function computeFingerprint(schemaSql: string): Promise<string | undefined
   }
 }
 
-// The base image + engine, as the ACTIVE lane names it. On the default path that is the resolved
-// version of `@electric-sql/pglite` + `@electric-sql/pglite-prepopulatedfs`, and an unresolvable one
-// still disables the disk cache (never key on a partial fingerprint). Under a factory neither package
-// determines a byte of the snapshot, so the factory's own identity stands in their place.
+// The base image + engine, as the ACTIVE lane names it. On the default path that is a hash of the C
+// build's artefact pins (every artefact's sha256, the prepopulated image's included), and an unreadable
+// pin file still disables the disk cache (never key on a partial fingerprint). Under a factory the C build
+// determines no byte of the snapshot, so the factory's own identity stands in its place.
 async function engineIdentity(): Promise<string | undefined> {
   const factory = resolveTestStoreFactory();
   if (factory) {
     return `${factory.cacheIdentity ?? factory.cacheKeyPrefix ?? process.env[TEST_STORE_FACTORY_ENV] ?? "factory"}\0`;
   }
-  const pgliteVersion = await resolvePackageVersion("@electric-sql/pglite");
-  const prepopulatedVersion = await resolvePackageVersion("@electric-sql/pglite-prepopulatedfs");
-  if (!pgliteVersion || !prepopulatedVersion) return undefined;
-  return `@electric-sql/pglite@${pgliteVersion}\0@electric-sql/pglite-prepopulatedfs@${prepopulatedVersion}\0`;
-}
-
-// Read a dependency's `version` without depending on it exporting `./package.json` (pglite does not):
-// resolve the package entry, then walk up to the nearest `package.json` whose `name` matches.
-async function resolvePackageVersion(name: string): Promise<string | undefined> {
-  let dir: string;
+  let pins: string;
   try {
-    dir = path.dirname(requireFromHere.resolve(name));
+    pins = await readFile(path.join(repoRoot, "packages", "pgwasm-c", "src", "artefact-pins.ts"), "utf8");
   } catch {
     return undefined;
   }
-  for (let depth = 0; depth < 12; depth++) {
-    try {
-      const parsed = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8")) as {
-        name?: string;
-        version?: string;
-      };
-      if (parsed.name === name && typeof parsed.version === "string") return parsed.version;
-    } catch {
-      // Not this directory — keep walking up.
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return undefined;
+  return `pgwasm-c-artefact-pins@${createHash("sha256").update(pins).digest("hex")}\0`;
 }
 
 // Instances that existed when the current test started — i.e. ones a `beforeAll`/module-scope setup
 // opened to share ACROSS tests. They must survive per-test cleanup, or the next test queries a closed
 // handle. Refreshed at each test start (tests/support/setup.ts `beforeEach`).
-let scopeMarker: ReadonlySet<PGliteInterface> = new Set();
+let scopeMarker: ReadonlySet<Pgwasm> = new Set();
 
 /** Snapshot the currently-open instances as "shared, do not close per-test". For `beforeEach`. */
 export function markTestScope(): void {
@@ -368,7 +355,7 @@ export function markTestScope(): void {
 }
 
 /** Close only the instances opened DURING the current test (not the shared ones). For `afterEach`. */
-export async function closeTestScopedPGlites(): Promise<void> {
+export async function closeTestScopedPgwasms(): Promise<void> {
   for (const pg of [...openInstances]) {
     if (scopeMarker.has(pg)) continue;
     openInstances.delete(pg);
@@ -381,7 +368,7 @@ export async function closeTestScopedPGlites(): Promise<void> {
 }
 
 /** Close every remaining instance (including shared ones). For `afterAll` / explicit teardown. */
-export async function closeOpenTestPGlites(): Promise<void> {
+export async function closeOpenTestPgwasms(): Promise<void> {
   const instances = [...openInstances];
   openInstances.clear();
   scopeMarker = new Set();

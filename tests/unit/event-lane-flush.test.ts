@@ -26,7 +26,7 @@ import {
   type OutboxStatus,
 } from "../../packages/client/src/event-lane";
 import { generateLocalSchemaSql } from "../../packages/client/src/schema";
-import { closeOpenTestPGlites, createSchemaTestPGlite } from "../support/pglite";
+import { closeOpenTestPgwasms, createSchemaTestPgwasm } from "../support/pgwasm-store";
 
 // The Event lane's flush loop (ADR-0053 decisions 3 + 4), against a REAL PGlite and a mocked endpoint
 // (Phase C builds the real one). What is pinned: batch assembly ordered by the `seq` append ordinal across
@@ -74,7 +74,7 @@ function fixedClock(startMs = 1_700_000_000_000) {
 }
 
 interface LaneHarness {
-  db: Awaited<ReturnType<typeof createSchemaTestPGlite>>;
+  db: Awaited<ReturnType<typeof createSchemaTestPgwasm>>;
   runtime: EventLaneRuntime;
   clock: ReturnType<typeof fixedClock>;
   reports: EventLaneReport[];
@@ -88,7 +88,7 @@ async function makeLane(
     subscribeReports?: boolean;
   } = {},
 ): Promise<LaneHarness> {
-  const db = await createSchemaTestPGlite(schemaSql);
+  const db = await createSchemaTestPgwasm(schemaSql);
   const clock = fixedClock();
   const runtime = createEventLaneRuntime({
     db,
@@ -164,7 +164,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
 }
 
 afterEach(async () => {
-  await closeOpenTestPGlites();
+  await closeOpenTestPgwasms();
 });
 
 describe("batch assembly (ADR-0053 decision 3)", () => {

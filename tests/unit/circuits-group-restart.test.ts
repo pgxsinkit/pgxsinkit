@@ -21,7 +21,7 @@ import {
 
 import { migrateSubscriptionMetadataTables } from "../../packages/client/src/sync/subscription-state";
 import { createTablesFromSchema, drizzleOver } from "../support/drizzle";
-import { createFreshTestPGlite } from "../support/pglite";
+import { createFreshTestPgwasm } from "../support/pgwasm-store";
 
 // The mid-session recovery (backlog 0010, ADR-0056 decision 7's live half). A read that ends under a
 // live subscription has no way back on its own — `stream()`'s own error hook wraps only the OPENING
@@ -229,7 +229,7 @@ function contentEnvelope(id: string, offeringId: string): StreamEnvelope {
 // back `404` and delivery simply STOPS. Nothing throws at anyone — the failure is on the response's
 // `closed` promise — so before this the rows sat there forever with no reader.
 it("re-subscribes and resumes when a stream 404s under a live read", async () => {
-  const pg = await createFreshTestPGlite();
+  const pg = await createFreshTestPgwasm();
   await createTablesFromSchema(pg, { draft });
   await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
 
@@ -305,7 +305,7 @@ it("re-subscribes and resumes when a stream 404s under a live read", async () =>
 // authoritative statement of what the subject may read, so the scope it no longer names is the scope
 // whose rows go (ADR-0055 decision 6). The caller hears about it only after they are gone.
 it("clears a scope revoked on re-mint and tells the caller after the clear", async () => {
-  const pg = await createFreshTestPGlite();
+  const pg = await createFreshTestPgwasm();
   await createTablesFromSchema(pg, { content });
   await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
 
@@ -425,7 +425,7 @@ it("keeps the current token when a re-mint fails", async () => {
 // the answer is the same ladder. What it must NOT be is fatal: a start that threw would leave the app
 // holding a group that never syncs again, seconds before the network came back.
 it("retries a start whose streams cannot be opened, rather than failing it", async () => {
-  const pg = await createFreshTestPGlite();
+  const pg = await createFreshTestPgwasm();
   await createTablesFromSchema(pg, { draft });
   await migrateSubscriptionMetadataTables({ pg, metadataSchema: METADATA_SCHEMA });
 
