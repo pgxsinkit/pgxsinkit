@@ -276,16 +276,6 @@ for (const pkg of publicPackages) {
 // Apache-licensed code to give recipients the licence text and keep its attribution notices, so a
 // package whose `license` names Apache-2.0 packs its NOTICE and LICENSE-APACHE-2.0 too. `bun pm pack`
 // adds a LICENSE by itself but neither of those: they reach the tarball only through `files`.
-//
-// These packages ship no LICENSE yet. They are MIT only and all their code is pgxsinkit's own, so no
-// third-party notice rides on them. One of them may lack a LICENSE; a LICENSE it has must still be packed.
-const LICENSE_OPTIONAL: ReadonlySet<string> = new Set([
-  "packages/contracts",
-  "packages/pglite-opfs-repacked",
-  "packages/react",
-  "packages/server",
-]);
-
 describe("published licence files", () => {
   for (const pkg of publicPackages) {
     it(`${pkg.packageDir} packs its LICENSE, and its NOTICE and LICENSE-APACHE-2.0 where Apache-2.0 applies`, () => {
@@ -296,12 +286,8 @@ describe("published licence files", () => {
       // An unrecognised dry-run listing must fail here rather than pass by listing nothing.
       expect(packed).toContain("package.json");
 
-      const required = new Set<string>();
-      if (!LICENSE_OPTIONAL.has(pkg.packageDir) || existsSync(join(repoRoot, pkg.packageDir, "LICENSE"))) {
-        required.add("LICENSE");
-      }
+      const required = new Set(["LICENSE"]);
       if (namesApache(manifest.license)) {
-        required.add("LICENSE");
         required.add("NOTICE");
         required.add("LICENSE-APACHE-2.0");
       }
