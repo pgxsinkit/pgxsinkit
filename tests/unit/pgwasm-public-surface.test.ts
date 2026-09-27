@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import * as amcheck from "../../packages/pgwasm-c/src/contrib/amcheck";
 import * as cBuildMain from "../../packages/pgwasm-c/src/index";
+import * as prepopulated from "../../packages/pgwasm-c/src/prepopulated";
 import * as build from "../../packages/pgwasm/src/build";
 import * as drizzle from "../../packages/pgwasm/src/drizzle";
 import * as fs from "../../packages/pgwasm/src/fs";
@@ -54,6 +55,7 @@ const surfaces: [entry: string, module: object, exports: string[]][] = [
   ],
   ["@pgxsinkit/pgwasm-c", cBuildMain, ["C_BUILD_IDENTITY", "cBuild", "cBuildArtefacts", "createCBuild"]],
   ["@pgxsinkit/pgwasm-c/contrib/amcheck", amcheck, ["amcheck"]],
+  ["@pgxsinkit/pgwasm-c/prepopulated", prepopulated, ["prepopulatedDataDir"]],
 ];
 
 describe("the runtime exports of every entry point", () => {

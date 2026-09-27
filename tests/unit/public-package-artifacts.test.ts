@@ -208,7 +208,8 @@ for (const pkg of publicPackages) {
             resolve(dirname(path), match[1] ?? ""),
           ),
         );
-        expect(references.length).toBe(4);
+        // pglite.wasm, pglite.data, initdb.wasm (index), prepopulated.tar.gz, amcheck.tar.gz
+        expect(references.length).toBe(5);
         for (const target of references) {
           expect(target.startsWith(join(repoRoot, pkg.packageDir, "artefacts") + sep)).toBe(true);
           expect(existsSync(target)).toBe(true);

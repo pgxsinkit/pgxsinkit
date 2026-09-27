@@ -43,6 +43,22 @@ const build = createCBuild({
 });
 ```
 
+## Starting from the prepopulated data directory
+
+A new database normally runs initdb. The package also ships a freshly initialised data directory as
+a Store backup, which starts faster:
+
+```ts
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+
+const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
+```
+
+`loadDataDir` restores only into an empty data directory, so pass it when creating a store, not when
+reopening one. Every database created from it is marked as the C build's.
+
 ## Extensions
 
 `amcheck` is included:

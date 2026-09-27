@@ -40,7 +40,8 @@ function sourceFiles(dir: string): string[] {
  * package's other entry points.
  */
 const referencingModules: Record<string, (relative: string) => boolean> = {
-  "packages/pgwasm-c": (relative) => relative === "src/artefacts.ts" || path.dirname(relative) === "src/contrib",
+  "packages/pgwasm-c": (relative) =>
+    relative === "src/artefacts.ts" || relative === "src/prepopulated.ts" || path.dirname(relative) === "src/contrib",
   "packages/pgwasm-pg-dump": (relative) => relative === "src/artefacts.ts",
 };
 

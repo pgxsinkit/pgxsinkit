@@ -1,20 +1,18 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 
-import { dataDir as prepopulatedDataDir } from "@electric-sql/pglite-prepopulatedfs";
-
 import { cBuild } from "../../../packages/pgwasm-c/src";
+import { prepopulatedDataDir } from "../../../packages/pgwasm-c/src/prepopulated";
 import { createPgwasm, type Extensions, type Pgwasm, type PgwasmOptions } from "../../../packages/pgwasm/src";
 import type { PostgresBuild } from "../../../packages/pgwasm/src/build";
 
 /**
  * Test databases on the C build.
  *
- * A database starts from a seed data directory rather than running initdb every time: the
- * prepopulated data directory, an unmarked C-build directory made before builds were recorded. Every
- * seeded boot therefore also exercises the rule that an unmarked directory is the C build's, and that a
- * created directory gets marked. Step 2 of ADR-0062 moves the seed into pgwasm-c; this file is the one
- * place to switch.
+ * A database starts from a seed data directory rather than running initdb every time: the C build's
+ * prepopulated data directory (`@pgxsinkit/pgwasm-c/prepopulated`), an unmarked C-build directory made
+ * before builds were recorded. Every seeded boot therefore also exercises the rule that an unmarked
+ * directory is the C build's, and that a created directory gets marked.
  */
 
 let seed: Promise<Blob> | undefined;

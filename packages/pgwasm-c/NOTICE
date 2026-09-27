@@ -24,13 +24,26 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds six files republished byte-identical from `@electric-sql/pglite`
-0.5.8 (https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz; the
-tarball's integrity and every file's sha256 are pinned in `src/artefact-pins.ts`):
+`artefacts/` holds seven files republished byte-identical from ElectricSQL's npm
+packages (each tarball's integrity and every file's sha256 are pinned in
+`src/artefact-pins.ts`).
+
+Six come from `@electric-sql/pglite` 0.5.8
+(https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz):
 `pglite.wasm` (the Postgres server), `pglite.data` (its filesystem bundle: share
 files, loadable modules, time zone data, ICU data), `pglite.js` and `initdb.js`
 (Emscripten-generated JavaScript), `initdb.wasm` (initdb) and `amcheck.tar.gz` (the
 amcheck extension).
+
+`prepopulated.tar.gz` is `dist/prepopulatedfs.tgz` from
+`@electric-sql/pglite-prepopulatedfs` 0.5.8
+(https://registry.npmjs.org/@electric-sql/pglite-prepopulatedfs/-/pglite-prepopulatedfs-0.5.8.tgz;
+dual-licensed Apache-2.0 / PostgreSQL License like the rest of PGlite, taken under the
+PostgreSQL License, Copyright (c) ElectricSQL and contributors). It is a data directory
+ElectricSQL created by running initdb with PGlite 0.5.8 (its
+`scripts/generateFS.ts`) and taking a backup of it, so it holds only what PostgreSQL
+itself wrote, from the same PostgreSQL tree and under the same notices as the files
+above.
 
 They were built by ElectricSQL from the postgres-pglite tree
 (https://github.com/electric-sql/postgres-pglite, commit b133782cd759f08b3aeb263b80a963b39c7b7af1,

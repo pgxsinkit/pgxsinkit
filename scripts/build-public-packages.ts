@@ -102,9 +102,10 @@ export const publicPackages: readonly PublicPackage[] = [
   {
     // The C Postgres build: its artefacts live in `artefacts/`, one level above both `src/` and `dist/`,
     // and every module that references them is emitted at its own depth (src/artefacts.ts into
-    // dist/index.js, src/contrib/*.ts into dist/contrib/), so the references stay valid unrewritten.
+    // dist/index.js, src/prepopulated.ts into dist/prepopulated.js, src/contrib/*.ts into dist/contrib/),
+    // so the references stay valid unrewritten.
     packageDir: "packages/pgwasm-c",
-    entrypoints: ["src/index.ts", "src/contrib/amcheck.ts"],
+    entrypoints: ["src/index.ts", "src/prepopulated.ts", "src/contrib/amcheck.ts"],
     bundler: "bun",
     relativeExternals: ["../artefacts/*", "../../artefacts/*"],
     verify: () => assertArtefactsVerified(artefactPackage("packages/pgwasm-c")),

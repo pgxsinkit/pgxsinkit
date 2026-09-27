@@ -31,6 +31,10 @@
     "./contrib/amcheck": {
       "types": "./dist/contrib/amcheck.d.ts",
       "default": "./dist/contrib/amcheck.js"
+    },
+    "./prepopulated": {
+      "types": "./dist/prepopulated.d.ts",
+      "default": "./dist/prepopulated.js"
     }
   },
   "publishConfig": {
