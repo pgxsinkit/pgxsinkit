@@ -36,14 +36,14 @@ restores only into its own build.
 
 ## Entry points
 
-| Import                       | What it gives you                                                            |
-| ---------------------------- | ---------------------------------------------------------------------------- |
-| `@pgxsinkit/pgwasm`          | `createPgwasm`, the result and option types, the typed errors                |
-| `@pgxsinkit/pgwasm/live`     | the `live` extension: `live.query`, `live.incrementalQuery`, `live.changes`  |
-| `@pgxsinkit/pgwasm/drizzle`  | a Drizzle ORM driver (`drizzle(pg)`); needs `drizzle-orm`                    |
-| `@pgxsinkit/pgwasm/protocol` | wire-level access (`protocol(pg).execProtocol…`) for tools such as `pg_dump` |
-| `@pgxsinkit/pgwasm/fs`       | the filesystem contract a custom storage implements                          |
-| `@pgxsinkit/pgwasm/build`    | the contract a Postgres build package implements                             |
+| Import                       | What it gives you                                                                       |
+| ---------------------------- | --------------------------------------------------------------------------------------- |
+| `@pgxsinkit/pgwasm`          | `createPgwasm`, the result and option types, the typed errors                           |
+| `@pgxsinkit/pgwasm/live`     | the `live` extension: `live.query`, `live.incrementalQuery`, `live.changes`             |
+| `@pgxsinkit/pgwasm/drizzle`  | a Drizzle ORM driver (`drizzle(pg)`); needs `drizzle-orm`                               |
+| `@pgxsinkit/pgwasm/protocol` | `protocol(pg)`: wire-level access and an exclusive session, for tools such as `pg_dump` |
+| `@pgxsinkit/pgwasm/fs`       | the filesystem contract a custom storage implements                                     |
+| `@pgxsinkit/pgwasm/build`    | the contract a Postgres build package implements                                        |
 
 ESM only, for Bun and browsers (pages, dedicated workers, SharedWorkers and extension pages).
 

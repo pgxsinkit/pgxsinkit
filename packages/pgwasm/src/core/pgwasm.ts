@@ -176,6 +176,7 @@ export class PgwasmInstance implements Pgwasm {
       execProtocolStream: (message, options) => this.#execProtocolStream(message, options),
       execProtocolRaw: (message, options) => this.#execProtocolRaw(message, options),
       execProtocolRawStream: (message, options) => this.#execProtocolRawStream(message, options),
+      runExclusiveSession: (fn) => this.#runExclusiveSession(fn),
       capabilities: this.#capabilities,
     });
   }
@@ -675,6 +676,18 @@ export class PgwasmInstance implements Pgwasm {
 
   async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
     return await this.#runExclusiveQuery(fn);
+  }
+
+  /** `/protocol`'s exclusive session: the transaction lock, then the query lock, for `fn`'s whole run. */
+  async #runExclusiveSession<T>(fn: () => Promise<T>): Promise<T> {
+    await this.#checkReady();
+    return await this.#transactionMutex.runExclusive(() =>
+      this.#queryMutex.runExclusive(async () => {
+        this.#checkOpenState();
+        this.#checkPersistLatch();
+        return await fn();
+      }),
+    );
   }
 
   // ─── array types ─────────────────────────────────────────────────────────────

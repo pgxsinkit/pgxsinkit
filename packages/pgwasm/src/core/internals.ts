@@ -41,6 +41,17 @@ export interface PgwasmProtocol {
    * tool driving it from inside a blocking wasm callback (pg_dump) needs.
    */
   execProtocolRawStream(message: Uint8Array, options: ExecProtocolStreamOptions): Promise<void>;
+  /**
+   * Run `fn` with the database's session to itself, for a tool whose exchanges must not interleave with
+   * anything else (pg_dump). It waits for, then holds, the locks a `transaction()` holds, and the query
+   * lock: no query, exec, transaction, listen, live-query refresh or Store backup of this database runs
+   * until `fn` settles.
+   *
+   * What `fn` sends with the `execProtocol*` methods is its own responsibility: no transaction is begun
+   * or ended around it, and a message is persisted only as its options say. Inside `fn`, use only these
+   * wire methods: the database's query methods wait for the locks `fn` holds, so awaiting one deadlocks.
+   */
+  runExclusiveSession<T>(fn: () => Promise<T>): Promise<T>;
   /** The build's capabilities, e.g. to check `synchronousExchange` before relying on it. */
   readonly capabilities: BuildCapabilities;
 }

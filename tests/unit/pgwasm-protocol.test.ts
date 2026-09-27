@@ -3,8 +3,8 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { DatabaseError } from "../../packages/pgwasm/src";
-import { protocol, serialize } from "../../packages/pgwasm/src/protocol";
+import { DatabaseError, PgwasmClosedError } from "../../packages/pgwasm/src";
+import { messages, protocol, serialize } from "../../packages/pgwasm/src/protocol";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { rejectionOf } from "./support/rejection";
 
@@ -69,5 +69,92 @@ describe("the wire, through protocol(pg)", () => {
 
   it("refuses anything that is not a pgwasm instance", () => {
     expect(() => protocol({} as never)).toThrow(/Not a pgwasm instance/);
+  });
+});
+
+const nextMacrotask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/** A promise and the function that resolves it. */
+function latch(): { readonly promise: Promise<void>; readonly open: () => void } {
+  let open: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+// A tool that drives the wire through several exchanges (pg_dump) must not have a query, a transaction's
+// next statement or a backup run between them.
+describe("an exclusive session, through protocol(pg)", () => {
+  it("holds off queries, transactions and backups until it settles", async () => {
+    const pg = await createTestPgwasm();
+    const wire = protocol(pg);
+    await pg.exec("CREATE TABLE seen (step text)");
+    const entered = latch();
+    const gate = latch();
+    const order: string[] = [];
+    const exclusive = wire.runExclusiveSession(async () => {
+      entered.open();
+      await gate.promise;
+      await wire.execProtocol(serialize.query("INSERT INTO seen VALUES ('exclusive')"));
+      order.push("exclusive");
+      return "done";
+    });
+    await entered.promise;
+    const others = [
+      pg.query("INSERT INTO seen VALUES ('query')").then(() => order.push("query")),
+      pg
+        .transaction(async (tx) => {
+          await tx.exec("INSERT INTO seen VALUES ('transaction')");
+        })
+        .then(() => order.push("transaction")),
+      pg.dumpDataDir().then(() => order.push("backup")),
+    ];
+    await nextMacrotask();
+    await nextMacrotask();
+    expect(order).toEqual([]);
+    gate.open();
+    expect(await exclusive).toBe("done");
+    await Promise.all(others);
+    expect(order[0]).toBe("exclusive");
+    expect(order.slice(1).sort()).toEqual(["backup", "query", "transaction"]);
+    expect(
+      (await pg.query<{ step: string }>("SELECT step FROM seen ORDER BY step")).rows.map((row) => row.step),
+    ).toEqual(["exclusive", "query", "transaction"]);
+  });
+
+  it("waits for a transaction in progress, between its statements", async () => {
+    const pg = await createTestPgwasm();
+    const wire = protocol(pg);
+    const entered = latch();
+    const gate = latch();
+    const transaction = pg.transaction(async (tx) => {
+      await tx.exec("CREATE TABLE inside (id int)");
+      entered.open();
+      await gate.promise;
+      await tx.exec("INSERT INTO inside VALUES (1)");
+    });
+    await entered.promise;
+    let status: string | undefined;
+    const exclusive = wire.runExclusiveSession(async () => {
+      const replies = (await wire.execProtocol(serialize.sync())).messages;
+      const ready = replies.find((reply) => reply instanceof messages.ReadyForQueryMessage);
+      status = ready instanceof messages.ReadyForQueryMessage ? ready.status : undefined;
+    });
+    await nextMacrotask();
+    await nextMacrotask();
+    expect(status).toBeUndefined();
+    gate.open();
+    await transaction;
+    await exclusive;
+    // It ran after the COMMIT: the session was outside any transaction block.
+    expect(status).toBe("I");
+  });
+
+  it("refuses a closed database", async () => {
+    const pg = await createTestPgwasm();
+    const wire = protocol(pg);
+    await pg.close();
+    expect(await rejectionOf(wire.runExclusiveSession(async () => undefined))).toBeInstanceOf(PgwasmClosedError);
   });
 });

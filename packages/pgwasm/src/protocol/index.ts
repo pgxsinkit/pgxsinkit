@@ -1,7 +1,8 @@
 /**
  * Wire-level access to a pgwasm instance, for tools that speak the Postgres protocol themselves
- * (pg_dump, a REPL, a benchmark). Everyday code uses `query`, `exec` and `transaction` instead: these
- * calls bypass pgwasm's query locks.
+ * (pg_dump, a REPL, a benchmark). Everyday code uses `query`, `exec` and `transaction` instead: the
+ * `execProtocol*` calls bypass pgwasm's query locks. A tool whose exchanges must not interleave with
+ * anything else runs them inside `runExclusiveSession`, which holds those locks.
  */
 
 import { protocolAccessOf, type PgwasmProtocol } from "../core/internals";
