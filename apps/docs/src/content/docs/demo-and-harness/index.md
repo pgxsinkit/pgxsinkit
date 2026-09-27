@@ -26,7 +26,7 @@ three toolkit edge functions —
 Its job is twofold:
 
 - **Example code** — a working reference for wiring `createSyncClient`, staging and flushing
-  optimistic writes, reading reactively from PGlite, and surfacing convergence/conflict state.
+  optimistic writes, reading reactively from the local store, and surfacing convergence/conflict state.
 - **A hands-on view of the behaviour** — somewhere to watch offline-first sync, membership fan-out,
   optimistic writes, and conflict convergence working end-to-end.
 
@@ -63,7 +63,7 @@ verification lanes back it:
 
 - **Integration suites** (`tests/integration`) stand up an isolated, ephemeral PostgreSQL +
   durable-streams + Circuits engine stack and assert the topology end-to-end: write validation, the
-  in-database apply, membership fan-out, RLS auth context, and eventual convergence in local PGlite.
+  in-database apply, membership fan-out, RLS auth context, and eventual convergence in the local store.
   The stream edge runs in-process there, which is also what lets a test revoke an entitlement between
   polls.
 - **Board demo smoke** drives the demo's full deployment topology — GoTrue → Envoy → the bundled edge

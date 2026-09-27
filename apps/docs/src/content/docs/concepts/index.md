@@ -12,9 +12,9 @@ they cover everything a fresh reader (human or AI) tends to get wrong.
 1. [The two paths](/concepts/two-paths/) — read and write are separate and asymmetric.
 2. [The write path](/concepts/write-path/) — stage locally, flush a batch, apply in the database.
 3. [The read path](/concepts/read-path/) — shapes stream Postgres → the Circuits engine →
-   durable-streams → PGlite, granted by a control plane and gated at the edge.
+   durable-streams → the local store, granted by a control plane and gated at the edge.
 4. [Timestamps](/concepts/timestamps/) — microsecond integers carried as decimal strings.
-5. [Local schema & DDL parity](/concepts/local-schema-ddl-parity/) — what local PGlite does and
+5. [Local schema & DDL parity](/concepts/local-schema-ddl-parity/) — what the local store does and
    does not replicate.
 
 Once you have the model, the [Registry entry options](/concepts/registry-entry-options/) page is the
@@ -22,6 +22,8 @@ field-by-field reference for configuring a sync table — every option, with a s
 achieves, and when to use it. And [Worker mode](/concepts/worker-mode/) covers the browser topology in
 which tabs attach through a SharedWorker and capability placement chooses a Safari SW-direct or elected
 Chromium/Firefox engine (`defineSyncWorker` / `attachSyncClient`) instead of the calling thread.
+[Postgres builds](/concepts/postgres-builds/) explains the compiled Postgres the local store runs on, why a
+store belongs to the build that created it, and what each build refusal means.
 
 Not everything is sync state. [The event lane](/concepts/event-lane/) is the second lane beside the sync
 rail, for high-volume append-only facts that nothing ever reads back down: `appendEvent` into a local

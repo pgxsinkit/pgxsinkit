@@ -6,18 +6,22 @@ sidebar:
 ---
 
 pgxsinkit ships as a set of focused packages. Most apps install `client`, `server`, and `contracts`,
-plus `react` for React bindings. The OPFS-repacked package is an optional low-level PGlite storage
-backend for browser workers.
+plus `react` for React bindings. The client runs its local store on [pgwasm](/packages/pgwasm/), the
+toolkit's own Postgres-in-WebAssembly runtime, and brings it as a dependency; install the pgwasm packages
+yourself only to use them directly.
 
 ## Published packages (the product)
 
-| Package                               | Install when you…                                                                                                                                                                                            | Runtime             |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- |
-| **`@pgxsinkit/contracts`**            | always — shared Zod schemas, the sync registry types (tables **and** event-stream registration), and the transport DTOs every lane uses.                                                                     | shared              |
-| **`@pgxsinkit/server`**               | you run the server — `createSyncServer`, the apply-function builder, the read path's control plane (`/sync/v1/*`) and stream edge (`createStreamGate`), and the event lane's ingest route + consumer runner. | any `fetch` runtime |
-| **`@pgxsinkit/client`**               | you build the client — local overlay + mutation journal, batch flush, read wiring over PGlite, and the event Outbox + its flush loop.                                                                        | browser / PGlite    |
-| **`@pgxsinkit/react`**                | you want React hooks/bindings over the client.                                                                                                                                                               | React               |
-| **`@pgxsinkit/pglite-opfs-repacked`** | you need a constant-handle OPFS filesystem for a PGlite database in a capability-proven worker.                                                                                                              | browser worker      |
+| Package                         | Install when you…                                                                                                                                                                                            | Runtime             |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- |
+| **`@pgxsinkit/contracts`**      | always — shared Zod schemas, the sync registry types (tables **and** event-stream registration), and the transport DTOs every lane uses.                                                                     | shared              |
+| **`@pgxsinkit/server`**         | you run the server — `createSyncServer`, the apply-function builder, the read path's control plane (`/sync/v1/*`) and stream edge (`createStreamGate`), and the event lane's ingest route + consumer runner. | any `fetch` runtime |
+| **`@pgxsinkit/client`**         | you build the client — local overlay + mutation journal, batch flush, read wiring over the local pgwasm store, and the event Outbox + its flush loop.                                                        | browser / PGlite    |
+| **`@pgxsinkit/react`**          | you want React hooks/bindings over the client.                                                                                                                                                               | React               |
+| **`@pgxsinkit/pgwasm`**         | you use the local Postgres directly — `createPgwasm`, live queries, the Drizzle driver, the wire protocol, or the constant-handle OPFS-repacked store (`/opfs`) in a capability-proven worker.               |
+| **`@pgxsinkit/pgwasm-c`**       | you supply the C Postgres build yourself — to warm its files early (`createCBuild({ assets })`), start from the prepopulated data directory, or load `amcheck`.                                              |
+| **`@pgxsinkit/pgwasm-pg-dump`** | you run `pg_dump` against a pgwasm database in the same page, worker or Bun process.                                                                                                                         |
+| **`@pgxsinkit/pgwasm-repl`**    | you want an interactive SQL prompt (a React component) over a pgwasm database or a client's inspection surface.                                                                                              | browser worker      |
 
 ## Internal packages (not published)
 
@@ -42,5 +46,6 @@ backend for browser workers.
   not a sync path at all — no overlay, no echo, no conflict. See [The event lane](/concepts/event-lane/).
 
 API-level details will live in the [API reference](/reference/) (generated from the package sources).
-For the storage package's construction, durability, and recreation contract, see
-[OPFS-repacked PGlite storage](/packages/pglite-opfs-repacked/).
+For the pgwasm packages — the runtime, the C build, the OPFS-repacked store's construction, durability,
+and recreation contract, `pg_dump` and the REPL — see [pgwasm](/packages/pgwasm/), and for what a build is,
+[Postgres builds](/concepts/postgres-builds/).

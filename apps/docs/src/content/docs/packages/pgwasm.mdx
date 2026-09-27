@@ -1,0 +1,340 @@
+---
+title: pgwasm — Postgres in the browser
+description: The pgwasm family — the Postgres runtime the client's local store runs on, its C build, the OPFS-repacked store, pg_dump, and the SQL REPL.
+sidebar:
+  label: pgwasm
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+pgwasm is the Postgres runtime under every pgxsinkit client: a real PostgreSQL 18, compiled to
+WebAssembly, running in a page, a worker or a Bun process. `@pgxsinkit/client` depends on it and creates
+the local store with it, so an app that only syncs never imports pgwasm itself. Reach for these packages
+directly to type a local store, write raw SQL against it, run your own database next to the synced one,
+or add the REPL and `pg_dump` to a debug page.
+
+pgwasm began as a fork of [PGlite](https://pglite.dev) and is now its own runtime: it keeps PGlite's
+query, transaction and live-query model under new names, and it separates the runtime from the compiled
+Postgres (the **build**), so a store records which build made it.
+
+## The packages
+
+| Package                         | What it is                                                                                         |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **`@pgxsinkit/pgwasm`**         | the runtime: `createPgwasm`, queries, transactions, live queries, a Drizzle driver, the OPFS store |
+| **`@pgxsinkit/pgwasm-c`**       | the C Postgres build (`cBuild`), its prepopulated data directory and the `amcheck` extension       |
+| **`@pgxsinkit/pgwasm-pg-dump`** | PostgreSQL 18's `pg_dump`, compiled to WebAssembly, run against a database in the same scope       |
+| **`@pgxsinkit/pgwasm-repl`**    | an interactive SQL prompt, as a React component                                                    |
+
+All four are ESM only, for Bun and browsers (pages, dedicated workers, SharedWorkers and extension pages).
+
+```bash
+bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c
+```
+
+## `@pgxsinkit/pgwasm`
+
+```ts
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { live } from "@pgxsinkit/pgwasm/live";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+
+const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app", extensions: { live } });
+await pg.exec("CREATE TABLE IF NOT EXISTS todo (id serial PRIMARY KEY, title text)");
+const { rows } = await pg.query<{ id: number; title: string }>("SELECT * FROM todo");
+await pg.close();
+```
+
+`createPgwasm` is async and needs a `build`: the compiled Postgres it runs (see
+[Postgres builds](/concepts/postgres-builds/)). `dataDir` names where the data directory lives, always
+with a scheme:
+
+- `memory://` (or no `dataDir`): in memory, gone on `close()`;
+- `idb://<name>`: IndexedDB, in a browser;
+- `file://<path>`: a directory on disk, on Bun.
+
+A build states which of these it supports. `opfs-ahp://`, PGlite's one-handle-per-file OPFS layout, is
+not supported and fails with `OpfsAhpRemovedError`; the OPFS store is `@pgxsinkit/pgwasm/opfs` (below).
+
+A database records the build that created it. Opening it with another build fails with
+`BuildMismatchError` before anything is written. `pg.dumpDataDir()` makes a **Store backup** (a tarball of
+the data directory) and the `loadDataDir` option restores one into an empty data directory; the backup
+carries the same record, so it restores only into its own build.
+
+| Import                       | What it gives you                                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `@pgxsinkit/pgwasm`          | `createPgwasm`, the `Pgwasm` interface and option types, the typed errors                      |
+| `@pgxsinkit/pgwasm/live`     | the `live` extension: `live.query`, `live.incrementalQuery`, `live.changes` (`PgwasmWithLive`) |
+| `@pgxsinkit/pgwasm/drizzle`  | a Drizzle ORM driver: `drizzle(pg)` returns a `PgwasmDatabase`; needs `drizzle-orm`            |
+| `@pgxsinkit/pgwasm/protocol` | `protocol(pg)`: wire-level access and an exclusive session, for tools such as `pg_dump`        |
+| `@pgxsinkit/pgwasm/opfs`     | the OPFS-repacked store: `createOpfsPgwasm`, `strictSync`, its errors and its low-level parts  |
+| `@pgxsinkit/pgwasm/fs`       | the filesystem contract a custom storage implements                                            |
+| `@pgxsinkit/pgwasm/build`    | the contract a Postgres build package implements                                               |
+
+The pgxsinkit client's store type is `PgwasmClient` (from `@pgxsinkit/client`), which is `PgwasmWithLive`:
+a pgwasm database with the `live` extension. The React hooks' `{ pgwasm }` option and the
+`prepareLocalDb*` hooks take it.
+
+### Typed errors
+
+Every runtime error extends `PgwasmError`. The ones an app meets:
+
+- **`BuildMismatchError`**, **`DataFormatMismatchError`**, **`BuildMarkerUnreadableError`**: the data
+  directory or backup belongs to another build, another data format, or has an unreadable build marker.
+  See [Postgres builds](/concepts/postgres-builds/#the-refusals).
+- **`DataDirExistsError`**: `loadDataDir` was given for a data directory that already holds a database.
+  A backup restores only into an empty one.
+- **`BackupFormatError`**: the backup is not a data-directory tarball, or a member lies outside the data
+  directory.
+- **`StorageInUseError`**: another open database holds the same storage (an IndexedDB store open in
+  another context).
+- **`UnsupportedDataDirError`**: a `dataDir` pgwasm does not accept (an unknown scheme, a bare path, or
+  `dataDir` together with `fs`). **`UnsupportedFilesystemError`**: the build does not mount that kind of
+  storage. **`UnsupportedFeatureError`**: a feature the build does not have.
+- **`CrossOriginIsolationRequiredError`**: the build needs a cross-origin isolated page and this one is not.
+- **`ExtensionBuildMismatchError`**: an extension was compiled for another build.
+- **`PgwasmClosedError`**: the database is closing or closed.
+- **`PgwasmFailedError`**: the build failed underneath a statement (a storage failure thrown into the
+  engine, a PANIC). The instance is failed: every later statement throws the same error, and `close()`
+  releases its resources and rejects with it. Close it and open the store again.
+- **`DatabaseError`**: Postgres itself rejected a statement (with its `code`, `detail` and the rest of the
+  error fields).
+
+## The OPFS-repacked store (`@pgxsinkit/pgwasm/opfs`)
+
+The client's default store in a capable worker. It keeps a whole data directory inside four exclusively
+owned OPFS files, so its handle count stays four however many files Postgres creates. The client wires it
+for you ([Worker mode](/concepts/worker-mode/)); use it directly only for a database of your own.
+
+### Requirements
+
+- Run the database in a worker scope where an actual `createSyncAccessHandle()` open succeeds. Chromium and
+  Firefox grant it in dedicated workers and deny it in SharedWorkers. Real macOS and iOS Safari grant it in
+  SharedWorkers. Method presence is not proof.
+- Do not run the database on the window main thread. Playwright's WebKitGTK denies synchronous handles in
+  both worker kinds and exercises the IndexedDB fallback; that is not evidence against real Safari.
+- Give each database its own otherwise-empty OPFS directory. The store owns the directory in full.
+
+The store accepts an OPFS directory handle and does not choose a worker topology. For a cross-browser
+pgxsinkit app, prefer `@pgxsinkit/client`'s [capability-driven worker mode](/concepts/worker-mode/): it
+probes the SharedWorker, runs directly there on Safari, and elects a dedicated engine worker on Chromium and
+Firefox.
+
+### Create and close
+
+`createOpfsPgwasm` is the only supported construction path:
+
+```ts
+import { createOpfsPgwasm, strictSync } from "@pgxsinkit/pgwasm/opfs";
+import { live } from "@pgxsinkit/pgwasm/live";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+
+const root = await navigator.storage.getDirectory();
+const directory = await root.getDirectoryHandle("my-database", { create: true });
+
+const pg = await createOpfsPgwasm({
+  build: cBuild,
+  directory,
+  durability: "relaxed",
+  extentSize: 64 * 1024,
+  pgwasm: {
+    // Any other pgwasm option, including extensions.
+    extensions: { live },
+  },
+});
+
+try {
+  await pg.exec("SELECT 1");
+  await strictSync(pg); // a strict boundary on demand
+} finally {
+  await pg.close();
+}
+```
+
+The store owns the database's `build`, `dataDir`, `fs`, and `relaxedDurability` options, so `pgwasm` takes
+every other `createPgwasm` option. The factory performs a strict sync after a successful initialization,
+and closing the database closes the store: every acquired handle is released after a failed
+initialization or a shutdown. The optional `onPhase` callback reports `"store-opened"` (handles acquired)
+and `"pgwasm-ready"` (the database booted), for attributing a slow create.
+
+### One durability authority
+
+The store's `durability` option is the only physical-durability choice:
+
+- `"relaxed"` is the default. Ordinary awaited syncs assert health and perform any due deferred repack
+  without physically flushing routine work. Termination may lose an unflushed suffix, while recovery keeps
+  the longest valid metadata-log prefix and never exposes bytes from an earlier extent owner.
+- `"strict"` flushes arena data before metadata on every awaited sync. A successful query return is a
+  strict boundary.
+
+pgwasm always awaits the store's sync. A non-awaited sync raises `DurabilityModeMismatchError` and poisons
+the live instance; it is a construction error, not an override. Successful initialization, repack
+activation, and close from an open instance always use strict ordering in either mode. `strictSync(pg)`
+stabilizes every preceding operation in strict order on demand; it throws `UnsupportedFeatureError` for a
+database `createOpfsPgwasm` did not create.
+
+### Extent and directory identity
+
+For a new store, `extentSize` accepts 8 KiB–16 MiB in 8 KiB increments and defaults to 64 KiB. An existing
+store's identity is authoritative. Supplying another valid value raises `ExtentSizeMismatchError` without
+changing it.
+
+The directory contains exactly `arena.bin`, `metadata-a.bin`, `metadata-b.bin`, and `activation.bin`. An
+extra entry or wrong entry kind raises `UnexpectedStoreEntryError` before owned content changes. A second
+live owner raises `StoreOwnedError`.
+
+### Recreate after a format change
+
+Each release of the store accepts one exact format identity. On `StoreRecreationRequiredError`, close every
+owner, remove the complete dedicated directory, and create a fresh one:
+
+```ts
+await pg.close();
+await root.removeEntry("my-database", { recursive: true });
+```
+
+Do not copy individual owned files into the fresh directory. `CorruptStoreError` means the activated
+authority is invalid; restore an external backup or recreate. The store fails closed rather than guessing
+another authority.
+
+### Failure boundaries
+
+The guaranteed model covers worker, tab, process, and browser termination; unflushed writes may be absent,
+partial, or independently present; completed flushes remain stable. It does not promise recovery after
+power loss, media failure, arbitrary external edits, or missing activated files.
+
+A platform write the store could not complete poisons the live instance. An arena write the platform
+rejected before confirming a single byte leaves that range unknown, and a failed metadata-log append is
+ambiguous by construction, so the store never continues from either: that call and every later call throw
+`StoreFailedError` until `close()`, which releases the handles and persists nothing more. Its numeric
+`code` is 29 (`EIO`), so pgwasm reports an I/O error to Postgres, which treats a failed WAL write as PANIC,
+and the awaited sync after a commit rejects on a poisoned store: in either durability mode, a commit whose
+write failed is never acknowledged. Close the database and reopen it; recovery keeps exactly what reached
+the platform. A write the platform accepted in part returns the short count and does not poison.
+
+All storage errors expose stable classes. Store-level errors carry a string `storeCode`; wrapped errors
+retain `cause`. `StoreFailedError` means the live instance is poisoned: close and reopen, then inspect its
+cause. It also carries the numeric `code` 29 (`EIO`), without being an `FsError`. `StoreClosedError` is a
+call after `close()`; `StoreLimitError` is a store-format limit reached.
+
+### Lower-level parts
+
+`/opfs` also exports the parts the factory is built from, for a host that owns a store itself: the storage
+ports (`OpfsRepackedPort`, `FileRepackedPort` on Bun, `MemoryRepackedPort` with fault injection), the
+virtual filesystem (`MountedRepackedVfs`, `OpfsRepackedFS`), a synchronous broker that lets one coordinator
+worker own a store while other threads reach it over a `SharedArrayBuffer` channel (`RepackedSyncBroker`,
+`RepackedSyncClient`), and a WASI preview1 filesystem adapter (`createWasiPreview1Fs`) that routes a wasm
+engine's file calls to one store through that broker. The
+[API reference](/api/pgwasm/) lists them in full.
+
+## `@pgxsinkit/pgwasm-c`: the C build
+
+PostgreSQL 18 compiled to WebAssembly with Emscripten, single-threaded, with the memory, IndexedDB
+(`idb://`) and file (`file://`, Bun) filesystems. `cBuild` is the build; it is the client's default.
+
+The package ships its WebAssembly module, filesystem bundle and initdb as files next to its code,
+referenced as `new URL("…", import.meta.url)`, so bundlers copy and fingerprint them. With Vite, exclude it
+(and `@pgxsinkit/pgwasm-pg-dump`) from dependency pre-bundling, which would move the module away from its
+files:
+
+```ts
+// vite.config.ts
+export default defineConfig({
+  optimizeDeps: { exclude: ["@pgxsinkit/pgwasm-c", "@pgxsinkit/pgwasm-pg-dump"] },
+});
+```
+
+**Warming the artefacts early.** `cBuildArtefacts` holds the URLs of the files the build loads. Fetch and
+compile them on an earlier screen and hand the promise to `createCBuild({ assets })`; a rejected warm falls
+back to the build's own load, so it never fails the create. The client takes the result as its `build`
+option ([Operating in production](/start/operating-in-production/#pre-warming-the-postgres-build)).
+
+```ts
+import { cBuildArtefacts, createCBuild, type CBuildAssets } from "@pgxsinkit/pgwasm-c";
+
+const assets: Promise<CBuildAssets> = Promise.all([
+  WebAssembly.compileStreaming(fetch(cBuildArtefacts.postgresWasm)),
+  WebAssembly.compileStreaming(fetch(cBuildArtefacts.initdbWasm)),
+  fetch(cBuildArtefacts.fsBundle).then((response) => response.blob()),
+]).then(([postgresWasmModule, initdbWasmModule, fsBundle]) => ({ postgresWasmModule, initdbWasmModule, fsBundle }));
+
+const build = createCBuild({ assets });
+```
+
+**The prepopulated data directory** (`@pgxsinkit/pgwasm-c/prepopulated`). A new database normally runs
+initdb. `prepopulatedDataDir()` returns a freshly initialised data directory as a Store backup, which starts
+faster. Pass it as `loadDataDir` when creating a store, never when reopening one:
+
+```ts
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+
+const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
+```
+
+**Extensions** (`@pgxsinkit/pgwasm-c/contrib/amcheck`). `amcheck` is included:
+
+```ts
+import { amcheck } from "@pgxsinkit/pgwasm-c/contrib/amcheck";
+
+const pg = await createPgwasm({ build: cBuild, extensions: { amcheck } });
+await pg.exec("CREATE EXTENSION amcheck");
+```
+
+## `@pgxsinkit/pgwasm-pg-dump`
+
+`pg_dump` for a pgwasm database, run in the same page, worker or Bun process. The client's
+[data export](/concepts/export-and-restore/) uses it.
+
+```ts
+import { pgDump } from "@pgxsinkit/pgwasm-pg-dump";
+
+const dump = await pgDump({ pg }); // a File: dump.sql
+const copy = await createPgwasm({ build: cBuild });
+await copy.exec(await dump.text()); // a plain dump is SQL that exec() runs back
+```
+
+- `pg`: the database. Its build must reply on the wire synchronously, as `cBuild` does; otherwise
+  `pgDump` throws `PgDumpUnsupportedBuildError` before loading anything.
+- `args`: more `pg_dump` arguments, such as `["--schema-only"]`, `["--table=notes"]` or
+  `["--format=custom"]`. The fixed ones win: `-U postgres --inserts -j 1 -f <file>`.
+- `fileName`: the returned file's name, `dump.sql` by default.
+
+A plain dump is `text/plain`; the custom and tar formats and a compressed plain dump are returned byte for
+byte as `application/octet-stream`. The directory format is not supported. After restoring a plain dump,
+the restoring session's `search_path` is empty (the dump sets it so); set it back if the session relies on
+it.
+
+`pg_dump` runs on the database's own session and holds it for the whole dump: queries, transactions and
+backups of the same database wait. A session left inside a hand-written `BEGIN` is refused with
+`PgDumpSessionError`. Afterwards the session is as it was: `pg_dump`'s transaction is ended, its prepared
+statements are deallocated, and every setting it changed is restored (a setting that cannot be is a
+`PgDumpSessionError`). `PgDumpError` carries `exitCode` (`null` on a crash) and `stderr`.
+
+## `@pgxsinkit/pgwasm-repl`
+
+An interactive SQL prompt as a React component (React 19.3 or later): CodeMirror input with autocompletion
+of keywords, tables and columns, input history, and psql's `\d` family of commands.
+
+```tsx
+import { replAdapter, type SyncClient } from "@pgxsinkit/client";
+import { Repl } from "@pgxsinkit/pgwasm-repl";
+
+export function Console({ client }: { client: SyncClient }) {
+  return <Repl pg={replAdapter(client)} />;
+}
+```
+
+`pg` is anything with pgwasm's `query` and `exec` (the `ReplDatabase` type): a `Pgwasm`, or a pgxsinkit
+client's inspection surface through `replAdapter(client)`, which works on a
+[worker-attached client](/concepts/worker-mode/) too. When `pg` has a `waitReady` promise, the prompt waits
+for it. The other props are `border`, `theme` (`"light"`, `"dark"` or `"auto"`), `lightTheme` and
+`darkTheme`.
+
+<Aside type="caution" title="Inspection only">
+  Statements typed into the REPL run raw against the local store: they bypass the mutation journal and the optimistic
+  overlay, and a write to a synced table stays local and never converges.
+</Aside>
+
+See the API reference for [`@pgxsinkit/pgwasm`](/api/pgwasm/), [`@pgxsinkit/pgwasm-c`](/api/pgwasm-c/),
+[`@pgxsinkit/pgwasm-pg-dump`](/api/pgwasm-pg-dump/readme/) and
+[`@pgxsinkit/pgwasm-repl`](/api/pgwasm-repl/readme/).

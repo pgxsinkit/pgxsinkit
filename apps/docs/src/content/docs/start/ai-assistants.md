@@ -4,7 +4,7 @@ description: Point your coding assistant at pgxsinkit's llms.txt and the Agent S
 ---
 
 pgxsinkit is easy to misunderstand from the source alone — the read and write paths are asymmetric,
-the write path is deliberately a single in-database function, and local PGlite schema is not a full
+the write path is deliberately a single in-database function, and local pgwasm schema is not a full
 mirror of Postgres. These docs publish machine-readable summaries so an assistant can load the
 correct model without re-deriving it from the whole repository.
 
@@ -31,14 +31,14 @@ you installed. They complement `llms.txt` rather than replace it: `llms.txt` is 
 by URL; a skill is a focused checklist your assistant loads at the moment it reaches for that task, and it
 travels with the dependency.
 
-| Skill                    | Package                           | Load it before…                                                                                                                                                                                                                                                     |
-| ------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`core`**               | `@pgxsinkit/client`               | wiring sync at all — the two asymmetric paths, the single in-database write path, how the read path fails closed (401 at the control plane, 403 at the edge), and why local PGlite is not full DDL parity.                                                          |
-| **`registry-authoring`** | `@pgxsinkit/contracts`            | defining a registry — the writable-table rules (a server-version field **and** a conflict policy), server-managed fields, authoring row filters with the `p.*` predicate builders, and deriving the read filter and RLS from one predicate.                         |
-| **`operating`**          | `@pgxsinkit/client`               | shipping to production — runtime latency, capability-driven worker placement (Safari SW-direct; Chromium/Firefox elected), OPFS-vs-idb durability, relocation outcomes, backend permanence and destruction, diagnostics, and the forwarded debug rail.              |
-| **`deploying`**          | `@pgxsinkit/server`               | deploying the write API, the read path's control plane, and the stream edge on Bun / Deno / Supabase Edge / Workers — bundling for Deno, the function-name path rewrite, and resolving claims from the platform JWT.                                                |
-| **`react`**              | `@pgxsinkit/react`                | building React components — `createSyncClientHooks`, the live read hooks, the snake_case→field-key remap, and that writes go through `client.tables.<t>`, not the hooks.                                                                                            |
-| **`operating`**          | `@pgxsinkit/pglite-opfs-repacked` | constructing the constant-handle OPFS backend in a capability-proven worker scope — dedicated workers on Chromium/Firefox, SharedWorkers on real Safari — plus factory-owned durability, extent identity, complete-directory recreation, and stable error remedies. |
+| Skill                    | Package                | Load it before…                                                                                                                                                                                                                                                                                       |
+| ------------------------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`core`**               | `@pgxsinkit/client`    | wiring sync at all — the two asymmetric paths, the single in-database write path, how the read path fails closed (401 at the control plane, 403 at the edge), and why the local pgwasm schema is not full DDL parity.                                                                                 |
+| **`registry-authoring`** | `@pgxsinkit/contracts` | defining a registry — the writable-table rules (a server-version field **and** a conflict policy), server-managed fields, authoring row filters with the `p.*` predicate builders, and deriving the read filter and RLS from one predicate.                                                           |
+| **`operating`**          | `@pgxsinkit/client`    | shipping to production — runtime latency, capability-driven worker placement (Safari SW-direct; Chromium/Firefox elected), OPFS-vs-idb durability, relocation outcomes, backend permanence and destruction, diagnostics, and the forwarded debug rail.                                                |
+| **`deploying`**          | `@pgxsinkit/server`    | deploying the write API, the read path's control plane, and the stream edge on Bun / Deno / Supabase Edge / Workers — bundling for Deno, the function-name path rewrite, and resolving claims from the platform JWT.                                                                                  |
+| **`react`**              | `@pgxsinkit/react`     | building React components — `createSyncClientHooks`, the live read hooks, the snake_case→field-key remap, and that writes go through `client.tables.<t>`, not the hooks.                                                                                                                              |
+| **`opfs`**               | `@pgxsinkit/pgwasm`    | constructing the constant-handle OPFS-repacked store (`@pgxsinkit/pgwasm/opfs`) in a capability-proven worker scope — dedicated workers on Chromium/Firefox, SharedWorkers on real Safari — plus factory-owned durability, extent identity, complete-directory recreation, and stable error remedies. |
 
 Discover and load them with the [TanStack Intent](https://tanstack.com/intent) CLI, from a project that
 has `@pgxsinkit/*` installed:
@@ -61,7 +61,7 @@ resolve to the wrong CLI.)
 4. **The engine's table list is explicit, never `*`.** `ELECTRIC_CIRCUITS_PG_TABLES` names bare table
    names; `*` sweeps in every `public` table with a primary key. A schema-qualified registry is refused
    outright — the engine keys tables by bare name end to end.
-5. **Local PGlite schema is not full DDL parity** with Postgres.
+5. **The local pgwasm schema is not full DDL parity** with Postgres.
 6. **Browser storage is capability-selected, not browser-named.** Capability worker mode prefers
    OPFS-repacked: real Safari runs SW-direct, Chromium/Firefox elect a dedicated worker, and idb is the
    fallback. Read `BootReport.storageBackend`/`engineHome`; do not infer from WebKitGTK or user-agent text.
@@ -88,13 +88,13 @@ and each silently makes a live app feel slow or flaky. An assistant wiring a rea
 - **Serverless edges cold-start.** The first write after idle lags; warm the worker and set its
   wall-clock timeout above the durable-streams long-poll hold.
 - **Debug latency with `globalThis.__pgxsinkitDebug`**, and measure at the network boundary — polling
-  PGlite in a loop inflates the number it reports.
+  the local store in a loop inflates the number it reports.
 - **In a browser, attach through a SharedWorker** (`defineSyncWorker` + `attachSyncClient`) to take
-  PGlite off the main thread. Capability placement is automatic — there is no placement option; pass the
+  the local store off the main thread. Capability placement is automatic — there is no placement option; pass the
   SharedWorker as a factory (`worker: () => SharedWorker`) and the elected engine is auto-derived from
   the SharedWorker's own script URL (supply `createEngineWorker` only for non-module/underivable
-  entries). Storage is declared on the registry (`storage.backend`/`storage.durability`, defaulting to
-  opfs/relaxed); force idb with `storage.backend: "idbfs"`. Safari runs in that SharedWorker;
+  entries). Storage is declared on the registry (`storage.backend`/`storage.durability`/`storage.build`, defaulting to
+  opfs/relaxed/c); force idb with `storage.backend: "idbfs"`. Safari runs in that SharedWorker;
   Chromium/Firefox elect a dedicated engine behind it. Always pass `extendedLifetime: true`, and branch
   on `EngineRelocatedError.outcome` rather than blindly retrying a mutation. See
   [Worker mode](/concepts/worker-mode/).

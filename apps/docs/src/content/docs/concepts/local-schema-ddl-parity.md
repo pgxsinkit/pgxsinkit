@@ -1,11 +1,11 @@
 ---
 title: Local schema & DDL parity
-description: What the generated local PGlite schema replicates from Postgres, what it never will, and what it might.
+description: What the generated local pgwasm schema replicates from Postgres, what it never will, and what it might.
 sidebar:
   order: 7
 ---
 
-The client runs a local PGlite database whose schema is **generated** from your sync registry. It is
+The client runs a local Postgres database (pgwasm) whose schema is **generated** from your sync registry. It is
 a **read cache plus write-staging buffer** — not a mirror of your Postgres schema. This page is
 precise about what it does and does not replicate.
 
@@ -48,7 +48,7 @@ and divergent at worst:
 - **Managed-field values** (e.g. owner via `authClaim` at claimPath `["sub"]`, `created_at_us`/`updated_at_us`
   via `nowMicroseconds`). These are deliberately assigned by the database, not defaulted locally — their
   server-side DEFAULTs call `public.pgxsinkit_clock_us()`, a server-only function never rendered into the
-  local PGlite DDL (registry defaults aren't emitted locally at all).
+  local pgwasm DDL (registry defaults aren't emitted locally at all).
 
 ## Not yet local — gaps we intend to narrow
 
@@ -65,7 +65,7 @@ flush, while the server stays authoritative:
   explicitly best-effort and never a substitute for the server check.
 
 Until then, validate user input on the client (e.g. with Zod) and rely on the server to reject what
-PGlite would not.
+pgwasm would not.
 
 ## Practical implications
 

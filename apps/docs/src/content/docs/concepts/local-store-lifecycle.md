@@ -61,7 +61,7 @@ For an elected home it resolves `{ engineHome, toreDown: false }` and sends noth
 dedicated engine dies with its owning tab, so its store is already released.
 
 Why it matters is a backend split. OPFS releases its sync-access handles when the engine goes idle,
-so an obsolete opfs path is deletable soon after its last document leaves. **idbfs does not** — PGlite
+so an obsolete opfs path is deletable soon after its last document leaves. **idbfs does not** — pgwasm
 holds its IndexedDB connection for the engine's whole life, and the board's workers are
 `extendedLifetime` (they outlive their spawning document), so an idbfs predecessor keeps `deleteDatabase`
 `blocked` across a reload until the browser reaps the worker. Quiescing it first releases the
@@ -82,6 +82,10 @@ idempotent and safe on an already-dead store (a fresh spawn boots no engine; its
 empty host), so call it unconditionally on every obsolete path — see ADR-0050.
 
 ## The preference-change pattern: fresh path + background destruction
+
+The same pattern applies to every field of the storage declaration, the
+[Postgres build](/concepts/postgres-builds/) (`storage.build`) included: a store belongs to the build that
+created it, so moving to another build is a fresh store, never a reopen of the old one.
 
 A store's [storage declaration](/concepts/worker-mode/#the-storage-declaration-on-the-wire-adr-0050)
 (backend, durability) is **immutable** — bound at first contact, refused on conflict (ADR-0050). So a

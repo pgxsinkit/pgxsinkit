@@ -11,13 +11,13 @@ they are not one channel — the read path carries the read direction only, neve
 ## Read path: server → client
 
 ```
-PostgreSQL  →  Circuits engine  →  durable-streams  →  PGlite
+PostgreSQL  →  Circuits engine  →  durable-streams  →  pgwasm
 ```
 
 Postgres is the source of truth. ElectricSQL's Circuits engine maintains **shapes** (filtered row
 sets, including membership fan-out) over the logical replication stream and publishes each one into
 durable-streams; the client subscribes through the pgxsinkit control plane and reads those streams
-through the stream edge, where they land in local PGlite. The app reads from PGlite. This path is live
+through the stream edge, where they land in the local store (pgwasm). The app reads from it. This path is live
 and continuous. See [The read path](/concepts/read-path/).
 
 ## Write path: client → server
@@ -54,7 +54,7 @@ obeys the one rule.
 
 ## The one rule
 
-> Read from PGlite. Write through the write route. Never write to a synced table directly, and never
+> Read from the local store. Write through the write route. Never write to a synced table directly, and never
 > expect the read path to carry a write.
 
 ## Composition is yours

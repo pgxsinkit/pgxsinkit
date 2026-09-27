@@ -1,6 +1,6 @@
 ---
 title: What is pgxsinkit?
-description: An offline-first sync toolkit for Postgres, ElectricSQL's Circuits engine, Drizzle, and PGlite — what you install, and how its two paths fit together.
+description: An offline-first sync toolkit for Postgres, ElectricSQL's Circuits engine, Drizzle, and pgwasm — what you install, and how its two paths fit together.
 ---
 
 pgxsinkit is an **offline-first sync toolkit**: the `@pgxsinkit/*` packages you install to give a
@@ -22,7 +22,7 @@ Writes do not travel back down the read path; the read and write sides use diffe
 |                 | Read path                                                 | Write path                                     |
 | --------------- | --------------------------------------------------------- | ---------------------------------------------- |
 | Direction       | server → client                                           | client → server                                |
-| Route           | `PostgreSQL → Circuits engine → durable-streams → PGlite` | `client → write route → PostgreSQL`            |
+| Route           | `PostgreSQL → Circuits engine → durable-streams → pgwasm` | `client → write route → PostgreSQL`            |
 | Carries         | live shape streams (rows)                                 | batches of staged mutations                    |
 | Read transport? | yes (durable-streams)                                     | **no** — writes never go through the read path |
 

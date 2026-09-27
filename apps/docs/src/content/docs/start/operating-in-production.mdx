@@ -20,8 +20,8 @@ tick. The interval (`createBrowserConvergenceTrigger({ intervalMs })`, default *
 only a **fallback** for retries, recovery, and cross-tab wake-ups.
 
 Because the happy path is event-driven, you should make that fallback interval **long**. A short
-interval is the dominant idle cost: every PGlite query carries ~50ms of WASM overhead and serializes on
-the one worker thread, and an unconditional reconcile each tick fires PGlite's live-query notifications,
+interval is the dominant idle cost: every local query carries ~50ms of WASM overhead and serializes on
+the one worker thread, and an unconditional reconcile each tick fires the store's live-query notifications,
 re-running every mounted query. The toolkit already idle-skips an empty reconcile, but the cheapest idle
 board is still a rare interval — the board demo runs `intervalMs: 15_000`, taking idle CPU from ~70% of a
 core to ~2% with **no change to convergence latency** (latency is bounded by the read-path echo, not the
@@ -47,11 +47,11 @@ another. The physical behavior depends on the capability-selected backend:
 
 - **IndexedDB:** strict flushes the whole datadir synchronously at the end of every query, setting a
   ~100–200ms optimistic-write floor. Relaxed returns before that snapshot and schedules it asynchronously.
-- **OPFS-repacked:** PGlite always awaits the host sync. Relaxed asserts VFS health and runs any due deferred
+- **OPFS-repacked:** pgwasm always awaits the store's sync. Relaxed asserts VFS health and runs any due deferred
   repack without an ordinary physical flush; strict flushes arena data before metadata. Initialization,
   repack activation, and open-state close keep strict ordering in both modes.
 
-The resolved mode is stamped on the `boot pglite.create` rail line. A capability fallback from opfs to
+The resolved mode is stamped on the `boot pgwasm.create` rail line. A capability fallback from opfs to
 idbfs keeps the registry-declared durability unchanged.
 
 **What you trade.** On idb, writes since the last completed snapshot are at risk only if the browser
@@ -143,8 +143,8 @@ nothing renews them once the session is gone. Because each claim is named, the r
 **idempotent**: repeating one is the same act once, and cannot take another subscriber's claim.
 
 That pairing has a configuration requirement, and the control plane enforces it: if the engine's lease
-window is **shorter than twice** the stream-token TTL, subscribe and refresh answer `503
-{"error":"sync engine lease window shorter than the token TTL"}` rather than serving sessions whose
+window is **shorter than twice** the stream-token TTL, subscribe and refresh answer
+`503 {"error":"sync engine lease window shorter than the token TTL"}` rather than serving sessions whose
 shapes would lapse after a single missed refresh. Raise `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`, lower
 `ttlSeconds`, or set the idle window to `0` (which disables dormancy, and with it leases).
 
@@ -164,7 +164,7 @@ in [Deploying the server](/start/deploying-the-server/).
 
 ## Read-path apply failures hold, they don't diverge
 
-If a local commit into PGlite keeps failing — a bad local migration, a storage/quota error, a corrupt
+If a local commit into the store keeps failing — a bad local migration, a storage/quota error, a corrupt
 local store — the read path retries with backoff and then **latches into a `degraded` phase** instead of
 advancing past the change it could not apply. It holds the read cache at the **last good commit**, so the
 client never silently diverges from the server. The failure is surfaced through the `onSyncError`
@@ -285,10 +285,13 @@ directly:
 - `board-write responded {status, ms}` (a cold edge worker, or a browser connection stall, shows up here)
 - `live-query register` / `retained` / `dedup-hit` / `evicted` (the local read model's subscription
   bookkeeping) and `live query updated → re-render` (the final UI hop, from `@pgxsinkit/react`)
-- `boot pglite.create` → `boot local schema` → `boot journal recovery` → `boot store-version reconcile`
+- `boot pgwasm.create` → `boot local schema` → `boot journal recovery` → `boot store-version reconcile`
   → `boot sync start` → `boot client ready` (the boot phases, for attributing a slow first paint to one
   of them)
-- `boot pglite assets warm` (only when the host uses the pre-warm below — see next section)
+- `boot pgwasm.create phase` (on an OPFS store: `module-loaded`, `directory-ready`, `store-opened`,
+  `pgwasm-ready`), so a create that never returns is attributable to one step
+- `boot pgwasm build warm` (only when the host times its pre-warm on the rail, as the board demo does — see
+  next section)
 
 **The read path itself does not emit rail lines.** Its transport is `@durable-streams/client` and that
 request loop is not instrumented on this rail. Read it at the two boundaries instead: `boot client ready` (fired when
@@ -320,7 +323,7 @@ const client = await createSyncClient({
 const report = await client.bootReport(); // the most recent completed boot, or null before the first sync
 ```
 
-`report.totalMs` is boot start → every eager group caught up; `phases` decomposes the local work (pglite
+`report.totalMs` is boot start → every eager group caught up; `phases` decomposes the local work (store
 create, schema exec, journal recovery, store-version reconcile, sync start, catch-up) and `groups[]` breaks
 out the per-consistency-group boot catch-up (`rows`, `requests`, `fetchMs`, `applyMs`, start/ready offsets).
 
@@ -341,7 +344,7 @@ fingerprint stored in the store. On a match the whole durable replay is **skippe
 `schemaSkipped: true`, `schemaFingerprintMatch: true`. On a mismatch or a store with no stored fingerprint
 (fresh, rebuilt) the durable schema is replayed and the new fingerprint stamped, and both flags read `false`.
 The **ephemeral** schema is recreated on every boot regardless (TEMP relations die with the old engine), so it
-is never part of the skip. A boot that adopts a caller-supplied `pgliteInstance` runs no schema stage at all
+is never part of the skip. A boot that adopts a caller-supplied `pgwasmInstance` runs no schema stage at all
 and leaves both flags at their conservative `false`.
 
 **Journal recovery.** The boot-time `sending → pending` recovery pass is driven by a durable recovery marker
@@ -354,7 +357,7 @@ that a clean settle clears:
   self-verifying marker clear run in one transaction. `journalRecoverySkipped: false`,
   `journalRecoveryRequired: true`, `journalTablesVisited` is the registry's writable-journal count, and
   `journalRowsRecovered` is the **real count** of rows lifted `sending → pending`.
-- **Marker absent** (never initialised), a **caller-supplied `pgliteInstance`** (pgxsinkit never touches the
+- **Marker absent** (never initialised), a **caller-supplied `pgwasmInstance`** (pgxsinkit never touches the
   marker table it does not own), or a **restore boot** (which ignores the marker and quarantines what it
   recovers): one conservative unconditional pass. `journalRecoverySkipped: false`,
   `journalRecoveryRequired: true`, `journalTablesVisited` is the writable-journal count, and
@@ -371,9 +374,9 @@ itself — zero eager groups, or instant catch-up.)
 
 **The `provision` block is what your login-dwell amortized.** When it is non-null, the store was adopted
 from a pre-provisioned spare (the worker-mode / eager-create pattern below): `provision.initdbMs` is the
-PGlite create cost that ran **off-thread before this boot**, and `provision.provisionedMsBeforeBoot` is how
+store create cost that ran **off-thread before this boot**, and `provision.provisionedMsBeforeBoot` is how
 long that store sat ready before the boot claimed it — the spare's amortized `initdb`, made visible. On
-such a boot `phases.pgliteCreateMs` is `null`, because the create cost is reported in `provision` instead.
+such a boot `phases.pgwasmCreateMs` is `null`, because the create cost is reported in `provision` instead.
 
 The report is `reportVersion: 1` — a contract number a consumer can branch on (additive fields keep it; a
 breaking reshape bumps it). It is a plain structured-clone-safe object, so in worker mode it crosses the
@@ -381,37 +384,45 @@ bridge unchanged; see [Worker mode](/concepts/worker-mode/) for the push-at-fina
 semantics (`onBootReport` fires only for a tab attached when the boot finalizes; a later tab reads the same
 boot through `bootReport()`).
 
-### Pre-warming PGlite's boot assets
+### Pre-warming the Postgres build
 
-A cold `PGlite.create` spends ~2.5s fetching and compiling the Postgres WASM (plus the initdb WASM and
-the filesystem bundle) before it can open a store — and that cost otherwise lands **after** sign-in, on
-the critical path to first paint. `createSyncClient` accepts a `pgliteBootAssets` option: a promise of
-the already-fetched/compiled assets (`{ pgliteWasmModule?, initdbWasmModule?, fsBundle? }`) that it
-awaits and passes straight into `PGlite.create`, so the create skips its own lazy asset load. Kick the
+A cold store create spends ~2.5s fetching and compiling the Postgres WASM (plus the initdb WASM and the
+filesystem bundle) before it can open a store — and that cost otherwise lands **after** sign-in, on the
+critical path to first paint. `createSyncClient` takes a `build` option, the
+[Postgres build](/concepts/postgres-builds/) the store runs on (`cBuild` by default). Pass
+`createCBuild({ assets })` from `@pgxsinkit/pgwasm-c`, where `assets` is a promise of the
+already-fetched/compiled files (`CBuildAssets`: `{ postgresWasmModule, initdbWasmModule, fsBundle }`,
+whose URLs `cBuildArtefacts` holds), and the build uses them instead of its own lazy load. Kick the
 fetch+compile off on an **earlier screen** (a login/identity picker) and hand the still-pending promise
-in, and the WASM cost hides behind user think-time. It is pure best-effort: a rejected/failed warm is
-caught to `undefined` and PGlite falls back to loading its own assets — the warm never fails the boot.
-The `boot pglite assets warm` rail stamp times the warm itself. (The board demo wires this from its
-login route; see `apps/board/src/board/pglite-warm.ts` for the Vite `?url` asset-resolution pattern.)
+in, and the WASM cost hides behind user think-time. It is pure best-effort: a rejected warm falls back to
+the build's own asset load — the warm never fails the boot. The client waits for an unfinished warm
+_before_ it starts the `boot pgwasm.create` stamp, so `phases.pgwasmCreateMs` measures the create alone.
+(The board demo wires this from its login route and times the warm itself on a
+`boot pgwasm build warm` rail line; see `apps/board/src/board/pgwasm-warm.ts`.) The build must be the
+registry's declared `storage.build`, or the boot fails with `StorageBuildMismatchError` before any store
+is touched.
 
-In **worker mode the engine loads PGlite's own assets — deliberately**; do not pre-supply them to the
-worker. The tab's warm still serves the engine, by priming the same-origin HTTP cache the worker fetches
+In **worker mode the engine loads the build's own assets — deliberately**; do not hand the tab's compiled
+modules to the worker. The tab's warm still serves the engine, by priming the same-origin HTTP cache the worker fetches
 from. Handing the engine a pre-compiled `WebAssembly.Module` benched **net-negative**: it forces
-compile-to-completion before instantiate, forfeiting the pipelining PGlite gets from its own streaming
+compile-to-completion before instantiate, forfeiting the pipelining the build gets from its own streaming
 load, and the engine realm has no overlap window longer than the placement/handshake gap, so the compile
-only competes for CPU at worker spawn.
+only competes for CPU at worker spawn. (A worker entry can still pass `defineSyncWorker({ build })`, e.g.
+`createCBuild({ assets })` over assets warmed inside the worker; it is checked against `storage.build` the
+same way.)
 
-Pre-warming hides only the WASM fetch+compile — `PGlite.create` still spends ~1.9s on `initdb` and opening
+Pre-warming hides only the WASM fetch+compile — the create still spends ~1.9s on `initdb` and opening
 the store, and that cannot start until the store id is known (typically the signed-in user). To hide that
 cost too, create the store **eagerly** under a generated id on the first screen and **bind** it at auth.
-`createClientPGlite(storePath, { bootAssets })` runs the identical create the client does internally
-(PGlite's `live` extension — the only create-time one — plus boot-asset consumption and the
-`boot pglite.create` stamp) and returns a schemaless, deliberately engine-less instance; hand the still-pending promise to `createSyncClient`'s `precreatedPglite` option.
-Unlike `pgliteInstance` (which assumes the caller applied the schema), `precreatedPglite` still lets the
+`createPgwasmClient(storePath, { build })` runs the identical create the client does internally
+(pgwasm's `live` extension — the only create-time one — plus the build's warm and the
+`boot pgwasm.create` stamp) and returns a schemaless, deliberately engine-less instance; hand the still-pending promise to `createSyncClient`'s `precreatedPgwasm` option.
+Unlike `pgwasmInstance` (which assumes the caller applied the schema), `precreatedPgwasm` still lets the
 client run schema exec, prepare hooks, journal recovery, and store-version reconcile — so the eager create
-buys only `initdb`, and the role/registry-derived schema stays post-auth. A rejected `precreatedPglite` is
-caught and falls back to the `storePath` create path (also consuming `pgliteBootAssets`), so the pattern is a
-pure accelerator, never a boot dependency. Bind eager stores to users with a small localStorage registry
+buys only `initdb`, and the role/registry-derived schema stays post-auth. A rejected `precreatedPgwasm` is
+caught and falls back to the `storePath` create path (on the same `build`), so the pattern is a
+pure accelerator, never a boot dependency. Both adopted instances are checked against `storage.build`
+through their own `pg.build`. Bind eager stores to users with a small localStorage registry
 (userId→storeId plus one unbound "spare"): create a spare on the login screen, claim it at sign-in, and GC
 any store that is neither mapped nor the spare. (Board demo: `apps/board/src/board/store-registry.ts`.)
 
@@ -430,8 +441,8 @@ the edge in particular wants to sit near the **caller** so catch-up bytes take t
 the region header in `writeRequestHeaders`, never in the shared `requestHeaders` (which reads also
 send), and leave the read functions following the caller.
 
-<Aside type="caution" title="Measure at the network boundary, not by polling PGlite">
-  Every PGlite query is ~50ms of WASM work on a single thread, so a tight `setInterval` that reads PGlite to "watch" a
+<Aside type="caution" title="Measure at the network boundary, not by polling the local store">
+  Every local query is ~50ms of WASM work on a single thread, so a tight `setInterval` that reads the store to "watch" a
   value inflates the very latency it reports — a self-inflicted slowdown that repeatedly masqueraded as a sync problem
   while dogfooding. Trust the instrumentation's network-boundary timings (and a server-side `curl`) over a polling loop.
 </Aside>
@@ -442,7 +453,7 @@ In a browser app you will usually attach through a **SharedWorker** rather than 
 `defineSyncWorker` in a worker entry, `attachSyncClient` in the tab. A capability probe at boot decides
 the engine's home: real Safari hosts the OPFS engine in that SharedWorker, while Chromium and Firefox
 elect a dedicated engine worker behind it. See [Worker mode](/concepts/worker-mode/) for the SharedWorker
-factory, relocation, and storage lifecycle. PGlite, the stream subscriptions, and convergence stay off
+factory, relocation, and storage lifecycle. The local store, the stream subscriptions, and convergence stay off
 the main thread in either home.
 
 - **The debug rail is forwarded and origin-tagged.** A SharedWorker's own `console` is invisible to the page
@@ -459,7 +470,7 @@ the main thread in either home.
   rejections. That is also where a missing `Access-Control-Expose-Headers` on the edge shows itself, as a hot
   loop of stream requests that never advance an offset.
 - **The spare store is a pre-spawned worker.** The spare-store pattern from
-  [Pre-warming PGlite's boot assets](#pre-warming-pglites-boot-assets) becomes a schemaless worker spawned at
+  [Pre-warming the Postgres build](#pre-warming-the-postgres-build) becomes a schemaless worker spawned at
   the login screen; claiming it binds the store id (tab-side `localStorage`) and attaches with config +
   token, so the `initdb` cost is already paid by the time sign-in completes. Boot-rail stamps trace it:
   `boot spare store ensured`, `boot mapped store prewarm`, and `boot store claimed`. Boot itself is

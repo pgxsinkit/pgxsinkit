@@ -80,7 +80,19 @@ yarn add @pgxsinkit/react
 </Tabs>
 
 The packages are published to public npm; install them with whichever package manager your app uses —
-pgxsinkit mandates none. Peer dependencies include `drizzle-orm`, `@electric-sql/pglite`, and `zod`.
+pgxsinkit mandates none. Peer dependencies are `drizzle-orm` and `zod`. The client brings its local Postgres,
+[pgwasm](/packages/pgwasm/), and the C Postgres build as ordinary dependencies; there is nothing else to
+install or override.
+
+If your app builds with Vite, exclude the two packages that ship WebAssembly files next to their code from
+dependency pre-bundling, which would move the modules away from their files:
+
+```ts
+// vite.config.ts
+export default defineConfig({
+  optimizeDeps: { exclude: ["@pgxsinkit/pgwasm-c", "@pgxsinkit/pgwasm-pg-dump"] },
+});
+```
 
 ## Stand up the write path
 
@@ -287,7 +299,7 @@ stream), and they render containment as the AST's `IN (subquery)` where the poli
 ## Stand up the read path
 
 The client writes locally into an overlay + a durable journal, flushes the journal to the server's
-write route, and subscribes to shape streams that land in local PGlite. Reads are served from PGlite.
+write route, and subscribes to shape streams that land in the local store (pgwasm). Reads are served from that store.
 The client does not construct stream URLs: it **asks** the control plane what it may read and is told,
 then reads those streams through the edge, which checks the token it was granted.
 

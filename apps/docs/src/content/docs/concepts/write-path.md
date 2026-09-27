@@ -14,7 +14,7 @@ deleted. There is no selectable backend, no strategy enum, and no per-table CRUD
 ## The flow
 
 1. **Stage locally.** A client write is recorded into a local **overlay** table (the optimistic
-   value the UI reads) and a durable **mutation journal** in PGlite. The app never mutates a synced
+   value the UI reads) and a durable **mutation journal** in the local store. The app never mutates a synced
    table directly.
 2. **Flush a batch.** The client sends one or more journaled mutations to the server's write route as
    a batch: `POST /api/mutations`.

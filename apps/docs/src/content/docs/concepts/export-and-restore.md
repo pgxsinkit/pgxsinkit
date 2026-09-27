@@ -7,7 +7,7 @@ sidebar:
 
 The sync engine holds a real database in the browser: your synced read cache, the optimistic overlay,
 and the mutation journal. Three purpose-named exports let you get that data **out**, and a restore boots
-a fresh client back **in** from a backup. They matter most in worker mode, where `client.pglite` is
+a fresh client back **in** from a backup. They matter most in worker mode, where `client.pgwasm` is
 deliberately unreachable — these methods are the only supported door to the store.
 
 Every export resolves to `{ file, report }`: a named `File` you can download or persist, and a structured
@@ -19,7 +19,7 @@ Pick by what you need the artefact **for** — the three differ in format, fidel
 
 ### Store backup — `exportStore()`
 
-A full-fidelity, PGlite-restorable tarball of the **whole** local store: synced cache, overlay, and the
+A full-fidelity tarball of the **whole** local store's data directory: synced cache, overlay, and the
 mutation journal, unflushed writes included.
 
 ```ts
@@ -30,8 +30,9 @@ const { file, report } = await client.exportStore();
 - **Lossless.** The journal travels _inside_ the artefact, so nothing staged is dropped.
 - **Offline-safe.** It never blocks and needs no network. It is the **only** lossless export a device
   with unflushed writes can take while offline.
-- **PGlite-only.** It restores into a pgxsinkit client via [`restoreFrom`](#restore), not into a
-  general-purpose Postgres.
+- **Build-bound.** It restores into a pgxsinkit client via [`restoreFrom`](#restore), not into a
+  general-purpose Postgres, and only into a client running the [Postgres build](/concepts/postgres-builds/)
+  that made it: the tarball records its build.
 
 Use it for device backup and migration — carry a user's whole local store to a new device without losing
 work in flight. Pass `{ compression: "none" }` for an uncompressed tar, or `{ fileName }` to override the
@@ -109,12 +110,16 @@ const client = await createSyncClient({
 });
 ```
 
-Four rules keep a restore safe:
+Five rules keep a restore safe:
 
 - **Fresh target across both backends.** Restore boots a new store; it never overlays a live one. The target
   check covers both IndexedDB and the OPFS commitment/store namespace, even if the current engine would choose
   only one of them. Any existing authority raises `RestoreTargetExistsError`. Destroy the existing store first,
   then restore into the now-empty path.
+- **Same build.** A backup restores only into the build that made it. A backup from another build fails
+  with `BuildMismatchError` (`source: "backup"`), one in a data format this release of the build does not
+  read with `DataFormatMismatchError`, both before anything is written and never retried. Restore it into
+  a client running the backup's own build (see [Postgres builds](/concepts/postgres-builds/#the-refusals)).
 - **Online iff the recovered journal is clean.** If journal recovery finds **nothing to quarantine** —
   an empty recovered journal, e.g. a server-generated bootstrap artifact — the restore boots **online**
   and resumes sync straight away (honouring `syncEnabled`/`autoSync`, exactly like a normal boot). If the

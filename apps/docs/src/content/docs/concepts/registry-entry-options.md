@@ -209,7 +209,7 @@ argument accepts (unique constraints, indexes, composite checks). Receives the b
 extras: (t) => [unique().on(t.orgId, t.slug), index("idx_issue_team").on(t.teamId)],
 ```
 
-**When to use.** Server-side integrity and performance. Not applied to the local PGlite table.
+**When to use.** Server-side integrity and performance. Not applied to the local table.
 
 ---
 
@@ -275,7 +275,7 @@ that is how it says so.
 
 ### `clientProjection`
 
-**What it achieves.** Shapes the _local_ (PGlite) table differently from the server table — without a
+**What it achieves.** Shapes the _local_ (pgwasm) table differently from the server table — without a
 migration, since the local schema is a runtime-derived projection.
 
 ```ts
@@ -313,7 +313,7 @@ Sub-fields:
   primary key and nothing else: your server's indexes are **not** mirrored, deliberately (they serve
   server loads, and many cover columns a client projection omits). So declare what the **client's**
   queries need — the motivating case is a `due_at` window over a large synced table, which goes from a
-  sequential scan to an index scan (measured on PGlite over 100k rows: ~13 ms → ~0.1 ms). Each entry is
+  sequential scan to an index scan (measured on the local store over 100k rows: ~13 ms → ~0.1 ms). Each entry is
   `{ name, columns, unique? }`: a plain ascending btree over projected columns, named by DB column name
   or Drizzle property key. The registry **refuses** an unknown column, a column `omitColumns` removes, a
   duplicate index name, or an empty column list — at registry-build time, not at boot. Every index costs
@@ -554,7 +554,7 @@ silent.
 
 **What it achieves.** _Whether_ the local copy is durable.
 
-- **`persistent`** — the durable PGlite/OPFS backend with a resumable subscription-state.
+- **`persistent`** — the durable local store (OPFS or IndexedDB) with a resumable subscription-state.
 - **`ephemeral`** — the table's whole local cluster (read cache, overlay, journal, sequence, views,
   reconcile function) is emitted as `TEMP`/`pg_temp`, so reads **and** writes leave no durable trace and
   re-hydrate fresh each session.
@@ -751,6 +751,30 @@ fingerprint here it can't see the `customPredicate` body — bump `rowFilter.rev
 divergence is caught.
 
 ---
+
+## Registry storage (`storage.build`)
+
+The registry, not an entry, carries the store's storage declaration: `backend` (`"opfs"` or `"idbfs"`),
+`durability` (`"relaxed"` or `"strict"`, see [Operating in production](/start/operating-in-production/)),
+`engine` (see [Worker mode](/concepts/worker-mode/#declaring-a-different-store-engine)) and `build`.
+
+```ts
+export const registry = defineSyncRegistry({
+  tables: { todos },
+  storage: { build: "c" },
+});
+```
+
+**What it achieves.** `build` names the [Postgres build](/concepts/postgres-builds/) that owns every store
+minted from this registry: `"c"` (the default, `cBuild` from `@pgxsinkit/pgwasm-c`) or `"pgrust"`. It is
+part of the store's identity — a data directory belongs to the build that created it — so a different build
+is a different store, minted fresh under a fresh path. The declaration only names the build; the app
+supplies the build itself as code (the `build` option of `createSyncClient`, `defineSyncWorker` and
+`createPgwasmClient`), and a supplied or adopted build that is not the declared one fails with
+`StorageBuildMismatchError` before any store is touched.
+
+**When to use.** Leave it at the default unless the app runs another build. Change it only together with a
+fresh store path.
 
 ## See also
 

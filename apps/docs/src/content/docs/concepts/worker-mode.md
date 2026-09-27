@@ -5,7 +5,7 @@ sidebar:
   order: 8
 ---
 
-By default `createSyncClient` runs the whole local-first engine **in the tab that called it** — PGlite,
+By default `createSyncClient` runs the whole local-first engine **in the tab that called it** — the local Postgres store,
 the Local schema, the mutation journal, the read-path stream subscriptions, and the convergence loop all execute
 on that tab's thread. **Worker mode** leaves the tab a thin view and uses a native `SharedWorker` as the
 communication centre. A real OPFS open at boot decides the engine's home:
@@ -187,7 +187,7 @@ elected engine worker and is not part of the OPFS durability guarantee.
 ### The storage declaration on the wire (ADR-0050)
 
 The worker **name carries the store path and nothing else** — never configuration. The store's
-storage declaration (`SyncStorageDeclaration`: `backend`, `durability`, `engine`) normally lives statically on
+storage declaration (`SyncStorageDeclaration`: `backend`, `durability`, `build`, `engine`) normally lives statically on
 the registry (`attachSyncRegistryStorage`), and that remains authoritative. For a consumer whose declaration is
 **dynamic** (a runtime storage toggle, like the board demo's), the declaration travels on the wire
 instead: pass `storage` to `attachSyncClient`/`provisionSyncWorker`, and the library posts a
@@ -195,7 +195,10 @@ instead: pass `storage` to `attachSyncClient`/`provisionSyncWorker`, and the lib
 defers its placement decision until the first declaration arrives — `backend: "idbfs"` must skip the
 OPFS probe, so the declaration has to precede the decision — and the first arrival binds for the
 worker's lifetime. The same declaration rides the provision/attach payloads so the engine binds the
-mint's durability wherever it runs.
+mint's durability wherever it runs. The declaration only _names_ the
+[Postgres build](/concepts/postgres-builds/) (`storage.build`); the build itself is code, so it never
+travels: the worker entry supplies it as `defineSyncWorker({ build })` (default `cBuild`), and a mismatch
+with the declaration is a `StorageBuildMismatchError` before any store is touched.
 
 The rules are strict, per field, on **explicit values only**: an unset field is "no opinion" and never
 conflicts; an explicit field disagreeing with the registry's declaration or the already-bound one — or
@@ -222,10 +225,10 @@ storage: {
 ```
 
 `module` is an absolute or origin-relative module URL. pgxsinkit `import()`s it in whichever scope is
-minting and takes its **default export** — or, failing that, a named `createPglite` — as the store
-factory: `(storePath: string, backendOverride?: "memory") => Promise<ClientPGlite>`, the same signature
-`createPglite` has always had. That module then answers for the store instead of the built-in
-`createClientPGlite`, so a different PostgreSQL-shaped engine can back the local store with no
+minting and takes its **default export** — or, failing that, a named `createStore` — as the store
+factory: `(storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>`, the same signature as
+`defineSyncWorker`'s `createStore` option. That module then answers for the store instead of the built-in
+`createPgwasmClient`, so a different PostgreSQL-shaped engine can back the local store with no
 engine-specific code in your app or in the toolkit. Absent (the default) is the built-in store.
 
 Everything the seam does not pass, the module owns: its own assets (derive them from `import.meta.url`
@@ -258,7 +261,7 @@ on SW-direct Safari is rejected because a page cannot terminate that in-scope Sh
 
 ### Spare-store adoption budget
 
-The login-screen **spare store** is a pure accelerator: the worker pre-creates a schemaless PGlite so the
+The login-screen **spare store** is a pure accelerator: the worker pre-creates a schemaless store so the
 first attach adopts a store whose `initdb` has already run. An attach arriving while that create is still in
 flight waits for it — but only within `provisionAdoptionBudgetMs`, an engine-construction option on
 `defineSyncWorker` measured from the provision attempt's **start** (default 20 s), never from the attach.
@@ -319,7 +322,7 @@ included — nothing is re-derived from per-group catch-up readiness, which is t
 `groupReady` answers. Before the first snapshot, and for an unknown key, it reads `false`; a detached
 client keeps its last snapshot.
 
-What remains unproxied is structural, not a slice gap: `pglite` (the tab holds no local store) and
+What remains unproxied is structural, not a slice gap: `pgwasm` (the tab holds no local store) and
 `dropReadCache` (an engine-wide cache rebuild).
 
 `destroy()` **is** proxied under a supervisor that survives engine shutdown. It refuses with
@@ -358,12 +361,12 @@ that attaches **after** the boot never receives the push: it reads the boot it n
 `bootReport()`, which returns the engine's stored report regardless of when the tab attached.
 
 The one exception is the **inspection read surface** — `client.rawQuery(sql, params)` and
-`client.rawExec(sql)` — which _is_ proxied: the statement is executed in the worker (where PGlite lives)
+`client.rawExec(sql)` — which _is_ proxied: the statement is executed in the worker (where the store lives)
 and the `Results` cross back. It is identical to the in-process client, and it is for **inspection only**
 (debug pages, REPLs, ad-hoc counts): statements run raw against the local store, bypassing the mutation
 journal and optimistic overlay, and any write stays local and never converges — for app data reads use the
-live-rows hooks. `client.pglite` itself stays unavailable. `replAdapter(client)` shapes this surface into
-the `{ query, exec }` duck `@electric-sql/pglite-repl`'s `<Repl>` expects, so a SQL REPL works unchanged in
+live-rows hooks. `client.pgwasm` itself stays unavailable. `replAdapter(client)` shapes this surface into
+the `{ query, exec }` duck [`@pgxsinkit/pgwasm-repl`](/packages/pgwasm/#pgxsinkitpgwasm-repl)'s `<Repl>` expects, so a SQL REPL works unchanged in
 worker mode (each statement routed through the bridge).
 
 The same surface has an **atomic** form, `client.rawTransaction(statements)`: the statements
@@ -371,7 +374,7 @@ The same surface has an **atomic** form, `client.rawTransaction(statements)`: th
 rolls the whole list back and rejects, and an empty list resolves `[]` without opening a transaction. It is
 for the **local-only tables your app owns** and pgxsinkit does not manage — anything that must
 delete-then-insert without a torn intermediate state — and it is the only way to get that in worker mode,
-where the tab has no PGlite of its own: the whole list crosses in a single RPC, so the transaction opens and
+where the tab has no store of its own: the whole list crosses in a single RPC, so the transaction opens and
 closes inside the worker and the behaviour is identical to the in-process client. Every inspection caveat
 still applies (journal and overlay bypassed, writes stay local and never converge), so it is never the write
 path for a synced table — that remains `mutate` / `tables.*`. Like the write ops, a lost response after a
@@ -400,7 +403,7 @@ a documented future swap (a non-goal today).
 ### Live queries cross as diffs, not resends
 
 Live-query results cross the bridge **diff-shaped** — `{order, added, changed, removed}` — computed in the
-worker with PGlite's `live.incrementalQuery` for single-PK queries (a keyless query falls back to
+worker with pgwasm's `live.incrementalQuery` for single-PK queries (a keyless query falls back to
 remove-all + add-all, never a silent full resend). The tab-side materializer **preserves row identity**:
 an unchanged row keeps the same object reference (`===`), so a memoized React row skips re-rendering even
 though the update crossed a thread boundary.
@@ -448,12 +451,12 @@ The boot rail stamps this sequence: `boot spare store ensured`, `boot mapped sto
 ### Pre-opening a warm store, not just a fresh spare
 
 `provisionSyncWorker({ worker, storePath })` is the pre-open primitive
-behind that spare — it runs PGlite
+behind that spare — it runs the pgwasm
 `create`/initdb inside the worker and holds the raw store idle for the first `attachSyncClient` to adopt —
 but it is **not only for fresh spares**. Adoption is keyed purely on the **storePath**, not on whether the
 store has ever been written: a **returning** user whose store is already populated adopts a pre-opened
 store exactly as a first-time user does. So call `provisionSyncWorker` the moment the store identity is
-known — at login-screen mount for a returning user, say — to overlap the WASM/PGlite open with auth and UI
+known — at login-screen mount for a returning user, say — to overlap the WASM/store open with auth and UI
 startup on that **warm persisted store**. (You still omit the `freshStore` hint for a returning store: that
 hint governs the shape-catch-up overlap above, not the pre-open, and is only ever true for a claimed
 schemaless spare.)

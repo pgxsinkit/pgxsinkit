@@ -1,19 +1,19 @@
 ---
 title: The read path
-description: Rows stream PostgreSQL → the Circuits engine → durable-streams → PGlite, granted by a control plane and gated at the edge.
+description: Rows stream PostgreSQL → the Circuits engine → durable-streams → the local store, granted by a control plane and gated at the edge.
 sidebar:
   order: 4
 ---
 
 The read path streams rows from Postgres **through ElectricSQL's Circuits engine and
-durable-streams** to the client and keeps local PGlite up to date — nothing goes from Postgres to the
-client directly. The app reads exclusively from PGlite; it never queries Postgres or the engine
+durable-streams** to the client and keeps the local store up to date — nothing goes from Postgres to the
+client directly. The app reads exclusively from the local store; it never queries Postgres or the engine
 directly at read time.
 
 ## The flow
 
 ```
-PostgreSQL  →  Circuits engine  →  durable-streams  →  the edge  →  PGlite (local)
+PostgreSQL  →  Circuits engine  →  durable-streams  →  the edge  →  pgwasm (local)
 ```
 
 1. **Shapes** define what a client may see. Every shape declares one of two tiers, and _which field it
@@ -98,7 +98,7 @@ PostgreSQL  →  Circuits engine  →  durable-streams  →  the edge  →  PGli
 4. **The edge** (`createStreamGate`, mounted at `/v1/stream`) serves the durable-streams reads: it
    verifies the stream token, checks the grant against the live entitlement set, and proxies bytes.
 
-5. **PGlite** subscribes through `@pgxsinkit/client`'s own reader (`readShapeStream`, over
+5. **The local store** (pgwasm) is fed through `@pgxsinkit/client`'s own reader (`readShapeStream`, over
    `@durable-streams/client`) and applies the stream into local tables. The app reads from there.
 
 **Cell values on the wire are Postgres output text.** The engine's cell model is `null`, integer,
@@ -108,7 +108,7 @@ row and its first replicated update compare equal. The client decodes exactly on
 way in: a **scalar `json`/`jsonb` column is parsed once**, at the wire boundary, so it reaches every
 apply tier (and your local table) as a value rather than as text that would be JSON-encoded a second
 time. Array columns — json arrays included — stay in Postgres's own array literal, which each apply tier
-hands straight back to Postgres. You never see either form: what you read back out of PGlite is a
+hands straight back to Postgres. You never see either form: what you read back out of the local store is a
 `jsonb` object, not a string.
 
 ## The edge is the gate
@@ -130,7 +130,7 @@ that declare one.
 Losing entitlement means losing the _subscription_, not losing rows: the client takes `403` on its
 next poll, truncates that scope, and unsubscribes.
 
-Treat synced tables in PGlite as **replication
+Treat synced tables in the local store as **replication
 targets**: they are written by this path and must never be mutated by application code (writes go
 through [the write path](/concepts/write-path/)).
 
@@ -235,18 +235,18 @@ diagnostic that inspects `_sync_state`) — they complement the guarded read pat
 ## Live queries: dedup, keep-alive, and diagnostics
 
 A reactive read (`useLiveDrizzleRows`, `useLiveQueryRaw`, or `client.subscribeLiveRows`) opens a **local
-SQL live query** over PGlite: it materialises the query once and then re-runs and diffs it on every write
+SQL live query** over the local store: it materialises the query once and then re-runs and diffs it on every write
 that touches its tables, pushing changed rows to your component. That is one of three independent lifetimes,
 and keeping them apart is what makes the behaviour predictable:
 
 - **Shape lifetime** — what a table _syncs_ from the server (the registry's `subscription`/`retention`). This
   is the network stream, unrelated to any query you run locally.
-- **Local SQL live-query lifetime** — the PGlite registration + diff for one live query. This is what the
+- **Local SQL live-query lifetime** — the local registration + diff for one live query. This is what the
   query manager below owns.
 - **Domain projection lifetime** — the models your app builds _from_ live rows. That is yours to hold; the
   library never sees it.
 
-**Dedup is automatic and free.** Identical live queries share a single PGlite registration. Ten components —
+**Dedup is automatic and free.** Identical live queries share a single local registration. Ten components —
 or ten browser tabs on a shared worker — mounting the same query cost **one** materialisation and **one**
 re-run + diff per relevant write, fanned out to every subscriber. You do not opt in and nothing changes in
 your code; it is keyed on the executed SQL + bound params, so two reads that differ only in a `where` value
@@ -283,7 +283,7 @@ defineSyncWorker({
 
 The same `liveQueries` block is accepted by `createSyncClient` and governs the in-process client identically.
 
-**Why the default is 0.** A retained zero-subscriber query is not free: PGlite live queries cannot be paused,
+**Why the default is 0.** A retained zero-subscriber query is not free: pgwasm live queries cannot be paused,
 so it still pays a full re-run + diff on **every** write to its tables for as long as it is held. Retention
 is a win only for a query that is genuinely hot (frequently re-mounted) and write-cold; for a write-hot query
 it can cost more over its idle life than the one re-materialisation it saves. So keep-alive is opt-in per hot

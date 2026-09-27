@@ -49,7 +49,7 @@ works everywhere — it only loses the off-thread isolation on that browser.
 
 A signed-in visitor who closes the board and reopens it without connectivity boots to a usable board.
 A small runtime-capture **service worker** (no precache — it caches only what that visitor's own boots
-already fetched) replays the app shell and the PGlite engine assets; the data is whatever each table's
+already fetched) replays the app shell and the pgwasm engine assets; the data is whatever each table's
 declared retention kept in the local store — every eager table, plus the Admin's chat once activated.
 The Member's chat is ephemeral by design and instead shows an explicit connection-needed state, as does
 sign-in itself — the capability is offline _return_, not first-visit offline. Board

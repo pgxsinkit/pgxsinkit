@@ -1,25 +1,27 @@
 ---
 title: Storage benchmarks
-description: A wa-sqlite-style, in-browser benchmark suite comparing PGlite storage backends across timed SQL batteries.
+description: A wa-sqlite-style, in-browser benchmark suite comparing pgwasm storage backends across timed SQL batteries.
 sidebar:
   label: Storage benchmarks
 ---
 
-pgxsinkit runs on PGlite. The benchmark suite compares three storage backend slots:
+pgxsinkit's local store runs on [pgwasm](/packages/pgwasm/). The benchmark suite compares three storage
+backend columns:
 
-- **`idb`** — IndexedDB, via the `@pgxsinkit/pglite` fork's IndexedDB VFS (the universal fallback; works in
-  every browser and context). Capability-enabled worker mode prefers `opfs-repacked`; fixed worker mode and
-  the no-SharedWorker main-thread fallback remain on IndexedDB.
-- **`opfs-ahp`** — upstream PGlite's native OPFS VFS, one sync access handle per file (Chromium / Firefox).
-  Kept in the bench for comparison; it is **known broken on WebKit and Linux Chrome**. Default-ticked where it
-  actually runs — **Firefox everywhere** and **Chrome on Windows/macOS** — and default-unticked (but still
-  selectable, with a warning) on **Chrome/Linux** and **WebKit**. On Chrome/Linux a live store needs ~1070 open
-  file descriptors, but Chrome's profile-wide storage service inherits the session's 1024 FD soft limit and
-  hangs non-recoverably at exhaustion (raise your session `DefaultLimitNOFILE` to opt in); on WebKit it needs
-  ~1070 sync-access handles against a ~252 cap (the reason `opfs-repacked` exists). All `opfs-ahp` cells run
-  **last** (below), so a wedge can only affect other ahp cells.
-- **`opfs-repacked`** — `@pgxsinkit/pglite-opfs-repacked`, which packs the virtual database into a
-  constant four OPFS handles. It is default-ticked and supports both 8 KiB and 64 KiB extent profiles.
+- **`idb`** — IndexedDB, via pgwasm's IndexedDB filesystem (the universal fallback; works in every browser
+  and context). Capability-enabled worker mode prefers `opfs-repacked`; fixed worker mode and the
+  no-SharedWorker main-thread fallback remain on IndexedDB.
+- **`opfs-repacked`** — the OPFS-repacked store (`@pgxsinkit/pgwasm/opfs`), which packs the data
+  directory into a constant four OPFS handles, in a dedicated worker. It is default-ticked and supports both
+  8 KiB and 64 KiB extent profiles.
+- **`opfs-repacked-sw`** — the same store hosted directly in a SharedWorker, the topology worker mode uses
+  on Safari. Default-ticked on WebKit; elsewhere it stays selectable behind a warning, because Chromium and
+  Firefox grant sync access handles in dedicated workers only, and the column reports `unavailable`.
+
+Earlier published runs also carry an **`opfs-ahp`** column: PGlite's one-sync-access-handle-per-file OPFS
+filesystem, which needed ~1070 handles or file descriptors for a live store (against WebKit's ~252-handle cap
+and Chrome/Linux's 1024 FD soft limit) — the reason `opfs-repacked` exists. pgwasm does not support that
+filesystem, so the column is retired; its numbers below are kept as history.
 
 The timed backend cells run in dedicated workers so each cell is isolated. Separately, phase 0 runs a
 full OPFS-repacked boot, persist, and reopen inside a SharedWorker and records `sharedWorkerProof` in the
@@ -35,19 +37,14 @@ network, no framework.
 Each **cell** (one battery × one backend) runs isolated in its **own short-lived dedicated worker**, spawned
 fresh and terminated when the cell finishes, behind an **inactivity watchdog**: if a worker emits no progress
 for 90 seconds it is assumed wedged, terminated, recorded in the grid as `hung`, and the suite moves on to the
-next cell. On top of that, **all `opfs-ahp` cells run last** (after every other backend's cells): the
-Chrome/Linux FD-limit wedge is profile-wide and non-recoverable, so scheduling ahp last means a wedged ahp
-cell can only ever take out other ahp cells, never the `idb`/`opfs-repacked` columns. Column order in the grid
-stays fixed (`idb`, `opfs-ahp`, `opfs-repacked`) regardless of that run order.
+next cell. Column order in the grid is fixed: `idb`, `opfs-repacked`, `opfs-repacked-sw`.
 
 ## Run it
 
 **[Open the live storage benchmarks →](/bench/)**
 
-Tick the batteries and backends you want and press **Run selected**. `opfs-ahp` is default-ticked on Firefox
-(everywhere) and Chrome on Windows/macOS, and default-unticked on Chrome/Linux (session FD limit — wedges at
-exhaustion; raise `DefaultLimitNOFILE` to opt in) and WebKit (handle cap); tick it explicitly to include it —
-it runs last and the watchdog recovers a hung cell. `opfs-repacked` is default-ticked.
+Tick the batteries and backends you want and press **Run selected**. `idb` and `opfs-repacked` are
+default-ticked everywhere; `opfs-repacked-sw` is default-ticked on WebKit and warned elsewhere.
 Durability is _relaxed_ by default; the strict toggle measures the per-commit fsync/flush cost. The
 OPFS-repacked backend lets you select either extent profile. The page is deliberately dependency-free so it
 boots on a phone, including iPhone/Safari, where WebKit's OPFS behavior can differ from desktop engines.
@@ -56,9 +53,8 @@ Results **survive a page reload**: after every cell the current envelope is mirr
 on the next load — unless the page is auto-running — it is restored into the grid behind a labelled notice.
 This matters on iOS Safari, which can hard-reload the page under memory pressure once the suite has churned
 enough stores, wiping the DOM before you read the numbers; a fresh **Run selected** overwrites the saved
-envelope so stale results never masquerade as current. Add `?debug=1` to turn on PGlite/VFS tracing in the
-browser console (`console.log('[opfs-ahp]', …)`, phase-by-phase filesystem init) — the diagnostic channel for
-the opfs-ahp store-open hang, viewable via devtools or the Safari remote inspector.
+envelope so stale results never masquerade as current. Add `?debug=1` to pass pgwasm's `debug: 1` option to every
+store a cell opens, for tracing in the browser console, viewable via devtools or the Safari remote inspector.
 
 ### The batteries
 
@@ -82,7 +78,7 @@ IndexedDB round trip. Both OPFS backends sit near 1–2 ms regardless of durabil
 | Backend                  |    relaxed |     strict |
 | ------------------------ | ---------: | ---------: |
 | `idb`                    |   ~0.40 ms |   ~84.7 ms |
-| `opfs-ahp`               |   ~0.91 ms |   ~1.06 ms |
+| `opfs-ahp` (retired)     |   ~0.91 ms |   ~1.06 ms |
 | `opfs-repacked` (8 KiB)  | 1.4 ms p95 | 1.0 ms p95 |
 | `opfs-repacked` (64 KiB) | 1.1 ms p95 | 0.8 ms p95 |
 
