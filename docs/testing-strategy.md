@@ -147,9 +147,12 @@ their own. Where the code came from, file by file, is in
   pgwasm-pg-dump's two), the extraction of both kinds of pin (a tarball member, and a source map's
   `sourcesContent` entry) and that only modules emitted at their own depth reference them
   (`src/artefacts.ts`, pgwasm-c's `src/prepopulated.ts` and `src/contrib/*.ts`); `pgwasm-c-initdb`
-  pins the command lines initdb actually runs through the owned tokenizer; `pgwasm-legacy-datadir` opens a directory made by
-  the fork's PGlite and moves Store backups both ways between the fork and pgwasm (step 1 only: the
-  fork leaves the graph in step 3); `pgwasm-public-surface` pins every entry point's runtime exports.
+  pins the command lines initdb actually runs through the owned tokenizer; `pgwasm-legacy-datadir` opens a `file://` directory made by
+  the fork's PGlite and restores a fork Store backup, both checked-in fork-made fixtures
+  (`tests/unit/fixtures/pgwasm-legacy/`, captured from `@electric-sql/pglite` 0.5.8-pgx.2 before the
+  fork left the graph in step 3). The reverse half, restoring a pgwasm backup into the fork, is
+  retired with the switch (maintainer decision D4, 2026-09-27): it proved the rollback path, and the
+  rollback path ends once the fork is no longer a dependency; `pgwasm-public-surface` pins every entry point's runtime exports.
   `pgwasm-protocol` also proves `/protocol`'s exclusive session: a query, a transaction and a backup
   wait for it, and it waits for a running transaction's COMMIT.
 - **pg_dump** (`pgwasm-pg-dump`, `pgwasm-pg-dump-session`, `pgwasm-pg-dump-framing`): the fork's
