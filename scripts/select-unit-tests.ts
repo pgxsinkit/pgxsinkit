@@ -43,6 +43,8 @@ const FS_INPUTS: Record<string, string[]> = {
     "packages/pgwasm-pg-dump/src/**",
     "packages/pgwasm-pg-dump/artefacts/**",
   ],
+  // Compares the committed pins files, as text, with what `pgwasm:pin` renders for their release.
+  "pgwasm-pin": ["packages/pgwasm-c/src/artefact-pins.ts", "packages/pgwasm-pg-dump/src/artefact-pins.ts"],
   // The mount guard scans every source tree for `createStreamGate` callers; the drift guard reads the
   // INSTALLED ds client, which only moves with the lockfile.
   "stream-edge-cors": ["scripts/*.ts", "apps/*/src/**", "packages/*/src/**", "bun.lock"],

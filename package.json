@@ -56,6 +56,7 @@
     "lint": "oxlint -c .oxlintrc.jsonc apps/*/src packages/*/src scripts tests infra *.ts",
     "lint:fix": "oxlint --fix -c .oxlintrc.jsonc apps/*/src packages/*/src scripts tests infra *.ts",
     "perf:lab": "bun scripts/run-perf-lab.ts",
+    "pgwasm:pin": "bun scripts/pgwasm-pin.ts",
     "postinstall": "bun scripts/pgwasm-artefacts.ts",
     "prepare": "git config core.hooksPath .githooks || true",
     "probe:engines": "bun scripts/probes/engine-capabilities/run.ts",

@@ -3,6 +3,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { C_BUILD_IDENTITY } from "../../packages/pgwasm-c/src";
 import type { Pgwasm } from "../../packages/pgwasm/src";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { rejectionOf } from "./support/rejection";
@@ -186,5 +187,42 @@ describe("databases and memory", () => {
     expect(used.rows).toHaveLength(1);
     // ~30 MB of literals went through; a resetting context stays far below that.
     expect(Number(used.rows[0]?.used_bytes)).toBeLessThan(5 * 1024 * 1024);
+  });
+});
+
+describe("encoding conversions", () => {
+  // Every loadable module the build ships must resolve every symbol it imports from the server; the
+  // conversion modules once did not, and the first conversion crashed the backend.
+  it("converts to and from LATIN1", async () => {
+    const db = await createTestPgwasm();
+    expect(await one(db, "SELECT convert_to('é', 'LATIN1') AS value")).toEqual(new Uint8Array([0xe9]));
+    expect(await one(db, String.raw`SELECT convert_from('\xe9'::bytea, 'LATIN1') AS value`)).toBe("é");
+  });
+
+  it("runs every default conversion", async () => {
+    const db = await createTestPgwasm();
+    const { rows } = await db.query<{ total: number; converted: number }>(`
+      SELECT count(*)::int AS total,
+             count(*) FILTER (WHERE convert('a'::bytea, pg_encoding_to_char(conforencoding),
+                                            pg_encoding_to_char(contoencoding)) = 'a'::bytea)::int AS converted
+        FROM pg_conversion WHERE condefault
+    `);
+    expect(rows[0]?.total).toBeGreaterThan(100);
+    expect(rows[0]?.converted).toBe(rows[0]?.total);
+    expect(await one(db, "SELECT 1 AS value")).toBe(1);
+  });
+
+  it("LOADs a conversion module", async () => {
+    const db = await createTestPgwasm();
+    await db.exec("LOAD 'utf8_and_iso8859_1'");
+    expect(await one(db, "SELECT convert_to('ü', 'LATIN1') AS value")).toEqual(new Uint8Array([0xfc]));
+  });
+});
+
+describe("the release", () => {
+  it("is named in version(), as the build identity names it", async () => {
+    const db = await createTestPgwasm();
+    const version = String(await one(db, "SELECT version() AS value"));
+    expect(version).toStartWith(`PostgreSQL 18.3 (${C_BUILD_IDENTITY.release}) on wasm32-unknown-emscripten`);
   });
 });

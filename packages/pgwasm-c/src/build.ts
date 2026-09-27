@@ -15,6 +15,7 @@ import type {
   WireSession,
 } from "@pgxsinkit/pgwasm/build";
 
+import { ARTEFACT_RELEASE } from "./artefact-pins";
 import { cBuildArtefacts } from "./artefacts";
 import { bytesOf, compileModule, loadBundle, prefetch } from "./host/artefact-loader";
 import { readDataDirEntries, readDataDirFile, writeDataDirEntries, writeDataDirFile } from "./host/data-dir";
@@ -24,13 +25,17 @@ import { runInitdb } from "./host/initdb";
 import { mountFor, type StorageMount } from "./host/mounts";
 import { DEFAULT_START_PARAMS, PostgresInstance } from "./host/postgres-instance";
 
-/** The C build's identity, recorded in every data directory it creates (ADR-0063). */
+/**
+ * The C build's identity, recorded in every data directory it creates (ADR-0063). Its release and data
+ * format are the pinned pgwasm-postgres release's (`bun run pgwasm:pin` writes both; ADR-0064): the
+ * release is the build's name in version(), and `pgwasm:pin` refuses a release of another data format.
+ */
 export const C_BUILD_IDENTITY: BuildIdentity = {
   name: "c",
-  dataFormat: 1,
+  dataFormat: ARTEFACT_RELEASE.dataFormat,
   // Every data directory made before builds were recorded was made by this build.
   claimsUnmarkedDirectories: true,
-  release: "PostgreSQL 18.3; artefacts of @electric-sql/pglite 0.5.8",
+  release: ARTEFACT_RELEASE.name,
 };
 
 const C_BUILD_CAPABILITIES: BuildCapabilities = {

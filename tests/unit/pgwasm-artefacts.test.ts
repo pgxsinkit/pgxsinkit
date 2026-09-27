@@ -2,26 +2,25 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import type { TarEntry } from "../../packages/pgwasm/src/tar/tar";
 import {
   ARTEFACT_PACKAGES,
   artefactDir,
   artefactPackage,
   assertArtefactsVerified,
-  cachedTarballPath,
+  cachedAssetPath,
   discardMismatchedArtefacts,
   ensureArtefacts,
-  extractPinned,
+  fetchReleaseAssets,
+  releaseAssetUrl,
   verifyArtefacts,
   type ArtefactPackage,
-  type ArtefactPin,
 } from "../../scripts/pgwasm-artefacts";
 import { scratchDir } from "./support/pgwasm";
 import { rejectionOf } from "./support/rejection";
 
 // The build packages' artefacts are pinned by version and checksum and fetched by the root postinstall
 // (scripts/pgwasm-artefacts.ts); they are never committed. This file checks what is on disk against the
-// pins, the extraction of each kind of pin, and the rule that keeps the packages' relative references
+// pins, the fetching of a release's assets, and the rule that keeps the packages' relative references
 // valid once bundled.
 
 const repoRoot = path.join(import.meta.dir, "..", "..");
@@ -63,20 +62,20 @@ const pinnedNames: Record<string, string[]> = {
 };
 
 describe("the build packages' artefacts", () => {
-  it("are pinned to npm tarballs by registry URL and sha512, each cached under its own name", () => {
+  it("are pinned to one pgwasm-postgres release's assets, each cached under its release", () => {
     expect(ARTEFACT_PACKAGES.map((pkg) => pkg.packageDir).sort()).toEqual(Object.keys(pinnedNames).sort());
-    const sources = new Map<string, ArtefactPin["source"]>();
     for (const pkg of ARTEFACT_PACKAGES) {
       expect(Object.keys(pkg.files).sort()).toEqual(pinnedNames[pkg.packageDir] ?? []);
-      for (const pin of Object.values(pkg.files)) sources.set(pin.source.tarball, pin.source);
+      expect(pkg.release).toEqual(artefactPackage("packages/pgwasm-c").release);
+      for (const pin of Object.values(pkg.files)) expect(pin.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
-    for (const source of sources.values()) {
-      const unscoped = source.package.replace(/^@[^/]+\//, "");
-      expect(source.tarball).toBe(`https://registry.npmjs.org/${source.package}/-/${unscoped}-${source.version}.tgz`);
-      expect(source.integrity).toMatch(/^sha512-[A-Za-z0-9+/]{86}==$/);
-    }
-    const cachePaths = [...sources.values()].map(cachedTarballPath);
-    expect(new Set(cachePaths).size).toBe(cachePaths.length);
+    const release = { repository: "pgxsinkit/pgwasm-postgres", tag: "18.3.0" };
+    expect(releaseAssetUrl(release, "pglite.wasm")).toBe(
+      "https://github.com/pgxsinkit/pgwasm-postgres/releases/download/18.3.0/pglite.wasm",
+    );
+    expect(path.relative(repoRoot, cachedAssetPath(release, "pglite.wasm"))).toBe(
+      ".buildcache/pgwasm-artefacts/pgxsinkit/pgwasm-postgres/18.3.0/pglite.wasm",
+    );
   });
 
   for (const pkg of ARTEFACT_PACKAGES) {
@@ -174,50 +173,69 @@ describe("the build packages' artefacts", () => {
   });
 });
 
-describe("extracting a pinned file from its tarball", () => {
-  const source = { package: "example", version: "1.0.0", tarball: "https://example.test/x.tgz", integrity: "" };
+describe("fetching a release's assets", () => {
   const encode = (text: string) => new TextEncoder().encode(text);
-  const members = (entries: Record<string, string>) =>
-    new Map<string, TarEntry>(
-      Object.entries(entries).map(([name, text]) => [
-        name,
-        { name, type: "file", mode: 0o644, mtimeSeconds: 0, data: encode(text) },
-      ]),
-    );
-  const loader = "var Module = 1;\nexport default Module;\n";
-  const map = JSON.stringify({
-    version: 3,
-    sources: ["../src/a.ts", "../release/x.js"],
-    sourcesContent: ["a", loader],
-  });
+  const content = encode("the server");
+  const pkg: ArtefactPackage = {
+    packageDir: "packages/example",
+    release: { repository: "pgxsinkit/pgwasm-postgres", tag: "18.3.0" },
+    files: { "x.wasm": { bytes: content.byteLength, sha256: sha256(content) } },
+  };
 
-  it("takes a member byte for byte", () => {
-    const pin = { source, from: { member: "package/dist/x.wasm" }, bytes: 3, sha256: "" };
-    expect(extractPinned(members({ "package/dist/x.wasm": "abc" }), pin)).toEqual(encode("abc"));
-  });
-
-  it("takes a source map's sourcesContent entry, UTF-8 encoded", () => {
-    const pin = {
-      source,
-      from: { sourceMap: "package/dist/x.js.map", source: "../release/x.js" },
-      bytes: 0,
-      sha256: "",
+  /** A scratch cache and artefacts directory, and a stand-in for GitHub serving `served`. */
+  function setUp(served: Uint8Array) {
+    const scratch = scratchDir("pgwasm-artefacts");
+    const cacheDir = path.join(scratch.path, "cache");
+    const dir = path.join(scratch.path, "artefacts");
+    const urls: string[] = [];
+    const download = async (url: string) => {
+      urls.push(url);
+      return served;
     };
-    expect(extractPinned(members({ "package/dist/x.js.map": map }), pin)).toEqual(encode(loader));
+    return { scratch, cacheDir, dir, urls, download };
+  }
+
+  it("downloads each asset once, checks it, caches it, and leaves no .part behind", async () => {
+    const { scratch, cacheDir, dir, urls, download } = setUp(content);
+    try {
+      await fetchReleaseAssets(pkg, dir, ["x.wasm"], { cacheDir, download });
+      expect(urls).toEqual(["https://github.com/pgxsinkit/pgwasm-postgres/releases/download/18.3.0/x.wasm"]);
+      expect(readFileSync(path.join(dir, "x.wasm"))).toEqual(Buffer.from(content));
+      expect(readFileSync(cachedAssetPath(pkg.release, "x.wasm", cacheDir))).toEqual(Buffer.from(content));
+      await fetchReleaseAssets(pkg, dir, ["x.wasm"], { cacheDir, download });
+      expect(urls).toHaveLength(1);
+      expect(readdirSync(dir)).toEqual(["x.wasm"]);
+    } finally {
+      scratch.cleanup();
+    }
   });
 
-  it("refuses a missing member, a source the map does not name, and a source without content", () => {
-    const pin = (from: ArtefactPin["from"]) => ({ source, from, bytes: 0, sha256: "" });
-    expect(() => extractPinned(members({}), pin({ member: "package/dist/x.wasm" }))).toThrow(/has no member/);
-    expect(() =>
-      extractPinned(members({ "m.map": map }), pin({ sourceMap: "m.map", source: "../release/y.js" })),
-    ).toThrow(/does not name the source/);
-    const withoutContent = JSON.stringify({ version: 3, sources: ["../release/x.js"], sourcesContent: [null] });
-    expect(() =>
-      extractPinned(members({ "m.map": withoutContent }), pin({ sourceMap: "m.map", source: "../release/x.js" })),
-    ).toThrow(/carries no content/);
-    expect(() =>
-      extractPinned(members({ "m.map": "not json" }), pin({ sourceMap: "m.map", source: "../release/x.js" })),
-    ).toThrow(/not a JSON source map/);
+  it("refuses an asset that does not match its pin, writing it nowhere", async () => {
+    const { scratch, cacheDir, dir, urls, download } = setUp(encode("not the server"));
+    try {
+      const failure = await rejectionOf(fetchReleaseAssets(pkg, dir, ["x.wasm"], { cacheDir, download }));
+      expect(failure.message).toContain("could not download https://github.com/");
+      expect(failure.message).toMatch(/does not match its pin: size 14, expected 10/);
+      expect(urls).toHaveLength(3);
+      expect(existsSync(path.join(dir, "x.wasm"))).toBe(false);
+      expect(existsSync(cachedAssetPath(pkg.release, "x.wasm", cacheDir))).toBe(false);
+    } finally {
+      scratch.cleanup();
+    }
+  });
+
+  it("replaces a cached asset that no longer matches its pin", async () => {
+    const { scratch, cacheDir, dir, urls, download } = setUp(content);
+    try {
+      const cached = cachedAssetPath(pkg.release, "x.wasm", cacheDir);
+      mkdirSync(path.dirname(cached), { recursive: true });
+      writeFileSync(cached, "corrupt");
+      await fetchReleaseAssets(pkg, dir, ["x.wasm"], { cacheDir, download });
+      expect(urls).toHaveLength(1);
+      expect(readFileSync(cached)).toEqual(Buffer.from(content));
+      expect(readFileSync(path.join(dir, "x.wasm"))).toEqual(Buffer.from(content));
+    } finally {
+      scratch.cleanup();
+    }
   });
 });

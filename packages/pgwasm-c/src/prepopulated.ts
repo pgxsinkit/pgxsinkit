@@ -20,10 +20,11 @@ const prepopulatedUrl = new URL("../artefacts/prepopulated.tar.gz", import.meta.
  * const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
  * ```
  *
- * It is fetched by URL, like the build's other files, in Bun and in browsers. The backup was made by
- * ElectricSQL with PGlite 0.5.8, before builds were recorded, so it carries no build marker;
+ * It is fetched by URL, like the build's other files, in Bun and in browsers. It is an asset of the pinned
+ * pgwasm-postgres release, made deterministically by that release's own initdb; it is left unmarked, and
  * `createPgwasm` adds the marker whenever it restores an unmarked backup, so every data directory created
- * from it is marked as the C build's. Like any backup of a running database it holds `/postmaster.pid`,
+ * from it is marked as the C build's. Its directories are 0750 and its files 0640; a restore does not
+ * carry a mode into the data directory. Like any backup of a running database it holds `/postmaster.pid`,
  * recording the engine's own process id: the C build treats it as stale and writes its own on start.
  */
 export async function prepopulatedDataDir(): Promise<Blob> {
