@@ -37,15 +37,12 @@
   },
   "dependencies": {
     "@durable-streams/client": "0.2.7",
-    "@electric-sql/pglite-tools": "0.4.8",
     "@pgxsinkit/contracts": "workspace:*",
-    "@pgxsinkit/pglite-opfs-repacked": "workspace:*",
     "@pgxsinkit/pgwasm": "workspace:*",
     "@pgxsinkit/pgwasm-c": "workspace:*",
     "@pgxsinkit/pgwasm-pg-dump": "workspace:*"
   },
   "peerDependencies": {
-    "@electric-sql/pglite": ">=0.5.8-pgx.2",
     "drizzle-orm": "1.0.0-rc.4",
     "zod": "^4.6.5"
   }

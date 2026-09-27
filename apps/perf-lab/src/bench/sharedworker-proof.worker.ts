@@ -14,11 +14,12 @@
 // persistence claim under test (a second SharedWorker would only add Safari worker-lifecycle variables
 // that say nothing about the VFS).
 
-import { createOpfsRepackedPGlite } from "../../../../packages/pglite-opfs-repacked/src/pglite-factory";
-import type { CreateOpfsRepackedPGliteOptions } from "../../../../packages/pglite-opfs-repacked/src/pglite-factory";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { createOpfsPgwasm, type OpfsDirectoryHandle } from "@pgxsinkit/pgwasm/opfs";
+
 import type { SharedWorkerProofStage, SharedWorkerProofStageId, SwProofInbound, SwProofOutbound } from "./protocol";
 
-type RepackedDirectory = CreateOpfsRepackedPGliteOptions["directory"];
+type RepackedDirectory = OpfsDirectoryHandle;
 
 /** The messaging surface of a SharedWorker connection port (this app's tsconfig has no webworker lib). */
 interface ProofPort {
@@ -72,7 +73,7 @@ async function runProof(port: ProofPort, storeName: string): Promise<void> {
 
   const probeFileName = `${storeName}.probe`;
   // Engine handles bridged across stages; closed best-effort by cleanup if their stage failed midway.
-  let pg: Awaited<ReturnType<typeof createOpfsRepackedPGlite>> | undefined;
+  let pg: Awaited<ReturnType<typeof createOpfsPgwasm>> | undefined;
 
   const proof =
     (await run("probe", async () => {
@@ -87,7 +88,8 @@ async function runProof(port: ProofPort, storeName: string): Promise<void> {
     (await run("boot", async () => {
       const root = await opfsRoot();
       const directory = await root.getDirectoryHandle(storeName, { create: true });
-      pg = await createOpfsRepackedPGlite({
+      pg = await createOpfsPgwasm({
+        build: cBuild,
         directory: directory as unknown as RepackedDirectory,
         durability: "strict",
         extentSize: 65_536,
@@ -106,7 +108,8 @@ async function runProof(port: ProofPort, storeName: string): Promise<void> {
     (await run("reopen", async () => {
       const root = await opfsRoot();
       const directory = await root.getDirectoryHandle(storeName, { create: false });
-      pg = await createOpfsRepackedPGlite({
+      pg = await createOpfsPgwasm({
+        build: cBuild,
         directory: directory as unknown as RepackedDirectory,
         durability: "strict",
         extentSize: 65_536,
