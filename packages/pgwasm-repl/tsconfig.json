@@ -1,0 +1,10 @@
+{
+  // The REPL is a DOM component: it is typechecked in its own program, with the DOM library, and kept out
+  // of the root program (whose library has no DOM). `bun run typecheck` runs this project too.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node", "bun-types"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
+}

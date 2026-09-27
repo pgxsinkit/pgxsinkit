@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationMap": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node", "bun-types"]
+  },
+  "include": ["src"]
+}

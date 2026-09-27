@@ -90,7 +90,7 @@
     "test:performance:warm-boot": "bun test tests/performance/warm-boot-registry-width.perf.test.ts",
     "test:unit": "bun scripts/select-unit-tests.ts",
     "test:unit:nocache": "PGXSINKIT_NO_CACHE=1 bun scripts/select-unit-tests.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p apps/board/tsconfig.json && tsc --noEmit -p apps/perf-lab/tsconfig.json && tsc --noEmit -p tests/e2e/tsconfig.json && tsc --noEmit -p packages/client/tsconfig.type-tests.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p apps/board/tsconfig.json && tsc --noEmit -p apps/perf-lab/tsconfig.json && tsc --noEmit -p tests/e2e/tsconfig.json && tsc --noEmit -p packages/client/tsconfig.type-tests.json && tsc --noEmit -p packages/pgwasm-repl/tsconfig.json",
     "validate": "bun run guard:tmp-files && bun run skills:pins:check && bun run format && bun run check:fast",
     "validate:full": "bun run guard:tmp-files && bun run skills:pins:check && bun run format && bun run check",
     "validate:refresh": "PGXSINKIT_FORCE=1 bun run validate:full"
