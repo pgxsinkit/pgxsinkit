@@ -632,14 +632,14 @@ listed. Each is reproduced from the same tree:
      */
 
 ------------------------------------------------------------------------------
-zlib 1.3.1 (pg_dump.wasm)
+zlib 1.3.2 (pg_dump.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE
+Source: https://raw.githubusercontent.com/madler/zlib/v1.3.2/LICENSE
 
     Copyright notice:
 
-     (C) 1995-2022 Jean-loup Gailly and Mark Adler
+     (C) 1995-2026 Jean-loup Gailly and Mark Adler
 
       This software is provided 'as-is', without any express or implied
       warranty.  In no event will the authors be held liable for any damages
