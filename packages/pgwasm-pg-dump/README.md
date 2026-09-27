@@ -72,5 +72,11 @@ so bundlers copy and fingerprint it. With Vite, exclude the package from depende
 export default defineConfig({ optimizeDeps: { exclude: ["@pgxsinkit/pgwasm-pg-dump"] } });
 ```
 
+pg_dump is built by [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres) from
+PostgreSQL plus patches derived from ElectricSQL's
+[postgres-pglite](https://github.com/electric-sql/postgres-pglite) (PostgreSQL License), in the same
+release as `@pgxsinkit/pgwasm-c`'s server; each file's size and sha256 are pinned in
+`src/artefact-pins.ts`.
+
 Licensed under the PostgreSQL License. `NOTICE` lists the components compiled into pg_dump and
 reproduces each one's notice.

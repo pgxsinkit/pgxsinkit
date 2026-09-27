@@ -24,52 +24,47 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds seven files republished byte-identical from ElectricSQL's npm
-packages (each tarball's integrity and every file's sha256 are pinned in
-`src/artefact-pins.ts`).
+`artefacts/` holds seven files: the assets of the pgwasm-postgres release 18.3.0
+(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.3.0), republished byte-identical (each file's size and sha256 are pinned in
+`src/artefact-pins.ts`, from the release's manifest.json checked against its
+SHA256SUMS): `pglite.wasm` (the Postgres server), `pglite.data` (its filesystem
+bundle: share files, loadable modules, time zone data, ICU data), `pglite.js` and
+`initdb.js` (Emscripten-generated JavaScript), `initdb.wasm` (initdb),
+`amcheck.tar.gz` (the amcheck extension) and `prepopulated.tar.gz` (a data directory
+the release's own initdb created, so it holds only what PostgreSQL itself wrote).
 
-Six come from `@electric-sql/pglite` 0.5.8
-(https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz):
-`pglite.wasm` (the Postgres server), `pglite.data` (its filesystem bundle: share
-files, loadable modules, time zone data, ICU data), `pglite.js` and `initdb.js`
-(Emscripten-generated JavaScript), `initdb.wasm` (initdb) and `amcheck.tar.gz` (the
-amcheck extension).
+pgxsinkit/pgwasm-postgres (https://github.com/pgxsinkit/pgwasm-postgres) builds them
+from PostgreSQL 18.3 (the upstream tag REL_18_3, commit
+62d6c7d3df6287f1bd83199c1a746e50d31571a0) plus a patch series and an overlay derived
+from ElectricSQL's PGlite fork of PostgreSQL
+(https://github.com/electric-sql/postgres-pglite at
+b133782cd759f08b3aeb263b80a963b39c7b7af1; PostgreSQL License, Copyright (c)
+ElectricSQL and contributors). Release 18.3.0 is pgwasm-postgres commit
+b206c07782f3248dfd780d06005966dcafe11d97, built inside the builder image
+ghcr.io/pgxsinkit/pgwasm-builder@sha256:c9eacc51a7c25d67aef3daa418a39592a97f471aff099fa5a88fa1c82107435d
+(whose recipe is that repository's `builder/Containerfile`); its manifest.json records
+every file's size and sha256, and the release was published only because a rebuild of
+the tag gave the gated build's manifest.
 
-`prepopulated.tar.gz` is `dist/prepopulatedfs.tgz` from
-`@electric-sql/pglite-prepopulatedfs` 0.5.8
-(https://registry.npmjs.org/@electric-sql/pglite-prepopulatedfs/-/pglite-prepopulatedfs-0.5.8.tgz;
-dual-licensed Apache-2.0 / PostgreSQL License like the rest of PGlite, taken under the
-PostgreSQL License, Copyright (c) ElectricSQL and contributors). It is a data directory
-ElectricSQL created by running initdb with PGlite 0.5.8 (its
-`scripts/generateFS.ts`) and taking a backup of it, so it holds only what PostgreSQL
-itself wrote, from the same PostgreSQL tree and under the same notices as the files
-above.
+The components below, and their versions, come from:
 
-They were built by ElectricSQL from the postgres-pglite tree
-(https://github.com/electric-sql/postgres-pglite, commit b133782cd759f08b3aeb263b80a963b39c7b7af1,
-the commit the @electric-sql/pglite@0.5.8 release tag of github.com/electric-sql/pglite
-pins) inside the builder image
-`electricsql/pglite-builder:3.1.74-7`, whose recipe is that tree's
-`pglite/builder/Dockerfile`. The components below, and their versions, come from:
-
-  - the configure line embedded in pglite.wasm: --with-icu --with-uuid=ossp
-    --with-zlib --with-libxml --with-libxslt --with-openssl=no --without-llvm, and
-    its server link line (-lxslt -lxml2 -lz, and ICU through ICU_LIBS);
-  - the builder Dockerfile: Emscripten 3.1.74, zlib 1.3.1, libxml2 2.14.5,
-    libxslt 1.1.43, ICU 76.1. The binaries confirm Emscripten 3.1.74 (in the
-    server's version string) and ICU 76 (its data package, icudt76l);
+  - the configure line: --with-icu --with-zlib --with-libxml --with-openssl=no
+    --without-llvm, and the server's link line (-lxml2 -lz, and ICU through ICU_LIBS);
+  - the builder recipe: Emscripten 3.1.74, zlib 1.3.2, libxml2 2.14.5, ICU 76.1. The
+    binaries confirm Emscripten 3.1.74 (in the server's version string) and ICU 76
+    (its data package, icudt76l);
   - the files of pglite.data (dict_snowball.so, the time zone data, the ICU data and
     its LICENSE).
 
-Not included: OpenSSL (--with-openssl=no), LLVM (--without-llvm), and OSSP uuid —
-configure enables it, but only the uuid-ossp extension links it, and that extension
-is not part of these artefacts. The builder image's other libraries (for PostGIS and
-pgcrypto) belong to extensions that are not shipped either.
+Not included: OpenSSL (--with-openssl=no), LLVM (--without-llvm), libxslt and OSSP
+uuid (not configured: only contrib/xml2 and contrib/uuid-ossp use them, and neither is
+shipped). The release ships no extension but amcheck, so no other extension's
+libraries are in it.
 
 Each component's notice follows, copied from the file named with it.
 
 ------------------------------------------------------------------------------
-PostgreSQL 18.3, with ElectricSQL's changes for PGlite (pglite.wasm, initdb.wasm, pglite.data, amcheck.tar.gz)
+PostgreSQL 18.3, with changes derived from ElectricSQL's for PGlite (pglite.wasm, initdb.wasm, pglite.data, amcheck.tar.gz)
 ------------------------------------------------------------------------------
 
 Source: https://github.com/electric-sql/postgres-pglite at b133782cd759f08b3aeb263b80a963b39c7b7af1,
@@ -1440,66 +1435,6 @@ Source: https://gitlab.gnome.org/GNOME/libxml2/-/raw/v2.14.5/Copyright
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
-
-------------------------------------------------------------------------------
-libxslt 1.1.43 (on pglite.wasm's link line)
-------------------------------------------------------------------------------
-
-Source: https://gitlab.gnome.org/GNOME/libxslt/-/raw/v1.1.43/Copyright
-
-    Licence for libxslt except libexslt
-    ----------------------------------------------------------------------
-     Copyright (C) 2001-2002 Daniel Veillard.  All Rights Reserved.
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is fur-
-    nished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in
-    all copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FIT-
-    NESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
-    DANIEL VEILLARD BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-    IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CON-
-    NECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-    Except as contained in this notice, the name of Daniel Veillard shall not
-    be used in advertising or otherwise to promote the sale, use or other deal-
-    ings in this Software without prior written authorization from him.
-
-    ----------------------------------------------------------------------
-
-    Licence for libexslt
-    ----------------------------------------------------------------------
-     Copyright (C) 2001-2002 Thomas Broyer, Charlie Bozeman and Daniel Veillard.
-     All Rights Reserved.
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is fur-
-    nished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in
-    all copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FIT-
-    NESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
-    AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-    IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CON-
-    NECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-    Except as contained in this notice, the name of the authors shall not
-    be used in advertising or otherwise to promote the sale, use or other deal-
-    ings in this Software without prior written authorization from him.
-    ----------------------------------------------------------------------
 
 ------------------------------------------------------------------------------
 zlib 1.3.1 (pglite.wasm)

@@ -25,41 +25,44 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds two files republished byte-identical from
-`@electric-sql/pglite-tools` 0.4.8
-(https://registry.npmjs.org/@electric-sql/pglite-tools/-/pglite-tools-0.4.8.tgz; the
-tarball's integrity and each file's sha256 are pinned in `src/artefact-pins.ts`):
+`artefacts/` holds two files: assets of the pgwasm-postgres release 18.3.0
+(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.3.0), the release that also holds `@pgxsinkit/pgwasm-c`'s server, republished
+byte-identical (each file's size and sha256 are pinned in `src/artefact-pins.ts`, from
+the release's manifest.json checked against its SHA256SUMS):
 
-  - `pg_dump.wasm`, the member `package/dist/pg_dump.wasm`: pg_dump from PostgreSQL
-    18.3 (it reports `pg_dump (PostgreSQL) 18.3`), compiled to WebAssembly;
-  - `pg_dump.js`, its Emscripten-generated loader. The npm package ships the loader
-    only minified into `package/dist/chunk-RKAX3U4S.js`; the file here is the
-    original, carried verbatim in that chunk's source map
-    (`package/dist/chunk-RKAX3U4S.js.map`, the `sourcesContent` entry for the source
-    `../release/pg_dump.js`).
+  - `pg_dump.wasm`: pg_dump from PostgreSQL 18.3 (it reports
+    `pg_dump (PostgreSQL) 18.3`), compiled to WebAssembly;
+  - `pg_dump.js`, its Emscripten-generated loader.
 
-They were built by ElectricSQL in the same build as the C Postgres build's artefacts
-(`@pgxsinkit/pgwasm-c`): the release tags `@electric-sql/pglite-tools@0.4.8` and
-`@electric-sql/pglite@0.5.8` of github.com/electric-sql/pglite are the same commit
-(ae182ff8bd5ba4acb887d6c925d607a1498aa0b5), which pins the postgres-pglite tree
-(https://github.com/electric-sql/postgres-pglite) at
-b133782cd759f08b3aeb263b80a963b39c7b7af1; the monorepo's CI builds pg_dump and the
-server together from that tree (`pnpm build:all`, one job), inside the builder image
-`electricsql/pglite-builder:3.1.74-7` (whose recipe is that tree's
-`pglite/builder/Dockerfile`).
+pgxsinkit/pgwasm-postgres (https://github.com/pgxsinkit/pgwasm-postgres) builds them
+from PostgreSQL 18.3 (the upstream tag REL_18_3, commit
+62d6c7d3df6287f1bd83199c1a746e50d31571a0) plus a patch series and an overlay derived
+from ElectricSQL's PGlite fork of PostgreSQL
+(https://github.com/electric-sql/postgres-pglite at
+b133782cd759f08b3aeb263b80a963b39c7b7af1; PostgreSQL License, Copyright (c)
+ElectricSQL and contributors). Release 18.3.0 is pgwasm-postgres commit
+b206c07782f3248dfd780d06005966dcafe11d97, built inside the builder image
+ghcr.io/pgxsinkit/pgwasm-builder@sha256:c9eacc51a7c25d67aef3daa418a39592a97f471aff099fa5a88fa1c82107435d
+(whose recipe is that repository's `builder/Containerfile`); its manifest.json records
+every file's size and sha256, and the release was published only because a rebuild of
+the tag gave the gated build's manifest. pg_dump is built with the server, in the same run. Both files are
+byte-identical to the pg_dump ElectricSQL published in `@electric-sql/pglite-tools`
+0.4.8.
 
-What is compiled in comes from that tree's build (`build-pglite.sh`,
+What is compiled in comes from the build (`build-pglite.sh`,
 `src/bin/pg_dump/Makefile`) and from the binary itself:
 
   - pg_dump is linked from its own objects, libpq and PostgreSQL's frontend
     libraries (fe_utils, pgcommon, pgport), with ElectricSQL's `pglitec.c`, the host
     shims that route libpq's socket calls to the loader's callbacks;
-  - the configure line (--with-zlib --with-libxml --with-libxslt --with-icu
-    --with-openssl=no --without-llvm) puts -lz, -lxml2 and -lxslt on every program's
-    link line. zlib is compiled in: its inflate messages are in pg_dump.wasm. No code
-    from libxml2, libxslt or ICU is: none of their messages or names are in the
-    binary (pg_dump calls none of them, and the link keeps only what is called), so
-    their notices are not reproduced here (`@pgxsinkit/pgwasm-c`'s NOTICE has them);
+  - the configure line (--with-zlib --with-libxml --with-icu --with-openssl=no
+    --without-llvm) puts -lz and -lxml2 on every program's link line. zlib is
+    compiled in: its inflate messages are in pg_dump.wasm. No code from libxml2 or
+    ICU is: none of their messages or names are in the binary (pg_dump calls none of
+    them, and the link keeps only what is called), so their notices are not
+    reproduced here (`@pgxsinkit/pgwasm-c`'s NOTICE has them). The binary is the
+    same byte for byte as ElectricSQL's, whose configure line also had
+    --with-libxslt: no libxslt code was in it either;
   - Emscripten 3.1.74 (the builder image's) provides the loader's runtime and the
     system libraries: musl libc and LLVM's compiler-rt. pg_dump is C, and no C++
     runtime (libc++, libc++abi) is in the binary.
@@ -71,7 +74,7 @@ Snowball), which pg_dump does not contain.
 Each component's notice follows, copied from the file named with it.
 
 ------------------------------------------------------------------------------
-PostgreSQL 18.3, with ElectricSQL's changes for PGlite (pg_dump.wasm)
+PostgreSQL 18.3, with changes derived from ElectricSQL's for PGlite (pg_dump.wasm)
 ------------------------------------------------------------------------------
 
 Source: https://github.com/electric-sql/postgres-pglite at b133782cd759f08b3aeb263b80a963b39c7b7af1,

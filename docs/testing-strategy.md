@@ -123,8 +123,8 @@ provision-ahead-of-attach samples.
 
 ## pgwasm (ADR-0062 steps 1 and 2)
 
-`@pgxsinkit/pgwasm` (the engine-neutral runtime), `@pgxsinkit/pgwasm-c` (the C build: the pinned
-`@electric-sql/pglite` 0.5.8 artefacts and their host code, and the prepopulated data directory),
+`@pgxsinkit/pgwasm` (the engine-neutral runtime), `@pgxsinkit/pgwasm-c` (the C build: the artefacts of
+the pinned pgxsinkit/pgwasm-postgres release and their host code, and the prepopulated data directory),
 `@pgxsinkit/pgwasm-pg-dump` (pg_dump over the wire protocol) and `@pgxsinkit/pgwasm-repl` (the REPL
 component) replace the PGlite fork. Until step 3 nothing uses them yet; their lanes prove them on
 their own. Where the code came from, file by file, is in
@@ -144,8 +144,9 @@ their own. Where the code came from, file by file, is in
   anything is written run on a spy build that records calls (`pgwasm-create`, `pgwasm-build-marker`). `pgwasm-extension-types` is also a type-level test, checked by
   `bun run typecheck`: an inline extension's `setup(pg)` is typed, and namespaces are inferred.
   `pgwasm-artefacts` checks every build package's artefacts against their pins (pgwasm-c's seven,
-  pgwasm-pg-dump's two), the extraction of both kinds of pin (a tarball member, and a source map's
-  `sourcesContent` entry) and that only modules emitted at their own depth reference them
+  pgwasm-pg-dump's two, all assets of one pgwasm-postgres release), the fetching of a release's assets
+  (checked against the pin, cached, written through a `.part`, a corrupt cache entry replaced) and that
+  only modules emitted at their own depth reference them
   (`src/artefacts.ts`, pgwasm-c's `src/prepopulated.ts` and `src/contrib/*.ts`); `pgwasm-c-initdb`
   pins the command lines initdb actually runs through the owned tokenizer; `pgwasm-legacy-datadir` opens a `file://` directory made by
   the fork's PGlite and restores a fork Store backup, both checked-in fork-made fixtures
@@ -311,6 +312,27 @@ in the test estate:
 - **Retired halves.** Restoring a pgwasm backup into the fork (maintainer decision D4); the perf lab's
   opfs-ahp comparator column (published results stay as history); the PGlite-fork override runbook and the
   store shim package's own suite, which now runs as pgwasm's `/opfs` tests.
+
+## pgwasm-postgres 18.3.0 (ADR-0064 step 4c, 2026-09-27)
+
+Both build packages now pin the assets of one pgxsinkit/pgwasm-postgres GitHub release, written by
+`bun run pgwasm:pin <tag>` and fetched by the root postinstall; `pgwasm-pin` proves the committed pins are
+exactly what the command renders for their release, that the manifest and SHA256SUMS must agree, and that a
+release of another data format is refused. initdb and pg_dump are byte-identical to the previous pins; the
+server, its filesystem bundle, its glue and amcheck are new. Drift the lanes record:
+
+- **Encoding conversions work.** Every loadable module now resolves the server symbols it imports, so
+  `convert_to('é', 'LATIN1')` returns `\xe9`, all default conversions run and `LOAD` of a conversion module
+  succeeds (`pgwasm-c-engine-features`). On the previous artefacts the first conversion failed the instance
+  (`PgwasmFailedError: … TypeError: resolved is not a function`): the conversion module's import of a server
+  symbol was never exported.
+- **version() names the build.** It reads `PostgreSQL 18.3 (pgwasm-postgres 18.3.0) on
+wasm32-unknown-emscripten, …`, and `C_BUILD_IDENTITY.release` is the same name (asserted).
+- **The prepopulated data directory** is made by the release's own initdb, deterministically, and is still
+  unmarked. Its modes are 0750/0640 (the previous backup's were 0777/0666); a restore does not carry modes
+  into the data directory, and restoring it into memory and `file://` storage, rewriting the catalogs and
+  reopening are asserted (`pgwasm-c-prepopulated`).
+- The data format is unchanged (1, the same compatibility tuple), so every existing store opens as before.
 
 ## Offline return (board ADR-0010)
 

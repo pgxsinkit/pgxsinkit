@@ -70,5 +70,10 @@ const pg = await createPgwasm({ build: cBuild, extensions: { amcheck } });
 await pg.exec("CREATE EXTENSION amcheck");
 ```
 
+The artefacts are built by [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres) from
+PostgreSQL plus patches derived from ElectricSQL's
+[postgres-pglite](https://github.com/electric-sql/postgres-pglite) (PostgreSQL License), and published
+as its release assets; each file's size and sha256 are pinned in `src/artefact-pins.ts`.
+
 Licensed under the PostgreSQL License. `NOTICE` lists the components compiled into the artefacts and
 reproduces each one's notice.
