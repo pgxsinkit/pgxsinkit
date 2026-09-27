@@ -2,8 +2,14 @@
 // `idbfs-correctness.test.web.js`, taken under its PostgreSQL License option, © ElectricSQL — see
 // NOTICE). Owned outright (ADR-0062); compatibility with PGlite is an anti-goal.
 
+import { createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+
 import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
 import { cBuild, createCBuild } from "@pgxsinkit/pgwasm-c";
+import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
+import { pgDump } from "@pgxsinkit/pgwasm-pg-dump";
+import { Repl } from "@pgxsinkit/pgwasm-repl";
 
 import type { PostgresModule } from "../../../packages/pgwasm-c/src/host/emscripten";
 
@@ -99,6 +105,7 @@ function shapeOf(result: Awaited<ReturnType<Pgwasm["query"]>>): QueryShape {
 // ─── the base flow: one database across calls ──────────────────────────────────
 
 let base: Pgwasm | undefined;
+let repl: { readonly pg: Pgwasm; readonly root: Root; readonly container: HTMLElement } | undefined;
 
 function openBase(): Pgwasm {
   if (base === undefined) throw new Error("no database is open; call open() first");
@@ -505,7 +512,71 @@ const harness = {
   },
 };
 
-export type PgwasmIdbHarness = typeof harness;
+// ─── pg_dump and the REPL, in memory ──────────────────────────────────────────
+
+const toolsHarness = {
+  /**
+   * pg_dump on a database created from the prepopulated data directory, and its script run into
+   * another such database.
+   */
+  async pgDumpRoundTrip(): Promise<{
+    readonly name: string;
+    readonly type: string;
+    readonly insert: boolean;
+    readonly restored: unknown[];
+  }> {
+    const seeded = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
+    try {
+      await seeded.exec(
+        "CREATE TABLE dumped (id int PRIMARY KEY, note text); INSERT INTO dumped VALUES (1, 'in a browser');",
+      );
+      const dump = await pgDump({ pg: seeded });
+      const script = await dump.text();
+      const copy = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
+      try {
+        await copy.exec(script);
+        return {
+          name: dump.name,
+          type: dump.type,
+          insert: script.includes("INSERT INTO public.dumped VALUES (1, 'in a browser');"),
+          restored: (await copy.query("SELECT * FROM public.dumped")).rows,
+        };
+      } finally {
+        await copy.close();
+      }
+    } finally {
+      await seeded.close();
+    }
+  },
+
+  /** Mount two REPLs on one database created from the prepopulated data directory. */
+  async mountRepl(): Promise<void> {
+    const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir() });
+    const container = document.createElement("div");
+    container.id = "repl";
+    document.body.append(container);
+    const root = createRoot(container);
+    root.render([
+      createElement("div", { key: "first", id: "first-repl", style: { height: "300px" } }, createElement(Repl, { pg })),
+      createElement(
+        "div",
+        { key: "second", id: "second-repl", style: { height: "300px" } },
+        createElement(Repl, { pg }),
+      ),
+    ]);
+    repl = { pg, root, container };
+  },
+
+  async unmountRepl(): Promise<void> {
+    const mounted = repl;
+    repl = undefined;
+    mounted?.root.unmount();
+    mounted?.container.remove();
+    await mounted?.pg.close();
+  },
+};
+
+export type PgwasmIdbHarness = typeof harness & typeof toolsHarness;
 
 declare global {
   interface Window {
@@ -513,4 +584,4 @@ declare global {
   }
 }
 
-window.pgwasmIdb = harness;
+window.pgwasmIdb = { ...harness, ...toolsHarness };

@@ -7,7 +7,8 @@ import { expect, type Page, test } from "@playwright/test";
 /**
  * pgwasm on the C build with `idb://` storage, in Chromium and WebKit: the storage kind that exists
  * only in a browser. The scenarios run in the page (`src.ts`); these tests drive and assert on them.
- * On demand (`bun run test:browser:pgwasm-idb`), outside the commit path.
+ * pg_dump and the REPL run here too, in memory: the REPL needs a DOM, and pg_dump's WebAssembly is
+ * loaded as a browser loads it. On demand (`bun run test:browser:pgwasm-idb`), outside the commit path.
  */
 
 const ORIGIN = "http://127.0.0.1:4191";
@@ -203,5 +204,32 @@ test.describe("IndexedDB storage correctness", () => {
       crashRecovery: true,
       persistedAfterCrash: [{ value: 1 }, { value: 2 }],
     });
+  });
+});
+
+test.describe("pg_dump and the REPL", () => {
+  test("pg_dump dumps a database created from the prepopulated data directory", async ({ page }) => {
+    await openHarness(page);
+    const result = await page.evaluate(() => window.pgwasmIdb.pgDumpRoundTrip());
+    expect(result.name).toBe("dump.sql");
+    expect(result.type).toMatch(/^text\/plain/);
+    expect(result.insert).toBe(true);
+    expect(result.restored).toEqual([{ id: 1, note: "in a browser" }]);
+  });
+
+  test("the REPL runs what is typed on Enter, and its stylesheet is in the page once", async ({ page }) => {
+    await openHarness(page);
+    await page.evaluate(() => window.pgwasmIdb.mountRepl());
+    const input = page.locator("#first-repl .cm-content");
+    await expect(input).toHaveAttribute("contenteditable", "true");
+    await input.click();
+    await page.keyboard.type("select 1 as one");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#first-repl .pgwasm-repl-table th")).toHaveText("one");
+    await expect(page.locator("#first-repl .pgwasm-repl-table td")).toHaveText("1");
+    // Two REPLs are mounted; React inserted their stylesheet into the head once.
+    await expect(page.locator("#second-repl .pgwasm-repl-root")).toHaveCount(1);
+    expect(await page.locator('head style[data-href="pgwasm-repl"]').count()).toBe(1);
+    await page.evaluate(() => window.pgwasmIdb.unmountRepl());
   });
 });
