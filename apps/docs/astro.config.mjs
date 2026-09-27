@@ -7,7 +7,6 @@ import { createStarlightTypeDocPlugin } from "starlight-typedoc";
 const ogImage = "https://pgxsinkit.github.io/og.png";
 
 const [contractsTypeDoc, contractsTypeDocSidebar] = createStarlightTypeDocPlugin();
-const [pgliteOpfsRepackedTypeDoc, pgliteOpfsRepackedTypeDocSidebar] = createStarlightTypeDocPlugin();
 const [clientTypeDoc, clientTypeDocSidebar] = createStarlightTypeDocPlugin();
 const [serverTypeDoc, serverTypeDocSidebar] = createStarlightTypeDocPlugin();
 const [reactTypeDoc, reactTypeDocSidebar] = createStarlightTypeDocPlugin();
@@ -46,13 +45,6 @@ export default defineConfig({
           output: "api/contracts",
           typeDoc: { gitRemote: "upstream", excludeInternal: true },
           sidebar: { label: "@pgxsinkit/contracts", collapsed: true },
-        }),
-        pgliteOpfsRepackedTypeDoc({
-          entryPoints: ["../../packages/pglite-opfs-repacked/src/index.ts"],
-          tsconfig: "../../packages/pglite-opfs-repacked/tsconfig.typedoc.json",
-          output: "api/pglite-opfs-repacked",
-          typeDoc: { gitRemote: "upstream", excludeInternal: true },
-          sidebar: { label: "@pgxsinkit/pglite-opfs-repacked", collapsed: true },
         }),
         clientTypeDoc({
           entryPoints: ["../../packages/client/src/index.ts"],
@@ -95,7 +87,6 @@ export default defineConfig({
           items: [
             { label: "Overview", slug: "reference" },
             contractsTypeDocSidebar,
-            pgliteOpfsRepackedTypeDocSidebar,
             clientTypeDocSidebar,
             serverTypeDocSidebar,
             reactTypeDocSidebar,

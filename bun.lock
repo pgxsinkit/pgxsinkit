@@ -8,8 +8,6 @@
         "jose": "6.2.12",
       },
       "devDependencies": {
-        "@electric-sql/pglite": "0.5.8-pgx.2",
-        "@electric-sql/pglite-prepopulatedfs": "0.5.8",
         "@pgxsinkit/board-schema": "workspace:*",
         "@playwright/test": "^1.63.0",
         "@tanstack/intent": "^0.4.0",
@@ -141,14 +139,6 @@
         "zod": "^4.6.5",
       },
     },
-    "packages/pglite-opfs-repacked": {
-      "name": "@pgxsinkit/pglite-opfs-repacked",
-      "version": "0.0.0",
-      "peerDependencies": {
-        "@electric-sql/pglite": ">=0.5.8-pgx.2",
-        "@pgxsinkit/pgwasm": "workspace:*",
-      },
-    },
     "packages/pgwasm": {
       "name": "@pgxsinkit/pgwasm",
       "version": "0.0.0",
@@ -231,9 +221,6 @@
         "zod": "4.6.5",
       },
     },
-  },
-  "overrides": {
-    "@electric-sql/pglite": "npm:@pgxsinkit/pglite@0.5.8-pgx.2",
   },
   "packages": {
     "@astrojs/compiler-binding": ["@astrojs/compiler-binding@0.4.0", "", { "optionalDependencies": { "@astrojs/compiler-binding-darwin-arm64": "0.4.0", "@astrojs/compiler-binding-darwin-x64": "0.4.0", "@astrojs/compiler-binding-linux-arm64-gnu": "0.4.0", "@astrojs/compiler-binding-linux-arm64-musl": "0.4.0", "@astrojs/compiler-binding-linux-x64-gnu": "0.4.0", "@astrojs/compiler-binding-linux-x64-musl": "0.4.0", "@astrojs/compiler-binding-wasm32-wasi": "0.4.0", "@astrojs/compiler-binding-win32-arm64-msvc": "0.4.0", "@astrojs/compiler-binding-win32-x64-msvc": "0.4.0" } }, "sha512-x2RjDUuWfwLNtc3mjAdSRInwqh/rqbLar9cm/5FOMbHvmYZB7yfKewzSclAxWjIZsypJDXv1lhaP2WG+P8TK3g=="],
@@ -331,10 +318,6 @@
     "@drizzle-team/brocli": ["@drizzle-team/brocli@0.12.1", "", {}, "sha512-yHwomvolVafvUXhy5TdiJVkuNCxXn+bKOs2aWiWEQh/5YaV97Oa/abJz3dmx7lxgIUsUlS1Jl4mEfvJPo3YsVw=="],
 
     "@durable-streams/client": ["@durable-streams/client@0.2.7", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1" }, "bin": { "intent": "bin/intent.js" } }, "sha512-oxWbPEo8NO1Ruv9UgUVu3OswdE2z5ERhjccaujlpwe4tWuVd+Y/kdx+HtrkOnwN+bnRHTlxKYUNY8JTyrnhKew=="],
-
-    "@electric-sql/pglite": ["@pgxsinkit/pglite@0.5.8-pgx.2", "", {}, "sha512-YP74PVh7ScGvAVR3HnZbePaXEbsUqa2RH3lHhlMtP5BCdHaDnLJUchuExpyOUA0usPE4DOatrm2KaSq2ZSPJuw=="],
-
-    "@electric-sql/pglite-prepopulatedfs": ["@electric-sql/pglite-prepopulatedfs@0.5.8", "", { "peerDependencies": { "@electric-sql/pglite": "0.5.8" } }, "sha512-VQsIpJjTRcyEdsoU84UGhGc67Dq+N/P5k9NPPHrvMgGTptHYIxpPcEbzxpFnLL56ThvZ/mJecC+0IbNhRN1zrg=="],
 
     "@emnapi/core": ["@emnapi/core@1.11.1", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.2", "tslib": "^2.4.0" } }, "sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ=="],
 
@@ -613,8 +596,6 @@
     "@pgxsinkit/docs": ["@pgxsinkit/docs@workspace:apps/docs"],
 
     "@pgxsinkit/perf-lab": ["@pgxsinkit/perf-lab@workspace:apps/perf-lab"],
-
-    "@pgxsinkit/pglite-opfs-repacked": ["@pgxsinkit/pglite-opfs-repacked@workspace:packages/pglite-opfs-repacked"],
 
     "@pgxsinkit/pgwasm": ["@pgxsinkit/pgwasm@workspace:packages/pgwasm"],
 

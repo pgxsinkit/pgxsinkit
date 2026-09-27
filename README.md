@@ -91,10 +91,6 @@ bun run validate:full    # pre-push + CI gate: adds the PGlite-backed unit suite
 bun run test:integration # container-backed suites on isolated, ephemeral compose stacks
 ```
 
-**Fresh clone:** `@electric-sql/pglite` is temporarily overridden to the `@pgxsinkit/pglite` fork (see
-[docs/runbooks/pglite-fork-override.md](./docs/runbooks/pglite-fork-override.md)). The fork is mirrored
-on public npm, so a plain `bun install` resolves it — no registry auth or extra setup needed.
-
 Deeper references, all under `docs/`: [architecture](./docs/architecture.md) ·
 [testing strategy](./docs/testing-strategy.md) · [migrations](./docs/migrations.md) ·
 [function artifacts](./docs/function-artifacts.md) · [performance](./tests/performance/README.md).

@@ -8,8 +8,7 @@ import path from "node:path";
 // the repo's gitignored tmp/ tree, runs initdb + one trivial query + close, then
 // recursively counts the regular files in the datadir. Cleans up afterward.
 //
-// Uses the root `@electric-sql/pglite` dependency, which package.json aliases to the
-// @pgxsinkit fork.
+// Runs on pgwasm's C build (`@pgxsinkit/pgwasm-c`).
 import { createPgwasm } from "@pgxsinkit/pgwasm";
 import { cBuild } from "@pgxsinkit/pgwasm-c";
 

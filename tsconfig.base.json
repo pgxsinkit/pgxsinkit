@@ -30,7 +30,6 @@
       "@pgxsinkit/board-schema": ["./packages/board-schema/src/index.ts"],
       "@pgxsinkit/schema": ["./packages/schema/src/index.ts"],
       "@pgxsinkit/contracts": ["./packages/contracts/src/index.ts"],
-      "@pgxsinkit/pglite-opfs-repacked": ["./packages/pglite-opfs-repacked/src/index.ts"],
       "@pgxsinkit/pgwasm": ["./packages/pgwasm/src/index.ts"],
       "@pgxsinkit/pgwasm/build": ["./packages/pgwasm/src/build/index.ts"],
       "@pgxsinkit/pgwasm/drizzle": ["./packages/pgwasm/src/drizzle/index.ts"],

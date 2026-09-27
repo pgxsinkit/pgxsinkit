@@ -60,7 +60,7 @@ export interface PublicPackage {
    * host that has no bundler and cannot resolve a bare specifier — a plain `<script type="module">`
    * or worker in a browser, and a `file://` import in Node. The published `dist/index.js` cannot serve
    * that purpose by design: it leaves every declared dependency external (the ADR-0038 artifact
-   * contract), so it carries bare `@electric-sql/pglite` imports.
+   * contract), so it carries bare `@pgxsinkit/*` imports.
    *
    * This is a REDISTRIBUTION artifact, not the publish surface: it vendors whatever the entry pulls
    * in, is not referenced from `exports`, and is gitignored with the rest of `dist`. The artifact
@@ -135,14 +135,6 @@ export const publicPackages: readonly PublicPackage[] = [
     packageDir: "packages/pgwasm-repl",
     entrypoints: ["src/index.ts"],
     bundler: "vite",
-  },
-  {
-    packageDir: "packages/pglite-opfs-repacked",
-    entrypoints: ["src/index.ts"],
-    bundler: "bun",
-    // TEMPORARY shim (pgwasm step 3, B1; deleted in B5): the store's own bundle is pgwasm's
-    // dist/opfs/browser-bundle.js; this one keeps the PGlite factory's hosts loading by URL until then.
-    browserBundle: true,
   },
   {
     // `src/testing.ts` is the `@pgxsinkit/client/testing` subpath (ADR-0036) — a SEPARATE standalone bundle

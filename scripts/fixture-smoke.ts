@@ -30,7 +30,6 @@ const PUBLIC_PACKAGES = [
   "pgwasm-c",
   "pgwasm-pg-dump",
   "pgwasm-repl",
-  "pglite-opfs-repacked",
   "client",
   "server",
   "react",
@@ -72,23 +71,6 @@ async function peerDepsFromManifests(): Promise<Record<string, string>> {
     }
   }
   return peers;
-}
-
-/**
- * The workspace's `@electric-sql/pglite` fork alias, applied to the fixture as well.
- *
- * pgxsinkit does not run on any released upstream pglite (docs/runbooks/pglite-fork-override.md):
- * the peer ranges pin fork builds only (`>=<base>-pgx.0 <<base>`), and a real consumer satisfies
- * them with exactly this alias in their own `overrides`. The fixture mirrors that consumer setup.
- * A peer range can constrain the version but cannot itself force the `npm:@pgxsinkit/pglite@…`
- * alias, which is why this is applied explicitly. Read from the root manifest so the two pins can
- * never drift.
- */
-async function pgliteForkAlias(): Promise<string | undefined> {
-  const rootManifest = JSON.parse(await readFile(resolve(repoRoot, "package.json"), "utf8")) as {
-    overrides?: Record<string, string>;
-  };
-  return rootManifest.overrides?.["@electric-sql/pglite"];
 }
 
 /**
@@ -145,11 +127,11 @@ import {
   generateLocalSchemaSql,
 } from "@pgxsinkit/client";
 import { memoryStoreForTests } from "@pgxsinkit/client/testing";
-import { createOpfsRepackedPGlite, StoreRecreationRequiredError } from "@pgxsinkit/pglite-opfs-repacked";
 import { createSyncServer } from "@pgxsinkit/server";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 import { createPgwasm, OpfsAhpRemovedError } from "@pgxsinkit/pgwasm";
 import { readTar } from "@pgxsinkit/pgwasm/build";
+import { createOpfsPgwasm, StoreRecreationRequiredError } from "@pgxsinkit/pgwasm/opfs";
 import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 import { BaseFilesystem } from "@pgxsinkit/pgwasm/fs";
 import { live } from "@pgxsinkit/pgwasm/live";
@@ -203,11 +185,11 @@ assert.equal(typeof driver.start, "function");
 // server + react: the published entry points resolve and expose their factories.
 assert.equal(typeof createSyncServer, "function");
 assert.equal(typeof createSyncClientHooks, "function");
-assert.equal(typeof createOpfsRepackedPGlite, "function");
+assert.equal(typeof createOpfsPgwasm, "function");
 assert.equal(new StoreRecreationRequiredError("recreate").storeCode, "STORE_RECREATION_REQUIRED");
 // The source file is deliberately present in the tarball, as it is for every public package. The
 // export map must still make it unreachable as a consumer subpath.
-const repackedInternalSubpath = ["@pgxsinkit/pglite-opfs-repacked", "src", "opfs-port.ts"].join("/");
+const repackedInternalSubpath = ["@pgxsinkit/pgwasm", "src", "opfs", "opfs-port.ts"].join("/");
 await assert.rejects(
   import(repackedInternalSubpath),
   (error: unknown) => {
@@ -472,10 +454,6 @@ async function main(): Promise<void> {
     for (const [name, tarball] of Object.entries(tarballs)) {
       pkgDeps[name] = `file:${tarball}`;
       overrides[name] = `file:${tarball}`;
-    }
-    const pgliteAlias = await pgliteForkAlias();
-    if (pgliteAlias !== undefined) {
-      overrides["@electric-sql/pglite"] = pgliteAlias;
     }
 
     await writeFile(

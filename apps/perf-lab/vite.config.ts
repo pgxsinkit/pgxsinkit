@@ -51,7 +51,6 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: [
-      "@electric-sql/pglite",
       "@pgxsinkit/pgwasm",
       "@pgxsinkit/pgwasm-c",
       "@pgxsinkit/pgwasm-pg-dump",

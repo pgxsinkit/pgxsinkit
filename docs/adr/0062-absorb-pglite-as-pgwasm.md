@@ -15,7 +15,7 @@ pgxsinkit runs on PGlite through a fork. The root `overrides` alias `@electric-s
 `@pgxsinkit/pglite@0.5.8-pgx.2`, a rebase of upstream 0.5.8 carrying the fixes the repacked store's
 durability depends on (the transaction-end sync, and failing the instance on an engine exception
 instead of swallowing it). Every fix travels the same road: fork commit, a publish to GitHub
-Packages and npm, a pin bump here, and the steps in `docs/runbooks/pglite-fork-override.md`. Every
+Packages and npm, a pin bump here, and the steps in the fork-override runbook (deleted with the fork in step 3). Every
 consumer has to carry the same override.
 
 The maintainer's assessment (2026-09-26) is that ElectricSQL will contribute little more to PGlite

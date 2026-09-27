@@ -2,7 +2,6 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { publicPackages, type PublicPackage } from "../../scripts/build-public-packages";
 
@@ -41,64 +40,12 @@ const EXPECTED_IMPORTS: Record<string, readonly string[]> = {
     "@codemirror/view",
     "psql-describe",
   ],
-  "packages/pglite-opfs-repacked": ["@electric-sql/pglite", "@pgxsinkit/pgwasm/opfs"],
   "packages/client": ["@pgxsinkit/contracts", "drizzle-orm", "@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm-c"],
   // zod is a server peer but its bundle never imports it directly — the zod usage the old inlined
   // bundle showed belonged to the vendored contracts copy.
   "packages/server": ["@pgxsinkit/contracts", "drizzle-orm"],
   "packages/react": ["react", "react/jsx-runtime", "@pgxsinkit/client"],
 };
-
-const OPFS_REPACKED_RUNTIME_EXPORTS = [
-  // The pgwasm adapter, its factory, and the stable runtime errors.
-  "CorruptStoreError",
-  "DurabilityModeMismatchError",
-  "ExtentSizeMismatchError",
-  "FsError",
-  "OpfsRepackedFS",
-  "StoreClosedError",
-  "StoreFailedError",
-  "StoreLimitError",
-  "StoreOwnedError",
-  "StoreRecreationRequiredError",
-  "UnexpectedStoreEntryError",
-  "createOpfsRepackedPGlite",
-  // The engine-agnostic store core a coordinator worker owns, with no pgwasm, wasm, or OPFS in it.
-  "MemoryRepackedPort",
-  "MountedRepackedVfs",
-  "RepackedVfs",
-  // The OPFS port for that core, for a host that owns the store itself and wants it persisted.
-  "OpfsRepackedPort",
-  // The same four files in an ordinary directory, over `node:fs`: the port a Node/Bun build step
-  // fills a store on before shipping those four files to a browser.
-  "FileRepackedPort",
-  // The synchronous broker: one owner of the store, reached over SharedArrayBuffer by futex-parked
-  // backends that cannot await anything.
-  "DEFAULT_PAYLOAD_BYTES",
-  "O_APPEND",
-  "O_CREAT",
-  "O_EXCL",
-  "O_NOFOLLOW",
-  "O_RDONLY",
-  "O_RDWR",
-  "O_TRUNC",
-  "O_WRONLY",
-  "RepackedBrokerStoreError",
-  "RepackedBrokerTransportError",
-  "RepackedChannel",
-  "RepackedDoorbell",
-  "RepackedSyncBroker",
-  "RepackedSyncClient",
-  "errnoName",
-  "fsErrorNameOf",
-  "planOpen",
-  "throwOnErrno",
-  // The WASI preview1 filesystem adapter over that broker: what a wasm engine's file calls land on.
-  "WASI_ERRNO",
-  "WASI_FILETYPE",
-  "createWasiPreview1Fs",
-  "normalizeWasiPath",
-] as const;
 
 /**
  * The files `bun pm pack` puts in a package's tarball — the same pack `bun publish` makes — listed by a
@@ -172,7 +119,7 @@ for (const pkg of publicPackages) {
         peerDependencies?: Record<string, string>;
       };
       const declared = Object.keys({ ...manifest.dependencies, ...manifest.peerDependencies });
-      // Subpaths of a declared package (react/jsx-runtime, @electric-sql/pglite/live, zod/v4)
+      // Subpaths of a declared package (react/jsx-runtime, @pgxsinkit/pgwasm/live, zod/v4)
       // count as declared.
       const allowed = (specifier: string) =>
         declared.some((name) => specifier === name || specifier.startsWith(`${name}/`));
@@ -259,14 +206,6 @@ for (const pkg of publicPackages) {
           expect(target.startsWith(join(repoRoot, pkg.packageDir, "artefacts") + sep)).toBe(true);
           expect(existsSync(target)).toBe(true);
         }
-      });
-    }
-
-    if (pkg.packageDir === "packages/pglite-opfs-repacked") {
-      it("exports only the adapter, factory, and stable runtime errors", async () => {
-        const entry = join(repoRoot, pkg.packageDir, "dist", "index.js");
-        const publicApi = (await import(pathToFileURL(entry).href)) as Record<string, unknown>;
-        expect(Object.keys(publicApi).sort()).toEqual([...OPFS_REPACKED_RUNTIME_EXPORTS].sort());
       });
     }
   });

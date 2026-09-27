@@ -1101,7 +1101,7 @@ Deliverables:
   `#pendingFsSync`, `syncRequiresExclusiveExecution`, host cleanup hooks). `peerDependencies` names
   a plain upstream version range; the workspace-level fork override is a temporary carrier for
   upstream-pending host _bugfixes_ the packages may rely on — the initdb-fs-leak fix and the
-  transaction-end sync fix (see `docs/runbooks/pglite-fork-override.md`). The fork's non-exclusive
+  transaction-end sync fix (the fork-override runbook, deleted with the fork in pgwasm step 3). The fork's non-exclusive
   rejection latch is offered upstream as a generic swallowed-rejection bugfix; if accepted it
   enables detached relaxed host sync as an optional future performance mode, but correctness must
   never depend on it.

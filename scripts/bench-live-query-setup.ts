@@ -336,7 +336,7 @@ async function measureUnionSummary(
 
 async function main(): Promise<void> {
   console.log("Live-query setup-cost decomposition (ADR-0040 decision 5)");
-  console.log(`Bun ${Bun.version}, @electric-sql/pglite in-memory`);
+  console.log(`Bun ${Bun.version}, pgwasm (C build) in-memory`);
   if (process.argv.includes("--union-summary")) {
     // The registry-wide mutation-summary rerun cost (slice 4): the shared aggregate `subscribeSummary` reruns
     // per journal write. Small on purpose; expected ~tens of ms per write (per the ADR-0040 aggregate findings).
