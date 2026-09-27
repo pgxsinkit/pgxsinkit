@@ -127,6 +127,23 @@ describe("sync config contracts", () => {
     ).toThrow(/invalid storage\.durability/);
   });
 
+  it("carries a storage.build declaration through defineSyncRegistry (ADR-0063)", () => {
+    const registry = defineSyncRegistry({
+      tables: { thing: defineSyncTable({ tableName: "storage_thing_build", makeColumns: makeStorageColumns }) },
+      storage: { build: "pgrust" },
+    });
+    expect(getSyncRegistryStorage(registry)).toEqual({ build: "pgrust" });
+  });
+
+  it("rejects an invalid storage.build at defineSyncRegistry (fail closed at module-eval)", () => {
+    expect(() =>
+      defineSyncRegistry({
+        tables: { thing: defineSyncTable({ tableName: "storage_bad_build", makeColumns: makeStorageColumns }) },
+        storage: { build: "rust" as unknown as "pgrust" },
+      }),
+    ).toThrow(/invalid storage\.build/);
+  });
+
   it("carries a storage.engine declaration (the store-factory module) through defineSyncRegistry", () => {
     const registry = defineSyncRegistry({
       tables: { thing: defineSyncTable({ tableName: "storage_thing_engine", makeColumns: makeStorageColumns }) },

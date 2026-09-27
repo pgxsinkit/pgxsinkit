@@ -14,26 +14,34 @@ import { describe, expect, it } from "bun:test";
 
 import {
   assertStorageDeclarationCompatible,
+  isStorageBuild,
   isStorageEngineDeclaration,
   isStorageEngineModule,
   resolveStorageDeclaration,
+  STORAGE_BUILDS,
   StorageDeclarationRefusedError,
 } from "@pgxsinkit/contracts";
 
 describe("resolveStorageDeclaration — per-field precedence (ADR-0050)", () => {
   it("both silent → capability defaults (opfs, relaxed)", () => {
-    expect(resolveStorageDeclaration(undefined, undefined)).toEqual({ backend: "opfs", durability: "relaxed" });
-    expect(resolveStorageDeclaration({}, {})).toEqual({ backend: "opfs", durability: "relaxed" });
+    expect(resolveStorageDeclaration(undefined, undefined)).toEqual({
+      backend: "opfs",
+      durability: "relaxed",
+      build: "c",
+    });
+    expect(resolveStorageDeclaration({}, {})).toEqual({ backend: "opfs", durability: "relaxed", build: "c" });
   });
 
   it("wire explicit fields are honoured when the static declaration is silent", () => {
     expect(resolveStorageDeclaration(undefined, { backend: "idbfs" })).toEqual({
       backend: "idbfs",
       durability: "relaxed",
+      build: "c",
     });
     expect(resolveStorageDeclaration({}, { durability: "strict" })).toEqual({
       backend: "opfs",
       durability: "strict",
+      build: "c",
     });
   });
 
@@ -43,6 +51,7 @@ describe("resolveStorageDeclaration — per-field precedence (ADR-0050)", () => 
     expect(resolveStorageDeclaration({ backend: "idbfs", durability: "strict" }, {})).toEqual({
       backend: "idbfs",
       durability: "strict",
+      build: "c",
     });
   });
 
@@ -50,6 +59,7 @@ describe("resolveStorageDeclaration — per-field precedence (ADR-0050)", () => 
     expect(resolveStorageDeclaration({ backend: "idbfs" }, { backend: "idbfs", durability: "relaxed" })).toEqual({
       backend: "idbfs",
       durability: "relaxed",
+      build: "c",
     });
   });
 
@@ -74,7 +84,7 @@ describe("resolveStorageDeclaration — per-field precedence (ADR-0050)", () => 
 });
 
 describe("assertStorageDeclarationCompatible — a later declaration against the bound resolution", () => {
-  const bound = { backend: "opfs", durability: "strict" } as const;
+  const bound = { backend: "opfs", durability: "strict", build: "c" } as const;
 
   it("unset fields and equal explicit fields are idempotent", () => {
     expect(() => assertStorageDeclarationCompatible(bound, undefined)).not.toThrow();
@@ -130,13 +140,14 @@ describe("the engine field participates in the declaration exactly as backend/du
 
   it("both silent → NO engine: absence is how the toolkit's own store is spelled", () => {
     expect(resolveStorageDeclaration(undefined, undefined).engine).toBeUndefined();
-    expect(resolveStorageDeclaration({}, {})).toEqual({ backend: "opfs", durability: "relaxed" });
+    expect(resolveStorageDeclaration({}, {})).toEqual({ backend: "opfs", durability: "relaxed", build: "c" });
   });
 
   it("a wire engine is honoured when the registry is silent (the dynamic-preference path)", () => {
     expect(resolveStorageDeclaration({}, { engine: { module: ENGINE } })).toEqual({
       backend: "opfs",
       durability: "relaxed",
+      build: "c",
       engine: { module: ENGINE },
     });
   });
@@ -145,6 +156,7 @@ describe("the engine field participates in the declaration exactly as backend/du
     expect(resolveStorageDeclaration({ engine: { module: ENGINE } }, {})).toEqual({
       backend: "opfs",
       durability: "relaxed",
+      build: "c",
       engine: { module: ENGINE },
     });
   });
@@ -161,22 +173,73 @@ describe("the engine field participates in the declaration exactly as backend/du
   it("a later declaration naming a DIFFERENT engine than the bound one is refused — identity, not preference", () => {
     // A store's datadir belongs to the engine that wrote it, so this is the same immutability the other
     // fields have: an engine change mints a fresh store under a fresh path, it never rehomes this one.
-    const bound = { backend: "opfs", durability: "relaxed", engine: { module: ENGINE } } as const;
+    const bound = { backend: "opfs", durability: "relaxed", build: "c", engine: { module: ENGINE } } as const;
     expect(() => assertStorageDeclarationCompatible(bound, { engine: { module: ENGINE } })).not.toThrow();
     expect(() => assertStorageDeclarationCompatible(bound, { engine: { module: OTHER } })).toThrow(
       StorageDeclarationRefusedError,
     );
     // A store bound to the BUILT-IN engine, handed a module: still a refusal, naming what it is bound to.
     expect(() =>
-      assertStorageDeclarationCompatible({ backend: "opfs", durability: "relaxed" }, { engine: { module: ENGINE } }),
+      assertStorageDeclarationCompatible(
+        { backend: "opfs", durability: "relaxed", build: "c" },
+        { engine: { module: ENGINE } },
+      ),
     ).toThrow(/built-in store engine/);
   });
 
   it("an incoming declaration with NO engine is 'no opinion', never an assertion of the built-in engine", () => {
     // Absence is the built-in engine's spelling, so it cannot double as an explicit contradiction — the
     // consumer that switches back mints a fresh store rather than redeclaring this one.
-    const bound = { backend: "opfs", durability: "relaxed", engine: { module: ENGINE } } as const;
+    const bound = { backend: "opfs", durability: "relaxed", build: "c", engine: { module: ENGINE } } as const;
     expect(() => assertStorageDeclarationCompatible(bound, {})).not.toThrow();
     expect(() => assertStorageDeclarationCompatible(bound, { durability: "relaxed" })).not.toThrow();
+  });
+});
+
+// ADR-0063: the `build` field names the pgwasm build that owns the store's datadir. It resolves and binds
+// exactly like `durability` — unset is "no opinion", explicit disagreement refuses — and defaults to `"c"`.
+describe("the build field participates in the declaration exactly as durability does (ADR-0063)", () => {
+  it("isStorageBuild accepts exactly the declared vocabulary", () => {
+    expect(STORAGE_BUILDS).toEqual(["c", "pgrust"]);
+    expect(isStorageBuild("c")).toBe(true);
+    expect(isStorageBuild("pgrust")).toBe(true);
+    expect(isStorageBuild("C")).toBe(false);
+    expect(isStorageBuild("wasm")).toBe(false);
+    expect(isStorageBuild("")).toBe(false);
+    expect(isStorageBuild(undefined)).toBe(false);
+    expect(isStorageBuild({ name: "c" })).toBe(false);
+  });
+
+  it("both silent → the C build", () => {
+    expect(resolveStorageDeclaration(undefined, undefined).build).toBe("c");
+    expect(resolveStorageDeclaration({}, {}).build).toBe("c");
+  });
+
+  it("a wire build is honoured when the registry is silent, a static one when the wire is silent", () => {
+    expect(resolveStorageDeclaration({}, { build: "pgrust" })).toEqual({
+      backend: "opfs",
+      durability: "relaxed",
+      build: "pgrust",
+    });
+    expect(resolveStorageDeclaration({ build: "pgrust" }, {}).build).toBe("pgrust");
+    expect(resolveStorageDeclaration({ build: "pgrust" }, { build: "pgrust" }).build).toBe("pgrust");
+  });
+
+  it("explicit disagreement between the two sources is a typed refusal naming the field", () => {
+    expect(() => resolveStorageDeclaration({ build: "pgrust" }, { build: "c" })).toThrow(
+      StorageDeclarationRefusedError,
+    );
+    expect(() => resolveStorageDeclaration({ build: "c" }, { build: "pgrust" })).toThrow(/"build"/);
+  });
+
+  it("a later declaration: unset or equal is idempotent, a different build refuses", () => {
+    const bound = { backend: "opfs", durability: "relaxed", build: "pgrust" } as const;
+    expect(() => assertStorageDeclarationCompatible(bound, {})).not.toThrow();
+    expect(() => assertStorageDeclarationCompatible(bound, { durability: "relaxed" })).not.toThrow();
+    expect(() => assertStorageDeclarationCompatible(bound, { build: "pgrust" })).not.toThrow();
+    expect(() => assertStorageDeclarationCompatible(bound, { build: "c" })).toThrow(StorageDeclarationRefusedError);
+    expect(() =>
+      assertStorageDeclarationCompatible({ backend: "opfs", durability: "relaxed", build: "c" }, { build: "pgrust" }),
+    ).toThrow(/"build"/);
   });
 });

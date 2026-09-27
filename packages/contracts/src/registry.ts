@@ -30,6 +30,7 @@ import {
   isConflictPolicy,
   isRetention,
   isStorageBackend,
+  isStorageBuild,
   isStorageDurability,
   isStorageEngineDeclaration,
   isSubscriptionTiming,
@@ -38,6 +39,7 @@ import {
   readShapeTier,
   RETENTIONS,
   STORAGE_BACKENDS,
+  STORAGE_BUILDS,
   STORAGE_DURABILITIES,
   SUBSCRIPTION_TIMINGS,
   WRITE_MODES,
@@ -1848,9 +1850,9 @@ function validateRowClassification(registry: SyncTableRegistry, rowClasses: read
 
 /**
  * Fail-closed at module-eval (ADR-0049 decision 1): a declared `storage.backend` / `storage.durability` /
- * `storage.engine` must be a known value, matching how the other registry axes reject bad input at
- * `defineSyncRegistry`. An absent declaration or absent field is fine — it resolves to the ADR-0047
- * defaults (`opfs` / `relaxed`) and, for `engine`, to the toolkit's own store.
+ * `storage.build` / `storage.engine` must be a known value, matching how the other registry axes reject bad
+ * input at `defineSyncRegistry`. An absent declaration or absent field is fine — it resolves to the
+ * defaults (`opfs` / `relaxed` / `c`) and, for `engine`, to the toolkit's own store.
  */
 function validateStorageDeclaration(storage: SyncStorageDeclaration | undefined) {
   if (storage == null) {
@@ -1865,6 +1867,9 @@ function validateStorageDeclaration(storage: SyncStorageDeclaration | undefined)
     throw new Error(
       `invalid storage.durability "${String(storage.durability)}": must be one of ${STORAGE_DURABILITIES.join(", ")}`,
     );
+  }
+  if (storage.build !== undefined && !isStorageBuild(storage.build)) {
+    throw new Error(`invalid storage.build "${String(storage.build)}": must be one of ${STORAGE_BUILDS.join(", ")}`);
   }
   if (storage.engine !== undefined && !isStorageEngineDeclaration(storage.engine)) {
     throw new Error(

@@ -138,6 +138,25 @@ export function isStorageDurability(value: unknown): value is StorageDurability 
 }
 
 /**
+ * The registry-declared store BUILD (ADR-0063): which pgwasm engine build owns the store's data directory.
+ * `c` (default) is the C PostgreSQL build; `pgrust` is the Rust one. Like the engine module, it is part of
+ * the store's identity — a datadir belongs to the build that wrote it, so a different build is a DIFFERENT
+ * store, minted fresh under a fresh path, never a rehome of an existing one.
+ *
+ * The declaration only NAMES the build. The build itself is always supplied as code at the minting site,
+ * never loaded from this string.
+ */
+export type StorageBuild = "c" | "pgrust";
+
+/** The {@link StorageBuild} values. Source of truth for {@link SyncStorageDeclaration} validation. */
+export const STORAGE_BUILDS = ["c", "pgrust"] as const satisfies readonly StorageBuild[];
+
+/** Type guard: is `value` a {@link StorageBuild}? */
+export function isStorageBuild(value: unknown): value is StorageBuild {
+  return typeof value === "string" && (STORAGE_BUILDS as readonly string[]).includes(value);
+}
+
+/**
  * The declared store ENGINE (ADR-0050 addendum 2026-09-08): the module URL of a store factory that answers
  * for the store instead of the toolkit's own `createClientPGlite`.
  *
@@ -193,6 +212,8 @@ export function isStorageEngineDeclaration(value: unknown): value is StorageEngi
  *   to contradict it; a capability fallback keeps the declared mode. A no-op on `memory` clones.
  * - {@link StorageBackend backend} defaults to `"opfs"` and scopes the BROWSER store only; Node/`file` and
  *   `memory` clones are unaffected. `"idbfs"` opts the store out of the capability/election machinery.
+ * - {@link StorageBuild build} defaults to `"c"` and names the pgwasm build that owns the store's datadir
+ *   (ADR-0063). It resolves and binds exactly as `durability` does.
  * - {@link StorageEngineDeclaration engine} defaults to ABSENT — the toolkit's own store. Present, its
  *   `module` URL is the store factory that mints this store instead (ADR-0050 addendum 2026-09-08). It is
  *   part of the declaration for the same reason the other two are: a store's datadir belongs to the engine
@@ -202,6 +223,7 @@ export function isStorageEngineDeclaration(value: unknown): value is StorageEngi
 export interface SyncStorageDeclaration {
   backend?: StorageBackend;
   durability?: StorageDurability;
+  build?: StorageBuild;
   engine?: StorageEngineDeclaration;
 }
 
@@ -216,6 +238,7 @@ export interface SyncStorageDeclaration {
 export interface ResolvedStorageDeclaration {
   backend: StorageBackend;
   durability: StorageDurability;
+  build: StorageBuild;
   engine?: StorageEngineDeclaration;
 }
 
@@ -255,7 +278,7 @@ function resolveDeclarationField<TValue>(
  * declaration (authoritative) and the tab's WIRE declaration (honoured only where the registry is silent).
  * Per field: an unset field is "no opinion" and can never conflict; both explicit and disagreeing is a
  * {@link StorageDeclarationRefusedError}; unresolved fields take the capability defaults
- * (`backend: "opfs"`, `durability: "relaxed"`, and NO engine module — the toolkit's own store).
+ * (`backend: "opfs"`, `durability: "relaxed"`, `build: "c"`, and NO engine module — the toolkit's own store).
  *
  * The `engine` field resolves on its `module` URL, which is the identity that matters: two declarations
  * naming the same module are the same engine, and a disagreement refuses exactly as the other fields do.
@@ -278,6 +301,7 @@ export function resolveStorageDeclaration(
       wireDeclaration?.durability,
       "relaxed",
     ),
+    build: resolveDeclarationField("build", staticDeclaration?.build, wireDeclaration?.build, "c"),
     ...(engineModule === undefined ? {} : { engine: { module: engineModule } }),
   };
 }
@@ -297,7 +321,7 @@ export function assertStorageDeclarationCompatible(
   incoming: SyncStorageDeclaration | undefined,
 ): void {
   if (incoming === undefined) return;
-  for (const field of ["backend", "durability"] as const) {
+  for (const field of ["backend", "durability", "build"] as const) {
     const value = incoming[field];
     if (value !== undefined && value !== bound[field]) {
       throw new StorageDeclarationRefusedError(

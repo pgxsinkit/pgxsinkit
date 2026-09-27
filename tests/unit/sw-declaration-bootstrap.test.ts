@@ -236,6 +236,31 @@ describe("bootstrap — registry-silent placement defers to the first declaratio
     expect(connected).toEqual([tabA.port, tabB.port]);
     expect(refusalOf(tabB.sent)).toBeUndefined();
   });
+
+  it("a wire declaration naming an unknown build is refused at the handshake, never bound (ADR-0063)", async () => {
+    let probed = false;
+    const connected: BridgePort[] = [];
+    const { scope, connect } = makeFakeSharedScope();
+    bootstrapWorkerScope({
+      connect: (port) => connected.push(port),
+      peerCount: () => connected.length,
+      decidePlacement: () => {
+        probed = true;
+        return grantedPlacement();
+      },
+      globalScope: scope,
+    });
+
+    const tab = makeFakePort();
+    connect(tab.port);
+    tab.emit(declare({ build: "rust" }));
+    await settle();
+
+    expect(probed).toBe(false); // the bad declaration binds nothing, so no decision starts
+    expect(connected).toEqual([]);
+    const refusal = refusalOf(tab.sent)?.[DECLARATION_REFUSED_KEY] as { message?: string } | undefined;
+    expect(refusal?.message).toContain('unknown build "rust"');
+  });
 });
 
 // ─── 2. Registry-static (`staticStorage`) is authoritative: decides at startup, no wait ──────────────

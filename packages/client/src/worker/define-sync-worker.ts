@@ -21,6 +21,7 @@ import {
   assertStorageDeclarationCompatible,
   getSyncRegistryStorage,
   isStorageBackend,
+  isStorageBuild,
   isStorageDurability,
   isStorageEngineDeclaration,
   resolveStorageDeclaration,
@@ -2033,6 +2034,9 @@ function invalidDeclarationField(declaration: SyncStorageDeclaration): string | 
   }
   if (declaration.durability !== undefined && !isStorageDurability(declaration.durability)) {
     return `durability "${String(declaration.durability)}"`;
+  }
+  if (declaration.build !== undefined && !isStorageBuild(declaration.build)) {
+    return `build "${String(declaration.build)}"`;
   }
   // ADR-0050 addendum 2026-09-08: a declared engine must be `{ module }` naming an absolute or
   // origin-relative module URL. A malformed one is refused here rather than at the first mint, so a
