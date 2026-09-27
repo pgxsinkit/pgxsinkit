@@ -63,7 +63,8 @@ export type StorageDescription =
   | { readonly kind: "memory" }
   | { readonly kind: "idb"; readonly name: string }
   | { readonly kind: "file"; readonly path: string }
-  | { readonly kind: "vfs" };
+  /** A filesystem passed as `createPgwasm({ fs })`, as its `description` reports it. */
+  | { readonly kind: "vfs"; readonly name: string; readonly persistent: boolean };
 
 /** How {@link Pgwasm.dumpDataDir} compresses: `auto` and `gzip` gzip the tarball, `none` does not. */
 export type DumpCompression = "none" | "gzip" | "auto";

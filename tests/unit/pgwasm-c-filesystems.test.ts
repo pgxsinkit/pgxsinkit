@@ -4,7 +4,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { idbDatabaseName, idbLockName } from "../../packages/pgwasm-c/src/host/mounts/idb";
+import type { FilesystemDescription } from "../../packages/pgwasm/src/fs";
 import { closeTestPgwasms, createTestPgwasm, scratchDir } from "./support/pgwasm";
+import { MemoryVfs } from "./support/pgwasm-memory-vfs";
 
 afterEach(closeTestPgwasms);
 
@@ -28,6 +30,27 @@ describe("memory storage", () => {
     await first.close();
     const second = await createTestPgwasm({ dataDir: "memory://same" });
     expect((await second.query("SELECT to_regclass('only_here') AS t")).rows).toEqual([{ t: null }]);
+  });
+});
+
+describe("filesystem (vfs) storage", () => {
+  it("describes a filesystem that says nothing about itself as custom and not persistent", async () => {
+    const fs = new MemoryVfs();
+    expect(fs.description).toEqual({ name: "custom", persistent: false });
+    const db = await createTestPgwasm({ fs });
+    expect(db.storage).toEqual({ kind: "vfs", name: "custom", persistent: false });
+  });
+
+  it("reports the name and persistence a filesystem declares", async () => {
+    class DescribedVfs extends MemoryVfs {
+      override get description(): FilesystemDescription {
+        return { name: "described", persistent: true };
+      }
+    }
+    const db = await createTestPgwasm({ fs: new DescribedVfs() });
+    expect(db.storage).toEqual({ kind: "vfs", name: "described", persistent: true });
+    await db.exec("SELECT 1");
+    expect(db.storage).toEqual({ kind: "vfs", name: "described", persistent: true });
   });
 });
 

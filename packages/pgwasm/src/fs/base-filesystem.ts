@@ -51,6 +51,19 @@ export interface SyscallError {
 const MAX_SYSCALL_ERRORS = 50;
 
 /**
+ * What a filesystem says about itself, reported in `pg.storage` as `{ kind: "vfs", ...description }`:
+ * a short name for diagnostics, and whether what it holds survives the process (or the page) that wrote it.
+ */
+export interface FilesystemDescription {
+  /** A short name for diagnostics, e.g. `opfs-repacked`. */
+  readonly name: string;
+  /** Whether the data directory outlives the process (or page) that wrote it. */
+  readonly persistent: boolean;
+}
+
+const DEFAULT_DESCRIPTION: FilesystemDescription = Object.freeze({ name: "custom", persistent: false });
+
+/**
  * A synchronous virtual filesystem that holds a data directory, mounted by a Postgres build in place
  * of its built-in storage (pass it as `createPgwasm({ fs })`). Paths are absolute within the
  * filesystem, `/`-separated, `/` being the data directory itself.
@@ -66,6 +79,15 @@ export abstract class BaseFilesystem {
 
   constructor({ debug = false }: { debug?: boolean } = {}) {
     this.debug = debug;
+  }
+
+  /**
+   * What this filesystem is, as `pg.storage` reports it. Defaults to
+   * `{ name: "custom", persistent: false }`: a filesystem that keeps its data past the process overrides
+   * it, since nothing else can tell.
+   */
+  get description(): FilesystemDescription {
+    return DEFAULT_DESCRIPTION;
   }
 
   /** The most recent failed filesystem calls reported to Postgres (up to 50), oldest first. */

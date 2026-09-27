@@ -52,8 +52,10 @@ export function describeStorage(storage: StorageRequest): StorageDescription {
       return { kind: "idb", name: storage.name };
     case "file":
       return { kind: "file", path: storage.path };
-    case "vfs":
-      return { kind: "vfs" };
+    case "vfs": {
+      const { name, persistent } = storage.vfs.description;
+      return { kind: "vfs", name, persistent };
+    }
   }
 }
 
