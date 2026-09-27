@@ -122,6 +122,6 @@
     "vite": "8.3.0",
     "zod": "4.6.5"
   },
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "// @types/node": "Use the newest Node 26 release (mise.toml): the registry's latest tag points to 22.20.2, whose MessagePort declarations lack onmessage and typed message events required by Bun tests. Verified 26.5.1 via bun info @types/node@26 version."
 }
