@@ -6,6 +6,8 @@ from the sync engine down to the embedded Postgres runtime. Amends
 fork-only host behavior" rule is retired. [ADR-0063](0063-build-permanence-and-storage-build.md)
 records the store-level rules that follow from having more than one Postgres build.
 Revised 2026-09-27 before implementation: filesystem mounting is build-specific (step 1 design).
+Amended 2026-09-27: emergent is the only downstream consumer. Decision 10's step-3 gate and step-4
+codemod cover emergent alone; genretv and magnetic are not continued as they are.
 
 ## Context
 
