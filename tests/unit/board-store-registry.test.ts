@@ -86,7 +86,7 @@ describe("board spare-store registry", () => {
     const opened = await registry.openUserStore("user-1");
     expect(opened.storeId).toBe("gen-1");
     expect(opened.storePath).toBe(storePathForStore("gen-1"));
-    expect(await opened.pglite).toBeDefined();
+    expect(await opened.pgwasm).toBeDefined();
     // A claimed schemaless spare is provably fresh (ADR-0032 S4): the fresh-store prefetch-overlap hint.
     expect(opened.fresh).toBe(true);
 
@@ -103,7 +103,7 @@ describe("board spare-store registry", () => {
     const opened = await registry.openUserStore("user-1");
     expect(opened.storeId).toBe("store-1");
     expect(opened.storePath).toBe(storePathForStore("store-1"));
-    expect(await opened.pglite).toBeDefined();
+    expect(await opened.pgwasm).toBeDefined();
     // A returning user's mapped store already carries schema + rows — never fresh (no overlap).
     expect(opened.fresh).toBe(false);
     expect(harness.createdStorePaths).toEqual([storePathForStore("store-1")]);
@@ -118,7 +118,7 @@ describe("board spare-store registry", () => {
 
     const opened = await registry.openUserStore("user-2");
     expect(opened.storeId).toBe("spare-1");
-    expect(await opened.pglite).toBeDefined();
+    expect(await opened.pgwasm).toBeDefined();
     // A claimed spare is fresh for the claiming user (ADR-0032 S4).
     expect(opened.fresh).toBe(true);
     expect(harness.state()?.map).toEqual({ "user-1": "store-1", "user-2": "spare-1" });
@@ -132,7 +132,7 @@ describe("board spare-store registry", () => {
     const opened = await registry.openUserStore("user-1");
     expect(opened.storeId).toBe("gen-1");
     expect(harness.createdStorePaths).toEqual([storePathForStore("gen-1")]);
-    expect(await opened.pglite).toBeDefined();
+    expect(await opened.pgwasm).toBeDefined();
     // A brand-new minted store (no spare was waiting) is provably fresh (ADR-0032 S4).
     expect(opened.fresh).toBe(true);
     expect(harness.state()?.map).toEqual({ "user-1": "gen-1" });
@@ -147,7 +147,7 @@ describe("board spare-store registry", () => {
     const registry = createStoreRegistry(harness.adapters);
 
     const opened = await registry.openUserStore("user-1");
-    expect(await opened.pglite).toBeDefined();
+    expect(await opened.pgwasm).toBeDefined();
 
     // The corrupt idb was deleted, and a fresh id was created and re-bound to the user.
     expect(harness.deletedDatabases).toContain(idbNameForStore("bad"));
@@ -190,8 +190,8 @@ describe("board spare-store registry", () => {
     // Same result object (memoised promise), so the same in-flight pglite — never a second instance on
     // the same IndexedDB store.
     expect(a).toBe(b);
-    expect(a.pglite).toBe(b.pglite);
-    expect(await a.pglite).toBe(await b.pglite);
+    expect(a.pgwasm).toBe(b.pgwasm);
+    expect(await a.pgwasm).toBe(await b.pgwasm);
     // Exactly one create for the mapped store.
     expect(harness.createdStorePaths).toEqual([storePathForStore("store-1")]);
   });
@@ -221,10 +221,10 @@ describe("board spare-store registry", () => {
     const registry = createStoreRegistry(harness.adapters);
 
     const first = await registry.openUserStore("user-1");
-    expect(first.pglite).toBeDefined();
+    expect(first.pgwasm).toBeDefined();
     // Drain the rejection (mapped path always precreates) so the drop-cache-on-failure hook fires.
     let firstError: unknown;
-    await (first.pglite ?? Promise.resolve()).catch((cause: unknown) => {
+    await (first.pgwasm ?? Promise.resolve()).catch((cause: unknown) => {
       firstError = cause;
     });
     expect(firstError).toBeInstanceOf(Error);
@@ -263,7 +263,7 @@ describe("board spare-store registry", () => {
     const opened = await registry.openUserStore("user-1");
     expect(opened.storeId).toBeNull();
     expect(opened.storePath).toBe(fallbackStorePathForUser("user-1"));
-    expect(opened.pglite).toBeUndefined();
+    expect(opened.pgwasm).toBeUndefined();
     // The deterministic fallback path may hold a prior session's store — conservatively NOT fresh, so the
     // sync client takes the safe sequential path (no prefetch overlap).
     expect(opened.fresh).toBe(false);
@@ -304,14 +304,14 @@ describe("rebindAfterStall — a stalled spare provision rebinds the user onto a
     expect(rebound.storeId).toBe("gen-1"); // a freshly minted id, never the stalled one
     expect(rebound.storePath).toBe(storePathForStore("gen-1"));
     expect(rebound.fresh).toBe(true); // a fresh store is schemaless — same reasoning as a claimed spare
-    expect(await rebound.pglite).toBeDefined();
+    expect(await rebound.pgwasm).toBeDefined();
     expect(harness.createdStorePaths).toContain(storePathForStore("gen-1"));
     expect(harness.state()?.map).toEqual({ "user-1": "gen-1" });
 
     // Now let the stalled spare's create finally reject: the claim path deletes its idb and recovers onto
     // ANOTHER fresh id, then tries to re-point the binding from `spare-1` — which no longer names it.
     gate.resolve();
-    await opened.pglite;
+    await opened.pgwasm;
     await Promise.resolve();
 
     expect(harness.deletedDatabases).toContain(idbNameForStore("spare-1"));
@@ -328,7 +328,7 @@ describe("rebindAfterStall — a stalled spare provision rebinds the user onto a
     expect(rebound.storeId).toBe("recovered-1"); // the eager recovery's (or another tab's) store
     expect(rebound.storePath).toBe(storePathForStore("recovered-1"));
     expect(rebound.fresh).toBe(true);
-    expect(await rebound.pglite).toBeDefined();
+    expect(await rebound.pgwasm).toBeDefined();
     // No id was minted and the binding is untouched — a second mint would strand a never-attached store.
     expect(harness.state()?.map).toEqual({ "user-1": "recovered-1" });
     expect(harness.createdStorePaths).toEqual([storePathForStore("recovered-1")]);
@@ -347,7 +347,7 @@ describe("rebindAfterStall — a stalled spare provision rebinds the user onto a
     // The provider mount that follows the retry shares the store the client actually attached to.
     expect(after).toBe(rebound);
     expect(after.storeId).toBe("gen-1");
-    expect(await after.pglite).toBe(await rebound.pglite);
+    expect(await after.pgwasm).toBe(await rebound.pgwasm);
   });
 
   it("(d) registry disabled (storage throws): falls back to the deterministic per-user store", async () => {
@@ -358,7 +358,7 @@ describe("rebindAfterStall — a stalled spare provision rebinds the user onto a
 
     expect(rebound.storeId).toBeNull();
     expect(rebound.storePath).toBe(fallbackStorePathForUser("user-1"));
-    expect(rebound.pglite).toBeUndefined();
+    expect(rebound.pgwasm).toBeUndefined();
     // The deterministic fallback path may hold a prior session's store — conservatively NOT fresh.
     expect(rebound.fresh).toBe(false);
     expect(harness.createdStorePaths).toEqual([]);

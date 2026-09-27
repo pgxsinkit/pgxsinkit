@@ -10,7 +10,7 @@ import {
 import { createCBuild } from "@pgxsinkit/pgwasm-c";
 
 import { boardWorkerMode } from "./engine-host";
-import { warmCBuildAssets } from "./pglite-warm";
+import { warmCBuildAssets } from "./pgwasm-warm";
 import { type QuiesceThenDestroyOptions, quiesceThenDestroyStoreWith } from "./quiesce-destroy-core";
 import {
   boardStorageDeclaration,

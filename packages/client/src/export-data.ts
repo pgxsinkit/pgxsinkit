@@ -113,7 +113,7 @@ export class DataExportDrainError extends Error {
 /** The dependencies {@link performDataExport} needs from the owning client — narrow, so it is unit-testable. */
 export interface DataExportDeps {
   /** The live store to checkpoint and dump (the clone source; the live engine is never suspended). */
-  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">;
+  pgwasm: Pick<PgwasmClient, "exec" | "dumpDataDir">;
   /** The Mutation diagnostics seam (`client.diagnostics().mutation` / `readMutationStats`). */
   readMutationStats: () => Promise<MutationDiagnostics>;
   /** The optimistic flush (`client.flush()`), driven during the drain to send drainable rows. */
@@ -252,7 +252,7 @@ export async function performDataExport(
   // portability. `-t` is repeated once per table. `runThrowawayCloneDump` phases are offset from the SAME
   // export-start anchor, so they compose after the drain wall into one timeline.
   const pgDumpArgs = ["--no-owner", ...deps.syncedTableNames.flatMap((name) => ["-t", name])];
-  const { sqlBytes, phases } = await runThrowawayCloneDump(deps.pglite, startPerf, {
+  const { sqlBytes, phases } = await runThrowawayCloneDump(deps.pgwasm, startPerf, {
     pgDumpArgs,
     // Drop the reconcile triggers on the clone so `-t` yields portable, machinery-free tables.
     ...(deps.cloneCleanupSql.length > 0

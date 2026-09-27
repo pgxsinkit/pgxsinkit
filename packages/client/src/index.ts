@@ -3717,7 +3717,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       return lifecycleSlot.run("exportData", () =>
         performDataExport(
           {
-            pglite,
+            pgwasm: pglite,
             readMutationStats: () => mutationRuntime.readMutationStats(),
             flush: () => mutationRuntime.flush(),
             syncedTableNames: collectDataExportSyncedTableNames(options.registry),

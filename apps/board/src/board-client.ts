@@ -16,7 +16,7 @@ import { createCBuild } from "@pgxsinkit/pgwasm-c";
 import { createSyncClientHooks } from "@pgxsinkit/react";
 
 import { createOfflineControl, createWorkerOfflineControl, type OfflineControl } from "./board/offline";
-import { warmCBuildAssets } from "./board/pglite-warm";
+import { warmCBuildAssets } from "./board/pgwasm-warm";
 import {
   boardStorageDeclaration,
   readBackendPreference,
@@ -267,7 +267,7 @@ export async function createBoardSyncClient(
     // globally-distributed CDN, so pinning reads away from a distant caller pays intercontinental round
     // trips per catch-up hop (~1.2s) instead of following the caller (~300ms). See boardConfig.functionsRegion.
     ...(boardConfig.functionsRegion ? { writeRequestHeaders: { "x-region": boardConfig.functionsRegion } } : {}),
-    // Consume the login-screen pre-warm (see ./board/pglite-warm): the WASM fetch+compile ran during
+    // Consume the login-screen pre-warm (see ./board/pgwasm-warm): the WASM fetch+compile ran during
     // identity-picker think-time, so the store's C build skips its own cold asset load. The module-singleton
     // returns the same promise the login mount already primed; a failed warm is caught internally and
     // falls back to the build's own loading, so this never risks the boot.
@@ -276,7 +276,7 @@ export async function createBoardSyncClient(
       const { data } = await supabase.auth.getSession();
       return data.session?.user.id === userId ? data.session.access_token : undefined;
     },
-    ...(store.pglite ? { precreatedPgwasm: store.pglite } : {}),
+    ...(store.pgwasm ? { precreatedPgwasm: store.pgwasm } : {}),
     storePath: store.storePath,
     // Fresh-store prefetch overlap (ADR-0032 S4): the in-process fallback overlaps the shape catch-up with
     // schema exec + journal recovery + reconcile when the store is a just-claimed spare / fresh create.

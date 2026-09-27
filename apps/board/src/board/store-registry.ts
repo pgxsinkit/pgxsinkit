@@ -1,7 +1,7 @@
 import { syncDebug, storeIndexedDbDatabaseName, type PgwasmClient } from "@pgxsinkit/client";
 
 // Spare-store binding (board cold-boot optimisation B). PGlite's `initdb` + IDBFS open costs ~1.9s even
-// once the WASM is pre-warmed (optimisation A, see ./pglite-warm), and it otherwise can't start until
+// once the WASM is pre-warmed (optimisation A, see ./pgwasm-warm), and it otherwise can't start until
 // sign-in answers because the store is keyed by user id. This module breaks that ordering: on the login
 // SCREEN it eagerly creates an ANONYMOUS store under a generated id (consuming the WASM warm), then BINDS
 // that store to whichever user signs in — so the expensive create runs during identity-picker think-time,
@@ -60,7 +60,7 @@ export interface StoreRegistryState {
 
 /** A PGlite instance opened by an adapter, paired with the store id it actually opened. */
 export interface OpenedStore {
-  pglite: PgwasmClient;
+  pgwasm: PgwasmClient;
   /** The opened id — usually the requested one, but a fresh replacement id when a corrupt spare recovered. */
   storeId: string;
 }
@@ -105,7 +105,7 @@ export interface EnsureSpareResult {
 export interface OpenUserStoreResult {
   storeId: string | null;
   storePath: string;
-  pglite?: Promise<PgwasmClient>;
+  pgwasm?: Promise<PgwasmClient>;
   /**
    * Whether this store is PROVABLY fresh — a just-claimed schemaless spare or a brand-new create, with no
    * prior schema/rows/subscription state (ADR-0032 S4 fresh-store prefetch overlap). A mapped (returning)
@@ -272,8 +272,8 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
   // spare can never wedge login. Returns the working instance and the id actually opened.
   async function openSpareRecovering(spareId: string): Promise<OpenedStore> {
     try {
-      const pglite = await adapters.createStore(storePathForStore(spareId));
-      return { pglite, storeId: spareId };
+      const pgwasm = await adapters.createStore(storePathForStore(spareId));
+      return { pgwasm, storeId: spareId };
     } catch (error) {
       syncDebug("boot spare store corrupt — recreating", {
         error: error instanceof Error ? error.message : String(error),
@@ -284,8 +284,8 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
         // Best-effort delete; a still-blocked/absent db must not stop the fresh create.
       }
       const freshId = adapters.randomId();
-      const pglite = await adapters.createStore(storePathForStore(freshId));
-      return { pglite, storeId: freshId };
+      const pgwasm = await adapters.createStore(storePathForStore(freshId));
+      return { pgwasm, storeId: freshId };
     }
   }
 
@@ -349,7 +349,7 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
         return {
           storeId: plan.storeId,
           storePath: storePathForStore(plan.storeId),
-          pglite: adapters.createStore(storePathForStore(plan.storeId)),
+          pgwasm: adapters.createStore(storePathForStore(plan.storeId)),
           // A returning user's mapped store already carries schema + synced rows — never fresh.
           fresh: false,
         };
@@ -371,10 +371,10 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
           // opened. The returned `storePath` (the original claim id) is then only ever the reject-fallback,
           // and unused because this resolved.
           if (result.storeId !== plan.storeId) await reconcileMapEntry(userId, plan.storeId, result.storeId);
-          return result.pglite;
+          return result.pgwasm;
         });
         // A claimed spare is schemaless by construction (created but never schema-exec'd) — provably fresh.
-        return { storeId: plan.storeId, storePath: storePathForStore(plan.storeId), pglite, fresh: true };
+        return { storeId: plan.storeId, storePath: storePathForStore(plan.storeId), pgwasm: pglite, fresh: true };
       }
 
       syncDebug("boot store claimed", { spare: false, mapped: false });
@@ -382,7 +382,7 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
       return {
         storeId: plan.storeId,
         storePath: storePathForStore(plan.storeId),
-        pglite: adapters.createStore(storePathForStore(plan.storeId)),
+        pgwasm: adapters.createStore(storePathForStore(plan.storeId)),
         fresh: true,
       };
     } catch {
@@ -501,8 +501,8 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
       // fallback and never rejects, but the outer-rejection arm guards defensively regardless.
       void opening.then(
         (result) => {
-          if (result.pglite != null) {
-            void result.pglite.catch(() => {
+          if (result.pgwasm != null) {
+            void result.pgwasm.catch(() => {
               if (openByUser.get(userId) === opening) openByUser.delete(userId);
             });
           }
@@ -538,7 +538,7 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
         // while `map[userId]` is still the id it recovered FROM (the stalled spare), and we have just
         // re-pointed away from that — so a reconcile arriving after this call is already a no-op.
         const pglite = adapters.createStore(storePath);
-        const result: OpenUserStoreResult = { storeId, storePath, pglite, fresh: true };
+        const result: OpenUserStoreResult = { storeId, storePath, pgwasm: pglite, fresh: true };
         // Replace the per-user memo: the memoised result still describes the STALLED store, and the provider
         // mount that follows the caller's retry must share the store we actually attached to.
         const remembered = Promise.resolve(result);
