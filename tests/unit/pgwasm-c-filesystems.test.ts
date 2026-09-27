@@ -34,11 +34,12 @@ describe("memory storage", () => {
 });
 
 describe("filesystem (vfs) storage", () => {
-  it("describes a filesystem that says nothing about itself as custom and not persistent", async () => {
+  it("describes a filesystem that says nothing about itself as custom, persistence undeclared", async () => {
     const fs = new MemoryVfs();
-    expect(fs.description).toEqual({ name: "custom", persistent: false });
+    expect(fs.description).toEqual({ name: "custom" });
     const db = await createTestPgwasm({ fs });
-    expect(db.storage).toEqual({ kind: "vfs", name: "custom", persistent: false });
+    expect(db.storage).toEqual({ kind: "vfs", name: "custom" });
+    expect("persistent" in db.storage).toBe(false);
   });
 
   it("reports the name and persistence a filesystem declares", async () => {

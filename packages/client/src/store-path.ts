@@ -39,7 +39,7 @@ export class InvalidStorePathError extends Error {
  * Thrown when a caller-owned store handed to {@link CreateSyncClientOptions.pgliteInstance} /
  * {@link CreateSyncClientOptions.precreatedPglite} is PROVABLY non-persistent (ADR-0036 decision 4): its
  * `storage` is memory (pgwasm's default — the bare `createPgwasm({ build })` a copy-paste reaches — or an
- * explicit `memory://`), or a filesystem that reports itself non-persistent. Names both the why (durability
+ * explicit `memory://`), or a filesystem that explicitly reports itself non-persistent. Names both the why (durability
  * semantics assume a persisted store) and the two exits, so a consumer is never left guessing which store to
  * hand us instead.
  */
@@ -48,7 +48,7 @@ export class NonPersistentStoreError extends Error {
     const reason =
       observed === "memory"
         ? "its storage is in memory (pgwasm's default without a `dataDir`, or `memory://`)"
-        : "its storage is a filesystem that reports itself non-persistent";
+        : "its storage is a filesystem that explicitly reports itself non-persistent";
     super(
       `[pgxsinkit] refusing a non-persistent store: ${reason}. pgxsinkit's durability semantics ` +
         "(persistent retention, the optimistic Mutation journal) assume a persisted store — a memory store " +
@@ -332,13 +332,14 @@ export type NonPersistentStorage = "memory" | "non-persistent-vfs";
 /**
  * Classify a store's own `pg.storage` for the BYO refusal (ADR-0036 decision 4). Returns the offending shape
  * when the store is PROVABLY non-persistent (`memory`, pgwasm's default or an explicit `memory://`; a `vfs`
- * filesystem reporting `persistent: false`), or `null` when it passes: `idb`, `file` and a persistent `vfs`
- * (the OPFS-repacked store). The guard catches the accidental non-persistent shapes; it is not a
+ * filesystem explicitly reporting `persistent: false`), or `null` when it passes: `idb`, `file`, a persistent
+ * `vfs` (the OPFS-repacked store) and a `vfs` that doesn't declare its persistence (a custom filesystem is
+ * the caller's own call). The guard catches the accidental non-persistent shapes; it is not a
  * storage-backend whitelist.
  */
 export function classifyNonPersistentStorage(storage: StorageDescription): NonPersistentStorage | null {
   if (storage.kind === "memory") return "memory";
-  if (storage.kind === "vfs" && !storage.persistent) return "non-persistent-vfs";
+  if (storage.kind === "vfs" && storage.persistent === false) return "non-persistent-vfs";
   return null;
 }
 

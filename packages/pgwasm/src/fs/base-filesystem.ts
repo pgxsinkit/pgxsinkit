@@ -57,11 +57,15 @@ const MAX_SYSCALL_ERRORS = 50;
 export interface FilesystemDescription {
   /** A short name for diagnostics, e.g. `opfs-repacked`. */
   readonly name: string;
-  /** Whether the data directory outlives the process (or page) that wrote it. */
-  readonly persistent: boolean;
+  /**
+   * Whether the data directory outlives the process (or page) that wrote it. Absent when the filesystem
+   * doesn't say: nothing outside it can tell, so callers treat an undeclared filesystem as the author's
+   * own call rather than as non-persistent.
+   */
+  readonly persistent?: boolean;
 }
 
-const DEFAULT_DESCRIPTION: FilesystemDescription = Object.freeze({ name: "custom", persistent: false });
+const DEFAULT_DESCRIPTION: FilesystemDescription = Object.freeze({ name: "custom" });
 
 /**
  * A synchronous virtual filesystem that holds a data directory, mounted by a Postgres build in place
@@ -82,9 +86,9 @@ export abstract class BaseFilesystem {
   }
 
   /**
-   * What this filesystem is, as `pg.storage` reports it. Defaults to
-   * `{ name: "custom", persistent: false }`: a filesystem that keeps its data past the process overrides
-   * it, since nothing else can tell.
+   * What this filesystem is, as `pg.storage` reports it. Defaults to `{ name: "custom" }`, persistence
+   * undeclared: a filesystem overrides it to name itself and to say whether its data outlives the process
+   * (`persistent: true`) or not (`persistent: false`), since nothing else can tell.
    */
   get description(): FilesystemDescription {
     return DEFAULT_DESCRIPTION;

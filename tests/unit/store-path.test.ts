@@ -81,10 +81,12 @@ describe("classifyNonPersistentStorage — the BYO predicate (ADR-0036 decision 
     expect(classifyNonPersistentStorage({ kind: "vfs", name: "custom", persistent: false })).toBe("non-persistent-vfs");
   });
 
-  it("passes anything else — idb, file and a persistent filesystem (not a whitelist)", () => {
+  it("passes anything else — idb, file, a persistent filesystem and an undeclared one (not a whitelist)", () => {
     expect(classifyNonPersistentStorage({ kind: "idb", name: "x" })).toBeNull();
     expect(classifyNonPersistentStorage({ kind: "file", path: "/var/data/x" })).toBeNull();
     expect(classifyNonPersistentStorage({ kind: "vfs", name: "opfs-repacked", persistent: true })).toBeNull();
+    // A custom filesystem that doesn't declare its persistence is the caller's own call.
+    expect(classifyNonPersistentStorage({ kind: "vfs", name: "custom" })).toBeNull();
   });
 });
 

@@ -13,6 +13,8 @@ import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
 import { cBuild } from "@pgxsinkit/pgwasm-c";
+import type { FilesystemDescription } from "@pgxsinkit/pgwasm/fs";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
   type ClientPGlite,
@@ -22,6 +24,7 @@ import {
   type SyncClient,
 } from "../../packages/client/src/index";
 import { memoryStoreForTests, testStoreAcknowledgment } from "../../packages/client/src/testing";
+import { MemoryVfs } from "./support/pgwasm-memory-vfs";
 
 const profileTable = pgTable("profile", { id: uuid("id").primaryKey(), name: text("name") });
 
@@ -97,6 +100,35 @@ describe("BYO refusal (ADR-0036 decision 4)", () => {
     // Schema exec ran on the file store (the readonly synced table exists).
     const result = await client.rawQuery("select count(*)::int as n from profile");
     expect((result.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it("PASSES a custom filesystem that doesn't declare its persistence (the caller's own call)", async () => {
+    // `BaseFilesystem`'s default description leaves `persistent` undeclared; the guard refuses only what is
+    // PROVABLY non-persistent, so a user's own filesystem that says nothing is adopted.
+    const custom = await createPgwasm({ build: cBuild, fs: new MemoryVfs(), extensions: { live } });
+    looseInstances.push(custom);
+    expect(custom.storage).toEqual({ kind: "vfs", name: "custom" });
+    client = await createSyncClient({
+      ...commonOptions,
+      precreatedPglite: Promise.resolve(custom as unknown as ClientPGlite),
+    });
+    await client.ready;
+    const result = await client.rawQuery("select count(*)::int as n from profile");
+    expect((result.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it("refuses a filesystem that explicitly declares itself non-persistent", async () => {
+    class EphemeralVfs extends MemoryVfs {
+      override get description(): FilesystemDescription {
+        return { name: "ephemeral", persistent: false };
+      }
+    }
+    const ephemeral = await createPgwasm({ build: cBuild, fs: new EphemeralVfs(), extensions: { live } });
+    looseInstances.push(ephemeral);
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(
+      createSyncClient({ ...commonOptions, pgliteInstance: ephemeral as unknown as ClientPGlite }),
+    ).rejects.toBeInstanceOf(NonPersistentStoreError);
   });
 
   it("an acknowledgment UNLOCKS a deliberate memory store", async () => {
