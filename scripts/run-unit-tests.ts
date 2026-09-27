@@ -101,7 +101,9 @@ interface ShardResult {
 function runShard(files: string[]): Promise<ShardResult> {
   const startedAt = Date.now();
   return new Promise((resolve) => {
-    const child = spawn("bun", ["test", "--timeout", "45000", ...files.map((f) => `tests/unit/${f}.test.ts`)], {
+    // `./`-prefixed: bun takes a bare argument as a file-name FILTER, which also matches the same file in
+    // any copy of the repository below this one (a git worktree under tmp/), running both.
+    const child = spawn("bun", ["test", "--timeout", "45000", ...files.map((f) => `./tests/unit/${f}.test.ts`)], {
       env: process.env,
     });
     let output = "";
