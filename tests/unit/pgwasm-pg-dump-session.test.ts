@@ -9,6 +9,7 @@ import {
 } from "../../packages/pgwasm-pg-dump/src";
 import { PgwasmFailedError, UnsupportedFeatureError, type Pgwasm } from "../../packages/pgwasm/src";
 import { live } from "../../packages/pgwasm/src/live";
+import { serialize } from "../../packages/pgwasm/src/protocol";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { asyncExchangeBuild, wireHookBuild } from "./support/pgwasm-build-decorators";
 import { Recorder } from "./support/pgwasm-live";
@@ -203,6 +204,52 @@ describe("pgDump fails", () => {
     expect((badOption as PgDumpError).stderr).toMatch(/unrecognized option|invalid option/);
 
     expect(process.exitCode).toBe(exitCode);
+  });
+
+  it("to deallocate its statements, and still restores every setting, naming the statements it left", async () => {
+    let deallocations = 0;
+    const pg = await createTestPgwasm({
+      build: wireHookBuild(cBuild, (message) => {
+        if (!containsText(message, 'DEALLOCATE "')) return undefined;
+        deallocations++;
+        return serialize.query("SELECT 1/0");
+      }),
+    });
+    await pg.exec(`
+      CREATE FUNCTION answer() RETURNS int LANGUAGE sql AS 'SELECT 42';
+      CREATE TABLE t (id int);
+      SET search_path TO amigo, public;
+    `);
+
+    const failure = await rejectionOf(pgDump({ pg }));
+    expect(deallocations).toBeGreaterThan(0);
+    expect(failure).toBeInstanceOf(PgDumpSessionError);
+    expect(failure.message).toContain("statements it prepared: ");
+    expect((failure as PgDumpSessionError).unrestored).toEqual([]);
+    expect(await setting(pg, "search_path")).toBe("amigo, public");
+    await pg.exec("CREATE TABLE after_failure (id int)");
+  });
+
+  it("with pg_dump's own failure as the cause when the session could not be restored either", async () => {
+    const rollback = serialize.query("ROLLBACK");
+    let rollbacks = 0;
+    const pg = await createTestPgwasm({
+      build: wireHookBuild(cBuild, (message) => {
+        if (message.length !== rollback.length || !message.every((byte, index) => byte === rollback[index])) {
+          return undefined;
+        }
+        rollbacks++;
+        return serialize.query("SELECT 1/0");
+      }),
+    });
+
+    const failure = await rejectionOf(pgDump({ pg, args: ["--table=does_not_exist"] }));
+    expect(rollbacks).toBe(1);
+    expect(failure).toBeInstanceOf(PgDumpSessionError);
+    expect(failure.message).toContain("pg_dump's transaction is still open");
+    expect(failure.message).toContain("no matching tables were found");
+    expect(failure.cause).toBeInstanceOf(PgDumpError);
+    expect((failure.cause as PgDumpError).exitCode).toBe(1);
   });
 
   it("with the database's failure when the wire fails under it, never an unhandled rejection", async () => {

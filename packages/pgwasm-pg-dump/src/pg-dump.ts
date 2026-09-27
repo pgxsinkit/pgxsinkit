@@ -77,10 +77,11 @@ async function runPgDump(wire: PgwasmProtocol, wasm: WebAssembly.Module, args: r
         stderr += `${text}\n`;
       },
       instantiateWasm: (imports, successCallback) => {
-        WebAssembly.instantiate(wasm, imports).then(
-          (instance) => successCallback(instance, wasm),
-          (error: unknown) => rejectInstantiation(error),
-        );
+        // A throw from `successCallback` (the module's own start-up) must settle the race too, or pgDump
+        // would wait forever while holding the session.
+        WebAssembly.instantiate(wasm, imports)
+          .then((instance) => successCallback(instance, wasm))
+          .catch(rejectInstantiation);
         return {};
       },
       preRun: [
@@ -177,6 +178,36 @@ function failureOf(run: PgDumpRun): Error | undefined {
   return undefined;
 }
 
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/**
+ * What to throw when the session could not be restored after pg_dump. When pg_dump had failed as well,
+ * its failure is not dropped: it is the cause of the error thrown.
+ */
+function restoreError(restoreFailure: unknown, dumpFailure: { readonly error: unknown } | undefined): unknown {
+  // A failed or closed database fails every exchange; that is the error to report.
+  if (restoreFailure instanceof PgwasmFailedError || restoreFailure instanceof PgwasmClosedError) {
+    return restoreFailure;
+  }
+  const sessionError = restoreFailure instanceof PgDumpSessionError ? restoreFailure : undefined;
+  if (dumpFailure === undefined) {
+    return (
+      sessionError ??
+      new PgDumpSessionError("The database's session could not be restored after pg_dump.", [], {
+        cause: restoreFailure,
+      })
+    );
+  }
+  const message =
+    sessionError?.message ??
+    `The database's session could not be restored after pg_dump (${messageOf(restoreFailure)}).`;
+  return new PgDumpSessionError(
+    `${message} pg_dump itself had failed: ${messageOf(dumpFailure.error)}`,
+    sessionError?.unrestored ?? [],
+    { cause: dumpFailure.error },
+  );
+}
+
 /**
  * Dump a database with pg_dump, as a `File`: by default a plain SQL script of INSERT statements, which
  * `exec()` runs back into an empty database.
@@ -184,11 +215,14 @@ function failureOf(run: PgDumpRun): Error | undefined {
  * pg_dump runs on the database's own session, which it holds for the whole dump: no query, transaction
  * or other dump of this database runs until it is done, and none can be running inside a transaction
  * block when it starts ({@link PgDumpSessionError}). Afterwards the session is as it was: pg_dump's
- * transaction ended, its prepared statements gone, every setting it changed restored.
+ * transaction ended, its prepared statements gone, every setting it changed restored. It must not be
+ * called inside a `pg.transaction()` callback: it would wait forever for the session that transaction
+ * holds.
  *
  * @throws {PgDumpUnsupportedBuildError} the database's build cannot run pg_dump (checked first).
  * @throws {PgDumpError} pg_dump failed; it carries the exit code and standard error.
- * @throws {PgDumpSessionError} the session was inside a transaction block, or could not be restored.
+ * @throws {PgDumpSessionError} the session was inside a transaction block, or could not be restored
+ *   (then, when pg_dump had failed too, its failure is the cause).
  */
 export async function pgDump({ pg, args = [], fileName = "dump.sql" }: PgDumpOptions): Promise<File> {
   const wire = protocol(pg);
@@ -214,14 +248,8 @@ export async function pgDump({ pg, args = [], fileName = "dump.sql" }: PgDumpOpt
     try {
       await restoreSession(wire, before);
     } catch (restoreFailure) {
-      // A failed or closed database fails every exchange; that is the error to report.
-      if (restoreFailure instanceof PgwasmFailedError || restoreFailure instanceof PgwasmClosedError) {
-        throw restoreFailure;
-      }
-      if (restoreFailure instanceof PgDumpSessionError) throw restoreFailure;
-      throw new PgDumpSessionError("The database's session could not be restored after pg_dump.", [], {
-        cause: restoreFailure,
-      });
+      const dumpFailure = "failure" in outcome ? { error: outcome.failure } : failureOf(outcome.run);
+      throw restoreError(restoreFailure, dumpFailure instanceof Error ? { error: dumpFailure } : dumpFailure);
     }
 
     if ("failure" in outcome) throw outcome.failure;

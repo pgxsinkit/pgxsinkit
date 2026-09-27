@@ -186,19 +186,20 @@ export function noBlobDeviceBuild(inner: PostgresBuild): PostgresBuild {
 }
 
 /**
- * The same build, with `hook` seeing every frontend message before the wire does: to count exchanges, or
- * to throw, the way a broken build's wire would (pgwasm then fails the instance).
+ * The same build, with `hook` seeing every frontend message before the wire does: to count exchanges; to
+ * throw, the way a broken build's wire would (pgwasm then fails the instance); or to return another
+ * message, which the wire runs instead (a statement that fails the way SQL does, the instance intact).
  */
-export function wireHookBuild(inner: PostgresBuild, hook: (message: Uint8Array) => void): PostgresBuild {
+export function wireHookBuild(
+  inner: PostgresBuild,
+  hook: (message: Uint8Array) => Uint8Array | undefined | void,
+): PostgresBuild {
   return wrapBuild(inner, {}, (running) =>
     wrapRunning(running, {
       session: (session) => ({
         onUnsolicited: undefined,
         close: () => session.close(),
-        exchange: (message, onData) => {
-          hook(message);
-          return session.exchange(message, onData);
-        },
+        exchange: (message, onData) => session.exchange(hook(message) ?? message, onData),
       }),
     }),
   );

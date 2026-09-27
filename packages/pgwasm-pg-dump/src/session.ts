@@ -10,6 +10,7 @@
  * (nothing here writes data).
  */
 
+import { PgwasmClosedError, PgwasmFailedError } from "@pgxsinkit/pgwasm";
 import { messages, serialize, type BackendMessage, type PgwasmProtocol } from "@pgxsinkit/pgwasm/protocol";
 
 import { PgDumpSessionError } from "./errors";
@@ -94,25 +95,41 @@ const quoteIdentifier = (name: string) => `"${name.replaceAll('"', '""')}"`;
 /**
  * Put the session back as it was before pg_dump: end the transaction it left open, deallocate the
  * statements it prepared, and restore every setting it changed (the role last, undoing pg_dump's own
- * order). A setting still differing afterwards is a {@link PgDumpSessionError}.
+ * order). Every step is attempted even when an earlier one fails. Whatever still differs afterwards (the
+ * transaction, a statement of pg_dump's, a setting) is a {@link PgDumpSessionError} naming all of it,
+ * whose cause is what failed on the way. A failed or closed database fails every exchange: its error is
+ * thrown as it is.
  */
 export async function restoreSession(wire: PgwasmProtocol, before: SessionState): Promise<void> {
-  // pg_dump never ends its read-only transaction (a disconnect would); nothing it did needs keeping.
-  if ((await transactionStatus(wire)) !== "I") await exchange(wire, serialize.query("ROLLBACK"));
-  // A disconnect would drop pg_dump's prepared statements; the database's own (a live query's) stay.
-  for (const name of await readPreparedStatements(wire)) {
-    if (!before.preparedStatements.has(name)) {
-      await exchange(wire, serialize.query(`DEALLOCATE ${quoteIdentifier(name)}`));
+  const failures: unknown[] = [];
+  const attempt = async <T>(step: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await step();
+    } catch (error) {
+      if (error instanceof PgwasmFailedError || error instanceof PgwasmClosedError) throw error;
+      failures.push(error);
+      return undefined;
     }
+  };
+  const ownStatements = (names: ReadonlySet<string>) =>
+    [...names].filter((name) => !before.preparedStatements.has(name));
+
+  // pg_dump never ends its read-only transaction (a disconnect would); nothing it did needs keeping.
+  await attempt(async () => {
+    if ((await transactionStatus(wire)) !== "I") await exchange(wire, serialize.query("ROLLBACK"));
+  });
+  // A disconnect would drop pg_dump's prepared statements; the database's own (a live query's) stay.
+  for (const name of ownStatements((await attempt(() => readPreparedStatements(wire))) ?? new Set())) {
+    await attempt(() => exchange(wire, serialize.query(`DEALLOCATE ${quoteIdentifier(name)}`)));
   }
-  const changed = differing(before.settings, await readSettings(wire)).sort((a, b) =>
+  const settings = await attempt(() => readSettings(wire));
+  const changed = (settings === undefined ? [] : differing(before.settings, settings)).sort((a, b) =>
     a === "role" ? 1 : b === "role" ? -1 : a.localeCompare(b),
   );
-  const failures: unknown[] = [];
   for (const name of changed) {
     const value = before.settings.get(name) ?? "";
-    try {
-      await exchange(
+    await attempt(() =>
+      exchange(
         wire,
         concat([
           serialize.parse({ text: SET_CONFIG }),
@@ -120,18 +137,37 @@ export async function restoreSession(wire: PgwasmProtocol, before: SessionState)
           serialize.execute({}),
           serialize.sync(),
         ]),
-      );
-    } catch (error) {
-      failures.push(error);
-    }
+      ),
+    );
   }
-  const unrestored = differing(before.settings, await readSettings(wire));
-  if (unrestored.length > 0) {
+
+  // What is left of pg_dump's, each checked on its own.
+  const left: string[] = [];
+  const status = await attempt(() => transactionStatus(wire));
+  if (status !== "I") {
+    left.push(
+      status === undefined ? "the transaction status could not be read" : "pg_dump's transaction is still open",
+    );
+  }
+  const statements = await attempt(() => readPreparedStatements(wire));
+  const remaining = statements === undefined ? undefined : ownStatements(statements);
+  if (remaining === undefined) left.push("the prepared statements could not be read");
+  else if (remaining.length > 0) left.push(`statements it prepared: ${remaining.join(", ")}`);
+  const settingsAfter = await attempt(() => readSettings(wire));
+  const unrestored = settingsAfter === undefined ? [] : differing(before.settings, settingsAfter);
+  if (settingsAfter === undefined) {
+    left.push("the settings could not be read");
+  } else if (unrestored.length > 0) {
+    left.push(`settings it changed, which keep pg_dump's values: ${unrestored.join(", ")}`);
+  }
+
+  if (left.length > 0) {
     throw new PgDumpSessionError(
-      `pg_dump changed session settings that could not be restored: ${unrestored.join(", ")}. The database's ` +
-        "session keeps pg_dump's values for them.",
+      `The database's session could not be fully restored after pg_dump: ${left.join("; ")}.`,
       unrestored,
-      failures.length > 0 ? { cause: failures[0] } : undefined,
+      failures.length === 0
+        ? undefined
+        : { cause: failures.length === 1 ? failures[0] : new AggregateError(failures, "restoring the session failed") },
     );
   }
 }
