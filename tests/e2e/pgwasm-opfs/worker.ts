@@ -1,8 +1,9 @@
-import { createOpfsRepackedPGlite } from "../../../packages/pglite-opfs-repacked/src/pglite-factory";
-import type { CreateOpfsRepackedPGliteOptions } from "../../../packages/pglite-opfs-repacked/src/pglite-factory";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { createOpfsPgwasm } from "@pgxsinkit/pgwasm/opfs";
+import type { CreateOpfsPgwasmOptions } from "@pgxsinkit/pgwasm/opfs";
 
-type RepackedPGlite = Awaited<ReturnType<typeof createOpfsRepackedPGlite>>;
-type RepackedDirectory = CreateOpfsRepackedPGliteOptions["directory"];
+type RepackedPgwasm = Awaited<ReturnType<typeof createOpfsPgwasm>>;
+type RepackedDirectory = CreateOpfsPgwasmOptions["directory"];
 
 interface RequestMessage {
   readonly id: number;
@@ -29,7 +30,7 @@ interface BrowserSyncAccessHandle {
   close(): void;
 }
 
-let pg: RepackedPGlite | undefined;
+let pg: RepackedPgwasm | undefined;
 let flushController: FlushController | undefined;
 /** Completed `flush()` calls per owned file, when the store was opened with `countFlushes`. */
 let flushCounts: Record<string, number> | undefined;
@@ -69,7 +70,7 @@ async function execute(command: string, value: unknown): Promise<unknown> {
     );
     return "opened";
   }
-  if (pg === undefined) throw new Error("PGlite is not open");
+  if (pg === undefined) throw new Error("the database is not open");
   if (command === "exec") {
     await pg.exec(String(value));
     return "executed";
@@ -101,11 +102,11 @@ async function execute(command: string, value: unknown): Promise<unknown> {
 async function openWithOwnershipRetry(
   directory: RepackedDirectory,
   durability: "relaxed" | "strict",
-): Promise<RepackedPGlite> {
+): Promise<RepackedPgwasm> {
   const deadline = performance.now() + 10_000;
   for (;;) {
     try {
-      return await createOpfsRepackedPGlite({ directory, durability, extentSize: 8192 });
+      return await createOpfsPgwasm({ build: cBuild, directory, durability, extentSize: 8192 });
     } catch (cause) {
       if (errorShape(cause).name !== "StoreOwnedError" || performance.now() >= deadline) throw cause;
       await new Promise((resolve) => setTimeout(resolve, 25));

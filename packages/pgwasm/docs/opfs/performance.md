@@ -80,8 +80,8 @@ does not depend on it.
 ## Commands
 
 ```sh
-bun test tests/performance/pglite-opfs-repacked-core.perf.test.ts --timeout 180000
-bun test tests/performance/pglite-opfs-repacked-await.perf.test.ts --timeout 120000
+bun test tests/performance/pgwasm-opfs-core.perf.test.ts --timeout 180000
+bun test tests/performance/pgwasm-opfs-await.perf.test.ts --timeout 120000
 cd apps/perf-lab
 bun run bench:storage --batteries=flush-matrix --backends=opfs-repacked --repacked-extent-size=8192
 bun run bench:storage --batteries=bulk-write --backends=opfs-repacked --repacked-extent-size=65536 --strict

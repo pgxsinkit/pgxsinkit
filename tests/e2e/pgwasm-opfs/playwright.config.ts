@@ -15,7 +15,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "bun run e2e:opfs-repacked:serve",
+    command: "bun run e2e:pgwasm-opfs:serve",
     url: "http://127.0.0.1:4190",
     reuseExistingServer: false,
     timeout: 240_000,

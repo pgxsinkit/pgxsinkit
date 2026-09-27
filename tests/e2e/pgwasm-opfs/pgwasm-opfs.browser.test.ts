@@ -9,8 +9,8 @@ interface HarnessResponse {
   readonly error?: { readonly name: string; readonly message: string; readonly storeCode?: string };
 }
 
-const PROFILE_DIR = path.resolve(process.cwd(), "tmp/opfs-repacked-browser-profile");
-const CRASH_PROFILE_DIR = path.resolve(process.cwd(), "tmp/opfs-repacked-browser-crash-profile");
+const PROFILE_DIR = path.resolve(process.cwd(), "tmp/pgwasm-opfs-browser-profile");
+const CRASH_PROFILE_DIR = path.resolve(process.cwd(), "tmp/pgwasm-opfs-browser-crash-profile");
 
 async function reset(page: Page, storeName: string): Promise<void> {
   await page.evaluate((name) => window.opfsRepackedHarness.reset(name), storeName);
@@ -166,7 +166,7 @@ async function scanCrashRows(page: Page, via: "seq" | "index"): Promise<readonly
 
 /**
  * The browser confirmation of the unit crash-and-reopen suite
- * (`tests/unit/pglite-opfs-repacked-crash-reopen.test.ts`), on OPFS on disk: a persistent profile, where
+ * (`tests/unit/pgwasm-opfs-crash-reopen.test.ts`), on OPFS on disk: a persistent profile, where
  * the sync access handles write real files (an off-the-record context keeps OPFS in the browser
  * process's memory). The storage worker is
  * terminated at one deterministic point — after the last of N relaxed commits returned and before any

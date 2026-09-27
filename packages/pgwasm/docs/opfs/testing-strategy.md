@@ -14,7 +14,7 @@ substrings; a renamed or removed test must update this map in the same change.
 | Two-repack quarantine, projected replacement, forced-strict activation, and quota retry                        | `pgwasm-opfs-repack.test.ts`                                                                       |
 | Port operation labels and browser-failure persistence outcomes                                                 | `pgwasm-opfs-port.test.ts` and `pgwasm-opfs-fault-campaign.test.ts`                                |
 | PGlite construction, awaited host sync, cleanup, and poison delivery                                           | `pgwasm-opfs-adapter.test.ts` and `pgwasm-opfs-workload.test.ts`                                   |
-| Actual OPFS handles and worker, tab, and browser termination                                                   | `tests/e2e/opfs-repacked/opfs-repacked.browser.test.ts`                                            |
+| Actual OPFS handles and worker, tab, and browser termination                                                   | `tests/e2e/pgwasm-opfs/pgwasm-opfs.browser.test.ts`                                                |
 | Synchronous broker wire protocol, chunking, errno pass-through, per-client fd ownership, and detach            | `pgwasm-opfs-broker-operations.test.ts`, `-broker-transport.test.ts`, `-broker-lifecycle.test.ts`  |
 | Commit durability across a crash at a chosen store call, through the PGlite factory, both durability modes     | `pgwasm-opfs-crash-reopen.test.ts` (see [Crash and reopen](#crash-and-reopen-through-the-factory)) |
 
