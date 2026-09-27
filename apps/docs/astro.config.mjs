@@ -15,6 +15,12 @@ const [pgwasmCTypeDoc, pgwasmCTypeDocSidebar] = createStarlightTypeDocPlugin();
 const [pgwasmPgDumpTypeDoc, pgwasmPgDumpTypeDocSidebar] = createStarlightTypeDocPlugin();
 const [pgwasmReplTypeDoc, pgwasmReplTypeDocSidebar] = createStarlightTypeDocPlugin();
 
+// Multi-entry packages: TypeDoc gives each entry point its own landing page (`<entry>/README.md`) and links it from the
+// package index, but starlight-typedoc deletes every nested `README.md` when no `readme` option is set, leaving those
+// index links dead. A lowercase entry file name keeps the entry landing pages (and the package index stays at
+// `/api/<pkg>/readme/`, like the single-entry packages).
+const multiEntryTypeDoc = { gitRemote: "upstream", excludeInternal: true, entryFileName: "readme" };
+
 export default defineConfig({
   site: "https://pgxsinkit.github.io",
   vite: {
@@ -90,7 +96,7 @@ export default defineConfig({
           ],
           tsconfig: "../../packages/pgwasm/tsconfig.typedoc.json",
           output: "api/pgwasm",
-          typeDoc: { gitRemote: "upstream", excludeInternal: true },
+          typeDoc: multiEntryTypeDoc,
           sidebar: { label: "@pgxsinkit/pgwasm", collapsed: true },
         }),
         pgwasmCTypeDoc({
@@ -101,7 +107,7 @@ export default defineConfig({
           ],
           tsconfig: "../../packages/pgwasm-c/tsconfig.typedoc.json",
           output: "api/pgwasm-c",
-          typeDoc: { gitRemote: "upstream", excludeInternal: true },
+          typeDoc: multiEntryTypeDoc,
           sidebar: { label: "@pgxsinkit/pgwasm-c", collapsed: true },
         }),
         pgwasmPgDumpTypeDoc({

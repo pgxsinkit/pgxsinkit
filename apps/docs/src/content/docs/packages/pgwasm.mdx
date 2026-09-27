@@ -225,7 +225,7 @@ virtual filesystem (`MountedRepackedVfs`, `OpfsRepackedFS`), a synchronous broke
 worker own a store while other threads reach it over a `SharedArrayBuffer` channel (`RepackedSyncBroker`,
 `RepackedSyncClient`), and a WASI preview1 filesystem adapter (`createWasiPreview1Fs`) that routes a wasm
 engine's file calls to one store through that broker. The
-[API reference](/api/pgwasm/) lists them in full.
+[API reference](/api/pgwasm/readme/) lists them in full.
 
 ## `@pgxsinkit/pgwasm-c`: the C build
 
@@ -335,6 +335,6 @@ for it. The other props are `border`, `theme` (`"light"`, `"dark"` or `"auto"`),
   overlay, and a write to a synced table stays local and never converges.
 </Aside>
 
-See the API reference for [`@pgxsinkit/pgwasm`](/api/pgwasm/), [`@pgxsinkit/pgwasm-c`](/api/pgwasm-c/),
+See the API reference for [`@pgxsinkit/pgwasm`](/api/pgwasm/readme/), [`@pgxsinkit/pgwasm-c`](/api/pgwasm-c/readme/),
 [`@pgxsinkit/pgwasm-pg-dump`](/api/pgwasm-pg-dump/readme/) and
 [`@pgxsinkit/pgwasm-repl`](/api/pgwasm-repl/readme/).
