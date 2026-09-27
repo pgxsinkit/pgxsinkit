@@ -3,7 +3,7 @@ name: react
 description: >-
   Load when wiring @pgxsinkit/react into a React app — createSyncClientHooks and the reactive read hooks
   (useLiveRows, useLiveRow, useLiveDrizzleRows, useLiveDrizzleRow) plus SyncClientProvider /
-  useSyncClient. Teaches that live reads are event-driven off PGlite's live.query (they fire on commit,
+  useSyncClient. Teaches that live reads are event-driven off pgwasm's live.query (they fire on commit,
   not on a poll), that useLiveDrizzleRows remaps snake_case columns back to the builder's field keys
   while raw useLiveRows returns underlying column names, the { rows, loading, error } contract (the
   Drizzle hooks add a hydrating flag that stays true until every referenced consistency group — eager or
@@ -36,9 +36,9 @@ reactively and write through the client.
 
 ## Reads are reactive and event-driven (not polled)
 
-The live hooks register a PGlite `live.query`. When the sync engine applies a change to PGlite, the live
+The live hooks register a pgwasm `live.query`. When the sync engine applies a change to the local store, the live
 query re-runs and the hook re-renders — **on commit, not on an interval**. Do not add a `setInterval` to
-"refresh" a live query; it is already reactive, and polling PGlite is actively harmful (every query is
+"refresh" a live query; it is already reactive, and polling the local store is actively harmful (every query is
 ~50ms of WASM work on one thread — see the `operating` skill).
 
 Every read hook returns `{ rows, loading, error }` (singular variants return `{ row, ... }`). Pass
@@ -96,7 +96,7 @@ it is "do not activate a claims-dependent lazy group with unresolved claims."
 
 ## Prefer `useLiveDrizzleRows` for typed, correctly-keyed rows
 
-PGlite returns rows keyed by the underlying **snake_case** column names. `useLiveDrizzleRows` takes a
+pgwasm returns rows keyed by the underlying **snake_case** column names. `useLiveDrizzleRows` takes a
 Drizzle select builder and **remaps** those back to the builder's (camelCase) field keys, so the rows
 match the inferred type with no casts:
 
@@ -108,7 +108,7 @@ Raw `useLiveRows(sql, { params })` does **no** remap — its rows carry the raw 
 ad-hoc SQL where you control the column names; prefer `useLiveDrizzleRows` for typed reads. The Drizzle
 builder is rebuilt when the `deps` array changes (same contract as `useEffect`). When you pass `params`,
 the positional `$N` placeholders in the raw SQL must be strictly sequential `$1..$n`, each used exactly
-once — PGlite bug #1055 inlines live-query params textually rather than positionally, so any other shape
+once — the `live` extension's inherited bug #1055 (electric-sql/pglite#1055) inlines live-query params textually rather than positionally, so any other shape
 mis-binds; the client now rejects it with a clear error naming the bug. A Drizzle builder always compiles
 to that safe shape, so this only affects hand-written raw SQL.
 
@@ -124,7 +124,7 @@ cadence and the `globalThis.__pgxsinkitDebug` latency instrumentation.
 
 - Expecting `useLiveRows` to return camelCase keys — it returns raw DB column names; use
   `useLiveDrizzleRows` for remapped, typed rows.
-- Polling PGlite (`setInterval` re-reads) to "watch" data — the hooks are already reactive, and polling
+- Polling the local store (`setInterval` re-reads) to "watch" data — the hooks are already reactive, and polling
   saturates the single WASM thread.
 - Mutating local tables directly instead of through `client.tables.<t>` (the one write path).
 - Reading before the client is ready instead of gating with `ready: false`.

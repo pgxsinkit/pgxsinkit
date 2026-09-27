@@ -133,7 +133,7 @@ The local store renders a synced table's primary key and nothing else: server in
 cover projected-away columns. A client read that needs one declares it — `clientProjection: { localIndexes: [{ name:
 "cards_due_at_idx", columns: ["dueAt"] }] }`, an ascending btree over projected columns (`unique?` optional), refused
 at registry-build time if a column is unknown or omitted or a name repeats. Index only what the **client** scans (a
-due window over 100k PGlite rows: ~13 ms sequential vs ~0.1 ms indexed); each index costs write time per batch.
+due window over 100k local-store rows: ~13 ms sequential vs ~0.1 ms indexed); each index costs write time per batch.
 
 ## Read-path filtering: `customPredicate` compiles to a predicate AST, not SQL
 
@@ -390,11 +390,11 @@ class is a `risky` diff. It complements `RowFilterSpec.revision`: only `revision
 logic change move the fingerprint (rebuilding the cache, resetting the subscription), while the assertion
 renders that logic — for the fixtures you hand it, and no others.
 
-## Storage declaration: `storage.backend` and `storage.durability` (browser stores)
+## Storage declaration: `storage.backend`, `durability`, `engine`, `build` (browser stores)
 
-The registry carries the browser store's storage contract — `SyncRegistryDefinition.storage`,
-`{ backend?: "opfs" | "idbfs"; durability?: "relaxed" | "strict" }`. It lives on the registry, not on a
-minting surface, worker entry, or attach site, because both properties follow the DATA: one declaration
+The registry carries the browser store's storage contract — `SyncRegistryDefinition.storage`, `{ backend?: "opfs" |
+"idbfs"; durability?: "relaxed" | "strict"; engine?: { module }; build?: "c" | "pgrust" }` (`engine`, `build`:
+[references/storage-engine-and-build.md](references/storage-engine-and-build.md)). It lives on the registry, not on a minting surface, worker entry, or attach site, because every property follows the DATA: one declaration
 binds every open of every store minted from that registry, so no tab can disagree with another.
 
 - **`backend`** (default `"opfs"`) — the normal boot everywhere: the toolkit probes OPFS sync-access at boot and

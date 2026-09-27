@@ -33,7 +33,7 @@ interval (`createBrowserConvergenceTrigger({ intervalMs })`, default 1.5s; in wo
 `defineSyncWorker`'s `convergenceIntervalMs`, default 15s), which is only a fallback for
 retries/recovery/cross-tab.
 
-Therefore **keep the interval long.** A short interval is the dominant idle cost: every PGlite query is
+Therefore **keep the interval long.** A short interval is the dominant idle cost: every local-store query is
 ~50ms of WASM work on one thread, and an unconditional reconcile each tick re-runs every live query. The
 demo uses `intervalMs: 15_000`, cutting idle CPU from ~70% of a core to ~2% with **no change to convergence
 latency** (latency is bounded by the read-path echo). Do **not** shorten it to "make writes faster".
@@ -70,31 +70,31 @@ edge wants to sit near the CALLER, so catch-up bytes take the short hop. `create
 merged over it on the write path only. Put the region header in `writeRequestHeaders`, never in the shared
 `requestHeaders`.
 
-## Pre-warming PGlite's boot assets
+## Pre-warming the Postgres build
 
-A cold `PGlite.create` spends ~2.5s fetching + compiling the Postgres WASM (plus the initdb WASM and the
+A cold store create spends ~2.5s fetching + compiling the Postgres WASM (plus the initdb WASM and the
 filesystem bundle) before it can open a store — otherwise paid **after** sign-in, on the path to first paint.
-`createSyncClient` takes a `pgliteBootAssets` option: a promise of the already-fetched/compiled assets
-(`{ pgliteWasmModule?, initdbWasmModule?, fsBundle? }`), awaited and passed straight into `PGlite.create` so
-it skips its own lazy load. Start the fetch+compile on an **earlier screen** and hand the pending promise in
-— the WASM cost then hides behind user think-time. It is best-effort: a rejected warm is caught to
-`undefined` and PGlite loads its own assets. The `boot pglite assets warm` rail stamp times it. (Board demo:
-`apps/board/src/board/pglite-warm.ts` shows the Vite `?url` pattern PGlite's `exports` field otherwise blocks.)
+`createSyncClient` takes a `build` option (the Postgres build, `cBuild` from `@pgxsinkit/pgwasm-c` by
+default); pass `createCBuild({ assets })` with a promise of the already-fetched/compiled `CBuildAssets`
+(`{ postgresWasmModule, initdbWasmModule, fsBundle }`, URLs in `cBuildArtefacts`) and the build skips its own
+lazy load. Start the fetch+compile on an **earlier screen** and hand the pending promise in — the WASM cost
+then hides behind user think-time. Best-effort: a rejected warm falls back to the build's own load. The
+client awaits an unfinished warm BEFORE the `boot pgwasm.create` stamp, so `pgwasmCreateMs` is the create
+alone; a host may time its warm as `boot pgwasm build warm`. (Board demo: `apps/board/src/board/pgwasm-warm.ts`.)
+The build must match `storage.build` (else `StorageBuildMismatchError`); a store refuses any build but its own.
+**Read [references/postgres-builds.md](references/postgres-builds.md) before supplying a build or handling a refusal.**
 
-**In worker mode the engine loads PGlite's OWN assets — deliberately; do not pre-supply them.** The tab's
-warm still serves the engine by priming the same-origin HTTP cache the worker fetches from. Handing the
-engine a pre-compiled `WebAssembly.Module` benched NET-NEGATIVE: it forces compile-to-completion before
-instantiate (forfeiting PGlite's streaming-load pipelining), and the engine realm's only overlap window is
-the placement/handshake gap, so the compile just competes for CPU at spawn.
+**In worker mode the engine loads the build's OWN assets — deliberately; do not pre-supply them** (the tab's
+warm still primes the same-origin HTTP cache the worker fetches from; a pre-compiled module benched NET-NEGATIVE).
 
-Pre-warming only hides the WASM fetch+compile; `PGlite.create` still spends ~1.9s on `initdb` + store open,
+Pre-warming only hides the WASM fetch+compile; the create still spends ~1.9s on `initdb` + store open,
 which can't start until the store id is known (usually the signed-in user). To hide that too, create the
-store EAGERLY under a generated id on the first screen and BIND it at auth. `createClientPGlite(storePath,
-{ bootAssets })` runs the exact same create the client does internally and returns a schemaless instance;
-hand the still-pending promise to `createSyncClient`'s `precreatedPglite`. Unlike `pgliteInstance` (caller
-owns schema), `precreatedPglite` lets the client still run schema exec, prepare hooks, journal recovery and
+store EAGERLY under a generated id on the first screen and BIND it at auth. `createPgwasmClient(storePath,
+{ build })` runs the exact same create the client does internally and returns a schemaless `PgwasmClient`;
+hand the still-pending promise to `createSyncClient`'s `precreatedPgwasm`. Unlike `pgwasmInstance` (caller
+owns schema), `precreatedPgwasm` lets the client still run schema exec, prepare hooks, journal recovery and
 store-version reconcile — so the eager create buys only `initdb`, and the role/registry-derived schema stays
-post-auth. A rejected `precreatedPglite` falls back to the `storePath` create path, so it is a pure
+post-auth. A rejected `precreatedPgwasm` falls back to the `storePath` create path, so it is a pure
 accelerator, never a boot dependency. Bind eager stores to users with a small localStorage registry
 (userId→storeId plus one unbound "spare"): create a spare on the login screen, claim it at sign-in, GC any
 store that is neither mapped nor the spare. On a signed-in RELOAD there is no login screen to create ahead of,
@@ -103,7 +103,7 @@ later open adopts it. (Board demo: `store-registry.ts`, `store-prewarm.ts`.)
 
 ## Worker mode: capability-placed off-thread engine (browser apps)
 
-In a browser, prefer worker mode so PGlite, shape streams, journal machinery, and convergence leave the main
+In a browser, prefer worker mode so the pgwasm store, shape streams, journal machinery, and convergence leave the main
 thread. The SharedWorker is always the communication centre. There is no placement option: where the engine
 runs is a runtime capability decision. Under the default `storage.backend: "opfs"`, an unconditional real
 synchronous-handle open at boot chooses the engine home — real macOS/iOS Safari runs the OPFS-repacked engine
@@ -152,7 +152,7 @@ on the tab, so results match the in-process client exactly. A bare awaited `clie
 guarded here, and `client.drizzle.transaction()` throws (no tab-local store). `ensureSynced` is proxied
 (additive, idempotent); `isSynced` — SYNCHRONOUS, so never an RPC — reads a snapshot the WORKER computes by calling its OWN `isSynced` per
 registry key, ack-folded and re-broadcast on change: identical to the in-process answer (promoted lazy groups and sync-disabled included),
-`false` before the first one, never catch-up completion (`groupReady`). Local `pglite` and `dropReadCache` are NOT proxied (no tab-local
+`false` before the first one, never catch-up completion (`groupReady`). Local `pgwasm` and `dropReadCache` are NOT proxied (no tab-local
 store; a cache rebuild is engine-wide). `destroy()` IS proxied through a tab-side supervisor: it refuses peers with `StoreDestroyRefusedError`, refuses owed journal
 rows unless `{ force: true }`, retires/closes the engine, then runs a resumable deletion. The lazy lifecycle
 methods ARE proxied, but the engine is SHARED: `desync(tableKey)` from one tab reverts the consistency group for
@@ -163,7 +163,7 @@ single-consumer. The exception is the INSPECTION surface `rawQuery` / `rawExec` 
 REPLs, ad-hoc counts, and your own LOCAL-ONLY tables): identical on both clients (executed in the worker on the
 attach client), it runs raw against the local store — bypassing the journal/overlay, any write staying local and
 never converging — so it is not an app-data read path. `replAdapter(client)` shapes it into the
-`{ query, exec }` duck `@electric-sql/pglite-repl` needs. A worker file can bake multiple role variants and pick
+`{ query, exec }` duck `@pgxsinkit/pgwasm-repl` needs. A worker file can bake multiple role variants and pick
 per attach via `resolveRegistry(role)` + the tab's `role`, and can pass the schema prepare hooks
 `prepareLocalDbBeforeSchema` / `prepareLocalDbAfterSchema` (app migrations, indexes, views) — worker-entry, not
 attach, options, because a hook is a function and cannot cross the bridge.
@@ -225,7 +225,7 @@ start), then raises `ProvisionStalledError` — rebind to a fresh store; it boun
 ## Live-query manager: dedup + keep-alive (ADR-0040)
 
 Every reactive read (`useLiveDrizzleRows`/`useLiveQueryRaw`/`subscribeLiveRows`) is a **local SQL live
-query**: PGlite materialises it once, then re-runs + diffs it on every write to its tables. That registration
+query**: pgwasm materialises it once, then re-runs + diffs it on every write to its tables. That registration
 is a real cost (~a few hundred ms for a heavy aggregate) and is **automatically deduplicated** — identical
 queries (keyed on executed SQL + bound params, NOT `use`) share ONE registration and ONE re-run + diff per
 write, fanned to every subscriber, so N components (or N tabs on the shared worker) cost one materialisation.
@@ -239,7 +239,7 @@ exists on `createSyncClient`). The effective keep-alive is `max(default, subscri
 budgets outrank any hint and LRU-evict zero-subscriber entries; active entries are never evicted.
 
 **Keep the default 0 unless you have a specific hot query.** A retained zero-subscriber query is NOT paused
-(PGlite live queries can't be), so it still pays a full re-run + diff on every write to its tables while
+(pgwasm live queries can't be), so it still pays a full re-run + diff on every write to its tables while
 held: retention wins only for a frequently-re-mounted, write-COLD query. For a fixed hot set the endorsed
 "permanent" pattern is a **mounted subscriber** (a root-provider hook that never unmounts) — one live
 registration for the app's life, every route dedups onto it; there is deliberately no retain-forever knob.
@@ -256,7 +256,7 @@ main-thread fallback use IndexedDB; bun/Node uses the filesystem. Anything conta
 `InvalidStorePathError` — drop the scheme, don't re-add it. Memory-backed stores are deliberately unreachable
 from the production API (durability semantics assume a persisted store): tests spread
 `memoryStoreForTests("name")` from `@pgxsinkit/client/testing`, and a caller-owned
-`pgliteInstance`/`precreatedPglite` that is provably non-persistent (`dataDir` undefined, or `memory://`) is
+`pgwasmInstance`/`precreatedPgwasm` that is provably non-persistent (memory, or a filesystem declaring `persistent: false`) is
 refused with `NonPersistentStoreError` unless `testStoreAcknowledgment()` is spread alongside. For browser
 store GC, get the IndexedDB name from `storeIndexedDbDatabaseName(storePath)`, never assemble `/pglite/…`.
 
@@ -268,7 +268,7 @@ snapshot flush and schedules it asynchronously while strict pays that synchronou
 optimistic mutation); on OPFS-repacked the host still awaits every sync, with relaxed asserting VFS health
 and running any due deferred repack without an ordinary physical flush while strict flushes arena data
 before metadata (initialization, repack activation and open-state close use strict ordering either way).
-The resolved value is stamped on the `boot pglite.create` rail line.
+The resolved value is stamped on the `boot pgwasm.create` rail line.
 
 **The idb loss window.** On idb the store is an in-memory FS with debounced whole-snapshot writes, so
 `relaxed`'s window is every write since the last COMPLETED snapshot. The risk lands only on a crash before
@@ -284,8 +284,8 @@ browser-failure model — do not generalize it to power loss, media failure, or 
 as a transferred buffer):
 
 - `exportStore()` — the **store backup**: a live, checkpointed `dumpDataDir` tarball of the WHOLE store,
-  journal and overlay included. Never blocks, works offline with unflushed writes; restorable ONLY into
-  PGlite via restore below. This is the backup/migration format.
+  journal and overlay included. Never blocks, works offline with unflushed writes; restorable ONLY via
+  restore below, into the build that made it. This is the backup/migration format.
 - `exportDiagnostics()` — everything as SQL (synced + overlay + journal + views/functions + the `pgxsinkit`
   schema) for support evidence. Never blocks; not for restoring.
 - `exportData({ drainJournal? })` — the **portable** SQL (synced tables + their enum types, nothing of
@@ -438,9 +438,9 @@ fetch); `board-write responded {status, ms}` (a cold worker or a connection stal
 lines** — its cost is routing latency rather than phases, so read it off the `BootReport`'s per-group rows (below)
 and off `status` / `status.lastError` (`degraded`/stream = subscribe failing or the stream silent; `auth-needed` =
 the control plane refused this credential), and inspect the real requests in the worker's own DevTools. Server-side, `createSyncServer({ logTimings: true })` emits matching `[pgxsinkit-timing]` lines (the
-`deploying` skill); client-observed minus server `totalMs` isolates routing + network. Boot too: `boot pglite.create` → `boot client
+`deploying` skill); client-observed minus server `totalMs` isolates routing + network. Boot too: `boot pgwasm.create` → `boot client
 ready` (store open, schema apply, journal recovery, store-version reconcile, sync start) attributes a slow first
-paint to a phase; `boot pglite assets warm` times the optional pre-warm.
+paint to a phase; `boot pgwasm build warm` times the optional pre-warm.
 
 **Structured boot numbers — the `BootReport`.** The rail is for a human reading a console; for
 machine-keepable numbers (dashboards, CI budget gates) every boot ALSO builds a versioned `BootReport`,
@@ -451,7 +451,7 @@ report, so a late tab reads a boot that predates it). It carries `totalMs`, deco
 `groups[]`. Two reading caveats: groups catch up CONCURRENTLY on one WASM thread, so a group's
 `fetchMs` is an UPPER BOUND on network wait and concurrent `applyMs` can overlap — never sum them into a
 `totalMs` partition; and a non-null `provision` block is a spare's off-thread `initdb` made visible (then
-`phases.pgliteCreateMs` is `null`).
+`phases.pgwasmCreateMs` is `null`).
 
 **How a group decides to commit (ADR-0056), and the one state that is terminal.** There is **no commit floor** and
 no cross-shape position comparison — offsets are per-stream and comparable only within one — so a group commits
@@ -464,8 +464,8 @@ undelivered. A barrier the client cannot READ is a delay: the group stays on the
 batches, those effects are lost, and the client refuses to align and goes `degraded` rather than waiting —
 restart the engine and re-subscribe. Full prose: <https://pgxsinkit.github.io/start/operating-in-production/>.
 
-**Measure at the network boundary, not by polling PGlite.** Each PGlite query is ~50ms on one thread, so
-a tight `setInterval` reading PGlite to "watch" a value inflates the very latency it reports. Trust the
+**Measure at the network boundary, not by polling the local store.** Each local query is ~50ms on one thread, so
+a tight `setInterval` reading the store to "watch" a value inflates the very latency it reports. Trust the
 instrumentation's network timings and a server-side `curl` over a poll loop.
 
 **Inspecting a stuck or failed write.** To see _why_ a write is not converging — journal status,
@@ -489,7 +489,7 @@ a real rollback, route a permanent policy denial to `quarantined` — never mis-
 - Serving many-stream sync over plain HTTP/1.1 and blaming the server for stalled writes.
 - Mounting the stream edge on the control plane's origin (one cache key for both read surfaces), or omitting
   `Access-Control-Expose-Headers` on it — that one hot-loops the client, silently on both sides.
-- Treating an edge cold start as a toolkit problem, or measuring latency by polling PGlite in a loop
+- Treating an edge cold start as a toolkit problem, or measuring latency by polling the local store in a loop
   instead of at the network boundary.
 - Treating `deferred` as a failure and "cleaning up" the Outbox — it is rollout skew; those rows self-drain.
 - Composing a best-guess view on row PRESENCE instead of `acked_at_us IS NULL` (with a retention configured, that counts rows the server already took).

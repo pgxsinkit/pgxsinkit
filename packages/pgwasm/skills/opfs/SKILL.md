@@ -4,36 +4,42 @@ description: >-
   Load when wiring @pgxsinkit/pgwasm/opfs (the OPFS-repacked store) into a browser worker, choosing a worker scope,
   choosing relaxed or strict
   durability, handling store-open failures, or deleting and recreating a store after a format identity
-  change. Covers the factory-only construction seam, dedicated-directory ownership, the constant four
-  OPFS handles, worker requirements, extent-size identity, awaited PGlite host syncs, close behavior,
-  the supported browser-termination model, and the stable error remedies. Load before constructing,
-  operating, or recovering an OPFS-repacked PGlite database.
+  change. Covers the createOpfsPgwasm factory as the only construction seam (it takes the Postgres build),
+  dedicated-directory ownership, the constant four OPFS handles, worker requirements, extent-size identity,
+  awaited pgwasm host syncs, strictSync(pg), close behavior, the supported browser-termination model, the
+  stable error remedies, and the lower-level parts. Load before constructing, operating, or recovering a
+  pgwasm database on an OPFS-repacked store.
 metadata:
   type: task
   library: "@pgxsinkit/pgwasm"
   library_version: "0.3.1"
-  source: https://pgxsinkit.github.io/packages/pglite-opfs-repacked/
+  source: https://pgxsinkit.github.io/packages/pgwasm/
 ---
 
-# Operating an OPFS-repacked PGlite database
+# Operating a pgwasm database on an OPFS-repacked store
 
-Use `createOpfsRepackedPGlite` and no other construction path. The factory retains the adapter, forces
-PGlite onto its awaited sync path, performs a strict sync before returning a successfully initialized
-database, and closes all four handles after failed initialization or shutdown.
+Use `createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs` and no other construction path. The factory takes the
+Postgres build, retains the store, forces pgwasm onto its awaited sync path, performs a strict sync before
+returning a successfully initialized database, and closes all four handles after failed initialization or
+shutdown.
 
 ## Construct it in a capability-proven worker
 
-Create one otherwise-empty OPFS directory per database and pass its handle to the factory:
+Create one otherwise-empty OPFS directory per database and pass its handle to the factory with the build:
 
 ```ts
-import { createOpfsRepackedPGlite } from "@pgxsinkit/pglite-opfs-repacked";
+import { createOpfsPgwasm, strictSync } from "@pgxsinkit/pgwasm/opfs";
+import { live } from "@pgxsinkit/pgwasm/live";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
 
 const root = await navigator.storage.getDirectory();
 const directory = await root.getDirectoryHandle("app-database", { create: true });
-const pg = await createOpfsRepackedPGlite({
+const pg = await createOpfsPgwasm({
+  build: cBuild,
   directory,
   durability: "relaxed",
   extentSize: 64 * 1024,
+  pgwasm: { extensions: { live } },
 });
 ```
 
@@ -43,14 +49,22 @@ and iOS Safari grant it in SharedWorkers (full boot/persist/reopen verified 2026
 the database on the window main thread. A store owns exactly four handles regardless of its virtual
 file count.
 
-This package accepts a directory handle and does not choose placement. For a cross-browser
+The store accepts a directory handle and does not choose placement. For a cross-browser
 pgxsinkit app, use `@pgxsinkit/client`: capability-driven placement is automatic (there is no placement
 option), and a boot-time OPFS probe decides the engine's home — Safari runs the engine in the
 SharedWorker; Chromium and Firefox elect a dedicated engine worker. Playwright WebKitGTK denies the
 capability in both scopes and exercises the IndexedDB fallback; do not generalize that result to Safari.
 
-The `pglite` option accepts ordinary PGlite configuration such as extensions. Never pass `dataDir`,
-`fs`, or `relaxedDurability`; the factory owns all three and rejects them.
+`build` is required: the Postgres build the database runs on (e.g. `cBuild` from `@pgxsinkit/pgwasm-c`).
+A data directory belongs to the build that created it, so reopening it with another build is refused
+(`BuildMismatchError`, `DataFormatMismatchError`, `BuildMarkerUnreadableError`, all from `@pgxsinkit/pgwasm`);
+these refusals are permanent — never retry them. The `pgwasm` option accepts every other `createPgwasm`
+option, such as extensions. The store owns `build`, `dataDir`, `fs` and `relaxedDurability`, so `pgwasm`
+excludes all four (the types forbid them).
+
+The optional `onPhase` callback reports `"store-opened"` (handles acquired, the repacked filesystem open) and
+then `"pgwasm-ready"` (the database's boot completed), once each and only on success — diagnosability only,
+for attributing a create that never returns to a step. It carries no policy and must not throw.
 
 ## Choose durability once
 
@@ -61,9 +75,13 @@ The `pglite` option accepts ordinary PGlite configuration such as extensions. Ne
 - `durability: "strict"`: every awaited host sync flushes arena data before metadata. Successful query
   completion is a strict durability boundary.
 
-PGlite itself is always configured to await `syncToFs()`. A `true` host argument proves construction
+pgwasm itself is always configured to await the store's sync. A non-awaited sync proves construction
 was bypassed, raises `DurabilityModeMismatchError`, and poisons the instance. Do not introduce another
 durability option at a call site.
+
+`strictSync(pg)` (from `/opfs`, the same pattern as `protocol(pg)`) stabilizes every preceding operation in
+strict order on demand, under the database's exclusive lock. It throws `UnsupportedFeatureError` for a
+database `createOpfsPgwasm` did not create.
 
 Successful initialization, repack activation, and close from an open instance always use strict
 ordering. Close from a poisoned instance attempts no persistence and still releases all handles.
@@ -71,7 +89,7 @@ ordering. Close from a poisoned instance attempts no persistence and still relea
 A platform write the store could not complete (an arena write rejected before a single byte was
 confirmed, or a failed metadata-log append) poisons the instance: that call and every later one throw
 `StoreFailedError`, whose `code` is 29 (`EIO`), so Postgres sees an I/O error and a commit whose write
-failed is never acknowledged. Close and reopen; do not retry on the live instance.
+failed is never acknowledged. A write the platform accepted in part returns the short count and does not poison. Close and reopen; do not retry on the live instance.
 
 ## Reopen and recreate
 
@@ -107,4 +125,14 @@ absent, partial, or independently present; completed flushes remain stable. Powe
 arbitrary external edits, and mysteriously missing activated files are outside the guarantee and fail
 closed.
 
-Full prose: <https://pgxsinkit.github.io/packages/pglite-opfs-repacked/>.
+## Lower-level parts
+
+`/opfs` also exports what the factory is built from, for a host that owns a store itself: the storage ports
+(`OpfsRepackedPort`, `FileRepackedPort` on Bun, `MemoryRepackedPort` with fault injection), the engine-agnostic
+core (`RepackedVfs` over any `RepackedPort`), the mounted filesystem (`MountedRepackedVfs`, `OpfsRepackedFS`),
+a synchronous broker that lets one coordinator worker own a store while other threads reach it over a
+`SharedArrayBuffer` channel (`RepackedSyncBroker`, `RepackedSyncClient`), and a WASI preview1 filesystem
+adapter (`createWasiPreview1Fs`) routing a wasm engine's file calls to one store through that broker. Store-level
+errors carry a string `storeCode`; wrapped errors retain `cause`.
+
+Full prose: <https://pgxsinkit.github.io/packages/pgwasm/#the-opfs-repacked-store-pgxsinkitpgwasmopfs>.

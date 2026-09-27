@@ -2,12 +2,12 @@
 name: core
 description: >-
   Load when writing or reviewing code that uses @pgxsinkit/* — the offline-first sync toolkit for the
-  Postgres -> Circuits engine -> durable-streams -> PGlite read path and the client -> write API ->
+  Postgres -> Circuits engine -> durable-streams -> pgwasm read path and the client -> write API ->
   Postgres write path. Teaches the model the source does not make obvious: the two sync paths are
   separate and asymmetric, exactly one write path (an in-database apply function, not per-table CRUD), a
   non-sync Event lane carries append-only facts, a client asks the control plane for its streams
   (controlPlaneUrl + streamBaseUrl, both or neither) and reads fail closed twice — 401 control plane, 403
-  edge — local PGlite schema is not full DDL parity, writable tables must declare a conflict policy plus
+  edge — local pgwasm schema is not full DDL parity, writable tables must declare a conflict policy plus
   managed fields, ordinary writes self-activate their lazy group, and authenticated groups must not
   activate before claims exist. Load before wiring sync, defining a registry, adding an Event stream, or
   debugging "writes don't appear" / "an acked write stays pending" / "no rows stream" / "a removed
@@ -23,16 +23,16 @@ metadata:
 
 pgxsinkit is a **toolkit**, not a database, a framework, or the demo app. The `@pgxsinkit/*` packages
 are the product: `contracts` (the registry + shared types), `server` (the write API, the read path's
-**control plane**, and the **stream edge**), `client` (local PGlite store + mutation runtime +
+**control plane**, and the **stream edge**), `client` (local pgwasm store + mutation runtime +
 convergence), and `react` (hooks). A consumer installs these and wires them; they do not "run pgxsinkit".
 
 ## The one idea everything else follows from: two separate, asymmetric sync paths
 
 - **Read path:** Postgres → the **Circuits engine** (ingests logical replication and maintains the shapes
-  the control plane creates) → **durable-streams** → the **edge** (token-gated) → local **PGlite**. The
+  the control plane creates) → **durable-streams** → the **edge** (token-gated) → local **pgwasm**. The
   client does not
   construct a stream URL: it subscribes through the **control plane**, which decides which streams that
-  subject may read and hands back their paths. Reads are served from PGlite.
+  subject may read and hands back their paths. Reads are served from the local pgwasm store.
 - **Write path:** client stages an optimistic local write → flushes a batch to the **write API** → one
   **in-database apply function** (`pgxsinkit_apply_mutations`) applies it under RLS → Postgres.
 
@@ -70,7 +70,7 @@ it. Write it through the inspection surface — `rawExec(sql)` for a one-off, an
 when several statements must land together:
 
 ```ts
-// Atomic replace of a local-only cache entry. One PGlite transaction, all-or-nothing, one Results per
+// Atomic replace of a local-only cache entry. One local transaction, all-or-nothing, one Results per
 // statement; a throw rolls the whole list back, and `[]` resolves without opening a transaction at all.
 const [, inserted] = await client.rawTransaction([
   { sql: "delete from my_local_cache where key = $1", params: [key] },
@@ -99,7 +99,7 @@ await client.rawTransaction([{ sql: "delete from definition_cache where id = any
 ```
 
 It is identical on the in-process and worker-attached client — the whole list crosses the bridge in ONE RPC
-and the transaction opens and closes inside the worker — so a tab with no PGlite of its own gets the same
+and the transaction opens and closes inside the worker — so a tab with no local store of its own gets the same
 atomicity, rather than atomicity depending on where the engine happens to live. What it writes stays local
 and will NEVER converge, so it is never a shortcut for a synced table: those still go through
 `mutate` / `tables.*`. (Create such tables in `prepareLocalDbBeforeSchema` / `prepareLocalDbAfterSchema`, and
@@ -141,7 +141,7 @@ appendEvent() → Outbox (durable, local-only) → flush → POST /api/events �
 
 ## Reading the local store: base table vs overlay view
 
-Reads run against local PGlite through the client, not hand-written SQL. For a **pure-Drizzle** read, pass
+Reads run against the local pgwasm store through the client, not hand-written SQL. For a **pure-Drizzle** read, pass
 the builder callback directly to `client.query((c) => …)` (the guarded read): pgxsinkit scans the compiled
 SQL and activates + awaits every `lazy` relation the query touches (FROM, JOIN, subquery, WHERE) before it
 runs — nothing to declare. `client.query` resolves to the **rows array directly** (not `{ rows }`). Inside
@@ -273,7 +273,7 @@ RLS policy from the same Drizzle columns and they cannot drift.
 
 A subquery (membership) read filter — `p.in(col, p.subquery(…))` — is reactive in **both** directions,
 against a running client with no re-subscribe: granting a membership **materialises** the container's rows
-in the member's local PGlite; revoking one **evicts** them (a row reachable through a second membership
+in the member's local store; revoking one **evicts** them (a row reachable through a second membership
 survives until its last grant is gone). The engine **states** each side rather than implying it: the wire
 carries `upsert | delete`, so a row leaving your shape arrives as an explicit `delete` envelope. This holds
 **live and across an offline gap** — a client disconnected when the membership changed converges on
@@ -281,12 +281,12 @@ reconnect (it resumes from its per-stream offset and replays what it missed), so
 access never lingers offline. Observe it on the live subscription or a normal resume, not by re-reading a
 stream from the start.
 
-## Local PGlite schema is not full DDL parity
+## The local pgwasm schema is not full DDL parity
 
 The local store generates enums, tables, the overlay, the journal, and convergence triggers — **not**
 RLS, arbitrary triggers/functions, or managed-field defaults, and it does not enforce CHECK / FK /
 UNIQUE the way Postgres does. Treat Postgres as the source of truth for integrity; do not assume a
-constraint that holds server-side also holds in PGlite.
+constraint that holds server-side also holds in the local store.
 
 **Indexes are opt-in too.** A synced table gets its primary key's index and nothing else — the server's
 indexes are deliberately not mirrored (they serve server loads and often cover projected-away columns).
@@ -301,7 +301,7 @@ The wire carries every non-int/float/bool cell as **Postgres output text** (json
 uuid, numeric, bytea). The client parses exactly one family of it, once, at the wire boundary: a scalar
 `json`/`jsonb` column becomes a JS value before any apply tier sees it, so the local column holds the
 document — `jsonb_typeof` = `object`, not `string`. Array columns (json arrays included) stay in
-Postgres's array literal and are handed straight back to Postgres. You read objects back out of PGlite
+Postgres's array literal and are handed straight back to Postgres. You read objects back out of the local store
 either way; if you ever see a JSON **string** in a `jsonb` column, that is a double-encode bug, not the
 shape of the data.
 
@@ -319,22 +319,22 @@ shape of the data.
 - Activating an authenticated lazy group before auth resolves — reading OR writing while claims are
   unresolved subscribes against anonymous claims (now flagged by a console warning), and the control plane
   grants nothing, so the group stays empty until it is desynced and referenced again.
-- Assuming PGlite enforces every Postgres constraint.
+- Assuming the local store enforces every Postgres constraint.
 - Assuming a revoked member keeps their synced rows offline — membership changes converge both ways,
   live and on resume.
-- Passing a PGlite storage URL (`idb://…`, `memory://…`) as `storePath` — the contract is a plain
+- Passing a storage URL (`idb://…`, `memory://…`) as `storePath` — the contract is a plain
   name and schemes throw; the backend is derived (ADR-0036).
 
 ## Naming the local store
 
-`createSyncClient`/`createClientPGlite` take a **plain `storePath`** (e.g. `"my-app-store"`), never a
+`createSyncClient`/`createPgwasmClient` take a **plain `storePath`** (e.g. `"my-app-store"`), never a
 storage URL — the backend is derived, not named: a capability-proven browser engine home uses the
 constant-handle OPFS-repacked backend, fixed worker mode and browser fallbacks use IndexedDB, and bun/Node
 uses the filesystem; anything containing `://` throws `InvalidStorePathError`. Memory-backed stores are
 deliberately not expressible in the production API (pgxsinkit's retention + journal durability assume a
 persisted store): in TESTS, spread `memoryStoreForTests("name")` from `@pgxsinkit/client/testing` into the
-options; a caller-owned `pgliteInstance` that is provably non-persistent (a bare `new PGlite()`, or
-`memory://`) is refused with `NonPersistentStoreError` unless a testing acknowledgment is spread alongside.
+options; a caller-owned `pgwasmInstance` that is provably non-persistent (a memory store, or a filesystem that
+declares `persistent: false`; a custom filesystem that declares nothing is accepted) is refused with `NonPersistentStoreError` unless a testing acknowledgment is spread alongside.
 Separately from persistence, the store's flush **timing** is `durability`, declared once on the registry
 (`storage.durability`, default `"relaxed"`) — never a per-open, per-tab, or minting-surface option. Its
 physical behavior is backend-specific: idb detaches its whole-snapshot flush, while OPFS-repacked keeps the
