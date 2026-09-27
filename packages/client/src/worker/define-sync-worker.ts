@@ -25,7 +25,7 @@ import {
   resolveStorageDeclaration,
   StorageDeclarationRefusedError,
 } from "@pgxsinkit/contracts";
-import type { QueryOptions } from "@pgxsinkit/pgwasm";
+import type { PostgresBuild, QueryOptions } from "@pgxsinkit/pgwasm";
 import { drizzleParsers } from "@pgxsinkit/pgwasm/drizzle";
 
 import { type ConvergenceTrigger, createIntervalConvergenceTrigger } from "../convergence";
@@ -49,6 +49,7 @@ import { wrapLiveQueryForMaterialization } from "../live-rows-sql";
 import type { LocalStoreVersionEvent } from "../local-store";
 import { createOpfsEffects } from "../opfs-effects";
 import { type PlacementProbeResult, probeOpfsSyncAccess } from "../placement-probe";
+import { assertStoreBuild } from "../store-build";
 import { createStoreEngineResolver, type StoreEngineFactory, type StoreEngineModuleLoader } from "../store-engine";
 import { idbStoreExists, META_STORE_UNAVAILABLE, readStoreMetaRecord, writeStoreMetaRecord } from "../store-meta";
 import { readTestStoreMarker, TEST_STORE_BACKEND, type TestStoreMarker } from "../store-path";
@@ -132,6 +133,14 @@ export interface DefineSyncWorkerOptions<TRegistry extends SyncTableRegistry> {
    * Takes a plain store PATH (ADR-0036); the internal `backendOverride` is the test lane's memory selection.
    */
   createStore?: (storePath: string, backendOverride?: "memory") => Promise<PgwasmClient>;
+  /**
+   * The Postgres build this worker's stores run on: the boot's own mint, the provision mint and every spare
+   * mint (never on the wire — code cannot cross it). Defaults to `cBuild`. Pass `createCBuild({ assets })` to
+   * boot over assets warmed in the worker. It must be the registry's declared `storage.build` (default
+   * `"c"`, ADR-0063): a mismatch throws `StorageBuildMismatchError` before any store is touched. A store a
+   * {@link createStore} factory returns is checked against its own `pg.build` the same way.
+   */
+  build?: PostgresBuild;
   /**
    * How this scope imports a DECLARED store-engine module (ADR-0050 addendum 2026-09-08). Defaults to the
    * scope's own dynamic `import()`; injected by a unit test that has no module to load. It is consulted
@@ -342,11 +351,17 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   // provision payload bound the declaration (a construction-time constant could never see a wire declaration).
   const currentDurability = () =>
     engineStorage?.durability ?? getSyncRegistryStorage(options.registry)?.durability ?? "relaxed";
+  // The declared build (ADR-0063), read at mint time for the same reason as durability.
+  const currentBuild = () => engineStorage?.build ?? getSyncRegistryStorage(options.registry)?.build ?? "c";
   const builtInCreatePglite: StoreEngineFactory =
     options.createStore ??
     ((storePath: string, backendOverride?: "memory") =>
       createPgwasmClient(storePath, {
         ...(backendOverride ? { backendOverride } : {}),
+        // The worker's build, checked against the declaration before the mint touches a store.
+        ...(options.build ? { build: options.build } : {}),
+        declaredBuild: currentBuild(),
+        buildCheckSite: "defineSyncWorker",
         durability: currentDurability(),
         // SW-direct placement grant (ADR-0049 D1): a spare minted in-scope opens OPFS-repacked, matching the boot.
         ...(placementOpfsAccess ? { hasOpfsSyncAccess: true } : {}),
@@ -360,12 +375,26 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   // long after this closure is built, and it is immutable once bound — so every mint of this store resolves
   // the same engine. A declared module that will not load or exports no factory throws LOUDLY here; it never
   // degrades to the built-in store, which would report a healthy engine for one that never ran.
+  // Every store this factory returns is checked against the declared build (ADR-0063) on its own `pg.build`:
+  // a caller's `createStore` or a declared engine module may run any build, whatever `options.build` says.
   const createStore: StoreEngineFactory = async (storePath, backendOverride) => {
     const declaredEngine = engineStorage?.engine?.module;
-    if (declaredEngine === undefined) return await builtInCreatePglite(storePath, backendOverride);
-    const factory = await resolveStoreEngine(declaredEngine);
-    syncDebug("worker store engine declared", { storePath, module: declaredEngine });
-    return await factory(storePath, backendOverride);
+    let store: PgwasmClient;
+    if (declaredEngine === undefined) {
+      store = await builtInCreatePglite(storePath, backendOverride);
+    } else {
+      const factory = await resolveStoreEngine(declaredEngine);
+      syncDebug("worker store engine declared", { storePath, module: declaredEngine });
+      store = await factory(storePath, backendOverride);
+    }
+    try {
+      assertStoreBuild(currentBuild(), store.build, "createStore");
+    } catch (error) {
+      // Refused before any use: release the store's handles (an OPFS store holds exclusive ones) and propagate.
+      await store.close().catch(() => undefined);
+      throw error;
+    }
+    return store;
   };
   // A testing acknowledgment (ADR-0036) spread into THIS worker's options — needed when a test injects a
   // non-persistent BYO store (`precreatedPgwasm` / `pgwasmInstance` / a memory-returning `createStore`),
@@ -743,6 +772,9 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       ...(provisionStamp ? { provisionStamp } : {}),
       ...(precreatedPgwasm ? { precreatedPgwasm } : {}),
       ...(options.pgwasmInstance && restoreFrom == null ? { pgwasmInstance: options.pgwasmInstance } : {}),
+      // The worker's build (ADR-0063) for the boot's own mint; `createSyncClient` checks it against the bound
+      // declaration before any store is touched.
+      ...(options.build ? { build: options.build } : {}),
       // App-level schema prep runs IN THE WORKER around the registry schema exec (before/after), exactly as
       // the in-process client. Worker-entry options, not attach options: functions cannot cross the bridge.
       ...(options.prepareLocalDbBeforeSchema ? { prepareLocalDbBeforeSchema: options.prepareLocalDbBeforeSchema } : {}),

@@ -14,7 +14,9 @@ import type {
   SyncTableName,
   SyncTableRegistry,
   SyncTableUpdateInput,
+  StorageBuild,
   StorageDurability,
+  StoreBuildCheckSite,
   WriteMode,
 } from "@pgxsinkit/contracts";
 import {
@@ -104,6 +106,7 @@ import {
   type ResolvedStorageBackend,
   type StoreBootResolution,
 } from "./store-boot";
+import { assertStoreBuild, isStoreBuildRefusal } from "./store-build";
 import { runCommitmentBarrier } from "./store-lifecycle";
 import {
   META_STORE_UNAVAILABLE,
@@ -435,6 +438,17 @@ export interface CreatePgwasmClientOptions {
    */
   build?: PostgresBuild;
   /**
+   * @internal Toolkit-internal declared-build carrier (ADR-0063), NOT a public per-open knob: the registry's
+   * resolved `storage.build`, threaded by the sites that resolve a declaration (`createSyncClient`'s mints,
+   * the worker's provision and spare mints). When present, the supplied {@link build} must be that build
+   * ({@link StorageBuildMismatchError}, thrown before the store is touched); absent, no declaration is checked.
+   */
+  declaredBuild?: StorageBuild;
+  /**
+   * @internal The site the {@link declaredBuild} check reports; defaults to `"createPgwasmClient"`.
+   */
+  buildCheckSite?: StoreBuildCheckSite;
+  /**
    * @internal Toolkit-internal durability carrier (ADR-0047), NOT a public per-open knob. Durability is
    * registry-declared: {@link createSyncClient} resolves `storage.durability ?? "relaxed"` off its registry
    * and threads the resolved mode in here — the ONE resolution point — for every mint it funnels through this
@@ -533,10 +547,11 @@ function isOpfsRepackedStore(instance: PgwasmClient): boolean {
 const OPFS_REPACKED_STORAGE_NAME = "opfs-repacked";
 
 /**
- * Open the opfs-repacked factory with bounded retries (3) and a small linear backoff for transient failures,
+ * Open the opfs-repacked factory with bounded retries and a small linear backoff for transient failures,
  * then propagate the last error — a committed store's final failure is HARD, and an uncommitted candidate's
- * likewise propagates (the caller never exposes an unopened store). Kept simple: retry the whole factory call,
- * always, then throw.
+ * likewise propagates (the caller never exposes an unopened store). A typed build refusal (ADR-0063: the
+ * directory or backup is another build or data format, or its marker is unreadable) is not transient, so it
+ * propagates at once, never retried.
  */
 async function openWithBoundedRetries<T>(open: () => Promise<T>, backoffMs: number): Promise<T> {
   let lastError: unknown;
@@ -544,6 +559,7 @@ async function openWithBoundedRetries<T>(open: () => Promise<T>, backoffMs: numb
     try {
       return await open();
     } catch (error) {
+      if (isStoreBuildRefusal(error)) throw error;
       lastError = error;
       if (attempt < OPFS_OPEN_ATTEMPTS && backoffMs > 0) {
         await new Promise<void>((resolve) => setTimeout(resolve, backoffMs * attempt));
@@ -584,6 +600,12 @@ export async function createPgwasmClient(
   const normalised = normaliseStorePathInput(store);
   const storePath = normalised.storePath;
   const backendOverride = options?.backendOverride ?? normalised.backendOverride;
+  // ADR-0063: with a declaration threaded in, the supplied build must be the declared one — checked before
+  // anything below touches a store (the denied-home meta gate included). Absent `build` means `cBuild`.
+  if (options?.declaredBuild !== undefined) {
+    const suppliedBuild = (options.build ?? cBuild).identity;
+    assertStoreBuild(options.declaredBuild, suppliedBuild, options.buildCheckSite ?? "createPgwasmClient");
+  }
   // An eager precreate is itself a store mint, so it passes the SAME pre-mint meta gate the ordinary
   // createSyncClient path does before a denied browser home opens an IDB store: settle any durable `deleting`
   // authority, retire an unexposed `opfs-candidate`, and REFUSE an `opfs-committed` store outright ({@link
@@ -1071,6 +1093,10 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * {@link pgwasmInstance} is supplied (the caller owns that instance's boot). A rejected/failed warm never
    * fails the boot — the build falls back to loading its own assets, so the warm is a pure best-effort
    * accelerator.
+   *
+   * The build must be the registry's declared `storage.build` (default `"c"`, ADR-0063): a mismatch throws
+   * `StorageBuildMismatchError` before any store is touched. An adopted {@link pgwasmInstance} /
+   * {@link precreatedPgwasm} is checked the same way, against its own `pg.build`.
    */
   build?: PostgresBuild;
   resetSubscriptionKeys?: string[];
@@ -2157,12 +2183,16 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // The resolved mode threads into every client-owned mint (its own boot create and the precreated-reject
   // fallback) via the internal carrier on `createPgwasmClient`; no open site takes a durability option, so
   // no mint can contradict the data contract.
-  const resolvedDurability: StorageDurability = resolveStorageDeclaration(
-    getSyncRegistryStorage(options.registry),
-    options.storage,
-  ).durability;
+  const resolvedDeclaration = resolveStorageDeclaration(getSyncRegistryStorage(options.registry), options.storage);
+  const resolvedDurability: StorageDurability = resolvedDeclaration.durability;
+  // ADR-0063: the declared Postgres build (default `"c"`). A client-owned mint runs on the supplied build
+  // (`options.build`, else `cBuild`), which must be the declared one; an adopted instance's `pg.build` must too.
+  const declaredBuild: StorageBuild = resolvedDeclaration.build;
+  const suppliedBuild = options.build ?? cBuild;
   const createClientOptions: CreatePgwasmClientOptions = {
     ...(options.build ? { build: options.build } : {}),
+    declaredBuild,
+    buildCheckSite: "createSyncClient",
     ...(backendOverride ? { backendOverride } : {}),
     durability: resolvedDurability,
     // Restore (ADR-0035 decision 6): seed the fresh store from the backup via `loadDataDir`. Restore is
@@ -2172,6 +2202,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   };
   const fallbackStorePath = options.storePath ?? "pgxsinkit-overlay-v1";
   let openedStorageBackend: NonNullable<BootReport["storageBackend"]> | undefined;
+
+  // A boot that will mint (no adopted instance) refuses a supplied build that is not the declared one here,
+  // before the restore probe or any meta read touches a store. A `precreatedPgwasm` whose create rejected
+  // mints through `openOwnedStore`, which checks again first.
+  if (!options.pgwasmInstance && !options.precreatedPgwasm) {
+    assertStoreBuild(declaredBuild, suppliedBuild.identity, "createSyncClient");
+  }
 
   // Fresh-target gate (ADR-0035 decision 6): restore refuses a store that already exists — it boots a
   // brand-new store and never overlays a live one. Checked BEFORE the create so we never touch (let alone
@@ -2234,6 +2271,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // closure prevents a rejected eager create from bypassing live `deleting` authority or the OPFS commitment
   // phase machine by jumping straight to `timedCreate()`.
   const openOwnedStore = async (): Promise<PgwasmClient> => {
+    // ADR-0063: the build this path mints on must be the declared one, before any meta read or mint.
+    assertStoreBuild(declaredBuild, suppliedBuild.identity, "createSyncClient");
     // A capability-denied browser may inherit an interrupted destroy or an unexposed candidate from an earlier
     // granted engine home, and it may be looking at a store that lives in OPFS it cannot open at all. ONE
     // bounded meta read settles all three before any replacement IDB store is minted: a `deleting` handoff
@@ -2291,6 +2330,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // (schema, prepare hooks, and reconciliation) — see the `pgwasmInstance` JSDoc. No create here →
     // `pgwasmCreateMs` null.
     refuseIfNonPersistent(options.pgwasmInstance);
+    // ADR-0063: the adopted instance's own build must be the declared one.
+    assertStoreBuild(declaredBuild, options.pgwasmInstance.build, "pgwasmInstance");
     pglite = options.pgwasmInstance;
   } else if (options.precreatedPgwasm) {
     // The caller created the raw store eagerly via `createPgwasmClient`; the client still owns every
@@ -2305,6 +2346,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     );
     if (outcome.ok) {
       refuseIfNonPersistent(outcome.instance);
+      // ADR-0063: checked outside the reject-fallback, so the refusal propagates (never swallowed as a
+      // rejected create that falls back to minting on the supplied build).
+      assertStoreBuild(declaredBuild, outcome.instance.build, "precreatedPgwasm");
       pglite = outcome.instance;
       adoptedPrecreated = true;
     } else {

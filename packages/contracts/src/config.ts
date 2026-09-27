@@ -255,6 +255,45 @@ export class StorageDeclarationRefusedError extends Error {
   }
 }
 
+/**
+ * Where a store's Postgres build was checked against its declaration (ADR-0063): before a mint by the
+ * build a site supplies (`createSyncClient`, `defineSyncWorker`, `createPgwasmClient`), or on an instance a
+ * site adopts (`pgwasmInstance`, `precreatedPgwasm`, the result of a worker's `createStore`).
+ */
+export type StoreBuildCheckSite =
+  | "createSyncClient"
+  | "defineSyncWorker"
+  | "createPgwasmClient"
+  | "pgwasmInstance"
+  | "precreatedPgwasm"
+  | "createStore";
+
+/**
+ * The registry declares one Postgres build (`storage.build`, ADR-0063) and the code supplied or adopted
+ * another. Thrown before any store is touched. A store's build is code, never a declared string: pass the
+ * declared build (e.g. `defineSyncWorker({ build })`, `createSyncClient({ build })`), or fix the declaration.
+ * The stable `name` survives bridge serialization (`BridgeErrorWire.name`), and `detail` carries the three
+ * fields across it, so a tab can detect the refusal typed.
+ */
+export class StorageBuildMismatchError extends Error {
+  readonly declared: StorageBuild;
+  readonly supplied: string;
+  readonly site: StoreBuildCheckSite;
+  readonly detail: { readonly declared: StorageBuild; readonly supplied: string; readonly site: StoreBuildCheckSite };
+
+  constructor(declared: StorageBuild, supplied: string, site: StoreBuildCheckSite) {
+    super(
+      `storage build mismatch at ${site}: the registry declares the "${declared}" Postgres build but the ` +
+        `store's build is "${supplied}" — supply the declared build (a \`build\` option), or fix \`storage.build\``,
+    );
+    this.name = "StorageBuildMismatchError";
+    this.declared = declared;
+    this.supplied = supplied;
+    this.site = site;
+    this.detail = { declared, supplied, site };
+  }
+}
+
 /** One field's resolution: explicit-vs-explicit disagreement refuses; otherwise the explicit value, else the default. */
 function resolveDeclarationField<TValue>(
   field: keyof SyncStorageDeclaration,

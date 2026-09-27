@@ -31,7 +31,11 @@ function bootRegistry(): SyncTableRegistry {
 // Captured collaborator inputs, refreshed per test.
 let capturedCreateOptions: Record<string, unknown> | undefined;
 let capturedBuildOptions: { assets?: Promise<Record<string, unknown>> } | undefined;
-const fakeWarmBuild = { fake: "warm build" };
+// Carries the C identity: the boot checks the supplied build against the declared one (ADR-0063).
+const fakeWarmBuild = {
+  fake: "warm build",
+  identity: { name: "c", dataFormat: 1, claimsUnmarkedDirectories: true, release: "test" },
+};
 let capturedMutationOptions: Record<string, unknown> | undefined;
 let capturedSyncOptions: Record<string, unknown> | undefined;
 
@@ -55,6 +59,8 @@ describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
       createPgwasm: async (options: Record<string, unknown>) => {
         capturedCreateOptions = options;
         return {
+          // A worker's created store is checked against the declared build on its own `pg.build` (ADR-0063).
+          build: fakeWarmBuild.identity,
           exec: async () => undefined,
           close: async () => undefined,
         };

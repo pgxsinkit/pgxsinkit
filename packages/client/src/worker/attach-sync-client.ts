@@ -2721,7 +2721,11 @@ export function provisionSyncWorker<const TRegistry extends SyncTableRegistry>(
       const ackListener = (message: { data: unknown }): void => {
         if (!isBridgeEnvelope(message.data) || message.data.type !== "provision-ack") return;
         const ack = codec.decode(message.data.payload) as ProvisionAckPayload;
-        settle(() => (ack.ok ? resolve() : reject(new Error(ack.error?.message ?? "worker provision failed"))));
+        // A refusal keeps its type across the bridge (a `StorageBuildMismatchError`, pgwasm's build refusals, a
+        // committed store unreachable from this home): rebuilt by name and detail like every other bridge error.
+        settle(() =>
+          ack.ok ? resolve() : reject(ack.error ? rebuildError(ack.error) : new Error("worker provision failed")),
+        );
       };
       ackPort.addEventListener("message", ackListener);
       ackPort.start?.();
