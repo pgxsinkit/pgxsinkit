@@ -17,6 +17,13 @@ const [pgwasmReplTypeDoc, pgwasmReplTypeDocSidebar] = createStarlightTypeDocPlug
 
 export default defineConfig({
   site: "https://pgxsinkit.github.io",
+  vite: {
+    // Starlight's Markdown engine, satteri, loads a per-platform native binding by bare `require`. Bundled into
+    // the prerender chunks it would resolve that binding from `dist/`, where bun's isolated install has none;
+    // kept external, it resolves from its own package, next to the binding. Astro 7 prerenders pages in its own
+    // Vite environment, which the top-level `ssr` options do not reach.
+    environments: { prerender: { resolve: { external: ["satteri"] } } },
+  },
   integrations: [
     starlight({
       title: "pgxsinkit",
