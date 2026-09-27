@@ -152,6 +152,40 @@ async function driveInitialSync(client: { ready: Promise<void> }) {
   await client.ready;
 }
 
+describe("BootReport — an unfinished warm is not create time (ADR-0034)", () => {
+  afterEach(async () => {
+    while (openClients.length > 0)
+      await openClients
+        .pop()!
+        .stop()
+        .catch(() => undefined);
+  });
+
+  it("the boot waits for the build's prepare() before starting the pgwasmCreateMs clock", async () => {
+    const { createCBuild } = await import("@pgxsinkit/pgwasm-c");
+    const WARM_MS = 500;
+    // A warm still in flight when the boot starts: it settles WARM_MS later with nothing warmed, so the build
+    // loads its own artefacts. The settle time is taken on the first handler, before the build's own.
+    let warmSettledAt = Number.NaN;
+    const warm = new Promise<Record<string, never>>((resolve) => setTimeout(() => resolve({}), WARM_MS));
+    void warm.then(() => {
+      warmSettledAt = performance.now();
+    });
+    const bootStartedAt = performance.now();
+    const client = await bootClient({ build: createCBuild({ assets: warm }) });
+    const resolvedAt = performance.now();
+    await driveInitialSync(client);
+
+    const r = (await client.bootReport())!;
+    // The warm was genuinely unfinished when the boot began...
+    expect(warmSettledAt - bootStartedAt).toBeGreaterThanOrEqual(WARM_MS - 50);
+    // ...and the create clock started only after it settled: the whole measured create lies between the warm
+    // settling and the client resolving. Counting the warm would put up to WARM_MS more on it.
+    expect(r.phases.pgwasmCreateMs).not.toBeNull();
+    expect(r.phases.pgwasmCreateMs!).toBeLessThanOrEqual(resolvedAt - warmSettledAt);
+  });
+});
+
 describe("BootReport — in-process boot (ADR-0034)", () => {
   afterEach(async () => {
     while (openClients.length > 0)

@@ -245,9 +245,17 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
     options,
   };
 
+  // Everything a boot waits on before its own work: the warm-up, and the explicit Postgres module and
+  // filesystem bundle when given as promises. Settled, never rejected: a rejected one fails (or falls back in)
+  // the boot itself, which is where that belongs.
+  const prepared: Promise<void> = Promise.allSettled([warmed, options.postgresWasmModule, options.fsBundle]).then(
+    () => undefined,
+  );
+
   return {
     identity: C_BUILD_IDENTITY,
     capabilities: C_BUILD_CAPABILITIES,
+    prepare: () => prepared,
     async boot(request: BootRequest): Promise<MountedDataDirectory> {
       const extensionBundles = Promise.all(request.extensions.map((extension) => fetchExtensionBundle(extension)));
       // Awaited in start(); a failure before then must not surface as unhandled.

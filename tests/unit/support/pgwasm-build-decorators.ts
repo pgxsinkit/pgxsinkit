@@ -65,6 +65,7 @@ function wrapBuild(
       ...(changes.synchronousExchange === undefined ? {} : { synchronousExchange: changes.synchronousExchange }),
       ...(changes.blobDevice === undefined ? {} : { blobDevice: changes.blobDevice }),
     },
+    ...(inner.prepare ? { prepare: () => inner.prepare?.() ?? Promise.resolve() } : {}),
     boot: async (request) => wrapMounted(await inner.boot(request), wrap),
   };
 }

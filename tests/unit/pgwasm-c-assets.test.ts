@@ -63,3 +63,30 @@ describe("createCBuild({ assets })", () => {
     expect(warmedModuleRead).toBe(false);
   });
 });
+
+describe("createCBuild prepare()", () => {
+  it("settles once the warm settles, and never rejects when the warm does", async () => {
+    let release!: () => void;
+    const warm = new Promise<CBuildAssets>((resolve) => {
+      release = () => resolve({});
+    });
+    const build = createCBuild({ assets: warm });
+    let prepared = false;
+    const preparing = build.prepare!().then(() => {
+      prepared = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(prepared).toBe(false);
+    release();
+    await preparing;
+    expect(prepared).toBe(true);
+
+    const rejected = Promise.reject(new Error("warm failed"));
+    rejected.catch(() => undefined);
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(createCBuild({ assets: rejected }).prepare!()).resolves.toBeUndefined();
+    // With nothing warmed ahead there is nothing to wait for.
+    // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
+    await expect(createCBuild().prepare!()).resolves.toBeUndefined();
+  });
+});

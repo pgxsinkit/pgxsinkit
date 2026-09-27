@@ -638,6 +638,10 @@ export async function createPgwasmClient(
   // precreate). Maps to pgwasm's `relaxedDurability` boolean (`"strict"` → false). On idb the per-query
   // synchronous flush dominates write latency; relaxing it schedules the flush asynchronously instead.
   const relaxedDurability = (options?.durability ?? "relaxed") !== "strict";
+  // Wait for everything the build's boot would wait on (a `createCBuild({ assets })` warm still in flight)
+  // BEFORE the `boot pgwasm.create` stamp starts, so the stamp measures the create alone, never an unfinished
+  // warm. `prepare` never rejects: a failed warm falls back to the build's own lazy asset load.
+  await build.prepare?.();
 
   // ADR-0049 step 10a — the `opfs://` branch. pgwasm does NOT accept `opfs://` as a dataDir; instead the
   // OPFS store factory owns the store on a dedicated OPFS directory. The factory is loaded LAZILY (a
@@ -1092,7 +1096,8 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    * opened the assets are resolved and the build skips its own lazy asset load. Ignored when
    * {@link pgwasmInstance} is supplied (the caller owns that instance's boot). A rejected/failed warm never
    * fails the boot — the build falls back to loading its own assets, so the warm is a pure best-effort
-   * accelerator.
+   * accelerator. The boot waits for the build's `prepare()` (the warm) before its `boot pgwasm.create` stamp,
+   * so `pgwasmCreateMs` measures the create alone.
    *
    * The build must be the registry's declared `storage.build` (default `"c"`, ADR-0063): a mismatch throws
    * `StorageBuildMismatchError` before any store is touched. An adopted {@link pgwasmInstance} /
@@ -2226,6 +2231,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // Time a client-owned `createPgwasmClient` into `phases.pgwasmCreateMs`; an ADOPTED store (spare or
   // caller-supplied) leaves it `null` (create ran elsewhere — see the provision block below).
   const timedCreate = async (): Promise<PgwasmClient> => {
+    // The build's warm (if any) settles BEFORE the clock starts: `pgwasmCreateMs` measures the create alone,
+    // never an unfinished warm (`prepare` never rejects; a failed warm is the build's own lazy load).
+    await suppliedBuild.prepare?.();
     const startedAt = performance.now();
     // ADR-0049 step 10b/11c: the OPFS-home grant is spread in at MINT time (not baked into `createClientOptions`),
     // so the pre-mint phase machine that ran just above can settle `bootHasOpfsSyncAccess` first — opening the

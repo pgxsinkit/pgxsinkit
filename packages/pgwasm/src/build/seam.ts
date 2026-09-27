@@ -96,6 +96,13 @@ export interface PostgresBuild {
   readonly identity: BuildIdentity;
   readonly capabilities: BuildCapabilities;
   /**
+   * Optional: settles once everything a {@link boot} would wait on before its own work is ready (artefacts
+   * fetched and compiled ahead, e.g. by a warm started on an earlier screen). A caller that times a boot
+   * awaits it first, so the timing measures the boot, never an unfinished warm. Never rejects: a failed
+   * warm means the build loads its artefacts itself during the boot.
+   */
+  prepare?(): Promise<void>;
+  /**
    * Boot, phase 1: bring the host up and mount the storage (IndexedDB read in, a filesystem initially
    * synced). When this resolves, Postgres has not run and nothing in the data directory was written.
    */
