@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
-import { chromium, expect, type BrowserContext, type Page, test } from "@playwright/test";
+import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
 
 interface HarnessResponse {
   readonly ok: boolean;
@@ -9,8 +9,34 @@ interface HarnessResponse {
   readonly error?: { readonly name: string; readonly message: string; readonly storeCode?: string };
 }
 
-const PROFILE_DIR = path.resolve(process.cwd(), "tmp/pgwasm-opfs-browser-profile");
-const CRASH_PROFILE_DIR = path.resolve(process.cwd(), "tmp/pgwasm-opfs-browser-crash-profile");
+/** One profile per browser, so a WebKit run never opens a profile Chromium wrote (or the reverse). */
+const profileDir = (name: string, browserName: string) =>
+  path.resolve(process.cwd(), `tmp/pgwasm-opfs-browser-${name}-${browserName}`);
+
+/**
+ * WebKit grants OPFS only to a persistent context — in an ephemeral one every OPFS open fails with
+ * `UnknownError` — so on WebKit each test's `context` (and the `page` drawn from it) is a persistent
+ * context on a fresh profile. Chromium keeps its default context.
+ */
+const test = base.extend({
+  context: async ({ context, browserName, playwright, baseURL }, use, testInfo) => {
+    if (browserName !== "webkit") {
+      await use(context);
+      return;
+    }
+    const profile = testInfo.outputPath("webkit-profile");
+    const persistent = await playwright.webkit.launchPersistentContext(profile, {
+      headless: true,
+      ...(baseURL === undefined ? {} : { baseURL }),
+    });
+    try {
+      await use(persistent);
+    } finally {
+      await persistent.close();
+      await rm(profile, { recursive: true, force: true });
+    }
+  },
+});
 
 async function reset(page: Page, storeName: string): Promise<void> {
   await page.evaluate((name) => window.opfsRepackedHarness.reset(name), storeName);
@@ -46,7 +72,7 @@ async function seed(page: Page): Promise<void> {
 
 async function openPage(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
-  await page.goto("http://127.0.0.1:4190");
+  await page.goto("http://127.0.0.1:4192");
   return page;
 }
 
@@ -81,17 +107,18 @@ test("tab close terminates its worker and another tab reopens exact state", asyn
   await second.close();
 });
 
-test("persistent browser restart reopens state without an application close", async () => {
+test("persistent browser restart reopens state without an application close", async ({ browserName, playwright }) => {
   const store = "browser-termination";
-  await rm(PROFILE_DIR, { recursive: true, force: true });
-  let firstContext = await chromium.launchPersistentContext(PROFILE_DIR, { headless: true });
+  const profile = profileDir("profile", browserName);
+  await rm(profile, { recursive: true, force: true });
+  let firstContext = await playwright[browserName].launchPersistentContext(profile, { headless: true });
   const first = await openPage(firstContext);
   await reset(first, store);
   expect(await start(first, store, "strict")).toMatchObject({ ok: true });
   await seed(first);
   await firstContext.close();
 
-  firstContext = await chromium.launchPersistentContext(PROFILE_DIR, { headless: true });
+  firstContext = await playwright[browserName].launchPersistentContext(profile, { headless: true });
   try {
     const second = await openPage(firstContext);
     expect(await start(second, store, "strict")).toMatchObject({ ok: true });
@@ -99,7 +126,7 @@ test("persistent browser restart reopens state without an application close", as
     expect(await request(second, "close")).toMatchObject({ ok: true });
   } finally {
     await firstContext.close();
-    await rm(PROFILE_DIR, { recursive: true, force: true });
+    await rm(profile, { recursive: true, force: true });
   }
 });
 
@@ -168,15 +195,19 @@ async function scanCrashRows(page: Page, via: "seq" | "index"): Promise<readonly
  * The browser confirmation of the unit crash-and-reopen suite
  * (`tests/unit/pgwasm-opfs-crash-reopen.test.ts`), on OPFS on disk: a persistent profile, where
  * the sync access handles write real files (an off-the-record context keeps OPFS in the browser
- * process's memory). The storage worker is
+ * process's memory in Chromium, and WebKit refuses it OPFS). The storage worker is
  * terminated at one deterministic point — after the last of N relaxed commits returned and before any
  * strict boundary covered them — and a fresh worker reopens the store.
  */
-test("relaxed worker termination after N commits and before the next sync reopens every returned commit on disk", async () => {
+test("relaxed worker termination after N commits and before the next sync reopens every returned commit on disk", async ({
+  browserName,
+  playwright,
+}) => {
   const store = "relaxed-crash-reopen";
   const commits = 8;
-  await rm(CRASH_PROFILE_DIR, { recursive: true, force: true });
-  const context = await chromium.launchPersistentContext(CRASH_PROFILE_DIR, { headless: true });
+  const crashProfile = profileDir("crash-profile", browserName);
+  await rm(crashProfile, { recursive: true, force: true });
+  const context = await playwright[browserName].launchPersistentContext(crashProfile, { headless: true });
   try {
     const page = await openPage(context);
     await reset(page, store);
@@ -222,6 +253,6 @@ test("relaxed worker termination after N commits and before the next sync reopen
     expect(await request(page, "close")).toMatchObject({ ok: true });
   } finally {
     await context.close();
-    await rm(CRASH_PROFILE_DIR, { recursive: true, force: true });
+    await rm(crashProfile, { recursive: true, force: true });
   }
 });

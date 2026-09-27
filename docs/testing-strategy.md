@@ -168,6 +168,10 @@ their own. Where the code came from, file by file, is in
   autocompletion schema). `tests/pgwasm-repl-types.ts` is a type-level test, checked by
   `bun run typecheck`: a `Pgwasm` and `replAdapter(client)` are both a `ReplDatabase` without a cast.
   The package is typechecked in its own program (it needs the DOM library).
+- **OPFS browser lane** (`bun run test:browser:pgwasm-opfs`, `tests/e2e/pgwasm-opfs/`): its six opfs-repacked
+  specs run in Chromium and WebKit, the store in a dedicated worker in both (WebKit grants it sync access
+  handles there). WebKit gives OPFS only to a persistent context, so every WebKit spec gets its own profile,
+  and the lane serves on 4192 because WebKit refuses the bad port 4190 it used before.
 - **IndexedDB browser lane** (`bun run test:browser:pgwasm-idb`, `tests/e2e/pgwasm-idb/`): Bun has
   neither IndexedDB nor Web Locks, so `idb://` storage is proven in Chromium and WebKit, on demand and
   outside the commit path, like the opfs-repacked lane. It runs the fork's web base flow (create,
