@@ -55,6 +55,33 @@ export function isEmscriptenUnwind(error: unknown): boolean {
   );
 }
 
+/**
+ * The wasm's shadow stack pointer: the C stack in linear memory, which the glue exports neither
+ * `stackSave` nor `stackRestore` for. A throw that unwinds wasm frames (an ERROR's intercepted
+ * siglongjmp, a FATAL's exit) skips their epilogues, so the pointer stays where the deepest of them left
+ * it. Unrestored, every ERROR leaked that much stack (about 1.2 kB for `SELECT 1/0`), until
+ * `max_stack_depth` refused every statement (from about the 1,700th error in one instance). The host
+ * restores it to where the call started, as Postgres' own siglongjmp to PostgresMain would.
+ */
+interface ShadowStack {
+  save(): number;
+  restore(pointer: number): void;
+}
+
+function shadowStackOf(instance: WebAssembly.Instance): ShadowStack {
+  const current = instance.exports["emscripten_stack_get_current"];
+  const restore = instance.exports["_emscripten_stack_restore"];
+  if (typeof current !== "function" || typeof restore !== "function") {
+    throw new Error(
+      "The Postgres module exports no emscripten_stack_get_current or _emscripten_stack_restore: the host cannot restore its stack after an error",
+    );
+  }
+  return {
+    save: () => (current as () => number)(),
+    restore: (pointer) => (restore as (pointer: number) => void)(pointer),
+  };
+}
+
 export interface PostgresInstanceConfig {
   readonly wasmModule: Promise<WebAssembly.Module>;
   /** The filesystem bundle, a copy of its own for this instance. */
@@ -75,6 +102,7 @@ export interface PostgresInstanceConfig {
 export class PostgresInstance {
   readonly module: PostgresModule;
   readonly #debug: DebugLevel;
+  readonly #stack: ShadowStack;
   // Frontend bytes being fed to Postgres, and how far it has read them.
   #input: Uint8Array = new Uint8Array(0);
   #readOffset = 0;
@@ -89,16 +117,20 @@ export class PostgresInstance {
   // The last lines Postgres wrote to stderr, for the error when it fails to start.
   readonly #stderr: string[] = [];
 
-  private constructor(module: PostgresModule, debug: DebugLevel) {
+  private constructor(module: PostgresModule, debug: DebugLevel, stack: ShadowStack) {
     this.module = module;
     this.#debug = debug;
+    this.#stack = stack;
   }
 
   static async create(config: PostgresInstanceConfig): Promise<PostgresInstance> {
     const [wasmModule, fsBundle] = await Promise.all([config.wasmModule, config.fsBundle]);
     let host: PostgresInstance | undefined;
+    let stack: ShadowStack | undefined;
     const pendingHost = (module: PostgresModule): PostgresInstance => {
-      host ??= new PostgresInstance(module, config.debug);
+      // The runtime runs no preRun step before the instance it waits on (instantiateWasm) is ready.
+      if (stack === undefined) throw new Error("The Postgres module initialised before its wasm instance");
+      host ??= new PostgresInstance(module, config.debug, stack);
       return host;
     };
     let rejectInstantiation: (error: unknown) => void = () => undefined;
@@ -157,7 +189,15 @@ export class PostgresInstance {
       WASM_PREFIX: PG_ROOT,
       instantiateWasm: (imports, successCallback) => {
         WebAssembly.instantiate(wasmModule, imports).then(
-          (instance) => successCallback(instance, wasmModule),
+          (instance) => {
+            try {
+              stack = shadowStackOf(instance);
+            } catch (error) {
+              rejectInstantiation(error);
+              return;
+            }
+            successCallback(instance, wasmModule);
+          },
           (error: unknown) => rejectInstantiation(error),
         );
         return {};
@@ -328,48 +368,57 @@ export class PostgresInstance {
     }
   }
 
+  /**
+   * A call into the backend that may unwind (an ERROR's intercepted siglongjmp, a FATAL's exit):
+   * should it throw, the shadow stack pointer is restored to where it began (see {@link ShadowStack}).
+   */
+  #call<T>(call: () => T): T {
+    const stack = this.#stack.save();
+    try {
+      return call();
+    } catch (error) {
+      this.#stack.restore(stack);
+      throw error;
+    }
+  }
+
   #processStartupPacket(): void {
     const mod = this.module;
-    const result = mod._ProcessStartupPacket(mod._pgl_getMyProcPort(), true, true);
+    const result = this.#call(() => mod._ProcessStartupPacket(mod._pgl_getMyProcPort(), true, true));
     if (result !== 0) throw new Error("Cannot process the startup packet");
-    mod._pgl_sendConnData();
-    mod._pgl_pq_flush();
+    this.#call(() => {
+      mod._pgl_sendConnData();
+      mod._pgl_pq_flush();
+    });
   }
 
   #runMainLoop(message: Uint8Array): void {
     const mod = this.module;
-    let failure: { error: unknown } | undefined;
     try {
       // One message may carry several batched statements; the loop returns after each.
       while (this.#readOffset < message.length || mod._pq_buffer_remaining_data() > 0) {
+        const stack = this.#stack.save();
         try {
           mod._PostgresMainLoopOnce();
         } catch (error) {
-          if (!isEmscriptenUnwind(error)) {
-            failure = { error };
-            break;
-          }
-          const exitStatus = mod._pgl_setPGliteExitStatus(-2);
-          if (exitStatus === POSTGRES_MAIN_LONGJMP) {
+          // First, as Postgres' own siglongjmp to PostgresMain would: the throw skipped the epilogues of
+          // every frame it abandoned (see ShadowStack).
+          this.#stack.restore(stack);
+          if (!isEmscriptenUnwind(error)) throw error;
+          if (mod._pgl_setPGliteExitStatus(-2) === POSTGRES_MAIN_LONGJMP) {
             // Postgres raised an error: its siglongjmp into main was intercepted, and its error handling
             // runs here before the loop resumes with the rest of the batch.
-            mod._PostgresMainLongJmp();
+            this.#call(() => mod._PostgresMainLongJmp());
           }
         }
       }
-    } finally {
-      if (!failure) {
-        try {
-          mod._PostgresSendReadyForQueryIfNecessary();
-          mod._pgl_pq_flush();
-        } catch (error) {
-          failure = { error };
-        }
-      }
-    }
-    if (failure) {
+      this.#call(() => {
+        mod._PostgresSendReadyForQueryIfNecessary();
+        mod._pgl_pq_flush();
+      });
+    } catch (error) {
       this.#failed = true;
-      throw failure.error;
+      throw error;
     }
   }
 
@@ -379,7 +428,7 @@ export class PostgresInstance {
     try {
       preservingExitCode(() => {
         mod._pgl_setPGliteActive(0);
-        mod._pgl_run_atexit_funcs();
+        this.#call(() => mod._pgl_run_atexit_funcs());
       });
     } catch (error) {
       const exit = error as { name?: unknown; status?: unknown };
