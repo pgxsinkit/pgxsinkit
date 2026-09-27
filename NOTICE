@@ -27,12 +27,15 @@ A copy of the Apache License 2.0 is available at:
   https://www.apache.org/licenses/LICENSE-2.0
 
 ------------------------------------------------------------------------------
-ElectricSQL — @electric-sql/pglite (packages `pglite`, `pg-protocol`, `pglite-utils`)
+ElectricSQL — @electric-sql/pglite (packages `pglite`, `pg-protocol`, `pglite-utils`,
+`pglite-tools`, `pglite-repl`, `pglite-prepopulatedfs`)
 ------------------------------------------------------------------------------
 
-The Postgres runtime under `packages/pgwasm/src/` (`@pgxsinkit/pgwasm`) and the C
-build's host code under `packages/pgwasm-c/src/` (`@pgxsinkit/pgwasm-c`) began as a
-copy of ElectricSQL's PGlite monorepo:
+The Postgres runtime under `packages/pgwasm/src/` (`@pgxsinkit/pgwasm`), the C build's
+host code under `packages/pgwasm-c/src/` (`@pgxsinkit/pgwasm-c`), the pg_dump wrapper
+under `packages/pgwasm-pg-dump/src/` (`@pgxsinkit/pgwasm-pg-dump`) and the REPL under
+`packages/pgwasm-repl/src/` (`@pgxsinkit/pgwasm-repl`) began as a copy of ElectricSQL's
+PGlite monorepo:
 
   Source:  https://github.com/electric-sql/pglite
   License: PostgreSQL License. PGlite is dual-licensed under the Apache License 2.0
