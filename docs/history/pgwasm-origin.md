@@ -1,9 +1,10 @@
 # Where pgwasm came from
 
 > **Historical record.** This file records what `@pgxsinkit/pgwasm` and `@pgxsinkit/pgwasm-c` were
-> made from in step 1 of [ADR-0062](../adr/0062-absorb-pglite-as-pgwasm.md). The code is owned
-> outright and diverges freely: compatibility with PGlite is an anti-goal, and nothing here is a
-> reason to keep a file shaped like its source.
+> made from in step 1 of [ADR-0062](../adr/0062-absorb-pglite-as-pgwasm.md), and what
+> `@pgxsinkit/pgwasm-pg-dump`, `@pgxsinkit/pgwasm-repl` and pgwasm-c's prepopulated data directory
+> were made from in step 2. The code is owned outright and diverges freely: compatibility with PGlite
+> is an anti-goal, and nothing here is a reason to keep a file shaped like its source.
 
 ## Source
 
@@ -78,3 +79,51 @@ c: `src/host/exit-code.ts`, c: `src/artefact-pins.ts` and `scripts/pgwasm-artefa
 | `targets/web/base.js`, `targets/web/idbfs-correctness.test.web.js`                                                        | `tests/e2e/pgwasm-idb/` (Chromium and WebKit)                                  |
 | `packages/pg-protocol` tests                                                                                              | `pgwasm-protocol-wire.test.ts`                                                 |
 | `clone`, `describe-query`, the other contrib tests, `targets/deno`, the `opfs-ahp` and `PGliteWorker` cases               | dropped with what they tested                                                  |
+
+## Step 2: pg_dump, the REPL and the prepopulated data directory
+
+Same source commit. `d:` is `packages/pgwasm-pg-dump/`; `r:` is `packages/pgwasm-repl/`.
+
+### Artefacts
+
+All pinned in each package's `src/artefact-pins.ts` and fetched by the root `postinstall`, whose
+pipeline (`scripts/pgwasm-artefacts.ts`) now serves every build package:
+
+- **pgwasm-c's `prepopulated.tar.gz`** is `dist/prepopulatedfs.tgz` of
+  `@electric-sql/pglite-prepopulatedfs` 0.5.8: a Store backup ElectricSQL made by running initdb on
+  PGlite 0.5.8 (its `scripts/generateFS.ts`). It is unmarked, and it holds the lock file of the live
+  database it was taken from.
+- **pgwasm-pg-dump's `pg_dump.wasm`** is `dist/pg_dump.wasm` of `@electric-sql/pglite-tools` 0.4.8,
+  pg_dump 18.3, built with the server from the same postgres-pglite commit (the tags
+  `@electric-sql/pglite@0.5.8` and `@electric-sql/pglite-tools@0.4.8` are one commit).
+- **pgwasm-pg-dump's `pg_dump.js`**, the Emscripten loader, is not a file of that package: tsup
+  minified it into `dist/chunk-RKAX3U4S.js`. The chunk's source map carries the original verbatim, as
+  the `sourcesContent` entry of the source `../release/pg_dump.js` (126,562 bytes of ASCII, ending
+  `export default Module;`). The pin names that entry, and the postinstall extracts it from there.
+
+### Code
+
+| Source                                                                                                                                                                 | Became                                                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/pglite-tools/src/pg_dump.ts`                                                                                                                                 | d: `src/pg-dump.ts` (the run and `pgDump`), with d: `src/session.ts` (the session before and after), d: `src/framing.ts` (whole frontend messages, the reply queue), d: `src/output.ts` (the returned file) and d: `src/errors.ts` |
+| `packages/pglite-tools/src/pgDumpModFactory.ts`                                                                                                                        | d: `src/emscripten.ts` (owned types); the loader import in d: `src/artefacts.ts`                                                                                                                                                   |
+| `packages/pglite-utils` (artefact loading)                                                                                                                             | d: `src/wasm.ts` (compile once per URL)                                                                                                                                                                                            |
+| `packages/pglite-tools/src/index.ts`                                                                                                                                   | d: `src/index.ts`, a new barrel                                                                                                                                                                                                    |
+| `packages/pglite-repl/src/Repl.tsx`                                                                                                                                    | r: `src/repl.tsx`                                                                                                                                                                                                                  |
+| `packages/pglite-repl/src/ReplResponse.tsx`, `ReplTable.tsx`                                                                                                           | r: `src/repl-response.tsx`, `src/repl-table.tsx`                                                                                                                                                                                   |
+| `packages/pglite-repl/src/sqlSupport.ts`                                                                                                                               | r: `src/sql-support.ts`                                                                                                                                                                                                            |
+| `packages/pglite-repl/src/utils.ts`, `types.ts`                                                                                                                        | r: `src/run-query.ts`, `src/types.ts`                                                                                                                                                                                              |
+| `packages/pglite-repl/src/Repl.css`                                                                                                                                    | r: `src/styles.ts` (a string, rendered as a React-hoisted `<style>`)                                                                                                                                                               |
+| `packages/pglite-prepopulatedfs/src/index.ts`                                                                                                                          | c: `src/prepopulated.ts` (`@pgxsinkit/pgwasm-c/prepopulated`)                                                                                                                                                                      |
+| `packages/pglite-repl`'s `App.tsx`, `main.tsx`, `index.html`, `index.css`, `App.css`, `src-webcomponent/`, the Vite configs; `packages/pglite-prepopulatedfs/scripts/` | dropped (the demo app, the web component, the generator)                                                                                                                                                                           |
+
+New, with no source: `/protocol`'s `runExclusiveSession` (w: `src/core/pgwasm.ts`), and
+`tests/unit/support/pgwasm-build-decorators.ts`'s `wireHookBuild`.
+
+### Tests
+
+| Fork test                                                     | Became                                                                                                              |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `packages/pglite-tools/tests/pg_dump.test.ts`                 | `tests/unit/pgwasm-pg-dump.test.ts`, with `pgwasm-pg-dump-session.test.ts` and `pgwasm-pg-dump-framing.test.ts` new |
+| `packages/pglite-prepopulatedfs/tests/prepopulatedfs.test.ts` | dropped (a timing comparison with initdb); `tests/unit/pgwasm-c-prepopulated.test.ts` is new                        |
+| (the REPL had none)                                           | `tests/unit/pgwasm-repl.test.ts`, `tests/pgwasm-repl-types.ts`, and the REPL case of `tests/e2e/pgwasm-idb/`        |

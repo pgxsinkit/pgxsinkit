@@ -121,29 +121,53 @@ The manual Chromium provision comparison is
 outside every aggregate and reports foreground attach-to-first-query timing for plain versus
 provision-ahead-of-attach samples.
 
-## pgwasm (ADR-0062 step 1)
+## pgwasm (ADR-0062 steps 1 and 2)
 
-`@pgxsinkit/pgwasm` (the engine-neutral runtime) and `@pgxsinkit/pgwasm-c` (the C build: the pinned
-`@electric-sql/pglite` 0.5.8 artefacts and their host code) replace the PGlite fork. In step 1 nothing
-uses them yet; their lanes prove them on their own. Where the code came from, file by file, is in
+`@pgxsinkit/pgwasm` (the engine-neutral runtime), `@pgxsinkit/pgwasm-c` (the C build: the pinned
+`@electric-sql/pglite` 0.5.8 artefacts and their host code, and the prepopulated data directory),
+`@pgxsinkit/pgwasm-pg-dump` (pg_dump over the wire protocol) and `@pgxsinkit/pgwasm-repl` (the REPL
+component) replace the PGlite fork. Until step 3 nothing uses them yet; their lanes prove them on
+their own. Where the code came from, file by file, is in
 [docs/history/pgwasm-origin.md](history/pgwasm-origin.md).
 
 - **Unit lane** (`bun run test:unit`): `tests/unit/pgwasm-*.test.ts` and `tests/unit/pgwasm-c-*.test.ts`.
-  Most databases start from the prepopulated data directory (`tests/unit/support/pgwasm.ts`), an
-  unmarked C-build directory, so every seeded boot also exercises the rule that an unmarked directory
-  is the C build's; `fresh: true` runs initdb. The shared code's paths are proven against shapes no
-  build in the repo has, by wrapping the C build (`tests/unit/support/pgwasm-build-decorators.ts`): an
-  asynchronous exchange delivered in single-message chunks, notifications that arrive between exchanges
-  through `onUnsolicited`, another build identity, a build without `/dev/blob`, and hooks on the storage
-  persist and release (`pgwasm-seam`, `pgwasm-build-marker`, `pgwasm-persist-failure`). Boots that must
-  fail before anything is written run on a spy build that records calls (`pgwasm-create`,
-  `pgwasm-build-marker`). `pgwasm-extension-types` is also a type-level test, checked by
+  Most databases start from pgwasm-c's prepopulated data directory (`tests/unit/support/pgwasm.ts`,
+  through `@pgxsinkit/pgwasm-c/prepopulated`), an unmarked C-build directory, so every seeded boot also
+  exercises the rule that an unmarked directory is the C build's; `fresh: true` runs initdb.
+  `pgwasm-c-prepopulated` proves the entry itself: the pinned bytes, no marker in it, the marker added
+  on restore, and the lock file it carries from the live database it was taken from rewritten on
+  start. The shared code's paths are proven against shapes no build in the repo has, by wrapping the
+  C build (`tests/unit/support/pgwasm-build-decorators.ts`): an asynchronous exchange delivered in
+  single-message chunks, notifications that arrive between exchanges through `onUnsolicited`, another
+  build identity, a build without `/dev/blob`, and hooks on the storage persist and release
+  (`pgwasm-seam`, `pgwasm-build-marker`, `pgwasm-persist-failure`). Boots that must fail before
+  anything is written run on a spy build that records calls (`pgwasm-create`, `pgwasm-build-marker`). `pgwasm-extension-types` is also a type-level test, checked by
   `bun run typecheck`: an inline extension's `setup(pg)` is typed, and namespaces are inferred.
-  `pgwasm-c-artefacts` checks the six artefact files against their pins and that only
-  `src/artefacts.ts` and `src/contrib/*.ts` reference them; `pgwasm-c-initdb` pins the command lines
-  initdb actually runs through the owned tokenizer; `pgwasm-legacy-datadir` opens a directory made by
+  `pgwasm-artefacts` checks every build package's artefacts against their pins (pgwasm-c's seven,
+  pgwasm-pg-dump's two), the extraction of both kinds of pin (a tarball member, and a source map's
+  `sourcesContent` entry) and that only modules emitted at their own depth reference them
+  (`src/artefacts.ts`, pgwasm-c's `src/prepopulated.ts` and `src/contrib/*.ts`); `pgwasm-c-initdb`
+  pins the command lines initdb actually runs through the owned tokenizer; `pgwasm-legacy-datadir` opens a directory made by
   the fork's PGlite and moves Store backups both ways between the fork and pgwasm (step 1 only: the
   fork leaves the graph in step 3); `pgwasm-public-surface` pins every entry point's runtime exports.
+  `pgwasm-protocol` also proves `/protocol`'s exclusive session: a query, a transaction and a backup
+  wait for it, and it waits for a running transaction's COMMIT.
+- **pg_dump** (`pgwasm-pg-dump`, `pgwasm-pg-dump-session`, `pgwasm-pg-dump-framing`): the fork's
+  pg_dump cases, a round trip of many column types (sequences and a view included) through `exec()`, a
+  row holding lines that look like psql's `\restrict`, a thousand tables (pg_dump's catalogue queries
+  then exceed libpq's 8 KiB send blocks), and the custom format; the session held exclusively (both
+  ways) and given back as it was (pg_dump's transaction ended, odd `search_path` values, the other
+  settings pg_dump changes, its prepared statements gone while the database's own and a live changes
+  feed survive); the refusals (a build without a synchronous wire, through the async-exchange
+  decorator; a session inside a transaction block); the typed failure; and a wire that fails under
+  pg_dump (through a `wireHookBuild` decorator), which fails the dump with the database's failure and
+  no unhandled rejection. The framing of libpq's sends and the output file's handling are unit-tested
+  on their own.
+- **REPL** (`pgwasm-repl`): the component's non-DOM logic on a real database (SQL of several
+  statements, errors as responses, psql's describe commands and the tables they produce, the
+  autocompletion schema). `tests/pgwasm-repl-types.ts` is a type-level test, checked by
+  `bun run typecheck`: a `Pgwasm` and `replAdapter(client)` are both a `ReplDatabase` without a cast.
+  The package is typechecked in its own program (it needs the DOM library).
 - **IndexedDB browser lane** (`bun run test:browser:pgwasm-idb`, `tests/e2e/pgwasm-idb/`): Bun has
   neither IndexedDB nor Web Locks, so `idb://` storage is proven in Chromium and WebKit, on demand and
   outside the commit path, like the opfs-repacked lane. It runs the fork's web base flow (create,
@@ -155,11 +179,17 @@ uses them yet; their lanes prove them on their own. Where the code came from, fi
   extension close hook that still lets shutdown, the final persist and the release happen, a failed
   final persist reported ahead of a failed close hook, and a clean shutdown that leaves nothing for
   crash recovery (with a dropped-persist control that does recover). The fork's `PGliteWorker`
-  live-query cases are not ported: the worker is not part of pgwasm.
-- **Packed install** (`bun run fixture:smoke`): the fixture installs both packed packages, boots pgwasm
+  live-query cases are not ported: the worker is not part of pgwasm. In memory, it also runs pg_dump
+  on a database created from the prepopulated data directory and restores the script into another,
+  and mounts two REPLs, runs `select 1 as one` with Enter, and finds the REPL's stylesheet in the head
+  once.
+- **Packed install** (`bun run fixture:smoke`): the fixture installs the packed packages, boots pgwasm
   on the C build from the install (live, amcheck, Drizzle, `/protocol`, a Store backup restored, the
-  `opfs-ahp://` refusal), typechecks against the published declarations, and builds a Vite production
-  consumer whose emitted assets must contain every artefact byte-identical under a fingerprinted name.
+  `opfs-ahp://` refusal, a database from the prepopulated entry dumped with pg_dump, the REPL rendered
+  on the server), typechecks against the published declarations, and builds a Vite production consumer
+  of pgwasm-c, pgwasm-pg-dump, pgwasm-repl and the prepopulated entry whose emitted assets must contain
+  every artefact loaded by URL (`pg_dump.wasm` and the prepopulated tarball included) byte-identical
+  under a fingerprinted name.
 
 ### Behaviour drift from the fork
 
@@ -210,6 +240,48 @@ Against `@pgxsinkit/pglite` 0.5.8-pgx.2 (the fork at `b36bf12`):
   before releasing storage.
 - New data directories carry the build marker `PGWASM_BUILD` (ADR-0063). Existing unmarked
   directories open on the C build and are not backfilled.
+
+Against `@electric-sql/pglite-tools` (pg_dump), `@electric-sql/pglite-repl` and
+`@electric-sql/pglite-prepopulatedfs` at the same commit:
+
+- `pgDump` holds the database's session for the whole dump, and the reading and restoring of the
+  session around it (`/protocol`'s `runExclusiveSession`: the transaction lock, then the query lock).
+  A transaction in progress commits first, and one started during the dump waits. The fork ran pg_dump
+  beside anything else on the one session, so its `BEGIN` could land inside another caller's
+  transaction.
+- `pgDump` refuses a session left inside a transaction block (`PgDumpSessionError`), and a build
+  whose wire is not synchronous (`PgDumpUnsupportedBuildError`) before it loads anything.
+- pg_dump never ends its REPEATABLE READ, READ ONLY transaction (a disconnect would). The fork left the
+  application's session inside it, so every later write failed as read-only; `pgDump` rolls it back,
+  after a failed dump too.
+- pg_dump changes `search_path`, `row_security`, `restrict_nonsystem_relation_kind` (which forbids
+  reading views), `extra_float_digits` and the timeouts on the session. The fork restored only
+  `search_path`, interpolated into SQL (which failed for an empty value), and when it still differed
+  logged a warning that printed a result object. `pgDump` restores every setting a session can set,
+  and the role, with a parameterised `set_config`, and fails with `PgDumpSessionError` naming any it
+  cannot.
+- The fork ran `DEALLOCATE ALL` after each dump, which also dropped the database's own prepared
+  statements; a live changes feed (and so an incremental live query) then failed on its next refresh.
+  `pgDump` deallocates only the statements pg_dump prepared.
+- libpq, on pg_dump's Unix-socket connection, sends whole 8 KiB blocks and keeps the rest, so a longer
+  message (pg_dump's catalogue queries list every table's OID) reached the fork's write callback in
+  pieces, each handed to the backend as a whole message: the backend read past its input and the
+  database failed. `pgDump` frames frontend messages first.
+- A failure of the database's wire during the dump fails the dump with that failure. The fork left the
+  exchange's promise unawaited, so it surfaced as an unhandled rejection.
+- A failed pg_dump throws `PgDumpError` with `exitCode` and `stderr` (the fork threw a plain `Error`),
+  and its `stderr` no longer starts with a warning about the executable's path.
+- Only pg_dump's own `\restrict <key>` / `\unrestrict <key>` lines are removed, found by the key. The
+  fork removed every line starting `\restrict` or `\unrestrict`, including lines inside a row's text.
+  The custom and tar formats and a compressed dump are returned byte for byte; the fork decoded every
+  output as UTF-8 text.
+- `Repl` requires `pg` (no `usePGlite` context), and its `pg` is any `ReplDatabase`. Its stylesheet is
+  a React-hoisted `<style>` rather than an imported CSS file, and its classes and custom properties are
+  prefixed `pgwasm-repl-` (the fork's were `PGliteRepl-`). The web component is not ported.
+- `Repl` shows each table psql-describe produces, with its caption and footers. The fork showed the
+  rows of the describe command's last internal query, so `\d <table>` showed an unrelated result.
+- The prepopulated data directory is fetched by URL in Bun as in browsers; the fork read it with
+  Node's `fs` there. Databases created from it are marked (ADR-0063).
 
 ## Offline return (board ADR-0010)
 
