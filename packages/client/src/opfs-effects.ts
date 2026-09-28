@@ -48,12 +48,16 @@ export interface OpfsEffectsDeps {
 export interface OpfsEffects {
   /** Create-if-absent the commitment sentinel file at `pgxsinkit/commitments/<identity>`. */
   publishSentinel(): Promise<void>;
-  /** Delete-if-present the commitment sentinel (`NotFoundError` swallowed). */
+  /**
+   * Delete-if-present the commitment sentinel (`NotFoundError` swallowed). A root that cannot be opened at all
+   * raises {@link OpfsRootUnavailableError}.
+   */
   deleteSentinel(): Promise<void>;
   /**
    * Recursively delete-if-present the store directory `pgxsinkit/stores/<identity>` (`NotFoundError` swallowed),
    * under the store's ownership lock: the delete waits (bounded) until the context holding the directory's
-   * sync-access handles has released them, and fails with `StoreOwnershipWaitError` under a live owner.
+   * sync-access handles has released them, and fails with `StoreOwnershipWaitError` under a live owner. A root
+   * that cannot be opened at all raises {@link OpfsRootUnavailableError}.
    */
   deleteStoreDirectory(): Promise<void>;
   /**
@@ -63,6 +67,29 @@ export interface OpfsEffects {
   observeCommitmentNamespace(): Promise<{ sentinelPresent: boolean; storeDirectoryPresent: boolean } | "unobservable">;
   /** Create-if-absent chain to the store directory, returning its handle for the opfs-repacked factory. */
   getStoreDirectoryHandle(): Promise<unknown>;
+}
+
+/**
+ * The OPFS root could not be opened AT ALL in this context — `navigator.storage.getDirectory()` rejected
+ * (WebKit's throwaway contexts reject with `UnknownError`; probably Safari private windows too). Raised only by
+ * the two DELETE effects, so the destruction wiring can tell "this context cannot reach OPFS" from a failure
+ * inside a reachable OPFS and record the OPFS side as pending instead (ADR-0036 amendment, 2026-09-28). The
+ * original rejection is the `cause`.
+ */
+export class OpfsRootUnavailableError extends Error {
+  constructor(storePath: string, cause: unknown) {
+    super(
+      `[pgxsinkit] the OPFS root cannot be opened in this context, so the OPFS side of ${JSON.stringify(storePath)} ` +
+        "cannot be deleted here.",
+      { cause },
+    );
+    this.name = "OpfsRootUnavailableError";
+  }
+}
+
+/** Is this an {@link OpfsRootUnavailableError}? Name-based, so it survives duplicated module instances. */
+export function isOpfsRootUnavailableError(error: unknown): boolean {
+  return (error as { name?: string } | null)?.name === "OpfsRootUnavailableError";
 }
 
 /** Is this a `NotFoundError` (a missing OPFS entry) — the delete/observe "absent" signal? */
@@ -93,6 +120,19 @@ export function createOpfsEffects(storePath: string, deps?: OpfsEffectsDeps): Op
     if (getRoot == null) throw new Error("[pgxsinkit] OPFS root is unavailable in this scope");
     let handle = await getRoot();
     for (const segment of segments) handle = await handle.getDirectoryHandle(segment, { create });
+    return handle;
+  }
+
+  // The delete effects' walk: identical, except that a REJECTING root (OPFS cannot be opened in this context at
+  // all) is raised as the typed {@link OpfsRootUnavailableError}, distinct from any failure inside a reachable OPFS.
+  async function walkDirectoriesForDelete(segments: readonly string[]): Promise<DirLike> {
+    let handle: DirLike;
+    try {
+      handle = await getRoot!();
+    } catch (error) {
+      throw new OpfsRootUnavailableError(storePath, error);
+    }
+    for (const segment of segments) handle = await handle.getDirectoryHandle(segment, { create: false });
     return handle;
   }
 
@@ -129,7 +169,7 @@ export function createOpfsEffects(storePath: string, deps?: OpfsEffectsDeps): Op
       if (getRoot == null) return;
       const path = opfsCommitmentSentinelPath(storePath);
       try {
-        const parent = await walkDirectories(path.slice(0, -1), false);
+        const parent = await walkDirectoriesForDelete(path.slice(0, -1));
         await parent.removeEntry(path[path.length - 1]!);
       } catch (error) {
         // Delete-if-present: a missing parent dir or a missing sentinel both count as already deleted.
@@ -147,7 +187,7 @@ export function createOpfsEffects(storePath: string, deps?: OpfsEffectsDeps): Op
         storePath,
         async () => {
           try {
-            const parent = await walkDirectories(path.slice(0, -1), false);
+            const parent = await walkDirectoriesForDelete(path.slice(0, -1));
             // Recursive: the store directory holds the four VFS-owned files; the whole leaf goes.
             await parent.removeEntry(path[path.length - 1]!, { recursive: true });
           } catch (error) {

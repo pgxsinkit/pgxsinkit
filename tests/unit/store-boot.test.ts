@@ -15,6 +15,10 @@ import {
   storeIndexedDbDatabaseName,
 } from "../../packages/client/src/store-path";
 import { memoryStoreForTests } from "../../packages/client/src/testing";
+import {
+  createStoreDestructionEffects,
+  runStoreDestruction,
+} from "../../packages/client/src/worker/attach-sync-client";
 
 // ---------------------------------------------------------------------------------------------------------
 // Fake OPFS: a tiny in-memory FileSystemDirectoryHandle tree implementing only the surface opfs-effects
@@ -773,5 +777,181 @@ describe("createPgwasmClient — opfs:// factory routing", () => {
     } as never);
     expect(guard).toBeDefined();
     await (guard as unknown as { close: () => Promise<void> }).close();
+  });
+});
+
+// =========================================================================================================
+// C. Pending OPFS deletion (ADR-0036 amendment, 2026-09-28)
+//
+// A context that cannot open OPFS at all (`navigator.storage.getDirectory()` rejects — WebKit's throwaway
+// contexts, probably Safari private windows) runs its stores on IndexedDB. Destroying a store there removes what
+// it can reach (the idb database and the meta record) and records "OPFS deletion pending" for the store identity
+// IN INDEXEDDB. The next boot of that store that CAN reach OPFS deletes the commitment sentinel and the store
+// directory, clears the marker, and only then classifies/opens — so a leftover sentinel can never read as a
+// committed store (`repair-record-then-open-committed`) and resurrect destroyed data. A context that can open
+// OPFS destroys exactly as before (ownership lock included) and records nothing.
+// =========================================================================================================
+
+const PENDING_DB = "pgxsinkit-opfs-deletion-pending";
+const PENDING_STORE = "stores";
+
+function pendingMarker(metaIdb: FakeMetaIdb, storePath: string): unknown {
+  return metaIdb.dbs.get(PENDING_DB)?.stores.get(PENDING_STORE)?.data.get(storeIdentityComponent(storePath));
+}
+
+function seedPendingMarker(metaIdb: FakeMetaIdb, storePath: string): void {
+  let db = metaIdb.dbs.get(PENDING_DB);
+  if (db == null) {
+    db = new FakeDatabase(metaIdb.log);
+    metaIdb.dbs.set(PENDING_DB, db);
+  }
+  const store = db.stores.get(PENDING_STORE) ?? db.createObjectStore(PENDING_STORE);
+  store.data.set(storeIdentityComponent(storePath), { updatedAt: 1 });
+}
+
+/** WebKit's rejection when OPFS cannot be opened in a context at all. */
+function opfsUnopenable() {
+  return {
+    getRoot: async () => {
+      const error = new Error("The operation failed for an unknown transient reason");
+      error.name = "UnknownError";
+      throw error;
+    },
+    locks: null,
+  };
+}
+
+/** A data file inside the store directory, so a test can tell the destroyed directory from a fresh one. */
+async function seedStoreFile(root: FakeDir, storePath: string, file: string): Promise<void> {
+  let handle = root;
+  for (const segment of opfsStoreDirectoryPath(storePath)) handle = await handle.getDirectoryHandle(segment);
+  await handle.getFileHandle(file, { create: true });
+}
+
+async function storeDirHasFile(root: FakeDir, storePath: string, file: string): Promise<boolean> {
+  let handle = root;
+  try {
+    for (const segment of opfsStoreDirectoryPath(storePath)) handle = await handle.getDirectoryHandle(segment);
+  } catch {
+    return false;
+  }
+  return handle.files.has(file);
+}
+
+function destructionDeps(opfs: object, metaIdb: FakeMetaIdb) {
+  return { opfs, meta: { indexedDB: metaIdb, delay: () => Promise.resolve() } as never };
+}
+
+describe("pending OPFS deletion — destroy where OPFS cannot be opened", () => {
+  it("a no-OPFS destroy removes the idb store and meta record, SUCCEEDS, and leaves the pending marker", async () => {
+    const storePath = "pending-destroy-idb";
+    const metaIdb = new FakeMetaIdb();
+    // A no-OPFS boot mints a RECORDLESS idb store (the denied boot writes no meta record).
+    metaIdb.seedPgliteDb(storePath);
+
+    await runStoreDestruction(createStoreDestructionEffects(storePath, destructionDeps(opfsUnopenable(), metaIdb)));
+
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+    expect(metaPhase(metaIdb, storePath)).toBeUndefined();
+    expect(pendingMarker(metaIdb, storePath)).toBeDefined();
+  });
+
+  it("destroying an OPFS-committed store from a no-OPFS context defers the OPFS side to the next OPFS-capable boot", async () => {
+    const storePath = "pending-destroy-committed";
+    const metaIdb = new FakeMetaIdb();
+    const root = new FakeDir();
+    metaIdb.seedMeta(storePath, "opfs-committed");
+    await seedStoreDir(root, storePath);
+    await seedStoreFile(root, storePath, "destroyed-data");
+    await seedSentinel(root, storePath);
+
+    await runStoreDestruction(createStoreDestructionEffects(storePath, destructionDeps(opfsUnopenable(), metaIdb)));
+    expect(metaPhase(metaIdb, storePath)).toBeUndefined();
+    expect(pendingMarker(metaIdb, storePath)).toBeDefined();
+
+    // Without the marker this boot would read "no record + sentinel" as committed and reopen the destroyed store.
+    const resolution = await resolveStoreBoot(storePath, { hasOpfsSyncAccess: true, deps: browserDeps(root, metaIdb) });
+    expect(resolution.verdict?.action).toBe("virgin-create");
+    expect(await storeDirHasFile(root, storePath, "destroyed-data")).toBe(false);
+    expect(pendingMarker(metaIdb, storePath)).toBeUndefined();
+  });
+});
+
+describe("pending OPFS deletion — boot settlement", () => {
+  it("an OPFS-capable boot deletes the sentinel and directory BEFORE classifying, then clears the marker", async () => {
+    const storePath = "pending-boot-granted";
+    const log: string[] = [];
+    const metaIdb = new FakeMetaIdb(log);
+    const root = new FakeDir(log);
+    seedPendingMarker(metaIdb, storePath);
+    await seedStoreDir(root, storePath);
+    await seedStoreFile(root, storePath, "destroyed-data");
+    await seedSentinel(root, storePath);
+    log.length = 0;
+
+    const resolution = await resolveStoreBoot(storePath, { hasOpfsSyncAccess: true, deps: browserDeps(root, metaIdb) });
+
+    // Not `repair-record-then-open-committed`: the leftover sentinel went before classification saw it.
+    expect(resolution.verdict?.action).toBe("virgin-create");
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: true });
+    expect(await storeDirHasFile(root, storePath, "destroyed-data")).toBe(false);
+    expect(metaPhase(metaIdb, storePath)).toBe("opfs-candidate");
+    expect(log.indexOf("record:opfs-candidate")).toBeGreaterThanOrEqual(0);
+    expect(pendingMarker(metaIdb, storePath)).toBeUndefined();
+  });
+
+  it("a denied home that can still reach OPFS asynchronously settles the marker too", async () => {
+    const storePath = "pending-boot-denied-reachable";
+    const metaIdb = new FakeMetaIdb();
+    const root = new FakeDir();
+    seedPendingMarker(metaIdb, storePath);
+    await seedStoreDir(root, storePath);
+    await seedSentinel(root, storePath);
+
+    expect(await resolveDeniedBootAuthority(storePath, browserDeps(root, metaIdb))).toBe(false);
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+    expect(pendingMarker(metaIdb, storePath)).toBeUndefined();
+    expect(metaPhase(metaIdb, storePath)).toBeUndefined();
+  });
+
+  it("a boot that still cannot reach OPFS leaves the marker in place and proceeds", async () => {
+    const storePath = "pending-boot-unreachable";
+    const metaIdb = new FakeMetaIdb();
+    seedPendingMarker(metaIdb, storePath);
+
+    expect(
+      await resolveDeniedBootAuthority(storePath, { ...browserDeps(new FakeDir(), metaIdb), opfs: opfsUnopenable() }),
+    ).toBe(false);
+    expect(pendingMarker(metaIdb, storePath)).toBeDefined();
+    expect(metaPhase(metaIdb, storePath)).toBeUndefined();
+  });
+});
+
+describe("pending OPFS deletion — the OPFS-capable destroy path is unchanged", () => {
+  it("deletes sentinel, directory (under the ownership lock), idb store and record, and records NO marker", async () => {
+    const storePath = "pending-opfs-capable-destroy";
+    const metaIdb = new FakeMetaIdb();
+    const root = new FakeDir();
+    metaIdb.seedMeta(storePath, "opfs-committed");
+    metaIdb.seedPgliteDb(storePath);
+    await seedStoreDir(root, storePath);
+    await seedSentinel(root, storePath);
+    const lockNames: string[] = [];
+    const locks = {
+      request: async (name: string, _options: unknown, callback: (lock: unknown) => Promise<void>) => {
+        lockNames.push(name);
+        return callback({});
+      },
+    };
+
+    await runStoreDestruction(
+      createStoreDestructionEffects(storePath, destructionDeps({ getRoot: async () => root, locks }, metaIdb)),
+    );
+
+    expect(await observe(root, storePath)).toEqual({ sentinelPresent: false, storeDirectoryPresent: false });
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+    expect(metaPhase(metaIdb, storePath)).toBeUndefined();
+    expect(lockNames).toHaveLength(1);
+    expect(metaIdb.hasDb(PENDING_DB)).toBe(false);
   });
 });

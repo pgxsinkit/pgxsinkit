@@ -26,13 +26,15 @@
 // 10b/11. The returned {@link StoreBootResolution.verdict} tells the caller a candidate is uncommitted and
 // needs that barrier.
 
-import { createOpfsEffects, type OpfsEffectsDeps } from "./opfs-effects";
+import { createOpfsEffects, isOpfsRootUnavailableError, type OpfsEffectsDeps } from "./opfs-effects";
 import { beginFreshCandidate, resumeDeletion } from "./store-lifecycle";
 import {
   classifyStoreBoot,
+  clearOpfsDeletionPending,
   deleteStoreMetaRecord,
   idbStoreExists as defaultIdbStoreExists,
   META_STORE_UNAVAILABLE,
+  readOpfsDeletionPending,
   readStoreMetaRecord,
   type StoreBootVerdict,
   type StoreMetaDeps,
@@ -221,6 +223,39 @@ export function committedStoreUnreachableFromWire(detail: unknown): CommittedSto
   return new CommittedStoreUnreachableError(candidate.storePath);
 }
 
+/** The outcome of {@link settlePendingOpfsDeletion}. */
+export type PendingOpfsDeletionOutcome = "none" | "settled" | "still-pending";
+
+/**
+ * Settle an "OPFS deletion pending" marker (ADR-0036 amendment, 2026-09-28) — the FIRST thing every browser boot
+ * does, before any classification or open. A store destroyed in a context that could not open OPFS at all left
+ * its OPFS store directory and commitment sentinel (if it ever had them) behind, with the marker as the durable
+ * obligation. When this boot can reach OPFS it deletes the sentinel, then the store directory (under the
+ * store's ownership lock), and only then clears the marker — so a leftover sentinel never reaches the classifier
+ * as "no record + sentinel" (`repair-record-then-open-committed`, which would reopen destroyed data). When it
+ * still cannot reach OPFS (the namespace is unobservable, or the root rejects mid-settlement) the marker stays
+ * and the boot proceeds: such a context cannot open an OPFS store anyway.
+ *
+ * An unreadable marker propagates ({@link StoreMetaUnreadableError}) — never read as "no marker".
+ */
+export async function settlePendingOpfsDeletion(
+  storePath: string,
+  deps?: ResolveStoreBootOptions["deps"],
+): Promise<PendingOpfsDeletionOutcome> {
+  if (!(await readOpfsDeletionPending(storePath, deps?.meta))) return "none";
+  const effects = createOpfsEffects(storePath, deps?.opfs);
+  if ((await effects.observeCommitmentNamespace()) === "unobservable") return "still-pending";
+  try {
+    await effects.deleteSentinel();
+    await effects.deleteStoreDirectory();
+  } catch (error) {
+    if (isOpfsRootUnavailableError(error)) return "still-pending";
+    throw error;
+  }
+  await clearOpfsDeletionPending(storePath, deps?.meta);
+  return "settled";
+}
+
 /**
  * The PRE-MINT meta gate every probe-denied (no OPFS sync access) browser boot passes through — one bounded
  * meta read serving both of the record's claims such a boot must honour, before any replacement IDB store is
@@ -246,13 +281,19 @@ export function committedStoreUnreachableFromWire(detail: unknown): CommittedSto
  *
  * An UNREADABLE record propagates ({@link StoreMetaUnreadableError}) — a failed meta read is an error, never
  * "no record" (invariant 12).
+ *
+ * A pending OPFS deletion is settled first when this home can reach OPFS asynchronously
+ * ({@link settlePendingOpfsDeletion}; it runs alongside the record read, which it does not touch).
  */
 export async function resolveDeniedBootAuthority(
   storePath: string,
   deps?: ResolveStoreBootOptions["deps"],
 ): Promise<boolean> {
   const meta = deps?.meta;
-  const record = await readStoreMetaRecord(storePath, meta);
+  const [record] = await Promise.all([
+    readStoreMetaRecord(storePath, meta),
+    settlePendingOpfsDeletion(storePath, deps),
+  ]);
   if (record === META_STORE_UNAVAILABLE) return false;
   // The committed refusal rides THIS read — a no-grant boot never gets a second look at the record, and the
   // hazard (an empty idb sibling minted over a committed store) is decided by exactly this phase.
@@ -288,7 +329,9 @@ export async function resolveDeniedBootAuthority(
  *   no meta machinery).
  * - **non-browser** (no idb, no opfs handles) → `file://` passthrough, no classification (the filesystem
  *   backend has no meta machinery either).
- * - **browser** → read the meta record ({@link readStoreMetaRecord}; {@link StoreMetaUnreadableError}
+ * - **browser** → settle any pending OPFS deletion FIRST ({@link settlePendingOpfsDeletion} — alongside the first
+ *   meta read, which it does not touch, and before any observation, classification or open), then read the meta
+ *   record ({@link readStoreMetaRecord}; {@link StoreMetaUnreadableError}
  *   propagates = fail closed, invariant 12), map {@link META_STORE_UNAVAILABLE} to a provable absence
  *   (no idb ⇒ no record and no existing idb store), observe the commitment namespace and the recordless idb fact,
  *   classify, and execute:
@@ -360,11 +403,16 @@ export async function resolveStoreBoot(storePath: string, opts: ResolveStoreBoot
     return { dataDir: idbDataDir, storageBackend: "idbfs", verdict };
   };
 
+  // ADR-0036 amendment (2026-09-28): a store destroyed where OPFS could not be opened has its OPFS side pending.
+  // Settle it before anything below observes, classifies or opens; it touches OPFS and the marker only, so it
+  // overlaps the first meta read instead of adding a serial IndexedDB round trip to every boot.
+  const pendingOpfsDeletion = settlePendingOpfsDeletion(storePath, opts.deps);
+
   // The two record-clearing verdicts loop; every other verdict returns. Cleared record → a terminal verdict.
   for (let iteration = 0; iteration < MAX_DELETION_RECLASSIFY; iteration += 1) {
     // A failed meta read is an ERROR, never "no record" (invariant 12): StoreMetaUnreadableError propagates
     // here and fails the boot closed.
-    const metaResult = await readStoreMetaRecord(storePath, meta);
+    const [metaResult] = await Promise.all([readStoreMetaRecord(storePath, meta), pendingOpfsDeletion]);
     // META_STORE_UNAVAILABLE means IndexedDB is entirely absent — a no-idb scope cannot hold a record, so
     // absence is PROVABLE (record undefined) and there can be no existing idb store either (idbStoreExists
     // false). Faithful to store-meta's documented mapping.

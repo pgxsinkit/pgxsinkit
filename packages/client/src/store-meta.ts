@@ -457,3 +457,154 @@ export function idbStoreExists(storePath: string, deps?: StoreMetaDeps): Promise
     };
   });
 }
+
+// =========================================================================================================
+// D. "OPFS deletion pending" marker (ADR-0036 amendment, 2026-09-28)
+// =========================================================================================================
+
+/**
+ * The dedicated IndexedDB database holding "OPFS deletion pending" markers — SEPARATE from the meta record
+ * database, so the meta record's schema and total phase machine are untouched. A marker says: this store was
+ * destroyed in a context that could not open OPFS at all (`navigator.storage.getDirectory()` rejected — WebKit's
+ * throwaway contexts, probably Safari private windows), so its OPFS store directory and commitment sentinel,
+ * if any, still have to go. The next boot of that store that CAN reach OPFS deletes both, clears the marker, and
+ * only then classifies/opens (`store-boot.ts`'s `settlePendingOpfsDeletion`). Keyed by
+ * {@link storeIdentityComponent}; PRESENCE is the whole signal.
+ */
+export const OPFS_DELETION_PENDING_DATABASE = "pgxsinkit-opfs-deletion-pending";
+
+/** The single object store inside {@link OPFS_DELETION_PENDING_DATABASE}. */
+const PENDING_OBJECT_STORE = "stores";
+
+/** Open (or create) the pending-marker database — the WRITE path only; reads never create it. */
+function openPendingDatabase(indexedDB: IndexedDbLike): Promise<IdbDatabaseLike> {
+  return new Promise((resolve, reject) => {
+    let request: IdbOpenDbRequestLike;
+    try {
+      request = indexedDB.open(OPFS_DELETION_PENDING_DATABASE, 1);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(PENDING_OBJECT_STORE)) db.createObjectStore(PENDING_OBJECT_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("indexedDB open failed"));
+  });
+}
+
+/**
+ * Open the pending-marker database only if it ALREADY exists (the {@link idbStoreExists} technique: no version,
+ * abort the versionchange transaction when it would be created). Resolves `undefined` when it does not exist, so
+ * an origin that never destroyed a store without OPFS never gains the database just by booting.
+ */
+function openExistingPendingDatabase(indexedDB: IndexedDbLike): Promise<IdbDatabaseLike | undefined> {
+  return new Promise((resolve, reject) => {
+    let existed = true;
+    let request: IdbOpenDbRequestLike;
+    try {
+      request = indexedDB.open(OPFS_DELETION_PENDING_DATABASE);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    request.onupgradeneeded = (event) => {
+      existed = false;
+      const transaction = event?.target?.transaction ?? request.transaction;
+      transaction?.abort();
+    };
+    request.onsuccess = () => {
+      if (existed) {
+        resolve(request.result);
+        return;
+      }
+      request.result.close();
+      resolve(undefined);
+    };
+    request.onerror = () => {
+      if (!existed) {
+        resolve(undefined);
+        return;
+      }
+      reject(request.error ?? new Error("indexedDB open failed"));
+    };
+  });
+}
+
+async function readPendingAttempt(indexedDB: IndexedDbLike, key: string): Promise<boolean> {
+  const db = await openExistingPendingDatabase(indexedDB);
+  if (db == null) return false;
+  try {
+    if (!db.objectStoreNames.contains(PENDING_OBJECT_STORE)) return false;
+    const store = db.transaction(PENDING_OBJECT_STORE, "readonly").objectStore(PENDING_OBJECT_STORE);
+    return (await awaitRequest(store.get(key))) !== undefined;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Is an OPFS deletion pending for this store? `indexedDB` entirely absent → `false` (no marker can exist). The
+ * SAME failed-read policy as the meta record (invariant 12): a read that fails every one of
+ * {@link META_READ_ATTEMPTS} attempts throws {@link StoreMetaUnreadableError}, never "no marker" — reading an
+ * unreadable marker as absent would let a leftover sentinel classify as a committed store and reopen destroyed
+ * data.
+ */
+export async function readOpfsDeletionPending(storePath: string, deps?: StoreMetaDeps): Promise<boolean> {
+  const indexedDB = resolveIndexedDb(deps);
+  if (indexedDB == null) return false;
+  const key = storeIdentityComponent(storePath);
+  const delay = deps?.delay ?? defaultDelay;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= META_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await readPendingAttempt(indexedDB, key);
+    } catch (error) {
+      lastError = error;
+      if (attempt < META_READ_ATTEMPTS) await delay(META_READ_RETRY_DELAY_MS);
+    }
+  }
+  throw new StoreMetaUnreadableError(
+    storePath,
+    new Error("the OPFS-deletion-pending marker could not be read", { cause: lastError }),
+  );
+}
+
+/**
+ * Durably record that this store's OPFS side still has to be deleted. Resolves `false` WITHOUT writing when
+ * `indexedDB` is entirely absent — there is nowhere to record it, so the caller must not treat the OPFS side as
+ * handled.
+ */
+export async function writeOpfsDeletionPending(storePath: string, deps?: StoreMetaDeps): Promise<boolean> {
+  const indexedDB = resolveIndexedDb(deps);
+  if (indexedDB == null) return false;
+  const key = storeIdentityComponent(storePath);
+  const db = await openPendingDatabase(indexedDB);
+  try {
+    const transaction = db.transaction(PENDING_OBJECT_STORE, "readwrite", { durability: "strict" });
+    const store = transaction.objectStore(PENDING_OBJECT_STORE);
+    await awaitAuthorityMutation(transaction, store.put({ updatedAt: Date.now() }, key));
+  } finally {
+    db.close();
+  }
+  return true;
+}
+
+/** Clear the marker once the OPFS sentinel and store directory are provably gone. Absent counts as cleared. */
+export async function clearOpfsDeletionPending(storePath: string, deps?: StoreMetaDeps): Promise<void> {
+  const indexedDB = resolveIndexedDb(deps);
+  if (indexedDB == null) return;
+  const key = storeIdentityComponent(storePath);
+  const db = await openExistingPendingDatabase(indexedDB);
+  if (db == null) return;
+  try {
+    if (!db.objectStoreNames.contains(PENDING_OBJECT_STORE)) return;
+    const transaction = db.transaction(PENDING_OBJECT_STORE, "readwrite", { durability: "strict" });
+    const store = transaction.objectStore(PENDING_OBJECT_STORE);
+    await awaitAuthorityMutation(transaction, store.delete(key));
+  } finally {
+    db.close();
+  }
+}

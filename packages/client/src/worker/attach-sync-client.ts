@@ -45,10 +45,15 @@ import {
   type SyncTransactionResult,
 } from "../index";
 import type { LocalStoreVersionEvent } from "../local-store";
-import { createOpfsEffects, type OpfsEffectsDeps } from "../opfs-effects";
+import { createOpfsEffects, isOpfsRootUnavailableError, type OpfsEffectsDeps } from "../opfs-effects";
 import { committedStoreUnreachableFromWire } from "../store-boot";
 import { type DestructionEffects, runDestruction } from "../store-lifecycle";
-import { deleteStoreMetaRecord, type StoreMetaDeps, writeStoreMetaRecord } from "../store-meta";
+import {
+  deleteStoreMetaRecord,
+  type StoreMetaDeps,
+  writeOpfsDeletionPending,
+  writeStoreMetaRecord,
+} from "../store-meta";
 import { storeIndexedDbDatabaseName } from "../store-path";
 import { readTestStoreMarker } from "../store-path";
 import {
@@ -319,6 +324,15 @@ function deleteStoreIdbDatabase(storePath: string, meta?: StoreMetaDeps): Promis
  * backend-agnostic (`store-lifecycle.ts`): `deleteBackendStore` delete-if-presents BOTH the OPFS directory and
  * the idb database, so it works whichever backend the store used. Injectable IO (`opfs`/`meta`) so the wiring is
  * unit-testable with fakes.
+ *
+ * **A context that cannot open OPFS at all** (ADR-0036 amendment, 2026-09-28): when an OPFS delete meets a root
+ * that rejects ({@link isOpfsRootUnavailableError} — WebKit's throwaway contexts, probably Safari private windows)
+ * the store there runs on IndexedDB, and destroy removes what it CAN reach: it durably records "OPFS deletion
+ * pending" for the store identity (in IndexedDB, {@link writeOpfsDeletionPending}) and carries on with the idb
+ * database and the meta record. The marker is written from the sentinel step, i.e. while the `deleting` record
+ * still stands, so the obligation to delete the OPFS side is never unrecorded; the next boot that can reach OPFS
+ * finishes it before opening anything (`store-boot.ts`). With no IndexedDB to record it in, the original failure
+ * propagates. A context that can open OPFS takes exactly the old path (ownership lock included).
  */
 export function createStoreDestructionEffects(
   storePath: string,
@@ -326,11 +340,19 @@ export function createStoreDestructionEffects(
 ): DestructionEffects {
   const opfs = createOpfsEffects(storePath, deps?.opfs);
   const meta = deps?.meta;
+  const deleteOpfsOrRecordPending = async (deleteOpfs: () => Promise<void>): Promise<void> => {
+    try {
+      await deleteOpfs();
+    } catch (error) {
+      if (!isOpfsRootUnavailableError(error)) throw error;
+      if (!(await writeOpfsDeletionPending(storePath, meta))) throw error;
+    }
+  };
   return {
     setPhase: (phase) => writeStoreMetaRecord(storePath, { phase, updatedAt: Date.now() }, meta),
-    deleteSentinel: () => opfs.deleteSentinel(),
+    deleteSentinel: () => deleteOpfsOrRecordPending(() => opfs.deleteSentinel()),
     deleteBackendStore: async () => {
-      await opfs.deleteStoreDirectory();
+      await deleteOpfsOrRecordPending(() => opfs.deleteStoreDirectory());
       await deleteStoreIdbDatabase(storePath, meta);
     },
     deleteMetaRecord: () => deleteStoreMetaRecord(storePath, meta),
