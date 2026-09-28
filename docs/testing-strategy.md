@@ -385,6 +385,33 @@ record:
   Nothing in pgxsinkit calls them.
 - The data format is unchanged (1, the same compatibility tuple), so every existing store opens as before.
 
+## pgwasm-postgres 18.6.1 (2026-09-28)
+
+Both build packages pin release `18.6.1`: the same `REL_18_6` sources as `18.6.0`, now built with Emscripten
+6.0.10 (was 3.1.74) and libxml2 2.15.4, for the browser floor Safari/iOS 18.4, Chrome 137 and Firefox 131
+(ADR-0064 decision 7). The data format (1) and compatibility tuple are unchanged, and `version()` reads
+`PostgreSQL 18.6 (pgwasm-postgres 18.6.1) on wasm32-unknown-emscripten, …`. Drift the lanes record:
+
+- **A wrong-size filesystem bundle failed late.** Emscripten 6's file packager loads `pglite.data` in an
+  async function it never awaits, so a throw from `getPreloadedPackage` became an unhandled rejection and
+  the boot failed later, on a missing bundle file, with an Emscripten `ErrnoError` (the IDB lane's
+  failed-boot test saw `[object Object]` on Chromium and WebKit). The host now checks the bundle against
+  the pinned size before the glue runs (`pgwasm-c-failure`), so the boot fails with
+  `Invalid filesystem bundle size` again and mounts no store.
+- **An escaped longjmp throws an `EmscriptenSjLj` instance**, not a number. `isEmscriptenUnwind` recognises
+  both (`pgwasm-c-unwind`, which also asserts the class in the pinned glue).
+- **preRun callbacks run in the order listed** (3.1.74 reversed them). The build's pre-js still loads
+  `pglite.data` first, and the host's callbacks touch disjoint state, so boot behaviour is unchanged.
+- **IndexedDB stores keep their format.** IDBFS still uses database version 21 and
+  `{timestamp, mode, contents}` records, and now `lstat()`s. The IDB lane (Chromium and WebKit) creates,
+  reloads and reopens stores on `18.6.1`; it does not open a store an earlier release wrote, so continuity
+  across the release rests on that source diff.
+- **One more export**, `_pgl_socket` (1,125 in all): pg_dump's libpq socket, which Emscripten 6's SOCKFS
+  (AF_INET only) refused. The pg_dump suites pass unchanged.
+- **The glue imports `node:` specifiers** (`import("node:module")`, `require("node:fs")`), behind its
+  Node check. Vite externalizes them for the browser with its usual notice; the board, the docs site and
+  the Playwright lanes build and run.
+
 ## Offline return (board ADR-0010)
 
 The board demo's app shell is served offline by a hand-rolled, runtime-capture service worker

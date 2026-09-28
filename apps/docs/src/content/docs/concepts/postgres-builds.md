@@ -22,17 +22,24 @@ module. The patches are derived from ElectricSQL's
 [postgres-pglite](https://github.com/electric-sql/postgres-pglite), the PostgreSQL fork behind PGlite.
 [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres) applies them to an upstream
 PostgreSQL release and publishes each build as a release, tagged `<Postgres major>.<minor>.<revision>`:
-`18.6.0` is the first build of PostgreSQL 18.6. `@pgxsinkit/pgwasm-c` ships one release's files byte for
-byte, and `@pgxsinkit/pgwasm-pg-dump` ships `pg_dump` from the same release.
+`18.6.0` is the first build of PostgreSQL 18.6 and `18.6.1` the second. `@pgxsinkit/pgwasm-c` ships one
+release's files byte for byte, and `@pgxsinkit/pgwasm-pg-dump` ships `pg_dump` from the same release.
 
 `SELECT version()` names the release a database runs:
 
 ```text
-PostgreSQL 18.6 (pgwasm-postgres 18.6.0) on wasm32-unknown-emscripten, …
+PostgreSQL 18.6 (pgwasm-postgres 18.6.1) on wasm32-unknown-emscripten, …
 ```
 
 The same name is the build's `identity.release` (`C_BUILD_IDENTITY.release` from `@pgxsinkit/pgwasm-c`),
 so code can read it without a query. Quote it when you report a problem with the database itself.
+
+## Supported browsers
+
+The C build runs in **Safari and iOS 18.4, Chrome 137 and Firefox 131**, and in any later release, as well as
+in Bun. It is compiled for these browsers, the first with standard WebAssembly exception handling, and older
+ones are not supported. The same holds wherever the database runs: a page, a dedicated worker or a
+SharedWorker.
 
 ## A store belongs to its build
 

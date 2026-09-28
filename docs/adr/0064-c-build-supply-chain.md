@@ -10,6 +10,12 @@ pgxsinkit-facing side; the build repository's own mechanics are its
 Status note (2026-09-27): pgxsinkit adopted pgwasm-postgres `18.3.0` in `b47b056` (`pgwasm:pin`, the
 release-asset fetch, the data-format refusal) and `c69580a` (the provenance of the artefacts).
 
+Status note (2026-09-28): pgxsinkit adopted pgwasm-postgres `18.6.1`, the first release built with
+Emscripten 6.0.10 and so the first to enforce decision 7's browser floor, in `905deb2` (the pin, the host's
+`EmscriptenSjLj` unwind, the dead `WASM_PREFIX` removed, the NOTICEs) and `ae02603` (a wrong-size filesystem
+bundle is refused before the glue runs, since Emscripten 6's file packager swallows the throw). The
+consumer docs state the floor (getting-started, Postgres builds, pgwasm) from the same adoption.
+
 ## Context
 
 [ADR-0062](0062-absorb-pglite-as-pgwasm.md) decision 9 keeps Postgres compilation out of pgxsinkit: a

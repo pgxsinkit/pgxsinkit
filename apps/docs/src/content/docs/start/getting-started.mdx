@@ -29,6 +29,8 @@ This page gets you from zero to a working read + write path. For what each packa
   publish. The engine exits if a listed table is absent, so run it under a restart policy while
   migrations land.
 
+- **A supported browser** for the client's local database: Safari and iOS 18.4, Chrome 137, Firefox 131 or
+  later (see [Supported browsers](/concepts/postgres-builds/#supported-browsers)). Older browsers cannot run it.
 - **The `pgmq` extension**, but only if you use the [event lane](/concepts/event-lane/). Its generated
   migration runs `CREATE EXTENSION IF NOT EXISTS pgmq`, so the extension has to be present in the PostgreSQL
   image you deploy — Supabase's images ship it; a stock `postgres` image does not. Registries with no
