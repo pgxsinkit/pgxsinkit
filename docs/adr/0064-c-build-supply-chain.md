@@ -23,6 +23,19 @@ build must read back identically and write to, in Chromium and WebKit. A pin cha
 therefore meets stores the previous releases wrote; when a release that shipped goes out of the pin, it
 joins that list.
 
+Status note (2026-09-28): pgxsinkit adopted pgwasm-postgres `18.6.2` in `a81456f` (the pin; the artefacts
+renamed `postgres.{js,wasm,data}`; the compiled filesystem root and install prefix `/pgwasm`, and with it the
+IndexedDB database `/pgwasm/<name>` and Web Lock `pgwasm-idbfs:/pgwasm/<name>`; pgwasm-c's `idbDatabaseName`
+exported so the client's `storeIndexedDbDatabaseName` derives from it) and `3e49a44` (`pglite` dropped from
+module names). **This release requires refreshing local stores**: `idb://` stores written under `/pglite`
+(PGlite's and earlier pgxsinkit releases') are not opened, with no migration or shim, and the library does not
+delete the old `/pglite/*` databases (the prefix is PGlite's own too; another app on the origin may own
+them). That is the maintainer's decision for this release only, not a general policy. OPFS-repacked and
+`file://` stores address files relative to the mount and are unaffected. The IDB lane's continuity list is
+emptied by design (`18.6.0` dropped); `18.6.2` becomes its first entry when a later release is pinned. The
+consumer docs say it once (Coming from PGlite, "Existing data"), including that unsynced local writes stay
+behind in the old store.
+
 ## Context
 
 [ADR-0062](0062-absorb-pglite-as-pgwasm.md) decision 9 keeps Postgres compilation out of pgxsinkit: a
