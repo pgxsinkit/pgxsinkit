@@ -45,7 +45,7 @@ export interface DiagnosticExportResult {
 /** The dependencies {@link performDiagnosticExport} needs from the owning client — narrow, so it is unit-testable. */
 export interface DiagnosticExportDeps {
   /** The live store to checkpoint and dump (the clone source; the live engine is never suspended). */
-  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">;
+  pgwasm: Pick<PgwasmClient, "exec" | "dumpDataDir">;
   /** The Mutation diagnostics seam (`client.diagnostics().mutation` / `readMutationStats`). */
   readMutationStats: () => Promise<MutationDiagnostics>;
   /**
@@ -120,13 +120,13 @@ export interface CloneDumpOptions {
 }
 
 export async function runThrowawayCloneDump(
-  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">,
+  pgwasm: Pick<PgwasmClient, "exec" | "dumpDataDir">,
   startPerf: number,
   options: CloneDumpOptions = {},
 ): Promise<CloneDumpResult> {
   // Step 1 — the LIVE datadir dump the clone boots from (checkpoint → `dumpDataDir`, the shared core).
   const { dumped, checkpointStartedAtMs, checkpointMs, dumpStartedAtMs, dumpMs } = await performDatadirDump(
-    pglite,
+    pgwasm,
     "none",
     startPerf,
   );
@@ -211,7 +211,7 @@ export async function performDiagnosticExport(
 
   // A diagnostic dump takes the WHOLE store (no `-t`): synced + overlay + journal + metadata + views +
   // functions — everything a support engineer needs to read a misbehaving store.
-  const { sqlBytes, phases } = await runThrowawayCloneDump(deps.pglite, startPerf);
+  const { sqlBytes, phases } = await runThrowawayCloneDump(deps.pgwasm, startPerf);
 
   const storeId = deriveStoreId(deps.storePath);
   const fileName = options.fileName ?? `${storeId}-${compactTimestamp()}-diagnostics.sql`;

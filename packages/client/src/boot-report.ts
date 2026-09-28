@@ -256,7 +256,7 @@ export interface BootReportBuilder extends BootStampCollector {
     fn: () => Promise<T>,
     data?: Record<string, unknown>,
   ) => Promise<T>;
-  setPgliteCreateMs: (ms: number | null) => void;
+  setPgwasmCreateMs: (ms: number | null) => void;
   setProvision: (provision: BootReport["provision"]) => void;
   /**
    * Stamp `storageBackend` (ADR-0049 decision 12) at the client-owned mint seam, derived from the resolved dataDir
@@ -368,7 +368,7 @@ export function createBootReportBuilder(init: BootReportInit): BootReportBuilder
         else durations.set(key, ms);
       }
     },
-    setPgliteCreateMs: (ms) => {
+    setPgwasmCreateMs: (ms) => {
       pgwasmCreateMs = ms;
     },
     setProvision: (value) => {

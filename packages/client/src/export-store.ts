@@ -209,12 +209,12 @@ export const compactTimestamp = (): string => new Date().toISOString().replace(/
  * (the caller's export-start monotonic anchor) so the timings compose into either report.
  *
  * The `CHECKPOINT` is a utility statement — Drizzle has no builder for it, so a raw `exec` is the justified
- * tier-③ form here. Running it via `pglite.exec` serialises it behind any in-flight engine work on pgwasm's
+ * tier-③ form here. Running it via `pgwasm.exec` serialises it behind any in-flight engine work on pgwasm's
  * single connection, flushing dirty buffers to the datadir the dump then reads — so the tarball reflects
  * committed state, not a torn mid-write datadir.
  */
 export async function performDatadirDump(
-  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">,
+  pgwasm: Pick<PgwasmClient, "exec" | "dumpDataDir">,
   compression: "auto" | "gzip" | "none",
   startPerf: number,
 ): Promise<{
@@ -226,12 +226,12 @@ export async function performDatadirDump(
 }> {
   const checkpointStartedAtMs = nowMs() - startPerf;
   const checkpointStartPerf = nowMs();
-  await pglite.exec("CHECKPOINT");
+  await pgwasm.exec("CHECKPOINT");
   const checkpointMs = nowMs() - checkpointStartPerf;
 
   const dumpStartedAtMs = nowMs() - startPerf;
   const dumpStartPerf = nowMs();
-  const dumped = await pglite.dumpDataDir(compression);
+  const dumped = await pgwasm.dumpDataDir(compression);
   const dumpMs = nowMs() - dumpStartPerf;
 
   return { dumped, checkpointStartedAtMs, checkpointMs, dumpStartedAtMs, dumpMs };
@@ -240,7 +240,7 @@ export async function performDatadirDump(
 /** The dependencies {@link performStoreExport} needs from the owning client — narrow, so it is unit-testable. */
 export interface StoreExportDeps {
   /** The live store to checkpoint and dump. */
-  pglite: Pick<PgwasmClient, "exec" | "dumpDataDir">;
+  pgwasm: Pick<PgwasmClient, "exec" | "dumpDataDir">;
   /** The Mutation diagnostics seam (`client.diagnostics().mutation` / `readMutationStats`). */
   readMutationStats: () => Promise<MutationDiagnostics>;
   /**
@@ -268,7 +268,7 @@ export async function performStoreExport(
   // Live dump of the whole datadir (checkpoint → `dumpDataDir`, the shared core) — the journal and overlay
   // ride inside it (the lossless backup, ADR-0035).
   const { dumped, checkpointStartedAtMs, checkpointMs, dumpStartedAtMs, dumpMs } = await performDatadirDump(
-    deps.pglite,
+    deps.pgwasm,
     compression,
     startPerf,
   );

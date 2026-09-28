@@ -2290,7 +2290,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       openedStorageBackend = mintedBackend;
       bootReportBuilder.setStorageBackend(mintedBackend);
     }
-    bootReportBuilder.setPgliteCreateMs(performance.now() - startedAt);
+    bootReportBuilder.setPgwasmCreateMs(performance.now() - startedAt);
     return created;
   };
 
@@ -3766,7 +3766,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       return lifecycleSlot.run("exportStore", () =>
         performStoreExport(
           {
-            pglite,
+            pgwasm: pglite,
             readMutationStats: () => mutationRuntime.readMutationStats(),
             ...(options.storePath != null ? { storePath: options.storePath } : {}),
           },
@@ -3784,7 +3784,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       return lifecycleSlot.run("exportDiagnostics", () =>
         performDiagnosticExport(
           {
-            pglite,
+            pgwasm: pglite,
             readMutationStats: () => mutationRuntime.readMutationStats(),
             ...(options.storePath != null ? { storePath: options.storePath } : {}),
           },
