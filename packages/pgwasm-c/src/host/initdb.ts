@@ -108,7 +108,8 @@ export async function runInitdb({
         );
         return {};
       },
-      // Reverse execution order (see PostgresInstance.create): PROXYFS mount, then env, then callbacks.
+      // Run in the order listed, after the filesystem bundle loads (see PostgresInstance.create): the
+      // environment, then the runtime callbacks, then the PROXYFS mount of the backend's /pglite.
       preRun: [
         (module) => {
           const env = module.ENV;

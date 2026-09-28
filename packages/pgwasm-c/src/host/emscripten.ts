@@ -108,7 +108,6 @@ export interface ModuleOverrides<TModule> {
   ) => Record<string, never>;
   getPreloadedPackage?: (name: string, size: number) => ArrayBuffer;
   preRun?: ((module: TModule) => void)[];
-  WASM_PREFIX?: string;
 }
 
 /** The members every Emscripten module the C build loads has. */

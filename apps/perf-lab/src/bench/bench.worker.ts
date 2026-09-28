@@ -126,7 +126,7 @@ async function createStore(backend: BenchBackend, name: string, relaxedDurabilit
 }
 
 // Delete an IndexedDB database by name. pgwasm-c's `idb://<name>` maps to the database `/pglite/<name>`
-// (its WASM_PREFIX `/pglite`). Best-effort so a repeated run never accumulates stores.
+// (the IDBFS mount point under its root `/pglite`). Best-effort so a repeated run never accumulates stores.
 function deleteIdbDatabase(databaseName: string): Promise<void> {
   return new Promise((resolve) => {
     let request: IDBOpenDBRequest;

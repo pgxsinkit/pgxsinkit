@@ -6,7 +6,7 @@ import type { DebugLevel } from "@pgxsinkit/pgwasm/build";
 import { createPostgresModule } from "../artefacts";
 import type { EmscriptenStream, ModuleOverrides, PostgresModule } from "./emscripten";
 import { preservingExitCode } from "./exit-code";
-import { ICU_DATA_PATH, INITDB_EXE_PATH, LOCALE_LIST_PATH, PG_ROOT, PGDATA, POSTGRES_EXE_PATH } from "./paths";
+import { ICU_DATA_PATH, INITDB_EXE_PATH, LOCALE_LIST_PATH, PGDATA, POSTGRES_EXE_PATH } from "./paths";
 
 /** Postgres' error longjmp, intercepted by the host: keep in sync with pglitec.c's POSTGRES_MAIN_LONGJMP. */
 const POSTGRES_MAIN_LONGJMP = 100;
@@ -44,13 +44,17 @@ export const DEFAULT_START_PARAMS: readonly string[] = [
  * stack back to the main loop, which handles them:
  * - `'unwind'` from emscripten_exit_with_live_runtime(): how pgl_longjmp (pglitec.c) delivers Postgres'
  *   siglongjmp to its main-loop error handler, and how a Terminate message ends the loop;
- * - the number an emscripten-mode longjmp throws, should one pass every invoke_* frame.
+ * - what an emscripten-mode longjmp throws, should one pass every invoke_* frame: an instance of the
+ *   glue's (unexported) `EmscriptenSjLj` class on Emscripten 6.0.10 (pgwasm-postgres 18.6.1 onwards), a
+ *   number on Emscripten 3.1.74 (18.3.0 and 18.6.0). Both are recognised, so the host works with either.
  *
  * An `ExitStatus` (from exit()/proc_exit(): a FATAL error) is not: the backend's exit callbacks have
  * already torn its session down, so the loop cannot resume on it (see {@link exitStatusOf}).
  */
 export function isEmscriptenUnwind(error: unknown): boolean {
-  return error === "unwind" || typeof error === "number";
+  if (error === "unwind" || typeof error === "number") return true;
+  if (typeof error !== "object" || error === null) return false;
+  return (error as { constructor?: { name?: unknown } }).constructor?.name === "EmscriptenSjLj";
 }
 
 /** The status of the `ExitStatus` the runtime throws from exit()/proc_exit(), or undefined for anything else. */
@@ -154,8 +158,11 @@ export class PostgresInstance {
       if (config.debug > 0) console.error(text);
     };
 
-    // Emscripten runs preRun callbacks in REVERSE order (addOnPreRun unshifts), after the glue appends
-    // its own filesystem-bundle loader: the bundle loads first, then the storage mount, then these.
+    // Emscripten runs preRun callbacks in the order listed (3.1.74, before pgwasm-postgres 18.6.1, ran them
+    // in reverse). The build's pre-js loads the filesystem bundle before the first of them, so every one
+    // sees the bundle's files. They touch disjoint state (the runtime hook, /dev/blob, the environment, the
+    // bundle's files outside the data directory, then the storage mount over the data directory), so none
+    // depends on the order of the others.
     const preRun: ((module: PostgresModule) => void)[] = [
       (module) => {
         module.onRuntimeInitialized = () => pendingHost(module).#onRuntimeInitialized();
@@ -194,7 +201,6 @@ export class PostgresInstance {
       stdin: () => null,
       print: log,
       printErr: logError,
-      WASM_PREFIX: PG_ROOT,
       instantiateWasm: (imports, successCallback) => {
         WebAssembly.instantiate(wasmModule, imports).then(
           (instance) => {

@@ -316,8 +316,8 @@ export function opfsProbeDirectoryPath(): readonly [string, string] {
 /**
  * The IndexedDB database name a browser store occupies (ADR-0036) — a browser-only OPERATIONAL helper for
  * orphan GC / corrupt-store deletion (`indexedDB.deleteDatabase(...)`), NOT part of the create path. pgwasm
- * maps `idb://<storePath>` to the IndexedDB database `/pglite/<storePath>` (its `WASM_PREFIX` `/pglite`
- * joined with the path after the scheme; verified against `@electric-sql/pglite` 0.5.4 dist). Exposed so a
+ * maps `idb://<storePath>` to the IndexedDB database `/pglite/<storePath>` (the IDBFS mount point: its root
+ * `/pglite` joined with the path after the scheme; `@pgxsinkit/pgwasm-c`'s IndexedDB mount). Exposed so a
  * consumer that GCs its own stores routes that pgwasm-internal naming knowledge through the library rather
  * than re-deriving the `/pglite/` prefix itself. Rejects a scheme-bearing/empty path exactly as
  * {@link resolveStoreDataDir} does, so the two stay in lockstep.

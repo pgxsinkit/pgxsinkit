@@ -24,8 +24,8 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds seven files: the assets of the pgwasm-postgres release 18.6.0
-(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.6.0), republished byte-identical (each file's size and sha256 are pinned in
+`artefacts/` holds seven files: the assets of the pgwasm-postgres release 18.6.1
+(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.6.1), republished byte-identical (each file's size and sha256 are pinned in
 `src/artefact-pins.ts`, from the release's manifest.json checked against its
 SHA256SUMS): `pglite.wasm` (the Postgres server), `pglite.data` (its filesystem
 bundle: share files, loadable modules, time zone data, ICU data), `pglite.js` and
@@ -39,9 +39,9 @@ from PostgreSQL 18.6 (the upstream tag REL_18_6, commit
 from ElectricSQL's PGlite fork of PostgreSQL
 (https://github.com/electric-sql/postgres-pglite at
 b133782cd759f08b3aeb263b80a963b39c7b7af1; PostgreSQL License, Copyright (c)
-ElectricSQL and contributors). Release 18.6.0 is pgwasm-postgres commit
-efcbf6eee6dacc454fcb123e3730ad8f051a6eda, built inside the builder image
-ghcr.io/pgxsinkit/pgwasm-builder@sha256:c9eacc51a7c25d67aef3daa418a39592a97f471aff099fa5a88fa1c82107435d
+ElectricSQL and contributors). Release 18.6.1 is pgwasm-postgres commit
+28f0c1551db8c7f5df143ef1e424c641af93072d, built inside the builder image
+ghcr.io/pgxsinkit/pgwasm-builder@sha256:0c4d5255c5f1824216d1eb347cc231a6f881574c3d5b8172796a8cbe5f9f63c8
 (whose recipe is that repository's `builder/Containerfile`); its manifest.json records
 every file's size and sha256, and the release was published only because a rebuild of
 the tag gave the gated build's manifest.
@@ -50,8 +50,8 @@ The components below, and their versions, come from:
 
   - the configure line: --with-icu --with-zlib --with-libxml --with-openssl=no
     --without-llvm, and the server's link line (-lxml2 -lz, and ICU through ICU_LIBS);
-  - the builder recipe: Emscripten 3.1.74, zlib 1.3.2, libxml2 2.14.5, ICU 76.1. The
-    binaries confirm Emscripten 3.1.74 (in the server's version string) and ICU 76
+  - the builder recipe: Emscripten 6.0.10, zlib 1.3.2, libxml2 2.15.4, ICU 76.1. The
+    binaries confirm Emscripten 6.0.10 (in the server's version string) and ICU 76
     (its data package, icudt76l);
   - the files of pglite.data (dict_snowball.so, the time zone data, the ICU data and
     its LICENSE).
@@ -1406,10 +1406,10 @@ whose terms are the Unicode License v3 at the start of this file.
     without express or implied warranty.
 
 ------------------------------------------------------------------------------
-libxml2 2.14.5 (pglite.wasm)
+libxml2 2.15.4 (pglite.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://gitlab.gnome.org/GNOME/libxml2/-/raw/v2.14.5/Copyright
+Source: https://gitlab.gnome.org/GNOME/libxml2/-/raw/v2.15.4/Copyright
 
     Except where otherwise noted in the source code (e.g. the files dict.c and
     list.c, which are covered by a similar licence but with different Copyright
@@ -1466,10 +1466,10 @@ Source: https://raw.githubusercontent.com/madler/zlib/v1.3.2/LICENSE
       jloup@gzip.org          madler@alumni.caltech.edu
 
 ------------------------------------------------------------------------------
-Emscripten 3.1.74 (the runtime in pglite.js and initdb.js, and its system libraries in pglite.wasm and initdb.wasm)
+Emscripten 6.0.10 (the runtime in pglite.js and initdb.js, and its system libraries in pglite.wasm and initdb.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/LICENSE
+Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/LICENSE
 
     Emscripten is available under 2 licenses, the MIT license and the
     University of Illinois/NCSA Open Source License.
@@ -1574,10 +1574,10 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/LICE
     flag will run closure compiler from third_party/).
 
 ------------------------------------------------------------------------------
-musl libc, as bundled in Emscripten 3.1.74 (pglite.wasm, initdb.wasm)
+musl libc, as bundled in Emscripten 6.0.10 (pglite.wasm, initdb.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/system/lib/libc/musl/COPYRIGHT
+Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libc/musl/COPYRIGHT
 
     musl as a whole is licensed under the following standard MIT license:
 
@@ -1655,6 +1655,7 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/syst
     Leah Neukirchen
     Luca Barbato
     Luka Perkov
+    Lynn Ochs
     M Farkas-Dyck (Strake)
     Mahesh Bodapati
     Markus Wichmann
@@ -1684,7 +1685,6 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/syst
     Szabolcs Nagy
     Timo Teräs
     Trutz Behn
-    Valentin Ochs
     Will Dietz
     William Haddon
     William Pitcock
@@ -1724,7 +1724,7 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/syst
     in jurisdictions that may not recognize the public domain.
 
     The smoothsort implementation (src/stdlib/qsort.c) is Copyright © 2011
-    Valentin Ochs and is licensed under an MIT-style license.
+    Lynn Ochs and is licensed under an MIT-style license.
 
     The x86_64 port was written by Nicholas J. Kain and is licensed under
     the standard MIT terms.
@@ -1774,7 +1774,7 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/syst
     obstacle to adoption, that text has been removed.
 
 ------------------------------------------------------------------------------
-LLVM runtime libraries, as bundled in Emscripten 3.1.74 (compiler-rt, libc++, libc++abi; pglite.wasm, initdb.wasm)
+LLVM runtime libraries, as bundled in Emscripten 6.0.10 (compiler-rt, libc++, libc++abi; pglite.wasm, initdb.wasm)
 ------------------------------------------------------------------------------
 
 These are under the Apache License v2.0 with LLVM Exceptions. Their object code is
@@ -1799,7 +1799,7 @@ library's LICENSE.TXT, where it is identical):
 
 Each library's LICENSE.TXT also carries the legacy LLVM licence:
 
-  compiler-rt — https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/system/lib/compiler-rt/LICENSE.TXT
+  compiler-rt — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/compiler-rt/LICENSE.TXT
   Legacy licence (dual NCSA / MIT; the MIT notice is reproduced):
 
     The compiler_rt library is dual licensed under both the University of Illinois
@@ -1829,7 +1829,7 @@ Each library's LICENSE.TXT also carries the legacy LLVM licence:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 
-  libc++ — https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/system/lib/libcxx/LICENSE.TXT
+  libc++ — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libcxx/LICENSE.TXT
   Legacy licence (dual NCSA / MIT; the MIT notice is reproduced):
 
     The libc++ library is dual licensed under both the University of Illinois
@@ -1859,7 +1859,7 @@ Each library's LICENSE.TXT also carries the legacy LLVM licence:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 
-  libc++abi — https://raw.githubusercontent.com/emscripten-core/emscripten/3.1.74/system/lib/libcxxabi/LICENSE.TXT
+  libc++abi — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libcxxabi/LICENSE.TXT
   Legacy licence (dual NCSA / MIT; the MIT notice is reproduced):
 
     The libc++abi library is dual licensed under both the University of Illinois
