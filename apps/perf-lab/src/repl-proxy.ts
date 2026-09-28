@@ -2,7 +2,7 @@ import { bigint, pgSchema, text } from "drizzle-orm/pg-core";
 
 import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 
-import type { PerfLabDb } from "./pglite";
+import type { PerfLabDb } from "./pgwasm";
 
 // Tier ③ (justified): bootstrap DDL — CREATE SCHEMA / CREATE TABLE with an identity column. No
 // drizzle-kit migration lane exists for the browser-local REPL store, and Drizzle objects cannot

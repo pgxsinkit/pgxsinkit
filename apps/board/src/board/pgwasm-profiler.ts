@@ -32,7 +32,7 @@ export interface ProfilerReport {
   byCost: QueryStat[];
 }
 
-export interface PgliteProfiler {
+export interface PgwasmProfiler {
   /** Install the timing wrappers and start a fresh window. Idempotent. */
   start: () => void;
   /** Remove the wrappers and return the report for the window. */
@@ -67,7 +67,7 @@ function fingerprint(method: string, arg: unknown): string {
   return `${method} :: ${sql}`;
 }
 
-export function createPgliteProfiler(pglite: PgliteLike): PgliteProfiler {
+export function createPgwasmProfiler(pglite: PgliteLike): PgwasmProfiler {
   const buckets = new Map<string, Bucket>();
   let running = false;
   let windowStartMs = 0;

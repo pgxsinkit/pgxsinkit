@@ -30,7 +30,7 @@ import {
   type PerfLabClient,
   type PerfLabDb,
   type PerfLabConnectionMode,
-} from "./pglite";
+} from "./pgwasm";
 import { createReplProxy } from "./repl-proxy";
 
 type LabStatus = "idle" | "booting" | "ready" | "running" | "error";

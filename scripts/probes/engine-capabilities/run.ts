@@ -14,7 +14,7 @@ import path from "node:path";
 import { chromium, firefox, webkit } from "@playwright/test";
 import type { Browser, BrowserType } from "@playwright/test";
 
-import { countDatadirFiles } from "./pglite-datadir-count";
+import { countDatadirFiles } from "./pgwasm-datadir-count";
 import { startProbeServer } from "./serve";
 
 interface ErrorInfo {

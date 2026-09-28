@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { resolveTestStoreFactory, TEST_STORE_FACTORY_ENV } from "../support/pgwasm-store";
 
-// The store seam's resolution logic (see `tests/support/pglite.ts`): unset means pgwasm, exactly as
+// The store seam's resolution logic (see `tests/support/pgwasm-store.ts`): unset means pgwasm, exactly as
 // before; set means that module builds the suite's stores instead. Only the RESOLUTION is under test —
 // no store is built here, and the fixture the variable points at cannot build one.
 

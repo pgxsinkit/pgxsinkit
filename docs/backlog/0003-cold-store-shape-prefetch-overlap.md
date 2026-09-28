@@ -36,7 +36,7 @@ Recorded from the implementation attempt so a reopen does not re-derive it:
   **no replay buffer**, so swapping subscribers loses the already-fetched catch-up;
 - (d) thread the prefetch handle through `startConfiguredSync`/`startGroupSync`;
 - (e) gate on a provably-cold store only: no `pgliteInstance`, `idb://` scheme, and
-  `indexedDB.databases()` shows no `/pglite/<path>` entry — anything else takes the exact
+  `indexedDB.databases()` shows no `/pgwasm/<path>` entry — anything else takes the exact
   sequential path.
 
 Enabling invariants verified at the time: `reconcileLocalStoreVersion` on a cold store returns

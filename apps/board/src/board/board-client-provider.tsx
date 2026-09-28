@@ -17,7 +17,7 @@ import syncMarkDark from "../../../../brand/svg/pgxsinkit-symbol-dark.svg";
 import wordmarkDark from "../../../../brand/svg/pgxsinkit-wordmark-dark.svg";
 import { createBoardSyncClient, resetBoardBootReport, SyncClientProvider } from "../board-client";
 import type { OfflineControl } from "./offline";
-import { createPgliteProfiler } from "./pglite-profiler";
+import { createPgwasmProfiler } from "./pgwasm-profiler";
 
 type BoardSyncClient = Awaited<ReturnType<typeof createBoardSyncClient>>["client"];
 
@@ -109,7 +109,7 @@ function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmi
         if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
           const dev = globalThis as typeof globalThis & {
             __boardClient?: BoardSyncClient;
-            __boardProfiler?: ReturnType<typeof createPgliteProfiler>;
+            __boardProfiler?: ReturnType<typeof createPgwasmProfiler>;
             __pgxsinkitE2eClient?: BoardSyncClient;
           };
           dev.__boardClient = next;
@@ -118,7 +118,7 @@ function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmi
           // worker-pushed snapshot (ADR-0059). A dedicated handle beside `__boardClient` (which the scenarios
           // type down to just `mutate`), following the boot-report stash precedent in board-client.ts.
           dev.__pgxsinkitE2eClient = next;
-          if (mode === "in-process") dev.__boardProfiler = createPgliteProfiler(next.pgwasm);
+          if (mode === "in-process") dev.__boardProfiler = createPgwasmProfiler(next.pgwasm);
         }
         setStatus(next.status);
         setClient(next);
@@ -136,7 +136,7 @@ function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmi
       if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
         const dev = globalThis as typeof globalThis & {
           __boardClient?: BoardSyncClient;
-          __boardProfiler?: ReturnType<typeof createPgliteProfiler>;
+          __boardProfiler?: ReturnType<typeof createPgwasmProfiler>;
           __boardBootReport?: unknown;
           __pgxsinkitE2eClient?: BoardSyncClient;
         };

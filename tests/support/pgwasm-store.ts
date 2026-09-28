@@ -41,7 +41,7 @@ const requireFromHere = createRequire(import.meta.url);
 //   * `createFromDump(dump, options?)` — a store booted ON a datadir dump THIS factory produced (the
 //     `loadDataDir` create option). Dumps are never portable between engines, which is why the
 //     factory both writes (`dumpDataDir`) and reads them.
-//   * `cacheKeyPrefix?` — the filename prefix for the schema-dump disk cache under `tmp/pglite-cache/`.
+//   * `cacheKeyPrefix?` — the filename prefix for the schema-dump disk cache under `tmp/pgwasm-cache/`.
 //     It MUST be distinct per engine (a dump one engine wrote will not boot on another), and it is the
 //     one thing that keeps two engines' snapshots from colliding on one file. Default:
 //     `pgwasm-c-schema-`.
@@ -165,7 +165,7 @@ export async function createFreshTestPgwasm<E extends Extensions = Record<never,
 // across TWO tiers so neither this process nor a sibling shard rebuilds it:
 //
 //   1. In-process memo (`schemaDumpCache`) — same-process callers share one dump promise.
-//   2. Fingerprint-keyed disk cache under `tmp/pglite-cache/` — the sharded unit runner
+//   2. Fingerprint-keyed disk cache under `tmp/pgwasm-cache/` — the sharded unit runner
 //      (`scripts/run-unit-tests.ts`) spawns ~10 independent `bun test` PROCESSES; without this each
 //      shard rebuilds the dump (boot + DDL exec + dump). The disk tar lets every shard, and every
 //      later run, load an already-built snapshot and skip the exec.
@@ -187,7 +187,7 @@ const schemaDumpCache = new Map<string, Promise<Blob | File>>();
 
 // This file lives at `<repoRoot>/tests/support/pgwasm-store.ts`, so the repo root is two levels up.
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const cacheDir = path.join(repoRoot, "tmp", "pglite-cache");
+const cacheDir = path.join(repoRoot, "tmp", "pgwasm-cache");
 const cacheKeyPrefix = () => resolveTestStoreFactory()?.cacheKeyPrefix ?? DEFAULT_CACHE_KEY_PREFIX;
 const cacheFileFor = (fingerprint: string) => path.join(cacheDir, `${cacheKeyPrefix()}${fingerprint}.tar`);
 // Pruning is scoped to the ACTIVE lane's prefix so one engine's run never ages out another's snapshots.

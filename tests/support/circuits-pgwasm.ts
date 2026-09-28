@@ -9,8 +9,8 @@ import { createFreshTestPgwasm } from "./pgwasm-store";
 // boot; a test driving `startCircuitsSync` over a bare store has to do it itself, and this is the one
 // line that does.
 //
-// Deliberately NOT folded into `support/pglite.ts`: this file statically imports client modules, and
-// the mock-driven unit suites must not pull them in transitively through a `support/pglite` import.
+// Deliberately NOT folded into `support/pgwasm-store.ts`: this file statically imports client modules, and
+// the mock-driven unit suites must not pull them in transitively through a `support/pgwasm-store` import.
 // Only the real-stream integration suites use it.
 export async function createCircuitsTestPgwasm(): Promise<Pgwasm> {
   const pg = await createFreshTestPgwasm();

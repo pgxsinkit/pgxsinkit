@@ -10,7 +10,7 @@ repo — answer for that store instead**. It exists so the board can be driven a
 another engine without a line of engine-specific code landing here: nothing in this
 repo knows, names, or imports any particular engine. It is the browser-side twin of
 the unit suite's store seam (`PGXSINKIT_TEST_STORE_FACTORY`,
-`tests/support/pglite.ts`).
+`tests/support/pgwasm-store.ts`).
 
 There are **two ways in**, and they take the same module:
 

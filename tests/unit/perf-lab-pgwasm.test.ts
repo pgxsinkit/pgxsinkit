@@ -26,7 +26,7 @@ describe("perf-lab pglite loader", () => {
   });
 
   it("resets persisted shape subscriptions for live synced registries", async () => {
-    const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
+    const { loadPerfClient } = await import("../../apps/perf-lab/src/pgwasm");
 
     await loadPerfClient(
       {
@@ -63,7 +63,7 @@ describe("perf-lab pglite loader", () => {
   });
 
   it("does not request subscription reset for offline mode", async () => {
-    const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
+    const { loadPerfClient } = await import("../../apps/perf-lab/src/pgwasm");
 
     await loadPerfClient(
       {
@@ -97,7 +97,7 @@ describe("perf-lab pglite loader", () => {
   });
 
   it("passes the local database preparation hook through to the sync client", async () => {
-    const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
+    const { loadPerfClient } = await import("../../apps/perf-lab/src/pgwasm");
     const prepareLocalDbAfterSchema = mock(async (_db: unknown): Promise<void> => undefined);
 
     await loadPerfClient(
@@ -131,7 +131,7 @@ describe("perf-lab pglite loader", () => {
   });
 
   it("passes the pre-schema local database preparation hook through to the sync client", async () => {
-    const { loadPerfClient } = await import("../../apps/perf-lab/src/pglite");
+    const { loadPerfClient } = await import("../../apps/perf-lab/src/pgwasm");
     const prepareLocalDbBeforeSchema = mock(async (_db: unknown): Promise<void> => undefined);
 
     await loadPerfClient(
