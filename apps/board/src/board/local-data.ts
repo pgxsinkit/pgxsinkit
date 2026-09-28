@@ -48,12 +48,12 @@ import { quiesceThenDestroyStore } from "./store-registry-default";
 
 export type { DeleteLocalDataOutcome, DeletionResult };
 
-// PGlite maps `idb://<storePath>` to the IndexedDB database `/pglite/<storePath>`. Derive the namespace prefix
-// from the library's own helper (never re-encode `/pglite/` here) so a rename upstream stays in lockstep. A
+// pgwasm maps `idb://<storePath>` to the IndexedDB database `/pgwasm/<storePath>`. Derive the namespace prefix
+// from the library's own helper (never re-encode `/pgwasm/` here) so a rename upstream stays in lockstep. A
 // marker store name with no `/` yields "<prefix>marker"; slicing the marker off leaves the bare prefix.
 const PREFIX_MARKER = "x";
-/** The IndexedDB database-name prefix PGlite uses for every store (`/pglite/`). */
-const PGLITE_IDB_PREFIX = storeIndexedDbDatabaseName(PREFIX_MARKER).slice(0, -PREFIX_MARKER.length);
+/** The IndexedDB database-name prefix pgwasm uses for every store (`/pgwasm/`). */
+const PGWASM_IDB_PREFIX = storeIndexedDbDatabaseName(PREFIX_MARKER).slice(0, -PREFIX_MARKER.length);
 
 /** The minimal registry-state seams {@link retainObsoletePaths} needs — localStorage read/write + the
  * cross-tab lock. Built HERE rather than reaching for the full StoreRegistryAdapters: retention touches only
@@ -92,7 +92,7 @@ function realWipeSurfaces(): WipeSurfaces {
     indexedDb: (globalThis as { indexedDB?: WipeIdbFactorySurface }).indexedDB,
     destroyStore: (storePath) => quiesceThenDestroyStore(storePath, { diagnostic: true }),
     retention: retentionAdapters(),
-    pgliteIdbPrefix: PGLITE_IDB_PREFIX,
+    pgwasmIdbPrefix: PGWASM_IDB_PREFIX,
   };
 }
 

@@ -54,9 +54,9 @@ const pinnedNames: Record<string, string[]> = {
     "amcheck.tar.gz",
     "initdb.js",
     "initdb.wasm",
-    "pglite.data",
-    "pglite.js",
-    "pglite.wasm",
+    "postgres.data",
+    "postgres.js",
+    "postgres.wasm",
     "prepopulated.tar.gz",
   ],
   "packages/pgwasm-pg-dump": ["pg_dump.js", "pg_dump.wasm"],
@@ -71,11 +71,11 @@ describe("the build packages' artefacts", () => {
       for (const pin of Object.values(pkg.files)) expect(pin.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
     const release = { repository: "pgxsinkit/pgwasm-postgres", tag: "18.3.0" };
-    expect(releaseAssetUrl(release, "pglite.wasm")).toBe(
-      "https://github.com/pgxsinkit/pgwasm-postgres/releases/download/18.3.0/pglite.wasm",
+    expect(releaseAssetUrl(release, "postgres.wasm")).toBe(
+      "https://github.com/pgxsinkit/pgwasm-postgres/releases/download/18.3.0/postgres.wasm",
     );
-    expect(path.relative(repoRoot, cachedAssetPath(release, "pglite.wasm"))).toBe(
-      ".buildcache/pgwasm-artefacts/pgxsinkit/pgwasm-postgres/18.3.0/pglite.wasm",
+    expect(path.relative(repoRoot, cachedAssetPath(release, "postgres.wasm"))).toBe(
+      ".buildcache/pgwasm-artefacts/pgxsinkit/pgwasm-postgres/18.3.0/postgres.wasm",
     );
   });
 
@@ -106,14 +106,14 @@ describe("the build packages' artefacts", () => {
     const pkg = artefactPackage("packages/pgwasm-c");
     const scratch = scratchDir("pgwasm-artefacts");
     try {
-      writeFileSync(path.join(scratch.path, "pglite.js"), "not the glue");
+      writeFileSync(path.join(scratch.path, "postgres.js"), "not the glue");
       const problems = await verifyArtefacts(pkg, scratch.path);
-      expect(problems.find((problem) => problem.name === "pglite.js")?.problem).toMatch(/^size 12, expected \d+$/);
+      expect(problems.find((problem) => problem.name === "postgres.js")?.problem).toMatch(/^size 12, expected \d+$/);
       expect(problems.filter((problem) => problem.problem === "missing")).toHaveLength(
         Object.keys(pkg.files).length - 1,
       );
       discardMismatchedArtefacts(problems, scratch.path);
-      expect(existsSync(path.join(scratch.path, "pglite.js"))).toBe(false);
+      expect(existsSync(path.join(scratch.path, "postgres.js"))).toBe(false);
       expect(readdirSync(scratch.path)).toEqual([]);
     } finally {
       scratch.cleanup();

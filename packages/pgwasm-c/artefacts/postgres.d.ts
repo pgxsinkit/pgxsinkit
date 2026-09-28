@@ -1,4 +1,4 @@
-// The Emscripten-generated glue for the Postgres module (pglite.js, a pinned artefact): an ES module whose
+// The Emscripten-generated glue for the Postgres module (postgres.js, a pinned artefact): an ES module whose
 // default export is the module factory.
 import type { ModuleFactory, PostgresModule } from "../src/host/emscripten";
 

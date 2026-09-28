@@ -186,7 +186,7 @@ for (const pkg of publicPackages) {
     }
 
     const artefactReferences: Record<string, number> = {
-      // pglite.wasm, pglite.data, initdb.wasm (index), prepopulated.tar.gz, amcheck.tar.gz
+      // postgres.wasm, postgres.data, initdb.wasm (index), prepopulated.tar.gz, amcheck.tar.gz
       "packages/pgwasm-c": 5,
       // pg_dump.wasm (index)
       "packages/pgwasm-pg-dump": 1,

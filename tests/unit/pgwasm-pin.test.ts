@@ -105,7 +105,7 @@ describe("pgwasm:pin", () => {
       expect(text).toContain('name: "pgwasm-postgres 18.3.7",');
     }
     expect(written.get("packages/pgwasm-pg-dump")).toContain('"pg_dump.wasm": { bytes: ');
-    expect(written.get("packages/pgwasm-pg-dump")).not.toContain("pglite.wasm");
+    expect(written.get("packages/pgwasm-pg-dump")).not.toContain("postgres.wasm");
   });
 
   it("refuses a release of another data format, naming ADR-0064's open question, and writes nothing", async () => {

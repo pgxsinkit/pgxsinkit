@@ -1,4 +1,5 @@
 import type { StorageDescription } from "@pgxsinkit/pgwasm";
+import { idbDatabaseName } from "@pgxsinkit/pgwasm-c";
 
 // Store path contract (ADR-0036). The public seams (`createSyncClient`, `createPgwasmClient`, the worker
 // attach/provision messages, the board store registry) take a `storePath` — a PLAIN path/name, never a
@@ -272,8 +273,8 @@ export function storeIdentityComponent(storePath: string): string {
  * The toolkit-owned OPFS container at the root (ADR-0049 D6). Its child namespaces (`stores`, `commitments`,
  * `probe`) are DISJOINT so two valid identities can never contend for one OPFS entry (e.g. store `"foo"`'s
  * commitment sentinel vs a store literally named `"foo.committed"`). This module is the ONLY place that knows
- * these names — the same rule that keeps {@link storeIndexedDbDatabaseName} the sole owner of the `/pglite/`
- * prefix.
+ * these names — the same rule that keeps {@link storeIndexedDbDatabaseName} the client's sole route to the
+ * IndexedDB database names.
  */
 export const OPFS_TOOLKIT_CONTAINER = "pgxsinkit";
 
@@ -316,10 +317,10 @@ export function opfsProbeDirectoryPath(): readonly [string, string] {
 /**
  * The IndexedDB database name a browser store occupies (ADR-0036) — a browser-only OPERATIONAL helper for
  * orphan GC / corrupt-store deletion (`indexedDB.deleteDatabase(...)`), NOT part of the create path. pgwasm
- * maps `idb://<storePath>` to the IndexedDB database `/pglite/<storePath>` (the IDBFS mount point: its root
- * `/pglite` joined with the path after the scheme; `@pgxsinkit/pgwasm-c`'s IndexedDB mount). Exposed so a
- * consumer that GCs its own stores routes that pgwasm-internal naming knowledge through the library rather
- * than re-deriving the `/pglite/` prefix itself. Rejects a scheme-bearing/empty path exactly as
+ * maps `idb://<storePath>` to the IndexedDB database `/pgwasm/<storePath>` (the IDBFS mount point: its root
+ * `/pgwasm` joined with the path after the scheme), and the name comes from `@pgxsinkit/pgwasm-c`'s own
+ * `idbDatabaseName`, never re-encoded here. Exposed so a consumer that GCs its own stores routes that
+ * pgwasm-internal naming knowledge through the library rather than re-deriving the prefix itself. Rejects a scheme-bearing/empty path exactly as
  * {@link resolveStoreDataDir} does, so the two stay in lockstep.
  */
 export function storeIndexedDbDatabaseName(storePath: string): string {
@@ -333,7 +334,7 @@ export function storeIndexedDbDatabaseName(storePath: string): string {
       `invalid storePath ${JSON.stringify(storePath)}: storeIndexedDbDatabaseName expects a plain name, not a storage URL (ADR-0036).`,
     );
   }
-  return `/pglite/${storePath}`;
+  return idbDatabaseName(storePath);
 }
 
 /** The provably-non-persistent storage shapes {@link classifyNonPersistentStorage} reports. */

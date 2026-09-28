@@ -29,7 +29,7 @@ function writeFile(FS: EmscriptenFS, path: string, data: Uint8Array): void {
 }
 
 /**
- * Install extension files under `/pglite` (`lib/postgresql/*.so`, `share/postgresql/extension/*`).
+ * Install extension files under `/pgwasm` (`lib/postgresql/*.so`, `share/postgresql/extension/*`).
  * Shared objects go through the runtime's preload plugin, which compiles them ahead of `dlopen`; a
  * preload that fails leaves the plain file, and `dlopen` compiles it when it is first needed.
  */

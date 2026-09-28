@@ -7,7 +7,7 @@ import {
 } from "./store-registry";
 
 // The DOM-FREE core of the board's "Delete local data" wipe. Every browser touch — localStorage, IndexedDB,
-// the registry lock, `destroyStoreArtifacts`, the `/pglite/` prefix — is INJECTED through {@link WipeSurfaces}
+// the registry lock, `destroyStoreArtifacts`, the `/pgwasm/` prefix — is INJECTED through {@link WipeSurfaces}
 // so the wipe's decision logic (which paths to destroy, what to retain, how a blocked idb delete resolves) is
 // unit-testable in bun with plain fakes and no DOM. The real globalThis / `@pgxsinkit/client` wiring lives in
 // ./local-data.ts (kept out of this module so the unit test's root typecheck never pulls DOM globals in —
@@ -62,8 +62,8 @@ export interface WipeSurfaces {
   destroyStore: (storePath: string) => Promise<void>;
   /** The registry-state seams {@link retainObsoletePaths} needs — localStorage read/write + the cross-tab lock. */
   retention: ObsoleteRetentionAdapters;
-  /** The IndexedDB database-name prefix PGlite uses for every store (`/pglite/`). */
-  pgliteIdbPrefix: string;
+  /** The IndexedDB database-name prefix pgwasm uses for every store (`/pgwasm/`). */
+  pgwasmIdbPrefix: string;
 }
 
 /** The outer clamp for a per-store full destruction ({@link destroyKnownStores}). The wipe now QUIESCES the
@@ -162,8 +162,8 @@ function deleteIdbDatabase(
   });
 }
 
-/** Delete every board PGlite IndexedDB store. Enumerates `databases()` and deletes each name under the
- * `/pglite/` prefix; where enumeration is unavailable, falls back to the db names derivable from the board's
+/** Delete every board pgwasm IndexedDB store. Enumerates `databases()` and deletes each name under the
+ * `/pgwasm/` prefix; where enumeration is unavailable, falls back to the db names derivable from the board's
  * known store bindings. */
 async function deleteIndexedDbStores(surfaces: WipeSurfaces): Promise<DeletionResult[]> {
   const factory = surfaces.indexedDb;
@@ -173,7 +173,7 @@ async function deleteIndexedDbStores(surfaces: WipeSurfaces): Promise<DeletionRe
       const infos = await factory.databases();
       names = infos
         .map((info) => info.name)
-        .filter((name): name is string => typeof name === "string" && name.startsWith(surfaces.pgliteIdbPrefix));
+        .filter((name): name is string => typeof name === "string" && name.startsWith(surfaces.pgwasmIdbPrefix));
     } catch (cause) {
       return [
         {

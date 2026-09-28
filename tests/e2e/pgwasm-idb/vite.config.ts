@@ -60,15 +60,15 @@ function continuityBuilds(): Plugin {
         }
         const file = (name: string, query = "") => JSON.stringify(`${path.join(dir, name)}${query}`);
         imports.push(
-          `import createPostgresModule${index} from ${file("pglite.js")};`,
+          `import createPostgresModule${index} from ${file("postgres.js")};`,
           `import createInitdbModule${index} from ${file("initdb.js")};`,
-          `import postgresWasm${index} from ${file("pglite.wasm", "?url")};`,
+          `import postgresWasm${index} from ${file("postgres.wasm", "?url")};`,
           `import initdbWasm${index} from ${file("initdb.wasm", "?url")};`,
-          `import fsBundle${index} from ${file("pglite.data", "?url")};`,
+          `import fsBundle${index} from ${file("postgres.data", "?url")};`,
         );
         entries.push(
           `{ tag: ${JSON.stringify(build.tag)}, dataFormat: ${build.dataFormat}, ` +
-            `fsBundleBytes: ${build.files["pglite.data"].bytes}, ` +
+            `fsBundleBytes: ${build.files["postgres.data"].bytes}, ` +
             `createPostgresModule: createPostgresModule${index}, createInitdbModule: createInitdbModule${index}, ` +
             `postgresWasm: postgresWasm${index}, initdbWasm: initdbWasm${index}, fsBundle: fsBundle${index} }`,
         );

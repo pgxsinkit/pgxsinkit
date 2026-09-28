@@ -258,7 +258,7 @@ from the production API (durability semantics assume a persisted store): tests s
 `memoryStoreForTests("name")` from `@pgxsinkit/client/testing`, and a caller-owned
 `pgwasmInstance`/`precreatedPgwasm` that is provably non-persistent (memory, or a filesystem declaring `persistent: false`) is
 refused with `NonPersistentStoreError` unless `testStoreAcknowledgment()` is spread alongside. For browser
-store GC, get the IndexedDB name from `storeIndexedDbDatabaseName(storePath)`, never assemble `/pglite/…`.
+store GC, get the IndexedDB name from `storeIndexedDbDatabaseName(storePath)`, never assemble `/pgwasm/…`.
 
 **Relaxed durability is the default**, declared once on the registry
 (`SyncRegistryDefinition.storage.durability`) — never on a minting surface, worker entry or attach site,

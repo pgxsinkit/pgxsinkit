@@ -97,7 +97,7 @@ function shadowStackOf(instance: WebAssembly.Instance): ShadowStack {
 }
 
 export interface PostgresInstanceConfig {
-  /** The Postgres glue (`pglite.js`) and the size of the filesystem bundle it was packaged with. */
+  /** The Postgres glue (`postgres.js`) and the size of the filesystem bundle it was packaged with. */
   readonly glue: Pick<CBuildArtefactSet, "createPostgresModule" | "fsBundleBytes">;
   readonly wasmModule: Promise<WebAssembly.Module>;
   /** The filesystem bundle, a copy of its own for this instance. */
@@ -228,7 +228,7 @@ export class PostgresInstance {
         return {};
       },
       getPreloadedPackage: (name, size) => {
-        if (name !== "pglite.data") throw new Error(`Unknown filesystem package: ${name}`);
+        if (name !== "postgres.data") throw new Error(`Unknown filesystem package: ${name}`);
         if (fsBundle.byteLength !== size) {
           // Unreachable while the glue and the pins agree; if they ever do not, fail the boot with this error.
           const error = invalidBundleSize(fsBundle.byteLength, size);

@@ -8,16 +8,17 @@ import { PG_ROOT, PGDATA } from "../paths";
 import type { StorageMount } from "./storage-mount";
 
 /**
- * The IndexedDB database behind `idb://<name>`. IDBFS names the database after its mount point, so this
- * is both. It is the identity of every existing store: never change it.
+ * The IndexedDB database behind `idb://<name>`: `/pgwasm/<name>`. IDBFS names the database after its
+ * mount point, so this is both. It is a store's identity: a change to it (as the root rename in 18.6.2)
+ * opens a new, empty store and leaves the old database behind, never deleted here.
  */
 export function idbDatabaseName(name: string): string {
   return `${PG_ROOT}/${name}`;
 }
 
-/** The Web Lock that guards `idb://<name>` against a second open. The identity of existing stores too. */
+/** The Web Lock that guards `idb://<name>` against a second open: `pgwasm-idbfs:/pgwasm/<name>`. */
 export function idbLockName(name: string): string {
-  return `pglite-idbfs:${idbDatabaseName(name)}`;
+  return `pgwasm-idbfs:${idbDatabaseName(name)}`;
 }
 
 /** The slice of the Web Locks API this mount uses. */
@@ -31,11 +32,10 @@ interface LockManagerLike {
 
 /**
  * The data directory in IndexedDB, through Emscripten's IDBFS: the whole directory lives in memory and
- * is synced to an IndexedDB database named after its mount point, `/pglite/<name>`.
+ * is synced to an IndexedDB database named after its mount point, `/pgwasm/<name>`.
  *
- * One open per database: a Web Lock with the same name as the database's mount guards it, so a second
- * open fails with {@link StorageInUseError}. Both names are the identities of existing stores and stay as
- * they are.
+ * One open per database: a Web Lock named after the database guards it, so a second open fails with
+ * {@link StorageInUseError}. Both names come from {@link idbDatabaseName} and {@link idbLockName} only.
  *
  * Deliberately no exclusive persist: a relaxed persist is a background snapshot that statements run
  * beside (measured: an exclusive lane made relaxed as slow as strict, ~80 ms per statement). A crash

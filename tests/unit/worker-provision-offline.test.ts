@@ -164,8 +164,8 @@ class FakeMetaDatabase {
 
 class FakeAuthorityIdb {
   readonly store: FakeMetaStore;
-  /** pgwasm's own idb databases (`/pglite/<storePath>`) this scope already holds — the `idbStoreExists` fact. */
-  readonly pgliteDatabases = new Set<string>();
+  /** pgwasm's own idb databases (`/pgwasm/<storePath>`) this scope already holds — the `idbStoreExists` fact. */
+  readonly pgwasmDatabases = new Set<string>();
   private readonly database: FakeMetaDatabase;
   private readonly order: string[];
   constructor(order: string[]) {
@@ -176,7 +176,7 @@ class FakeAuthorityIdb {
 
   /** Seed pgwasm's idb database for a store, as a store minted on the idb backend leaves it. */
   seedPgliteDb(storePath: string): void {
-    this.pgliteDatabases.add(storeIndexedDbDatabaseName(storePath));
+    this.pgwasmDatabases.add(storeIndexedDbDatabaseName(storePath));
   }
 
   open(name?: string) {
@@ -190,7 +190,7 @@ class FakeAuthorityIdb {
     };
     // The meta database is opened WITH a version and is always present here; any other name is pgwasm's own
     // store database, opened version-less by the non-creating existence check (`idbStoreExists`).
-    if (name !== undefined && name !== STORE_META_DATABASE && !this.pgliteDatabases.has(name)) {
+    if (name !== undefined && name !== STORE_META_DATABASE && !this.pgwasmDatabases.has(name)) {
       const transaction = { abort: () => undefined };
       request.transaction = transaction;
       queueMicrotask(() => {

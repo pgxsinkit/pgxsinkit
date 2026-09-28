@@ -361,7 +361,7 @@ async function assertArtefactsFingerprinted(appDir: string): Promise<void> {
     emitted.set(new Bun.CryptoHasher("sha256").update(bytes).digest("hex"), name);
   }
   const byUrl = [
-    ...(["pglite.wasm", "pglite.data", "initdb.wasm", "amcheck.tar.gz", "prepopulated.tar.gz"] as const).map(
+    ...(["postgres.wasm", "postgres.data", "initdb.wasm", "amcheck.tar.gz", "prepopulated.tar.gz"] as const).map(
       (name) => [name, C_BUILD_ARTEFACTS[name].sha256] as const,
     ),
     ["pg_dump.wasm", PG_DUMP_ARTEFACTS["pg_dump.wasm"].sha256] as const,

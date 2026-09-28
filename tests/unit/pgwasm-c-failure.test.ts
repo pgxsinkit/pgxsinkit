@@ -94,6 +94,6 @@ describe("a filesystem bundle of the wrong size", () => {
   it("fails the boot with the size mismatch before the glue runs", async () => {
     const build = createCBuild({ fsBundle: new Blob([new Uint8Array(1)]) });
     const error = await rejectionOf(createPgwasm({ build }));
-    expect(error.message).toBe(`Invalid filesystem bundle size: 1 !== ${ARTEFACT_FILES["pglite.data"].bytes}`);
+    expect(error.message).toBe(`Invalid filesystem bundle size: 1 !== ${ARTEFACT_FILES["postgres.data"].bytes}`);
   });
 });

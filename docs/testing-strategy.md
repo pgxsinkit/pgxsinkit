@@ -238,13 +238,13 @@ their own. Where the code came from, file by file, is in
   (never backfilled) is asserted, and so is a non-claiming build's refusal of it. The earlier build boots
   through pgwasm-c's internal `createCBuildFrom` (the factory `createCBuild` uses; not exported), on the
   current host. The first entry is pgwasm-postgres 18.6.0 (pgxsinkit 0.4.1), built with Emscripten 3.1.74
-  like the PGlite 0.5.8 wasm pgxsinkit ≤0.3.x shipped; 18.6.1 moved to Emscripten 6.0.10. PGlite 0.5.8's
-  own glue is not booted (its host ABI is not pgwasm-c's); what makes its stores reachable is checked in
-  the source instead: the `@pgxsinkit/pglite` fork's IDB mount (`packages/pglite/src/fs/idbfs.ts`) mounts
-  IDBFS at `/pglite/<name>` for `idb://<name>` and symlinks `/pglite/data` to it, and guards it with the
-  Web Lock `pglite-idbfs:/pglite/<name>`, exactly as `idbDatabaseName` and `idbLockName` do, so the
-  IndexedDB database (IDBFS names it after the mount point) and its `FILE_DATA` keys are the same. Adding
-  a build is one entry in the pins list.
+  like the PGlite 0.5.8 wasm pgxsinkit ≤0.3.x shipped; 18.6.1 moved to Emscripten 6.0.10. The list is
+  **empty since 18.6.2**: that release renamed the filesystem root to `/pgwasm`, so `idbDatabaseName`
+  is `/pgwasm/<name>` and `idbLockName` `pgwasm-idbfs:/pgwasm/<name>`, and no earlier build's
+  IndexedDB store (under the old root's names, as PGlite's own) opens under the current one, by design
+  (the maintainer's decision for that release: local stores are refreshed, with no migration). The
+  machinery stays; 18.6.2 becomes the first entry when a later release is pinned. Adding a build is one
+  entry in the pins list.
 - **Packed install** (`bun run fixture:smoke`): the fixture installs the packed packages, boots pgwasm
   on the C build from the install (live, amcheck, Drizzle, `/protocol`, a Store backup restored, the
   `opfs-ahp://` refusal, a database from the prepopulated entry dumped with pg_dump, the REPL rendered
@@ -408,7 +408,7 @@ Both build packages pin release `18.6.1`: the same `REL_18_6` sources as `18.6.0
 (ADR-0064 decision 7). The data format (1) and compatibility tuple are unchanged, and `version()` reads
 `PostgreSQL 18.6 (pgwasm-postgres 18.6.1) on wasm32-unknown-emscripten, …`. Drift the lanes record:
 
-- **A wrong-size filesystem bundle failed late.** Emscripten 6's file packager loads `pglite.data` in an
+- **A wrong-size filesystem bundle failed late.** Emscripten 6's file packager loads `postgres.data` in an
   async function it never awaits, so a throw from `getPreloadedPackage` became an unhandled rejection and
   the boot failed later, on a missing bundle file, with an Emscripten `ErrnoError` (the IDB lane's
   failed-boot test saw `[object Object]` on Chromium and WebKit). The host now checks the bundle against
@@ -417,7 +417,7 @@ Both build packages pin release `18.6.1`: the same `REL_18_6` sources as `18.6.0
 - **An escaped longjmp throws an `EmscriptenSjLj` instance**, not a number. `isEmscriptenUnwind` recognises
   both (`pgwasm-c-unwind`, which also asserts the class in the pinned glue).
 - **preRun callbacks run in the order listed** (3.1.74 reversed them). The build's pre-js still loads
-  `pglite.data` first, and the host's callbacks touch disjoint state, so boot behaviour is unchanged.
+  `postgres.data` first, and the host's callbacks touch disjoint state, so boot behaviour is unchanged.
 - **IndexedDB stores keep their format.** IDBFS still uses database version 21 and
   `{timestamp, mode, contents}` records, and now `lstat()`s. The IDB lane (Chromium and WebKit) creates,
   reloads and reopens stores on `18.6.1`; it does not open a store an earlier release wrote, so continuity
@@ -427,6 +427,22 @@ Both build packages pin release `18.6.1`: the same `REL_18_6` sources as `18.6.0
 - **The glue imports `node:` specifiers** (`import("node:module")`, `require("node:fs")`), behind its
   Node check. Vite externalizes them for the browser with its usual notice; the board, the docs site and
   the Playwright lanes build and run.
+
+Both build packages pin release `18.6.2`: the same sources, toolchain, data format (1), tuple, export list
+and pg_regress results as `18.6.1`; the postgres.c patch now leaves upstream's main loop in place (its
+compiled code is token-identical but for two functions in another order and two new declarations). What
+the host sees:
+
+- **The artefacts are renamed** `postgres.js`, `postgres.wasm` and `postgres.data` (were `pglite.*`), and
+  the glue asks `getPreloadedPackage` for `postgres.data`.
+- **The filesystem root and install prefix are `/pgwasm`**, compiled in (`/pgwasm/data`, `/pgwasm/icu`,
+  `/pgwasm/bin/*`, `/pgwasm/lib/postgresql`, `/pgwasm/share/postgresql`), so `initdb.wasm` and
+  `pg_dump.wasm` changed bytes, not names. `PG_ROOT` follows, and with it the IndexedDB database
+  (`/pgwasm/<name>`) and the Web Lock (`pgwasm-idbfs:/pgwasm/<name>`): an `idb://` store an earlier
+  release or PGlite wrote is not opened, by design, and no library code deletes the old `/pglite/*`
+  databases (another app on the origin may own them). The IDB lane's continuity list is emptied for it.
+  OPFS-repacked and `file://` stores address files relative to the mount and are unaffected; a
+  `dumpDataDir()` backup names its members relative to the data directory and restores across.
 
 ## Offline return (board ADR-0010)
 

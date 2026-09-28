@@ -130,7 +130,7 @@ export interface EmscriptenModuleBase {
   _pgl_freopen(path: number, mode: number, stream: number): number;
 }
 
-/** The Postgres module (`pglite.js`). */
+/** The Postgres module (`postgres.js`). */
 export interface PostgresModule extends EmscriptenModuleBase {
   readonly PROXYFS: EmscriptenFilesystemType;
   _pgl_set_rw_cbs(readCallback: number, writeCallback: number): void;

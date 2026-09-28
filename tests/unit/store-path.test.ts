@@ -65,8 +65,8 @@ describe("resolveStoreDataDir — scheme rejection (ADR-0036 decision 1)", () =>
 });
 
 describe("storeIndexedDbDatabaseName — browser-only operational helper (ADR-0036)", () => {
-  it("maps a store path to PGlite's IndexedDB database name", () => {
-    expect(storeIndexedDbDatabaseName("pgxsinkit-board-abc")).toBe("/pglite/pgxsinkit-board-abc");
+  it("maps a store path to pgwasm's IndexedDB database name", () => {
+    expect(storeIndexedDbDatabaseName("pgxsinkit-board-abc")).toBe("/pgwasm/pgxsinkit-board-abc");
   });
 
   it("rejects a scheme-bearing/empty path exactly as resolveStoreDataDir does", () => {

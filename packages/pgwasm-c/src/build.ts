@@ -236,7 +236,8 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
  * @internal A C build on the given artefacts, recording the given identity: what {@link createCBuild}
  * builds on the pinned release's. Not exported from the package; the IndexedDB browser lane reaches it
  * from source to boot an earlier release's glue and files, so the stores that release wrote can be opened
- * by the current build (tests/e2e/pgwasm-idb/continuity-builds.ts).
+ * by the current build (tests/e2e/pgwasm-idb/continuity-builds.ts). That list starts empty at 18.6.2: its
+ * filesystem root changed, so no earlier release's stores open under it; 18.6.2 is the first entry.
  */
 export function createCBuildFrom(
   identity: BuildIdentity,

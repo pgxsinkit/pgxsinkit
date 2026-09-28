@@ -496,7 +496,7 @@ describe("no-grant boot over an opfs-committed store — typed refusal, never an
     expect((refusal as CommittedStoreUnreachableError).storePath).toBe(storePath);
     // The remedy must name a CALLABLE api — the caller's boot just failed, so they hold no client to `destroy()`.
     expect((refusal as Error).message).toContain(`destroyStoreArtifacts(${JSON.stringify(storePath)})`);
-    // No sibling was minted (pgwasm's `/pglite/<path>` database was never opened) and the record is untouched.
+    // No sibling was minted (pgwasm's `/pgwasm/<path>` database was never opened) and the record is untouched.
     expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
     expect(metaPhase(metaIdb, storePath)).toBe("opfs-committed");
     expect(log.filter((entry) => entry.startsWith("record:"))).toEqual([]);

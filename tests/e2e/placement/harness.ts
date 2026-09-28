@@ -904,7 +904,7 @@ const harness: PlacementHarness = {
           resolve();
         }
       });
-    await deleteDb(`/pglite/${storePath}`);
+    await deleteDb(`/pgwasm/${storePath}`);
     try {
       const root = await navigator.storage?.getDirectory?.();
       const container = await root?.getDirectoryHandle("pgxsinkit").catch(() => undefined);

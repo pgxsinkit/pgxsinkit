@@ -27,8 +27,8 @@ The artefacts, and what is compiled into them
 `artefacts/` holds seven files: the assets of the pgwasm-postgres release 18.6.1
 (https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.6.1), republished byte-identical (each file's size and sha256 are pinned in
 `src/artefact-pins.ts`, from the release's manifest.json checked against its
-SHA256SUMS): `pglite.wasm` (the Postgres server), `pglite.data` (its filesystem
-bundle: share files, loadable modules, time zone data, ICU data), `pglite.js` and
+SHA256SUMS): `postgres.wasm` (the Postgres server), `postgres.data` (its filesystem
+bundle: share files, loadable modules, time zone data, ICU data), `postgres.js` and
 `initdb.js` (Emscripten-generated JavaScript), `initdb.wasm` (initdb),
 `amcheck.tar.gz` (the amcheck extension) and `prepopulated.tar.gz` (a data directory
 the release's own initdb created, so it holds only what PostgreSQL itself wrote).
@@ -53,7 +53,7 @@ The components below, and their versions, come from:
   - the builder recipe: Emscripten 6.0.10, zlib 1.3.2, libxml2 2.15.4, ICU 76.1. The
     binaries confirm Emscripten 6.0.10 (in the server's version string) and ICU 76
     (its data package, icudt76l);
-  - the files of pglite.data (dict_snowball.so, the time zone data, the ICU data and
+  - the files of postgres.data (dict_snowball.so, the time zone data, the ICU data and
     its LICENSE).
 
 Not included: OpenSSL (--with-openssl=no), LLVM (--without-llvm), libxslt and OSSP
@@ -64,7 +64,7 @@ libraries are in it.
 Each component's notice follows, copied from the file named with it.
 
 ------------------------------------------------------------------------------
-PostgreSQL 18.6, with changes derived from ElectricSQL's for PGlite (pglite.wasm, initdb.wasm, pglite.data, amcheck.tar.gz)
+PostgreSQL 18.6, with changes derived from ElectricSQL's for PGlite (postgres.wasm, initdb.wasm, postgres.data, amcheck.tar.gz)
 ------------------------------------------------------------------------------
 
 Source: https://github.com/electric-sql/postgres-pglite at b133782cd759f08b3aeb263b80a963b39c7b7af1,
@@ -94,7 +94,7 @@ file COPYRIGHT. ElectricSQL's changes in that tree are distributed under the sam
     ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
     PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
 
-PostgreSQL's regular expression engine (compiled into pglite.wasm) carries its own
+PostgreSQL's regular expression engine (compiled into postgres.wasm) carries its own
 notice. Source: the same tree, src/backend/regex/COPYRIGHT.
 
     This regular expression package was originally developed by Henry Spencer.
@@ -812,11 +812,11 @@ lacks the function; all are listed. Each is reproduced from the same tree:
      * SUCH DAMAGE.
      */
 
-The time zone data in pglite.data (IANA tzdata 2025c, from src/timezone/data/tzdata.zi)
+The time zone data in postgres.data (IANA tzdata 2025c, from src/timezone/data/tzdata.zi)
 is in the public domain, as that file states.
 
 ------------------------------------------------------------------------------
-Snowball (dict_snowball.so and its stopword files, in pglite.data)
+Snowball (dict_snowball.so and its stopword files, in postgres.data)
 ------------------------------------------------------------------------------
 
 PostgreSQL's snowball module is synced with Snowball commit
@@ -854,11 +854,11 @@ Source: https://raw.githubusercontent.com/snowballstem/snowball/d19326ac6c1b9a41
     SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ------------------------------------------------------------------------------
-ICU 76.1 (pglite.wasm, initdb.wasm, and its data in pglite.data)
+ICU 76.1 (postgres.wasm, initdb.wasm, and its data in postgres.data)
 ------------------------------------------------------------------------------
 
 Source: https://raw.githubusercontent.com/unicode-org/icu/release-76-1/LICENSE
-The same file travels inside pglite.data at /pglite/icu/LICENSE (byte-identical).
+The same file travels inside postgres.data at /pgwasm/icu/LICENSE (byte-identical).
 PostgreSQL's own Unicode tables are generated from the Unicode Character Database,
 whose terms are the Unicode License v3 at the start of this file.
 
@@ -1406,7 +1406,7 @@ whose terms are the Unicode License v3 at the start of this file.
     without express or implied warranty.
 
 ------------------------------------------------------------------------------
-libxml2 2.15.4 (pglite.wasm)
+libxml2 2.15.4 (postgres.wasm)
 ------------------------------------------------------------------------------
 
 Source: https://gitlab.gnome.org/GNOME/libxml2/-/raw/v2.15.4/Copyright
@@ -1437,7 +1437,7 @@ Source: https://gitlab.gnome.org/GNOME/libxml2/-/raw/v2.15.4/Copyright
     THE SOFTWARE.
 
 ------------------------------------------------------------------------------
-zlib 1.3.2 (pglite.wasm)
+zlib 1.3.2 (postgres.wasm)
 ------------------------------------------------------------------------------
 
 Source: https://raw.githubusercontent.com/madler/zlib/v1.3.2/LICENSE
@@ -1466,7 +1466,7 @@ Source: https://raw.githubusercontent.com/madler/zlib/v1.3.2/LICENSE
       jloup@gzip.org          madler@alumni.caltech.edu
 
 ------------------------------------------------------------------------------
-Emscripten 6.0.10 (the runtime in pglite.js and initdb.js, and its system libraries in pglite.wasm and initdb.wasm)
+Emscripten 6.0.10 (the runtime in postgres.js and initdb.js, and its system libraries in postgres.wasm and initdb.wasm)
 ------------------------------------------------------------------------------
 
 Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/LICENSE
@@ -1574,7 +1574,7 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/LICE
     flag will run closure compiler from third_party/).
 
 ------------------------------------------------------------------------------
-musl libc, as bundled in Emscripten 6.0.10 (pglite.wasm, initdb.wasm)
+musl libc, as bundled in Emscripten 6.0.10 (postgres.wasm, initdb.wasm)
 ------------------------------------------------------------------------------
 
 Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libc/musl/COPYRIGHT
@@ -1774,7 +1774,7 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/syst
     obstacle to adoption, that text has been removed.
 
 ------------------------------------------------------------------------------
-LLVM runtime libraries, as bundled in Emscripten 6.0.10 (compiler-rt, libc++, libc++abi; pglite.wasm, initdb.wasm)
+LLVM runtime libraries, as bundled in Emscripten 6.0.10 (compiler-rt, libc++, libc++abi; postgres.wasm, initdb.wasm)
 ------------------------------------------------------------------------------
 
 These are under the Apache License v2.0 with LLVM Exceptions. Their object code is

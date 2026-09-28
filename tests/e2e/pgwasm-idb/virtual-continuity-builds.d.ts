@@ -6,7 +6,7 @@ declare module "virtual:pgwasm-continuity-builds" {
     readonly dataFormat: number;
     /** The size of the filesystem bundle its Postgres glue was packaged with. */
     readonly fsBundleBytes: number;
-    /** The default exports of its `pglite.js` and `initdb.js`: Emscripten module factories. */
+    /** The default exports of its `postgres.js` and `initdb.js`: Emscripten module factories. */
     readonly createPostgresModule: unknown;
     readonly createInitdbModule: unknown;
     readonly postgresWasm: string;

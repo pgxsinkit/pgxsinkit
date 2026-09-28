@@ -82,7 +82,7 @@ function makeSurfaces(options: {
       options.destroyed?.push(storePath);
     },
     retention: options.backing.retention,
-    pgliteIdbPrefix: "/pglite/",
+    pgwasmIdbPrefix: "/pgwasm/",
   };
 }
 
@@ -94,7 +94,7 @@ describe("deleteAllLocalBoardData — partial failure retains, full success remo
     const destroyed: string[] = [];
     const surfaces = makeSurfaces({
       backing,
-      idb: makeIdbFactory([`/pglite/${heldPath}`, `/pglite/${freePath}`]),
+      idb: makeIdbFactory([`/pgwasm/${heldPath}`, `/pgwasm/${freePath}`]),
       rejectDestroy: [heldPath],
       destroyed,
     });
@@ -125,7 +125,7 @@ describe("deleteAllLocalBoardData — partial failure retains, full success remo
     const destroyed: string[] = [];
     const surfaces = makeSurfaces({
       backing,
-      idb: makeIdbFactory([`/pglite/${aPath}`, `/pglite/${sPath}`]),
+      idb: makeIdbFactory([`/pgwasm/${aPath}`, `/pgwasm/${sPath}`]),
       destroyed,
     });
 
@@ -139,7 +139,7 @@ describe("deleteAllLocalBoardData — partial failure retains, full success remo
   it("DEFECT B: a BLOCKED idb delete is non-terminal — it resolves ok once the queued delete lands", async () => {
     // No registry-known stores (empty map) so the outcome hinges solely on the idb prefix sweep, whose one db
     // fires `onblocked` first and then completes — the reported result must be a success, never a blocked failure.
-    const strayName = `/pglite/${storePathForStore("stray")}`;
+    const strayName = `/pgwasm/${storePathForStore("stray")}`;
     const backing = makeRegistryBacking({ version: 1, map: {} });
     const surfaces = makeSurfaces({
       backing,
@@ -163,7 +163,7 @@ describe("deleteAllLocalBoardData — partial failure retains, full success remo
     const backing = makeRegistryBacking({ version: 1, map: { "user-1": "held" } });
     const surfaces: WipeSurfaces = {
       localStorage: backing.localStorage,
-      indexedDb: makeIdbFactory([`/pglite/${heldPath}`]),
+      indexedDb: makeIdbFactory([`/pgwasm/${heldPath}`]),
       destroyStore: (storePath) =>
         quiesceThenDestroyStoreWith(
           {
@@ -179,7 +179,7 @@ describe("deleteAllLocalBoardData — partial failure retains, full success remo
           { diagnostic: true },
         ),
       retention: backing.retention,
-      pgliteIdbPrefix: "/pglite/",
+      pgwasmIdbPrefix: "/pgwasm/",
     };
 
     const outcome = await deleteAllLocalBoardDataWith(surfaces);

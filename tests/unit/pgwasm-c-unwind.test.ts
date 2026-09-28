@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { isEmscriptenUnwind } from "../../packages/pgwasm-c/src/host/postgres-instance";
 
-// The glue's own shapes (pglite.js): `class EmscriptenEH{}` and `class EmscriptenSjLj extends EmscriptenEH{}`,
+// The glue's own shapes (postgres.js): `class EmscriptenEH{}` and `class EmscriptenSjLj extends EmscriptenEH{}`,
 // neither exported, so the test declares classes of the same names.
 class EmscriptenEH {}
 class EmscriptenSjLj extends EmscriptenEH {}
@@ -20,7 +20,7 @@ class ExitStatus {
   }
 }
 
-const GLUE = path.join(import.meta.dir, "../../packages/pgwasm-c/artefacts/pglite.js");
+const GLUE = path.join(import.meta.dir, "../../packages/pgwasm-c/artefacts/postgres.js");
 
 describe("isEmscriptenUnwind", () => {
   it("recognises the 'unwind' an intercepted siglongjmp and a Terminate throw", () => {

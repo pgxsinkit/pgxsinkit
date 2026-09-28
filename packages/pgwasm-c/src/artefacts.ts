@@ -9,15 +9,15 @@
  */
 
 import createInitdbModule from "../artefacts/initdb.js";
-import createPostgresModule from "../artefacts/pglite.js";
+import createPostgresModule from "../artefacts/postgres.js";
 import { ARTEFACT_FILES } from "./artefact-pins";
 
 /** The URLs of the files the C build loads, for fetching and compiling them ahead of a boot. */
 export const cBuildArtefacts = {
   /** The Postgres WebAssembly module. */
-  postgresWasm: new URL("../artefacts/pglite.wasm", import.meta.url),
+  postgresWasm: new URL("../artefacts/postgres.wasm", import.meta.url),
   /** The filesystem bundle (share/, lib/, the ICU data) the Postgres module mounts. */
-  fsBundle: new URL("../artefacts/pglite.data", import.meta.url),
+  fsBundle: new URL("../artefacts/postgres.data", import.meta.url),
   /** The initdb WebAssembly module, used when a data directory is created. */
   initdbWasm: new URL("../artefacts/initdb.wasm", import.meta.url),
 } as const;
@@ -42,5 +42,5 @@ export const pinnedCBuildArtefacts: CBuildArtefactSet = {
   createPostgresModule,
   createInitdbModule,
   ...cBuildArtefacts,
-  fsBundleBytes: ARTEFACT_FILES["pglite.data"].bytes,
+  fsBundleBytes: ARTEFACT_FILES["postgres.data"].bytes,
 };

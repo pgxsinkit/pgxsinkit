@@ -438,27 +438,27 @@ async function applyStoragePreferences(
   await expect(page.getByRole("heading", { name: "Sign in to the board" })).toBeVisible();
 }
 
-/** The `/pglite/*` IndexedDB database names present now (the board's pgwasm stores live under this prefix). */
-function pgliteDbNames(page: Page): Promise<string[]> {
+/** The `/pgwasm/*` IndexedDB database names present now (the board's pgwasm stores live under this prefix). */
+function pgwasmDbNames(page: Page): Promise<string[]> {
   return page.evaluate(async () => {
     const infos = await indexedDB.databases();
     return infos
       .map((info) => info.name)
-      .filter((name): name is string => typeof name === "string" && name.startsWith("/pglite/"));
+      .filter((name): name is string => typeof name === "string" && name.startsWith("/pgwasm/"));
   });
 }
 
 test("(H) idbfs + strict: Delete local data converges via retained obsolete stores across reloads", async ({
   browser,
 }) => {
-  // The exact user-reported repro. Forcing idbfs pins the engine to IndexedDB (so the store IS a `/pglite/*`
+  // The exact user-reported repro. Forcing idbfs pins the engine to IndexedDB (so the store IS a `/pgwasm/*`
   // db) and strict durability is the demo's slow combination; sign in to materialise the store, then wipe. The
   // signed-in store's SharedWorker is `extendedLifetime` and SURVIVES the wipe reload, so its idb delete first
   // BLOCKS — the wipe must report it as retained-for-retry (NOT strand it by clearing the registry) and the
   // boot-time `destroyObsoleteStores` must drain it on a later boot once the worker's grace period elapses.
   // Convergence here means the RETAINED old stores are gone: the pre-wipe idbfs databases no longer exist AND
   // the registry lists no remaining obsolete paths. (A fresh spare the post-wipe login screen mints is a new,
-  // legitimate `/pglite/*` db and is deliberately NOT part of this assertion — see the note below.)
+  // legitimate `/pgwasm/*` db and is deliberately NOT part of this assertion — see the note below.)
   test.setTimeout(180_000);
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
@@ -467,9 +467,9 @@ test("(H) idbfs + strict: Delete local data converges via retained obsolete stor
     await applyStoragePreferences(page, "idbfs", "strict");
 
     await signIn(page, ALICE);
-    // The idbfs store now exists as a `/pglite/*` IndexedDB database — capture the pre-wipe set so convergence
+    // The idbfs store now exists as a `/pgwasm/*` IndexedDB database — capture the pre-wipe set so convergence
     // can prove exactly these retained stores are destroyed (independent of any fresh spare minted afterwards).
-    const preWipeDbs = await pgliteDbNames(page);
+    const preWipeDbs = await pgwasmDbNames(page);
     expect(preWipeDbs.length).toBeGreaterThan(0);
 
     // Sign out (the store's extendedLifetime worker keeps holding it), then run the wipe-on-boot flow.

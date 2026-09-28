@@ -1,7 +1,7 @@
 /**
  * The words of a command line initdb hands to `system()` / `popen()`, up to the first shell operator.
  *
- * initdb runs its backend through a shell command (`"/pglite/bin/postgres" --boot -X 1048576 …`, or
+ * initdb runs its backend through a shell command (`"/pgwasm/bin/postgres" --boot -X 1048576 …`, or
  * `… template1 >"/dev/null"`); the host runs that backend itself, so it needs the argument words, not a
  * shell. Quoting is honoured (`'…'`, `"…"` with `\` escaping `"`, `\`, `$` and backtick, and a bare
  * `\`); the first redirection or control operator (`< > | & ; ( )`) ends the words, as a shell would

@@ -161,8 +161,8 @@ describe("board spare-store registry", () => {
       idbNameForStore("spare-1"), // spare → keep
       idbNameForStore("orphan"), // unbound board store → delete
       idbNameForStore("unmapped-user-uuid"), // unmapped board store → delete
-      "/pglite/some-other-app", // different prefix → ignore
-      "unrelated-database", // not a pglite store → ignore
+      "/pgwasm/some-other-app", // different prefix → ignore
+      "unrelated-database", // not a pgwasm store → ignore
     ];
     const harness = makeHarness({
       initial: { version: 1, map: { "user-1": "store-1" }, spare: "spare-1" },

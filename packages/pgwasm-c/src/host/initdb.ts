@@ -40,7 +40,7 @@ function assert(condition: unknown, message: string): asserts condition {
  * Run initdb against a scratch Postgres instance. initdb is its own wasm module; the backend commands it
  * shells out to (`postgres --boot`, `postgres --single`) are run on the scratch instance, whose heap is
  * reset to its pristine state before each. initdb sees the instance's filesystem through PROXYFS, so the
- * cluster it creates lands in the instance's `/pglite/data`.
+ * cluster it creates lands in the instance's `/pgwasm/data`.
  */
 export async function runInitdb({
   createInitdbModule,
@@ -112,7 +112,7 @@ export async function runInitdb({
         return {};
       },
       // Run in the order listed, after the filesystem bundle loads (see PostgresInstance.create): the
-      // environment, then the runtime callbacks, then the PROXYFS mount of the backend's /pglite.
+      // environment, then the runtime callbacks, then the PROXYFS mount of the backend's /pgwasm.
       preRun: [
         (module) => {
           const env = module.ENV;

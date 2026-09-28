@@ -106,18 +106,33 @@ worker) fails with `StorageInUseError`.
 
 ## Existing data
 
-**PGlite 0.5.x data directories open unchanged.** PGlite 0.5 runs PostgreSQL 18.3; the C build runs a later
-PostgreSQL 18 release, which reads the same data directory. An `idb://<name>` store opens under the same
-name, because pgwasm names its IndexedDB database the way PGlite does, and a directory on disk opens as
-`file://<path>`. A store PGlite wrote carries no build record, and the C build claims such stores (see
-[A store belongs to its build](/concepts/postgres-builds/#a-store-belongs-to-its-build)). pgxsinkit's browser
-tests create IndexedDB stores with an earlier C build compiled with Emscripten 3.1.74, the toolchain of
-PGlite 0.5.8, and open, read and write them with the current build in Chromium and WebKit.
+**IndexedDB stores are not carried over.** pgwasm names the IndexedDB database behind `idb://<name>`
+`/pgwasm/<name>`. PGlite and earlier pgxsinkit releases named it `/pglite/<name>`, so the same
+`idb://<name>` now opens a new, empty store, and the old database is not read. pgxsinkit's local sync stores
+are re-synced from the server. Data held only in the old store is not: writes that had not synced when the
+app upgraded stay behind in the old database. Let pending writes flush before upgrading, or take a
+`dumpDataDir()` backup. OPFS-repacked stores and `file://` directories are not named this way and open
+unchanged.
 
-<Aside type="tip" title="Keep a copy">
-  Take a `dumpDataDir()` backup with PGlite before the first open with pgwasm, so the data can be restored whatever
-  happens.
-</Aside>
+**A backup carries a database across.** Take a `dumpDataDir()` backup with the old version and pass it as
+`loadDataDir` when creating the pgwasm database: the data directory format is unchanged. A PGlite 0.5
+backup restores too: PGlite 0.5 runs PostgreSQL 18.3, and the C build runs a later PostgreSQL 18 release,
+which reads the same data directory. A data directory PGlite wrote carries no build record, and the C build
+claims it (see [A store belongs to its build](/concepts/postgres-builds/#a-store-belongs-to-its-build)).
+
+```ts
+const backup = await oldPg.dumpDataDir(); // on PGlite 0.5, or an earlier pgxsinkit release
+const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app", loadDataDir: backup });
+```
+
+**The old databases stay until you delete them.** pgwasm never deletes `/pglite/*` IndexedDB databases:
+PGlite uses the same names, and another app on the same origin may own them. Once an app's own old stores
+are no longer needed, it can delete them by name, or list them with `indexedDB.databases()` where the
+browser supports it:
+
+```ts
+indexedDB.deleteDatabase("/pglite/my-app"); // the store that was idb://my-app
+```
 
 **Earlier PGlite versions need a dump and restore.** PGlite 0.2 runs PostgreSQL 16 and PGlite 0.3 and 0.4
 run PostgreSQL 17; PostgreSQL 18 does not open their data directories. Dump with PGlite's `pg_dump` and run

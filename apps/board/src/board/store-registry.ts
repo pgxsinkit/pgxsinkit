@@ -28,8 +28,8 @@ export const REGISTRY_KEY = "pgxsinkit-board-stores";
 /** The Web Locks name guarding registry mutations (spare creation, claim) across tabs. */
 export const REGISTRY_LOCK = "pgxsinkit-board-stores";
 // The IndexedDB database-name prefix for board stores, derived by the library's own operational helper
-// (ADR-0036) rather than re-assembling PGlite's `/pglite/` naming here — so the board never encodes
-// PGlite-internal storage knowledge itself. Orphan GC lists IndexedDB and keys off this prefix.
+// (ADR-0036) rather than re-assembling pgwasm's `/pgwasm/` naming here — so the board never encodes
+// pgwasm-internal storage knowledge itself. Orphan GC lists IndexedDB and keys off this prefix.
 const IDB_PREFIX = storeIndexedDbDatabaseName(STORE_PREFIX);
 
 /** The plain store path a store id opens at (ADR-0036 — a name, not a storage URL). */

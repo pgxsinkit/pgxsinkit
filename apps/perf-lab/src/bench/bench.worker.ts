@@ -12,7 +12,7 @@
 // combination — mirroring wa-sqlite's per-battery Run.
 
 import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
-import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { cBuild, idbDatabaseName } from "@pgxsinkit/pgwasm-c";
 import { createOpfsPgwasm, type OpfsDirectoryHandle } from "@pgxsinkit/pgwasm/opfs";
 
 import {
@@ -125,8 +125,8 @@ async function createStore(backend: BenchBackend, name: string, relaxedDurabilit
   });
 }
 
-// Delete an IndexedDB database by name. pgwasm-c's `idb://<name>` maps to the database `/pglite/<name>`
-// (the IDBFS mount point under its root `/pglite`). Best-effort so a repeated run never accumulates stores.
+// Delete an IndexedDB database by name: pgwasm-c's `idb://<name>` maps to the database `idbDatabaseName(name)`
+// (the IDBFS mount point under its root). Best-effort so a repeated run never accumulates stores.
 function deleteIdbDatabase(databaseName: string): Promise<void> {
   return new Promise((resolve) => {
     let request: IDBOpenDBRequest;
@@ -156,7 +156,7 @@ async function removeOpfsEntry(name: string): Promise<void> {
 
 async function cleanup(backend: BenchBackend, name: string): Promise<void> {
   if (backend === "idb") {
-    await deleteIdbDatabase(`/pglite/${name}`);
+    await deleteIdbDatabase(idbDatabaseName(name));
     return;
   }
   await removeOpfsEntry(name);

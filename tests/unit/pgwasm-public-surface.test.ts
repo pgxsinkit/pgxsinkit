@@ -111,7 +111,11 @@ const surfaces: [entry: string, module: object, exports: string[]][] = [
     build,
     ["TarFormatError", "gunzip", "gunzipIfCompressed", "gzip", "isGzip", "readTar", "writeTar"],
   ],
-  ["@pgxsinkit/pgwasm-c", cBuildMain, ["C_BUILD_IDENTITY", "cBuild", "cBuildArtefacts", "createCBuild"]],
+  [
+    "@pgxsinkit/pgwasm-c",
+    cBuildMain,
+    ["C_BUILD_IDENTITY", "cBuild", "cBuildArtefacts", "createCBuild", "idbDatabaseName"],
+  ],
   ["@pgxsinkit/pgwasm-c/contrib/amcheck", amcheck, ["amcheck"]],
   ["@pgxsinkit/pgwasm-c/prepopulated", prepopulated, ["prepopulatedDataDir"]],
   ["@pgxsinkit/pgwasm-pg-dump", pgDump, ["PgDumpError", "PgDumpSessionError", "PgDumpUnsupportedBuildError", "pgDump"]],

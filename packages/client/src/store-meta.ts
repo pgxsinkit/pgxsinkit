@@ -419,7 +419,7 @@ export async function deleteStoreMetaRecord(storePath: string, deps?: StoreMetaD
  * the handle and resolve `true`. The `onerror` that follows an abort is the EXPECTED completion of the
  * non-exist path (the AbortError), not a failure — it resolves `false`. `indexedDB` absent → `false`
  * (no idb store can exist). The database name comes from `store-path.ts`'s {@link storeIndexedDbDatabaseName}
- * (the sole owner of pgwasm's `/pglite/` naming) — never re-derived here.
+ * (the sole route to pgwasm's IndexedDB naming) — never re-derived here.
  */
 export function idbStoreExists(storePath: string, deps?: StoreMetaDeps): Promise<boolean> {
   const indexedDB = resolveIndexedDb(deps);

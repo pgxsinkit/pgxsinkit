@@ -34,7 +34,7 @@ describe("creating a data directory", () => {
     expect(commands.length).toBeGreaterThanOrEqual(2);
     for (const command of commands) {
       const words = commandWords(command);
-      expect(words[0]).toBe("/pglite/bin/postgres");
+      expect(words[0]).toBe("/pgwasm/bin/postgres");
       // Redirections never reach the backend's arguments.
       expect(words.some((word) => /[<>|&;]/.test(word))).toBe(false);
     }
@@ -45,8 +45,8 @@ describe("creating a data directory", () => {
 
 describe("commandWords", () => {
   it("keeps quoted words whole and stops at the first operator", () => {
-    expect(commandWords(`"/pglite/bin/postgres" --boot -X 1048576 -F -c log_checkpoints=false`)).toEqual([
-      "/pglite/bin/postgres",
+    expect(commandWords(`"/pgwasm/bin/postgres" --boot -X 1048576 -F -c log_checkpoints=false`)).toEqual([
+      "/pgwasm/bin/postgres",
       "--boot",
       "-X",
       "1048576",
@@ -54,8 +54,8 @@ describe("commandWords", () => {
       "-c",
       "log_checkpoints=false",
     ]);
-    expect(commandWords(`"/pglite/bin/postgres" --single -F -O -j template1 >"/dev/null"`)).toEqual([
-      "/pglite/bin/postgres",
+    expect(commandWords(`"/pgwasm/bin/postgres" --single -F -O -j template1 >"/dev/null"`)).toEqual([
+      "/pgwasm/bin/postgres",
       "--single",
       "-F",
       "-O",

@@ -55,7 +55,7 @@ async function errorOf(operation: () => Promise<unknown>): Promise<ErrorShape | 
 
 const idb = (name: string) => `idb://${name}`;
 /** The IndexedDB database behind `idb://<name>`: named after its mount point. */
-const databaseName = (name: string) => `/pglite/${name}`;
+const databaseName = (name: string) => `/pgwasm/${name}`;
 const nextMacrotask = (ms = 0) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -100,7 +100,7 @@ function continuityBuild(tag: string, onPostgresModule: (module: PostgresModule)
   const files = continuityBuilds.find((build) => build.tag === tag);
   if (files === undefined) throw new Error(`no continuity build ${tag}; see continuity-builds.ts`);
   const artefacts: CBuildArtefactSet = {
-    // The default exports of that release's pglite.js and initdb.js: the same factories as the pinned glue's.
+    // The default exports of that release's postgres.js and initdb.js: the same factories as the pinned glue's.
     createPostgresModule: files.createPostgresModule as CBuildArtefactSet["createPostgresModule"],
     createInitdbModule: files.createInitdbModule as CBuildArtefactSet["createInitdbModule"],
     postgresWasm: new URL(files.postgresWasm, location.href),

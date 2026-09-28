@@ -113,7 +113,7 @@ function resolveDeleteSurface(meta?: StoreMetaDeps): IdbDeleteSurface | undefine
 /**
  * Delete-if-present the pgwasm idb database for a store (`indexedDB.deleteDatabase`), backend-agnostic and
  * idempotent: absent counts as deleted, while a real failure rejects. The database name comes
- * ONLY from {@link storeIndexedDbDatabaseName} (store-path's sole owner of pgwasm's `/pglite/` naming).
+ * ONLY from {@link storeIndexedDbDatabaseName} (store-path's sole route to pgwasm's IndexedDB naming).
  */
 function deleteIdbDatabase(storePath: string, meta?: StoreMetaDeps): Promise<void> {
   const idb = resolveDeleteSurface(meta);
