@@ -39,6 +39,26 @@ The first published contract is intentionally narrow, and focused tests pin its 
   `tests/unit/plpgsql-apply.test.ts` (candidate lists + a PGlite apply that leaves the stored value
   untouched) and `tests/unit/update-managed-field-guard.test.ts` (the three request-path guards).
 
+## Release metadata: Agent Skill version pins (2026-09-28)
+
+Skill pins (`metadata.library_version` in `packages/*/skills/**/SKILL.md`) are tag-derived like
+`package.json`'s `version` (ADR-0001). Before this change, pins were hand-bumped before each tag
+(`skills:pins:write`) and `skills:pins:check` failed any pin behind `git describe --tags`. The
+`0.4.0` tag was pushed without the bump: the release job failed and every later commit failed the
+pre-commit check. Now:
+
+- **Repo side.** `skills:pins:check` (`scripts/validate-skills.ts --pins-only`, the first `validate` /
+  `validate:full` stage) requires every pin to be exactly the `"0.0.0"` placeholder. The pin check
+  no longer reads the git tag, so the `skills` cache stage no longer folds the tag into its
+  fingerprint. The intent CLI's structural `skills:validate` is unchanged.
+- **Publish side.** `scripts/publish-github-packages.ts` stamps the version it publishes into every
+  `SKILL.md` of each package it stages, beside the `package.json` version rewrite. It stages all
+  packages first and asserts that every staged pin equals its package's publish version before any
+  `bun publish`, naming each offending file. `tests/unit/publish-github-packages.test.ts` covers
+  stamping (nested skills, pin line only, `DRY_RUN` in memory only) and the assertion (the unstamped
+  placeholder, a stale pin, the other channel's version, a missing pin) for both the release (tag)
+  and dev channels. That file moved from `scripts/`, where the unit lane never ran it.
+
 ## Worker bridge protocol
 
 The `attachSyncClient` / `defineSyncWorker` bridge (ADR-0032) evolved during the July 2026 implementation; the notes below record the resulting contract so coverage stays anchored to current behavior.

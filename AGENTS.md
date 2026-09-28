@@ -21,7 +21,7 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 [docs/adr/0001](docs/adr/0001-unified-ts-release-versioning-tooling-standard.md)). The essentials:
 
 - **Scripts are check-default.** `bun run format` / `bun run lint` **check** (non-mutating); use
-  `format:write` / `lint:fix` to change files. `bun run validate` (skill-pin coherence first, then format,
+  `format:write` / `lint:fix` to change files. `bun run validate` (the skill-pin placeholder check first, then format,
   typecheck, lint, and the unit suite) is the **pre-commit** gate, auto-installed via the `prepare`
   script. It stays quick through a content-addressed cache (`.buildcache/`): each stage is skipped when
   its inputs are unchanged since it last passed, and the unit stage runs only the tests a change can
@@ -119,7 +119,7 @@ vocabulary.
 
 ## Definition of done
 
-- `bun run validate` (the pre-commit gate: skill-pin coherence, format, lint, typecheck, and the affected unit tests) must pass before any commit; it is cached and selection-scoped, so unchanged work re-runs almost nothing.
+- `bun run validate` (the pre-commit gate: the skill-pin placeholder check, format, lint, typecheck, and the affected unit tests) must pass before any commit; it is cached and selection-scoped, so unchanged work re-runs almost nothing.
 - The hand-back gates are `bun run validate` (pre-commit) and `bun run validate:full` (pre-push / CI-parity, cached the same way). Those two are the whole contract — a green cached run IS a green run. `bun run validate:refresh` and `bun run test:unit:nocache` are NOT part of any hand-back: they run only when the maintainer explicitly asks for that specific run (see the ⛔ HARD STOP section above).
 
 Integration suites must run through the package scripts that launch isolated compose projects (`test:integration:contract`, `test:integration:implementation`, or `test:integration`). Do not rely on shared long-running infra for integration verification.

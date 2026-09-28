@@ -23,17 +23,21 @@ The real version is derived at publish time from the most recent semver tag:
 There is no version-bump step and no release commit. Sibling deps are `workspace:*`, resolved to the
 derived version at pack/publish time.
 
+The Agent Skills (`packages/*/skills/**/SKILL.md`) follow the same rule: every skill's
+`metadata.library_version` is the placeholder `"0.0.0"` in the repo, and you never edit it
+(`skills:pins:check`, the first `validate` stage, fails on anything else). The publish stamps the
+version it publishes (the tag, or the dev version) into each packed `SKILL.md` beside the
+`package.json` rewrite, then refuses to publish if any staged skill's pin differs from its package's
+version, naming the file. The skills travel inside the tarballs, so the npm mirror carries the same
+stamped pins.
+
 ## Cutting a release
 
 ```bash
-# 0. Bump the Agent Skill version pins to the version you are ABOUT to tag (default: next patch),
-#    review the skill text against what this release actually ships, and commit. The tagged commit
-#    must carry pins that are true of itself — the skills travel inside the package tarballs.
-#    skills:validate accepts pins equal to OR ahead of the latest tag; only behind fails.
-bun run skills:pins:write            # or: bun run skills:pins:write 0.2.1
-
-# 1. Tag a reviewed commit on main and push the single tag. CI validates
-#    (validate:full + test:integration) then publishes release-parity to GitHub Packages.
+# 1. Review the Agent Skill text against what this release actually ships (the skills travel inside
+#    the tarballs; their version pins need no edit, the publish stamps them). Then tag a reviewed
+#    commit on main and push the single tag. CI validates (validate:full + test:integration), then
+#    publishes release-parity to GitHub Packages.
 git tag 0.2.1 && git push upstream 0.2.1
 
 # 2. Once the GitHub Packages publish is green, mirror it to public npm
