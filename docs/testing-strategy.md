@@ -334,6 +334,19 @@ wasm32-unknown-emscripten, …`, and `C_BUILD_IDENTITY.release` is the same name
   reopening are asserted (`pgwasm-c-prepopulated`).
 - The data format is unchanged (1, the same compatibility tuple), so every existing store opens as before.
 
+## pgwasm-postgres 18.6.0 (2026-09-28)
+
+Both build packages pin release `18.6.0`: upstream `REL_18_6` plus pgwasm-postgres's patch series at `efcbf6e`, built in the same
+builder image. Every asset is new (PostgreSQL 18.6's fixes, one of them for CVE-2026-6478). Drift the lanes
+record:
+
+- **version() and pg_dump name 18.6.** `version()` (`pgwasm-c-engine-features`) reads
+  `PostgreSQL 18.6 (pgwasm-postgres 18.6.0) on wasm32-unknown-emscripten, …`, and a plain dump
+  (`pgwasm-pg-dump`) says `Dumped by pg_dump version 18.6`.
+- **Three more exports** (`_RestrictSearchPath`, `_WalRcvIdentifySystemLsn`, `_timingsafe_bcmp`; 1,124 in all).
+  Nothing in pgxsinkit calls them.
+- The data format is unchanged (1, the same compatibility tuple), so every existing store opens as before.
+
 ## Offline return (board ADR-0010)
 
 The board demo's app shell is served offline by a hand-rolled, runtime-capture service worker

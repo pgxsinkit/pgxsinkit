@@ -1,7 +1,7 @@
 /**
  * pg_dump's output file, as the `File` pgDump returns.
  *
- * A plain-format dump is an SQL script. pg_dump 18.3 brackets it in psql's `\restrict <key>` /
+ * A plain-format dump is an SQL script. pg_dump 18.6 brackets it in psql's `\restrict <key>` /
  * `\unrestrict <key>` meta-commands, which only psql understands; the script is meant for `exec()`, so
  * those two lines are removed. They are found by pg_dump's random key, so a row whose text happens to
  * hold a line starting `\restrict` is left alone. The custom and tar formats and a compressed plain dump

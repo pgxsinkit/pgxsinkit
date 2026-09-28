@@ -22,13 +22,13 @@ module. The patches are derived from ElectricSQL's
 [postgres-pglite](https://github.com/electric-sql/postgres-pglite), the PostgreSQL fork behind PGlite.
 [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres) applies them to an upstream
 PostgreSQL release and publishes each build as a release, tagged `<Postgres major>.<minor>.<revision>`:
-`18.3.0` is the first build of PostgreSQL 18.3. `@pgxsinkit/pgwasm-c` ships one release's files byte for
+`18.6.0` is the first build of PostgreSQL 18.6. `@pgxsinkit/pgwasm-c` ships one release's files byte for
 byte, and `@pgxsinkit/pgwasm-pg-dump` ships `pg_dump` from the same release.
 
 `SELECT version()` names the release a database runs:
 
 ```text
-PostgreSQL 18.3 (pgwasm-postgres 18.3.0) on wasm32-unknown-emscripten, …
+PostgreSQL 18.6 (pgwasm-postgres 18.6.0) on wasm32-unknown-emscripten, …
 ```
 
 The same name is the build's `identity.release` (`C_BUILD_IDENTITY.release` from `@pgxsinkit/pgwasm-c`),

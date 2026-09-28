@@ -284,7 +284,7 @@ export async function pinRelease(
 if (import.meta.main) {
   const [tag, ...rest] = process.argv.slice(2);
   if (tag === undefined || rest.length > 0 || !/^\d+\.\d+\.\d+$/.test(tag)) {
-    console.error("usage: bun run pgwasm:pin <tag>   (a pgxsinkit/pgwasm-postgres release, e.g. 18.3.0)");
+    console.error("usage: bun run pgwasm:pin <tag>   (a pgxsinkit/pgwasm-postgres release, e.g. 18.6.0)");
     process.exit(2);
   }
   try {

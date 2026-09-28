@@ -12,25 +12,25 @@
 /** The release the files are assets of. */
 export const ARTEFACT_RELEASE = {
   repository: "pgxsinkit/pgwasm-postgres",
-  tag: "18.3.0",
-  name: "pgwasm-postgres 18.3.0",
-  commit: "b206c07782f3248dfd780d06005966dcafe11d97",
-  upstream: { tag: "REL_18_3", commit: "62d6c7d3df6287f1bd83199c1a746e50d31571a0" },
+  tag: "18.6.0",
+  name: "pgwasm-postgres 18.6.0",
+  commit: "efcbf6eee6dacc454fcb123e3730ad8f051a6eda",
+  upstream: { tag: "REL_18_6", commit: "724edf9bde9d356724ad384a2e196edc3c9f80f7" },
   dataFormat: 1,
   builderImage:
     "ghcr.io/pgxsinkit/pgwasm-builder@sha256:c9eacc51a7c25d67aef3daa418a39592a97f471aff099fa5a88fa1c82107435d",
-  manifestSha256: "86212051b87b8b691ce195463d1aa0bf830733d00ec9d8152970bc6dc725e44f",
+  manifestSha256: "d293bbe0a33f24bc4e70b3cfe4a0d48b8bc4f7a970c48be8fe2dd6617273e2f5",
 } as const;
 
 /** Every pinned file, by its name in `artefacts/` (the release asset of the same name). */
 export const ARTEFACT_FILES = {
-  "amcheck.tar.gz": { bytes: 21865, sha256: "cb49fc2abf989ba38e8701acf7e340ea55f4e9fed63a71e2b9b7d0f95244fe34" },
-  "initdb.js": { bytes: 109978, sha256: "6852f5292d9528c7aa2093a853236f0ba2ee6777b9d43a10f17b04ef22886194" },
-  "initdb.wasm": { bytes: 395242, sha256: "4c8988dca3b2f0bbfd23a0714023e4822a2909ead01804f37acffd9ff3ca9f8a" },
-  "pglite.data": { bytes: 6293220, sha256: "67dccef2c115b0b8e0853ed6139054436dbda07c79c609f498d3fab8a7b1731d" },
-  "pglite.js": { bytes: 380679, sha256: "cabac9d6a431cac2e3d70f112fec2dfd7ce518acced85181c417502ba366da5b" },
-  "pglite.wasm": { bytes: 10061242, sha256: "acbf58c590c85ce5837de71d40c5aac818e2c811cc9b8e7c0becbbea4b1b093a" },
-  "prepopulated.tar.gz": { bytes: 4400286, sha256: "70a8a3114fb8cdd28dc2ed801f39b41e5d0fd627640b727211f2e50729ed6679" },
+  "amcheck.tar.gz": { bytes: 21912, sha256: "74233ac5a0e561a55ba206827669f2c45aa2b137af1546a0315f32365e4cc228" },
+  "initdb.js": { bytes: 109978, sha256: "5da5c8aa5443ba113153f49d71b6fdacd4b888b4d4547bc7d9b5a7c45f5356c7" },
+  "initdb.wasm": { bytes: 395467, sha256: "1691997a10d595f0850bc0f0eaffd1ed6cbb22e1de6faec7a5f925e09305d336" },
+  "pglite.data": { bytes: 6290545, sha256: "0d836559779b3658b05e8b0fa74fe310d0f0c897ef2cbe4815ec3a3e8d7204e3" },
+  "pglite.js": { bytes: 380859, sha256: "5969cf9cd1cf54661f9838e14a4435b6b4f169f741d77eee2a7c32531d8bc8ee" },
+  "pglite.wasm": { bytes: 10089345, sha256: "9e30c88fb9bc8efe4e8e9a84b2c62a99cc55369b513b7bbda6f4ecb384110847" },
+  "prepopulated.tar.gz": { bytes: 4400286, sha256: "b82dc81f225c311f743397929c4a64689e1ac9b4e9b1a43a469d07071b9d69de" },
 } as const;
 
 export type ArtefactName = keyof typeof ARTEFACT_FILES;

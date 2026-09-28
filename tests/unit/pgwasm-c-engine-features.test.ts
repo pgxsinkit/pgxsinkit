@@ -223,6 +223,6 @@ describe("the release", () => {
   it("is named in version(), as the build identity names it", async () => {
     const db = await createTestPgwasm();
     const version = String(await one(db, "SELECT version() AS value"));
-    expect(version).toStartWith(`PostgreSQL 18.3 (${C_BUILD_IDENTITY.release}) on wasm32-unknown-emscripten`);
+    expect(version).toStartWith(`PostgreSQL 18.6 (${C_BUILD_IDENTITY.release}) on wasm32-unknown-emscripten`);
   });
 });

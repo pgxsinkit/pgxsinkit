@@ -11,20 +11,20 @@
 /** The release the files are assets of. */
 export const ARTEFACT_RELEASE = {
   repository: "pgxsinkit/pgwasm-postgres",
-  tag: "18.3.0",
-  name: "pgwasm-postgres 18.3.0",
-  commit: "b206c07782f3248dfd780d06005966dcafe11d97",
-  upstream: { tag: "REL_18_3", commit: "62d6c7d3df6287f1bd83199c1a746e50d31571a0" },
+  tag: "18.6.0",
+  name: "pgwasm-postgres 18.6.0",
+  commit: "efcbf6eee6dacc454fcb123e3730ad8f051a6eda",
+  upstream: { tag: "REL_18_6", commit: "724edf9bde9d356724ad384a2e196edc3c9f80f7" },
   dataFormat: 1,
   builderImage:
     "ghcr.io/pgxsinkit/pgwasm-builder@sha256:c9eacc51a7c25d67aef3daa418a39592a97f471aff099fa5a88fa1c82107435d",
-  manifestSha256: "86212051b87b8b691ce195463d1aa0bf830733d00ec9d8152970bc6dc725e44f",
+  manifestSha256: "d293bbe0a33f24bc4e70b3cfe4a0d48b8bc4f7a970c48be8fe2dd6617273e2f5",
 } as const;
 
 /** Every pinned file, by its name in `artefacts/` (the release asset of the same name). */
 export const ARTEFACT_FILES = {
-  "pg_dump.js": { bytes: 126562, sha256: "7a30ef1ec52a8ae18a84463c503d86096d3f003a0d7f5e52e29af2855b5dc5f8" },
-  "pg_dump.wasm": { bytes: 701466, sha256: "cdbc551ec339cc9867003203bc8f03911858be2be92b3e88376922b09ccdf58c" },
+  "pg_dump.js": { bytes: 126562, sha256: "1c2eb5278d148a6fa977c617ad728c0f878b5d937c10dfd3a7eed403911997cc" },
+  "pg_dump.wasm": { bytes: 703947, sha256: "29ecc71fea0865b114cc15733e325aaf7afcdcb6c5a65a5538d937f1df3fb301" },
 } as const;
 
 export type ArtefactName = keyof typeof ARTEFACT_FILES;

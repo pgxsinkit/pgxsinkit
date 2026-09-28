@@ -25,23 +25,23 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds two files: assets of the pgwasm-postgres release 18.3.0
-(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.3.0), the release that also holds `@pgxsinkit/pgwasm-c`'s server, republished
+`artefacts/` holds two files: assets of the pgwasm-postgres release 18.6.0
+(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.6.0), the release that also holds `@pgxsinkit/pgwasm-c`'s server, republished
 byte-identical (each file's size and sha256 are pinned in `src/artefact-pins.ts`, from
 the release's manifest.json checked against its SHA256SUMS):
 
-  - `pg_dump.wasm`: pg_dump from PostgreSQL 18.3 (it reports
-    `pg_dump (PostgreSQL) 18.3`), compiled to WebAssembly;
+  - `pg_dump.wasm`: pg_dump from PostgreSQL 18.6 (it reports
+    `pg_dump (PostgreSQL) 18.6`), compiled to WebAssembly;
   - `pg_dump.js`, its Emscripten-generated loader.
 
 pgxsinkit/pgwasm-postgres (https://github.com/pgxsinkit/pgwasm-postgres) builds them
-from PostgreSQL 18.3 (the upstream tag REL_18_3, commit
-62d6c7d3df6287f1bd83199c1a746e50d31571a0) plus a patch series and an overlay derived
+from PostgreSQL 18.6 (the upstream tag REL_18_6, commit
+724edf9bde9d356724ad384a2e196edc3c9f80f7) plus a patch series and an overlay derived
 from ElectricSQL's PGlite fork of PostgreSQL
 (https://github.com/electric-sql/postgres-pglite at
 b133782cd759f08b3aeb263b80a963b39c7b7af1; PostgreSQL License, Copyright (c)
-ElectricSQL and contributors). Release 18.3.0 is pgwasm-postgres commit
-b206c07782f3248dfd780d06005966dcafe11d97, built inside the builder image
+ElectricSQL and contributors). Release 18.6.0 is pgwasm-postgres commit
+efcbf6eee6dacc454fcb123e3730ad8f051a6eda, built inside the builder image
 ghcr.io/pgxsinkit/pgwasm-builder@sha256:c9eacc51a7c25d67aef3daa418a39592a97f471aff099fa5a88fa1c82107435d
 (whose recipe is that repository's `builder/Containerfile`); its manifest.json records
 every file's size and sha256, and the release was published only because a rebuild of
@@ -74,7 +74,7 @@ Snowball), which pg_dump does not contain.
 Each component's notice follows, copied from the file named with it.
 
 ------------------------------------------------------------------------------
-PostgreSQL 18.3, with changes derived from ElectricSQL's for PGlite (pg_dump.wasm)
+PostgreSQL 18.6, with changes derived from ElectricSQL's for PGlite (pg_dump.wasm)
 ------------------------------------------------------------------------------
 
 Source: https://github.com/electric-sql/postgres-pglite at b133782cd759f08b3aeb263b80a963b39c7b7af1,

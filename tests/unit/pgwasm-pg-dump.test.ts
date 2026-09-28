@@ -26,7 +26,7 @@ describe("pgDump", () => {
     expect(dump.type).toStartWith("text/plain");
     const content = await dump.text();
     expect(content).toContain("PostgreSQL database dump");
-    expect(content).toContain("Dumped by pg_dump version 18.3");
+    expect(content).toContain("Dumped by pg_dump version 18.6");
   });
 
   it("dumps the same database again and again", async () => {
