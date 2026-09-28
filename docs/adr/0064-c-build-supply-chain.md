@@ -16,6 +16,13 @@ Emscripten 6.0.10 and so the first to enforce decision 7's browser floor, in `90
 bundle is refused before the glue runs, since Emscripten 6's file packager swallows the throw). The
 consumer docs state the floor (getting-started, Postgres builds, pgwasm) from the same adoption.
 
+Status note (2026-09-28): the IDB Playwright lane of decision 4's contract gate now also proves cross-build
+continuity (`a4f1090`): each earlier build pinned in `tests/e2e/pgwasm-idb/continuity-builds.ts`, first
+`18.6.0` (Emscripten 3.1.74, pgxsinkit 0.4.1), writes an `idb://` store, marked and unmarked, that the pinned
+build must read back identically and write to, in Chromium and WebKit. A pin change that moves the toolchain
+therefore meets stores the previous releases wrote; when a release that shipped goes out of the pin, it
+joins that list.
+
 ## Context
 
 [ADR-0062](0062-absorb-pglite-as-pgwasm.md) decision 9 keeps Postgres compilation out of pgxsinkit: a

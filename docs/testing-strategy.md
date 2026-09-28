@@ -228,7 +228,23 @@ their own. Where the code came from, file by file, is in
   live-query cases are not ported: the worker is not part of pgwasm. In memory, it also runs pg_dump
   on a database created from the prepopulated data directory and restores the script into another,
   and mounts two REPLs, runs `select 1 as one` with Enter, and finds the REPL's stylesheet in the head
-  once.
+  once. Its **cross-build continuity** test opens stores that earlier C builds wrote: each build pinned in
+  `tests/e2e/pgwasm-idb/continuity-builds.ts` (its release tag and every glue and file's bytes and sha256
+  from that release's `manifest.json`; `scripts/pgwasm-continuity-artefacts.ts` fetches and verifies them
+  into `tmp/pgwasm-idb-continuity/<tag>/` through `scripts/pgwasm-artefacts.ts`, before the lane's Vite
+  build) creates an `idb://` store with plain rows, a bytea and a ~640 kB text, and the current build then
+  reads every row back identically, writes a row and reopens. It runs marked, as pgxsinkit 0.4.1 wrote its
+  stores, and unmarked, as pgxsinkit ≤0.3.x did: ADR-0063's adoption of an unmarked store as the C build's
+  (never backfilled) is asserted, and so is a non-claiming build's refusal of it. The earlier build boots
+  through pgwasm-c's internal `createCBuildFrom` (the factory `createCBuild` uses; not exported), on the
+  current host. The first entry is pgwasm-postgres 18.6.0 (pgxsinkit 0.4.1), built with Emscripten 3.1.74
+  like the PGlite 0.5.8 wasm pgxsinkit ≤0.3.x shipped; 18.6.1 moved to Emscripten 6.0.10. PGlite 0.5.8's
+  own glue is not booted (its host ABI is not pgwasm-c's); what makes its stores reachable is checked in
+  the source instead: the `@pgxsinkit/pglite` fork's IDB mount (`packages/pglite/src/fs/idbfs.ts`) mounts
+  IDBFS at `/pglite/<name>` for `idb://<name>` and symlinks `/pglite/data` to it, and guards it with the
+  Web Lock `pglite-idbfs:/pglite/<name>`, exactly as `idbDatabaseName` and `idbLockName` do, so the
+  IndexedDB database (IDBFS names it after the mount point) and its `FILE_DATA` keys are the same. Adding
+  a build is one entry in the pins list.
 - **Packed install** (`bun run fixture:smoke`): the fixture installs the packed packages, boots pgwasm
   on the C build from the install (live, amcheck, Drizzle, `/protocol`, a Store backup restored, the
   `opfs-ahp://` refusal, a database from the prepopulated entry dumped with pg_dump, the REPL rendered
