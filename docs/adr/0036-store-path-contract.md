@@ -132,6 +132,11 @@ the no-grant boot still refuses to settle a `deleting` store whose commitment na
 observe (unchanged). Re-running the destroy completes it, and an OPFS-capable boot resumes it as
 before.
 
+The maintainer then chose (2026-09-28, over "keep refusing"): a no-OPFS boot that finds a leftover
+`deleting` record **and** the "OPFS deletion pending" marker for that identity (the destroy was
+interrupted after the marker step) finishes the IndexedDB side of the destroy, keeps the marker, and
+proceeds as a fresh boot; without the marker it still refuses as above.
+
 The maintainer chose this over two alternatives: **record the backend at boot**, so destroy would
 know an IndexedDB store has no OPFS side (a no-OPFS boot would then write a meta record, which it
 deliberately does not do today), and **keep fail-closed** (a store in such a context could not be

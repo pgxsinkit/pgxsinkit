@@ -578,7 +578,8 @@ describe("resolveDeniedBootAuthority — denied-home authority handoff", () => {
     expect(metaIdb.hasDb(storeIndexedDbDatabaseName("denied-delete"))).toBe(true);
   });
 
-  it("keeps deleting authority when sentinel removal cannot be confirmed", async () => {
+  it("keeps deleting authority when sentinel removal cannot be confirmed and no OPFS deletion is pending", async () => {
+    // Interrupted BEFORE the marker step: nothing records that the OPFS side is deferred, so refuse.
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta("unobservable-delete", "deleting");
     metaIdb.seedPgliteDb("unobservable-delete");
@@ -591,6 +592,28 @@ describe("resolveDeniedBootAuthority — denied-home authority handoff", () => {
     ).rejects.toThrow("sentinel removal cannot be confirmed");
     expect(metaPhase(metaIdb, "unobservable-delete")).toBe("deleting");
     expect(metaIdb.hasDb(storeIndexedDbDatabaseName("unobservable-delete"))).toBe(true);
+    expect(pendingMarker(metaIdb, "unobservable-delete")).toBeUndefined();
+  });
+
+  it("finishes the IndexedDB side of a destroy interrupted after its OPFS deletion was recorded as pending", async () => {
+    // ADR-0036 amendment (2026-09-28): interrupted AFTER the marker step, the OPFS side is already deferred to the
+    // next OPFS-capable boot, so a no-OPFS boot completes the idb database + meta record and boots fresh.
+    const storePath = "unobservable-delete-pending";
+    const metaIdb = new FakeMetaIdb();
+    metaIdb.seedMeta(storePath, "deleting");
+    metaIdb.seedPgliteDb(storePath);
+    seedPendingMarker(metaIdb, storePath);
+
+    expect(
+      await resolveDeniedBootAuthority(storePath, {
+        ...browserDeps(new FakeDir(), metaIdb),
+        opfs: { getRoot: async () => Promise.reject(new Error("OPFS unavailable")) },
+      }),
+    ).toBe(false);
+    expect(metaPhase(metaIdb, storePath)).toBeUndefined();
+    expect(metaIdb.hasDb(storeIndexedDbDatabaseName(storePath))).toBe(false);
+    // The OPFS side stays owed to the next boot that can reach OPFS.
+    expect(pendingMarker(metaIdb, storePath)).toBeDefined();
   });
 
   it("refuses an `opfs-committed` store TYPED — a no-grant home can never open it", async () => {

@@ -135,7 +135,8 @@ records "OPFS deletion pending" in IndexedDB instead of failing, and the next bo
 the sentinel and store directory before it classifies or opens anything (ADR-0036 amendment, 2026-09-28).
 `tests/unit/store-boot.test.ts` ("pending OPFS deletion") pins the no-OPFS destroy leaving the marker, the
 settling boot (granted and denied-but-reachable), the unreachable boot keeping the marker, and the unchanged
-OPFS-capable destroy; WebKit's `destroy.browser.test.ts` and `quiesce.browser.test.ts` destroys prove it in a
+OPFS-capable destroy; its denied-boot cases pin that a no-OPFS boot finishes the IndexedDB side of a `deleting`
+store only when that identity's marker stands, and refuses without it; WebKit's `destroy.browser.test.ts` and `quiesce.browser.test.ts` destroys prove it in a
 real no-OPFS context.
 
 The server-backed lanes run the real write API plus the native read stack — durable-streams and the

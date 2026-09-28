@@ -284,13 +284,21 @@ export async function settlePendingOpfsDeletion(
  *
  * A pending OPFS deletion is settled first when this home can reach OPFS asynchronously
  * ({@link settlePendingOpfsDeletion}; it runs alongside the record read, which it does not touch).
+ *
+ * **An interrupted destroy whose OPFS side is already pending** (ADR-0036 amendment, 2026-09-28): a `deleting`
+ * record in a scope whose commitment namespace is unobservable is normally refused (sentinel removal cannot be
+ * confirmed). When the "OPFS deletion pending" marker for this identity still stands, the destroy got past its
+ * marker step, so the OPFS side is already durably deferred to the next OPFS-capable boot: this boot finishes
+ * the IndexedDB side (the idb database, then the meta record — destroy's own order), leaves the marker, and
+ * proceeds as a fresh boot. Returns `false` (no authority is published; the fresh boot is recordless). Without
+ * the marker (interrupted before the marker step) the refusal stands.
  */
 export async function resolveDeniedBootAuthority(
   storePath: string,
   deps?: ResolveStoreBootOptions["deps"],
 ): Promise<boolean> {
   const meta = deps?.meta;
-  const [record] = await Promise.all([
+  const [record, pendingOpfsDeletion] = await Promise.all([
     readStoreMetaRecord(storePath, meta),
     settlePendingOpfsDeletion(storePath, deps),
   ]);
@@ -306,6 +314,14 @@ export async function resolveDeniedBootAuthority(
   // cannot be observed, sentinel deletion cannot be confirmed. Keep the recorded phase authoritative and fail
   // closed rather than publish a conflicting replacement.
   if ((await effects.observeCommitmentNamespace()) === "unobservable") {
+    // ADR-0036 amendment (2026-09-28): a `deleting` store whose marker still stands was interrupted AFTER the
+    // marker step, so its OPFS side is already recorded as pending — finish the IndexedDB side of the destroy
+    // (keeping the marker) and boot fresh. Without the marker the recorded phase stays authoritative.
+    if (phase === "deleting" && pendingOpfsDeletion === "still-pending") {
+      await deleteIdbDatabase(storePath, meta);
+      await deleteStoreMetaRecord(storePath, meta);
+      return false;
+    }
     throw new Error(
       `[pgxsinkit] cannot settle ${JSON.stringify(storePath)} for an IDB boot (record phase ` +
         `${JSON.stringify(phase)}): the OPFS commitment namespace is unobservable in this scope, so sentinel ` +
