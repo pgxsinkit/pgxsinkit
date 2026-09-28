@@ -98,3 +98,41 @@ frictionless.
 - A consumer determined to hand us a memory store via a custom VFS with a fabricated `dataDir`
   string still can. That is accepted: the contract's promise is "never unintentionally", not
   "never".
+
+## Amended (2026-09-28): pending OPFS deletion where OPFS cannot be opened
+
+In some contexts OPFS cannot be opened at all: `navigator.storage.getDirectory()` rejects (WebKit
+raises `UnknownError`). Playwright's throwaway WebKit contexts do this, and Safari private windows
+probably do too. Stores there run on IndexedDB. Destroy used to delete the OPFS side first and fail
+closed, so a store in such a context could never be destroyed.
+
+The maintainer chose on 2026-09-28:
+
+- **Destroy removes what it can reach and records the rest.** When an OPFS delete meets a root that
+  cannot be opened, destroy records "OPFS deletion pending" for the store identity in IndexedDB (its
+  own small database, `pgxsinkit-opfs-deletion-pending`), then deletes the IndexedDB store and the
+  meta record, and succeeds. With no IndexedDB to hold the marker, the original failure still
+  propagates.
+- **The next boot that can reach OPFS finishes the job before it opens anything.** It deletes the
+  store's commitment sentinel and OPFS store directory (under the store's ownership lock), clears
+  the marker, and only then classifies and opens. A leftover sentinel therefore never reaches boot
+  classification as "no record + sentinel", which would reopen the destroyed store as committed. A
+  boot that still cannot reach OPFS leaves the marker in place and proceeds; such a context cannot
+  open an OPFS store anyway.
+- **Nothing is silently left behind.** In a private window the marker vanishes with the context,
+  which has no OPFS to clean.
+- **An OPFS-capable context is unchanged.** Where the OPFS root opens, destroy runs exactly as
+  before, ownership lock included, and records no marker.
+
+How the `deleting` record and the marker fit together: destroy still writes `deleting` first. The
+marker is written from the sentinel step, while `deleting` still stands, so the obligation to delete
+the OPFS side is recorded at every point; the IndexedDB store and then the `deleting` record go
+after it. A destroy interrupted after `deleting` in such a context is not resumed by a boot there:
+the no-grant boot still refuses to settle a `deleting` store whose commitment namespace it cannot
+observe (unchanged). Re-running the destroy completes it, and an OPFS-capable boot resumes it as
+before.
+
+The maintainer chose this over two alternatives: **record the backend at boot**, so destroy would
+know an IndexedDB store has no OPFS side (a no-OPFS boot would then write a meta record, which it
+deliberately does not do today), and **keep fail-closed** (a store in such a context could not be
+destroyed).

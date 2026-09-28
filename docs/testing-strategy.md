@@ -130,6 +130,14 @@ under a live owner. `tests/unit/store-ownership-lock.test.ts` proves it with fak
 `quiesce.browser.test.ts` destroys by path while the owner provably holds the lock and asserts the destroy
 parks on it, then deletes once the owner leaves.
 
+Where OPFS cannot be opened at all (`getDirectory()` rejects, as in Playwright's WebKit contexts), destroy
+records "OPFS deletion pending" in IndexedDB instead of failing, and the next boot that can reach OPFS deletes
+the sentinel and store directory before it classifies or opens anything (ADR-0036 amendment, 2026-09-28).
+`tests/unit/store-boot.test.ts` ("pending OPFS deletion") pins the no-OPFS destroy leaving the marker, the
+settling boot (granted and denied-but-reachable), the unreachable boot keeping the marker, and the unchanged
+OPFS-capable destroy; WebKit's `destroy.browser.test.ts` and `quiesce.browser.test.ts` destroys prove it in a
+real no-OPFS context.
+
 The server-backed lanes run the real write API plus the native read stack — durable-streams and the
 Circuits engine, stood up by `startNativeSyncStack` (`packages/test-utils/src/native-read-path.ts`),
 with the edge mounted in process. `bun run test:integration:placement`
