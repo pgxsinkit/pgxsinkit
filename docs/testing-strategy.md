@@ -101,6 +101,15 @@ both directions: destroying an `idb-authoritative` store deletes its database, l
 namespace as empty as it found it, and lets the next boot mint `opfs-repacked`; destroying a
 COMMITTED opfs store leaves no store directory, no sentinel, no meta record and no idb sibling.
 
+An OPFS store's deletion is ordered on its **ownership lock** (`store-ownership-lock.ts`, 2026-09-28): the
+opfs open path holds an exclusive per-store Web Lock (`pgxsinkit:store-owner:<identity>`) from before it opens
+the sync-access handles until after close, and `deleteStoreDirectory` takes the same lock first, so a delete
+waits for a previous owner whose worker is still dying (a reload or closed tab) instead of failing under its
+handles (Chromium `NoModificationAllowedError`), and fails with `StoreOwnershipWaitError` after a bounded wait
+under a live owner. `tests/unit/store-ownership-lock.test.ts` proves it with fake locks and a refusing OPFS;
+`quiesce.browser.test.ts` destroys by path while the owner provably holds the lock and asserts the destroy
+parks on it, then deletes once the owner leaves.
+
 The server-backed lanes run the real write API plus the native read stack — durable-streams and the
 Circuits engine, stood up by `startNativeSyncStack` (`packages/test-utils/src/native-read-path.ts`),
 with the edge mounted in process. `bun run test:integration:placement`
