@@ -5,7 +5,7 @@ import { fileURLToPath, URL } from "node:url";
 
 import { defineConfig, type Plugin } from "vite";
 
-import { CONTINUITY_BUILDS, CONTINUITY_FILES, continuityFixtureDir } from "./continuity-builds";
+import { CONTINUITY_BUILDS, CONTINUITY_FILES, continuityFixtureDir } from "./continuity-builds.ts";
 
 const packageSource = (path: string) => fileURLToPath(new URL(`../../../packages/${path}`, import.meta.url));
 
