@@ -1,3 +1,5 @@
+import { rm } from "node:fs/promises";
+
 import { expect, test } from "@playwright/test";
 
 import { harnessCall, uniqueStore } from "./support";
@@ -9,6 +11,33 @@ import { harnessCall, uniqueStore } from "./support";
 // worker lane's scenario (H) needs.
 
 test.describe.configure({ mode: "serial" });
+
+/**
+ * WebKit grants OPFS only to a persistent context — in Playwright's throwaway one `getDirectory()` rejects, so a
+ * store there runs on IndexedDB with no OPFS store, sentinel or ownership lock at all. A lane that asserts on
+ * those runs, on WebKit, in a persistent context on a fresh profile per test (as `tests/e2e/pgwasm-opfs/` does);
+ * Chromium keeps its default context. The other lanes here stay on the throwaway context, which is what covers
+ * the no-OPFS path.
+ */
+const opfsTest = test.extend({
+  context: async ({ context, browserName, playwright, baseURL }, use, testInfo) => {
+    if (browserName !== "webkit") {
+      await use(context);
+      return;
+    }
+    const profile = testInfo.outputPath("webkit-profile");
+    const persistent = await playwright.webkit.launchPersistentContext(profile, {
+      headless: true,
+      ...(baseURL === undefined ? {} : { baseURL }),
+    });
+    try {
+      await use(persistent);
+    } finally {
+      await persistent.close();
+      await rm(profile, { recursive: true, force: true });
+    }
+  },
+});
 
 // The BOARD scenario: the owning tab is GONE (a wipe reload destroyed it), and a fresh page quiesces the
 // surviving worker by name before destroying the path. This is the exact shape the board's obsolete-cleanup and
@@ -41,39 +70,43 @@ test("owner gone: quiesce-by-name from a fresh page then destroy-by-path succeed
 // closed tab terminates the old elected engine worker ASYNCHRONOUSLY — and a `removeEntry` under those handles
 // is refused (Chromium `NoModificationAllowedError`, WebKit `UnknownError`). The delete must WAIT for the owner's
 // release instead. Deterministic: the owner is provably alive (its engine holds the ownership lock) when the
-// destroy is issued, and it is closed only once the destroy is provably parked on that lock.
-test("previous owner still alive: destroy-by-path waits for the owner's release, then deletes", async ({ context }) => {
-  const store = uniqueStore("owner-release");
-  const owner = await context.newPage();
-  await owner.goto("/");
-  expect((await harnessCall(owner, "attach", { storePath: store, factories: true })).ok).toBe(true);
+// destroy is issued, and it is closed only once the destroy is provably parked on that lock. It needs OPFS, so on
+// WebKit it runs in a persistent context (`opfsTest`).
+opfsTest(
+  "previous owner still alive: destroy-by-path waits for the owner's release, then deletes",
+  async ({ context }) => {
+    const store = uniqueStore("owner-release");
+    const owner = await context.newPage();
+    await owner.goto("/");
+    expect((await harnessCall(owner, "attach", { storePath: store, factories: true })).ok).toBe(true);
 
-  const fresh = await context.newPage();
-  await fresh.goto("/");
-  expect(await harnessCall(fresh, "startDestroyArtifacts", store)).toEqual({ started: true });
-  // Parked on the live owner's ownership lock — not failed under its handles.
-  await expect
-    .poll(
-      async () => ({
-        destroy: await harnessCall(fresh, "destroyArtifactsState", store),
-        ownerLock: await harnessCall(fresh, "storeOwnerLock", store),
-      }),
-      { timeout: 5_000 },
-    )
-    .toEqual({ destroy: { state: "pending" }, ownerLock: { held: 1, pending: 1 } });
+    const fresh = await context.newPage();
+    await fresh.goto("/");
+    expect(await harnessCall(fresh, "startDestroyArtifacts", store)).toEqual({ started: true });
+    // Parked on the live owner's ownership lock — not failed under its handles.
+    await expect
+      .poll(
+        async () => ({
+          destroy: await harnessCall(fresh, "destroyArtifactsState", store),
+          ownerLock: await harnessCall(fresh, "storeOwnerLock", store),
+        }),
+        { timeout: 5_000 },
+      )
+      .toEqual({ destroy: { state: "pending" }, ownerLock: { held: 1, pending: 1 } });
 
-  // The owner leaves (like the wipe reload): its elected engine dies with the document and releases the store.
-  await owner.close();
-  await expect
-    .poll(() => harnessCall(fresh, "destroyArtifactsState", store), { timeout: 15_000 })
-    .toEqual({ state: "ok" });
-  expect(await harnessCall(fresh, "opfsArtefacts", store)).toEqual({
-    sentinelPresent: false,
-    storeDirectoryPresent: false,
-  });
-  expect(await harnessCall(fresh, "storeOwnerLock", store)).toEqual({ held: 0, pending: 0 });
-  await harnessCall(fresh, "cleanup", store);
-});
+    // The owner leaves (like the wipe reload): its elected engine dies with the document and releases the store.
+    await owner.close();
+    await expect
+      .poll(() => harnessCall(fresh, "destroyArtifactsState", store), { timeout: 15_000 })
+      .toEqual({ state: "ok" });
+    expect(await harnessCall(fresh, "opfsArtefacts", store)).toEqual({
+      sentinelPresent: false,
+      storeDirectoryPresent: false,
+    });
+    expect(await harnessCall(fresh, "storeOwnerLock", store)).toEqual({ held: 0, pending: 0 });
+    await harnessCall(fresh, "cleanup", store);
+  },
+);
 
 // The EXACT board scenario: the owner RELOADS (not closes), and the SAME reloaded page runs quiesce+destroy at
 // boot — precisely what the board's wipe-on-boot does (applyPendingLocalDataWipe runs first thing after a wipe
