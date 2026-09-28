@@ -51,6 +51,9 @@ const FS_INPUTS: Record<string, string[]> = {
   // Flagged as a reader only through scripts/lib.ts's podman `spawnSync` helpers, which these tests
   // never reach; the derivation itself is pure registry walking, all on-graph.
   "circuits-pg-tables": [],
+  // Its fs reads touch only the SKILL.md fixtures it writes under tmp/agents; the publish script's repo
+  // reads (publishable packages, git tags) happen in main(), which the tests never call.
+  "publish-github-packages": [],
 };
 
 // `bun test` narrowing flags — forwarding any would certify a partial run, so they are refused.

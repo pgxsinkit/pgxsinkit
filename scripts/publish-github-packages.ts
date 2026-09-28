@@ -12,14 +12,22 @@
  *   - branch push / manual dispatch          -> "dev channel": publish `<version>-dev.<shortSha>` at
  *     the `dev` dist-tag, so consumers can track the bleeding edge via `@dev` without a release.
  *
+ * Each package's Agent Skills travel inside its tarball, so every SKILL.md under `skills/` gets its
+ * `library_version` placeholder ("0.0.0", like package.json's `version`) stamped with the version being
+ * published, alongside the package.json rewrite. Before anything is published, every staged skill pin is
+ * asserted to equal its package's publish version; a mismatch fails the run, naming the file.
+ *
  * The scoped `.npmrc` (registry + auth token) is written by the workflow, not here.
  *
  * Env (provided by GitHub Actions): GITHUB_REPOSITORY, GITHUB_REF_TYPE, GITHUB_REF_NAME, GITHUB_SHA.
- * Set DRY_RUN=1 to print the plan without mutating package.json or publishing.
+ * Set DRY_RUN=1 to print the plan without mutating package.json / SKILL.md or publishing (the skill-pin
+ * assertion still runs, over the stamped content in memory).
  */
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+
+import { findSkillFiles, readLibraryVersion, stampLibraryVersion } from "./lib/skill-pins";
 
 const ROOT = join(import.meta.dir, "..");
 const REGISTRY = "https://npm.pkg.github.com";
@@ -167,6 +175,47 @@ export function pinSiblingDeps(pkg: Manifest, scopePrefix: string, version: stri
   }
 }
 
+// --- Agent Skill version pins --------------------------------------------------------------------
+// A skill's `library_version` is tag-derived exactly like package.json's `version`: the repo carries the
+// "0.0.0" placeholder, and the publish stamps the version it publishes into the copy it packs (this is
+// the CI checkout, rewritten in place like package.json — the working tree of a local DRY_RUN is never
+// touched). The assertion is the safety property: a published package's skills carry exactly its version.
+
+export interface StagedSkill {
+  file: string;
+  content: string;
+}
+
+/** Stamp every SKILL.md under the package's `skills/` with `version`; `write: false` keeps it in memory. */
+export function stampSkillPins(packageDir: string, version: string, write: boolean): StagedSkill[] {
+  return findSkillFiles(packageDir).map((file) => {
+    const content = stampLibraryVersion(readFileSync(file, "utf8"), version);
+    if (write) writeFileSync(file, content, "utf8");
+    return { file, content };
+  });
+}
+
+/** The package's SKILL.md files as they are on disk now — what `bun publish` will pack. */
+export function readStagedSkills(packageDir: string): StagedSkill[] {
+  return findSkillFiles(packageDir).map((file) => ({ file, content: readFileSync(file, "utf8") }));
+}
+
+/**
+ * One message per staged skill whose `library_version` is not exactly `version` (missing pins included),
+ * naming the file — relative to `displayRoot` when given.
+ */
+export function skillPinViolations(skills: StagedSkill[], version: string, displayRoot?: string): string[] {
+  const violations: string[] = [];
+  for (const { file, content } of skills) {
+    const pinned = readLibraryVersion(content);
+    if (pinned !== version) {
+      const where = displayRoot === undefined ? file : relative(displayRoot, file);
+      violations.push(`${where}: library_version "${pinned ?? "<missing>"}" is not the publish version "${version}"`);
+    }
+  }
+  return violations;
+}
+
 function scopePrefixOf(name: string | undefined): string {
   if (typeof name !== "string" || !name.startsWith("@")) return "";
   const scope = name.split("/")[0] ?? "";
@@ -192,8 +241,10 @@ function main(): void {
   console.log(`  registry: ${REGISTRY}`);
   console.log(`  dist-tag: ${distTag}${DRY_RUN ? "  (DRY RUN)" : ""}\n`);
 
-  const failures: string[] = [];
-
+  // Stage every package first (package.json + skill pins), and assert every staged skill pin before
+  // anything is published, so a bad pin can never leave a partial release behind.
+  const staged: { dir: string; label: string }[] = [];
+  const pinViolations: string[] = [];
   for (const { dir, pkgPath, pkg } of publishable) {
     const version = targetVersion(pkg.version as string, ctx);
     const label = `${String(pkg.name)}@${version}`;
@@ -203,12 +254,28 @@ function main(): void {
     pkg.repository = { type: "git", url: repoUrl };
     if (scopePrefix) pinSiblingDeps(pkg, scopePrefix, version);
 
+    const stamped = stampSkillPins(dir, version, !DRY_RUN);
+    if (!DRY_RUN) writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
+    // Re-read from disk when publishing: the assertion must hold for what `bun publish` actually packs.
+    const skills = DRY_RUN ? stamped : readStagedSkills(dir);
+    pinViolations.push(...skillPinViolations(skills, version, ROOT));
+    if (skills.length > 0) console.log(`  ${label}: ${skills.length} skill pin(s) stamped "${version}"`);
+    staged.push({ dir, label });
+  }
+
+  if (pinViolations.length > 0) {
+    console.error("\nRefusing to publish — staged Agent Skill pins disagree with the publish version:");
+    for (const v of pinViolations) console.error(`  ${v}`);
+    process.exit(1);
+  }
+
+  const failures: string[] = [];
+
+  for (const { dir, label } of staged) {
     if (DRY_RUN) {
       console.log(`[dry-run] would publish ${label} (tag ${distTag}) from ${dir}`);
       continue;
     }
-
-    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
 
     const proc = Bun.spawnSync(["bun", "publish", "--tag", distTag], {
       cwd: dir,
