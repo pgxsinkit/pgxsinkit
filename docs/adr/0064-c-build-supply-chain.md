@@ -27,11 +27,12 @@ Status note (2026-09-28): pgxsinkit adopted pgwasm-postgres `18.6.2` in `a81456f
 renamed `postgres.{js,wasm,data}`; the compiled filesystem root and install prefix `/pgwasm`, and with it the
 IndexedDB database `/pgwasm/<name>` and Web Lock `pgwasm-idbfs:/pgwasm/<name>`; pgwasm-c's `idbDatabaseName`
 exported so the client's `storeIndexedDbDatabaseName` derives from it) and `3e49a44` (`pglite` dropped from
-module names). **This release requires refreshing local stores**: `idb://` stores written under `/pglite`
-(PGlite's and earlier pgxsinkit releases') are not opened, with no migration or shim, and the library does not
-delete the old `/pglite/*` databases (the prefix is PGlite's own too; another app on the origin may own
-them). That is the maintainer's decision for this release only, not a general policy. OPFS-repacked and
-`file://` stores address files relative to the mount and are unaffected. The IDB lane's continuity list is
+module names). **This release requires refreshing local stores**: no store created by PGlite or an earlier
+pgxsinkit release is supported, with no migration or shim; apps destroy and re-sync them. `idb://` stores
+written under `/pglite` are not even opened (the database name changed), and the library does not delete the
+old `/pglite/*` databases (the prefix is PGlite's own too; another app on the origin may own them). That is the
+maintainer's decision for this release only, not a general policy. No store of the unreleased `18.6.1` pin
+exists outside tests, so nothing between `18.6.1` and `18.6.2` needs carrying over. The IDB lane's continuity list is
 emptied by design (`18.6.0` dropped); `18.6.2` becomes its first entry when a later release is pinned. The
 consumer docs say it once (Coming from PGlite, "Existing data"), including that unsynced local writes stay
 behind in the old store.

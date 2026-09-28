@@ -441,8 +441,9 @@ the host sees:
   (`/pgwasm/<name>`) and the Web Lock (`pgwasm-idbfs:/pgwasm/<name>`): an `idb://` store an earlier
   release or PGlite wrote is not opened, by design, and no library code deletes the old `/pglite/*`
   databases (another app on the origin may own them). The IDB lane's continuity list is emptied for it.
-  OPFS-repacked and `file://` stores address files relative to the mount and are unaffected; a
-  `dumpDataDir()` backup names its members relative to the data directory and restores across.
+  Stores of every kind from PGlite or earlier releases are unsupported by this release (the maintainer's
+  decision): apps refresh them. No test covers opening one; a `dumpDataDir()` backup names its members
+  relative to the data directory and restores across.
 
 ## Offline return (board ADR-0010)
 

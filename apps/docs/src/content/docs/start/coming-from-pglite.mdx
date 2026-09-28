@@ -106,13 +106,13 @@ worker) fails with `StorageInUseError`.
 
 ## Existing data
 
-**IndexedDB stores are not carried over.** pgwasm names the IndexedDB database behind `idb://<name>`
-`/pgwasm/<name>`. PGlite and earlier pgxsinkit releases named it `/pglite/<name>`, so the same
-`idb://<name>` now opens a new, empty store, and the old database is not read. pgxsinkit's local sync stores
-are re-synced from the server. Data held only in the old store is not: writes that had not synced when the
-app upgraded stay behind in the old database. Let pending writes flush before upgrading, or take a
-`dumpDataDir()` backup. OPFS-repacked stores and `file://` directories are not named this way and open
-unchanged.
+**Existing stores are not carried over.** Stores created by PGlite or by an earlier pgxsinkit release
+are not supported by this release: refresh them. pgxsinkit's local sync stores are refreshed by destroying
+the local store ([`client.destroy()`](/concepts/local-store-lifecycle/)) and letting it re-sync from the
+server. An `idb://<name>` store needs nothing: pgwasm names its IndexedDB database `/pgwasm/<name>` where
+PGlite and earlier pgxsinkit releases used `/pglite/<name>`, so the same `idb://<name>` opens a new, empty
+store. Data held only in the old store does not come across: writes that had not synced when the app
+upgraded stay behind. Let pending writes flush before upgrading, or take a `dumpDataDir()` backup.
 
 **A backup carries a database across.** Take a `dumpDataDir()` backup with the old version and pass it as
 `loadDataDir` when creating the pgwasm database: the data directory format is unchanged. A PGlite 0.5
