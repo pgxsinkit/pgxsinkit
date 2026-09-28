@@ -3,7 +3,9 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { PgwasmFailedError } from "../../packages/pgwasm/src";
+import { createCBuild } from "../../packages/pgwasm-c/src";
+import { ARTEFACT_FILES } from "../../packages/pgwasm-c/src/artefact-pins";
+import { createPgwasm, PgwasmFailedError } from "../../packages/pgwasm/src";
 import { ERRNO_CODES } from "../../packages/pgwasm/src/fs";
 import { protocol, serialize } from "../../packages/pgwasm/src/protocol";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
@@ -83,5 +85,15 @@ describe("an exception that is not a Postgres error inside the C build's main lo
     expect(await rejectionOf(pg.query("SELECT 1"))).toBe(streamError);
     expect(await rejectionOf(pg.close())).toBe(streamError);
     expect(pg.closed).toBe(true);
+  });
+});
+
+describe("a filesystem bundle of the wrong size", () => {
+  // Emscripten 6's file packager swallows a throw from getPreloadedPackage (an unhandled rejection), so the
+  // host checks the bundle before the glue runs; the boot must fail with this error, not a later FS one.
+  it("fails the boot with the size mismatch before the glue runs", async () => {
+    const build = createCBuild({ fsBundle: new Blob([new Uint8Array(1)]) });
+    const error = await rejectionOf(createPgwasm({ build }));
+    expect(error.message).toBe(`Invalid filesystem bundle size: 1 !== ${ARTEFACT_FILES["pglite.data"].bytes}`);
   });
 });

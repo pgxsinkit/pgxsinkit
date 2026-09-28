@@ -3,6 +3,7 @@
 
 import type { DebugLevel } from "@pgxsinkit/pgwasm/build";
 
+import { ARTEFACT_FILES } from "../artefact-pins";
 import { createPostgresModule } from "../artefacts";
 import type { EmscriptenStream, ModuleOverrides, PostgresModule } from "./emscripten";
 import { preservingExitCode } from "./exit-code";
@@ -56,6 +57,12 @@ export function isEmscriptenUnwind(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   return (error as { constructor?: { name?: unknown } }).constructor?.name === "EmscriptenSjLj";
 }
+
+/** The size of the filesystem bundle the pinned glue (`pglite.js`) was packaged with. */
+const FS_BUNDLE_BYTES = ARTEFACT_FILES["pglite.data"].bytes;
+
+const invalidBundleSize = (actual: number, expected: number): Error =>
+  new Error(`Invalid filesystem bundle size: ${actual} !== ${expected}`);
 
 /** The status of the `ExitStatus` the runtime throws from exit()/proc_exit(), or undefined for anything else. */
 export function exitStatusOf(error: unknown): number | undefined {
@@ -137,6 +144,11 @@ export class PostgresInstance {
 
   static async create(config: PostgresInstanceConfig): Promise<PostgresInstance> {
     const [wasmModule, fsBundle] = await Promise.all([config.wasmModule, config.fsBundle]);
+    // Checked before the glue runs. Emscripten 6's file packager (pgwasm-postgres 18.6.1 onwards) loads the
+    // bundle in an async function it never awaits, so a throw from getPreloadedPackage no longer rejects the
+    // factory: it is an unhandled rejection, and the boot fails later on a missing bundle file with an
+    // unrelated filesystem error.
+    if (fsBundle.byteLength !== FS_BUNDLE_BYTES) throw invalidBundleSize(fsBundle.byteLength, FS_BUNDLE_BYTES);
     let host: PostgresInstance | undefined;
     let stack: ShadowStack | undefined;
     const pendingHost = (module: PostgresModule): PostgresInstance => {
@@ -219,7 +231,10 @@ export class PostgresInstance {
       getPreloadedPackage: (name, size) => {
         if (name !== "pglite.data") throw new Error(`Unknown filesystem package: ${name}`);
         if (fsBundle.byteLength !== size) {
-          throw new Error(`Invalid filesystem bundle size: ${fsBundle.byteLength} !== ${size}`);
+          // Unreachable while the glue and the pins agree; if they ever do not, fail the boot with this error.
+          const error = invalidBundleSize(fsBundle.byteLength, size);
+          rejectInstantiation(error);
+          throw error;
         }
         return fsBundle;
       },
