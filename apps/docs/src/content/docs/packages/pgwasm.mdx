@@ -15,7 +15,8 @@ or add the REPL and `pg_dump` to a debug page.
 
 pgwasm began as a fork of [PGlite](https://pglite.dev) and is now its own runtime: it keeps PGlite's
 query, transaction and live-query model under new names, and it separates the runtime from the compiled
-Postgres (the **build**), so a store records which build made it.
+Postgres (the **build**), so a store records which build made it. An app moving from PGlite finds what
+carries over, what changes and how its existing data opens in [Coming from PGlite](/start/coming-from-pglite/).
 
 ## The packages
 

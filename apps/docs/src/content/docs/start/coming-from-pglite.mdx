@@ -1,0 +1,162 @@
+---
+title: Coming from PGlite
+description: Moving an app from PGlite to pgwasm — what carries over, what changes, how existing data directories open, and where pgwasm does not fit.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+[pgwasm](/packages/pgwasm/) began as a fork of [PGlite](https://pglite.dev) and keeps its query model: the
+same `query`, `exec`, `sql` and `transaction` calls, the same result shape, live queries and a Drizzle
+driver. This page is for an app that uses PGlite today without PGlite extensions and is weighing a move to
+`@pgxsinkit/pgwasm` and `@pgxsinkit/pgwasm-c`. pgwasm works on its own; the rest of pgxsinkit is not needed.
+
+```bash
+bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c
+```
+
+## Before and after
+
+With PGlite:
+
+```ts title="db.ts (PGlite)"
+import { PGlite } from "@electric-sql/pglite";
+import { live } from "@electric-sql/pglite/live";
+import { drizzle } from "drizzle-orm/pglite";
+
+export const pg = await PGlite.create({ dataDir: "idb://my-app", extensions: { live } });
+export const db = drizzle({ client: pg });
+```
+
+With pgwasm:
+
+```ts title="db.ts (pgwasm)"
+import { createPgwasm } from "@pgxsinkit/pgwasm";
+import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
+import { live } from "@pgxsinkit/pgwasm/live";
+import { cBuild } from "@pgxsinkit/pgwasm-c";
+
+export const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app", extensions: { live } });
+export const db = drizzle({ client: pg }); // or drizzle(pg)
+```
+
+Code that uses the database stays as it was:
+
+```ts
+const { rows } = await pg.query<{ id: number; title: string }>("SELECT id, title FROM todo WHERE done = $1", [false]);
+const open = await db.select().from(todo).where(eq(todo.done, false));
+const watched = await pg.live.query("SELECT count(*) FROM todo", [], (results) => render(results.rows));
+```
+
+`createPgwasm` is always async and resolves once the database is ready; there is no constructor. `build`
+is the compiled Postgres it runs: `cBuild` is PostgreSQL 18 built with Emscripten, the same kind of build
+PGlite ships (see [Postgres builds](/concepts/postgres-builds/)).
+
+## What carries over
+
+| PGlite                                                                              | pgwasm                                                                                            |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `new PGlite(options)`, `PGlite.create(options)`                                     | `await createPgwasm({ build: cBuild, ...options })`                                               |
+| `query`, `sql`, `exec`, `transaction`                                               | the same, with the same results (`rows`, `fields`, `affectedRows`, `blob`)                        |
+| query options `rowMode`, `parsers`, `serializers`, `blob`, `onNotice`, `paramTypes` | the same                                                                                          |
+| `listen`, `unlisten`, `onNotification`                                              | the same; to remove a callback, call the function `onNotification` returns (no `offNotification`) |
+| `dumpDataDir()`, the `loadDataDir` option                                           | the same; a backup restores only into an empty data directory (`DataDirExistsError`)              |
+| `waitReady`, `ready`, `closed`, `close()`, `refreshArrayTypes()`                    | the same                                                                                          |
+| `extensions: { live }` from `@electric-sql/pglite/live`                             | `@pgxsinkit/pgwasm/live`: `live.query`, `live.incrementalQuery`, `live.changes`; `PgwasmWithLive` |
+| `drizzle-orm/pglite`: `drizzle(pg)`, `drizzle({ client: pg })`                      | `@pgxsinkit/pgwasm/drizzle`, both forms                                                           |
+| `execProtocol`, `execProtocolRaw`, `execProtocolStream`, …                          | `protocol(pg)` from `@pgxsinkit/pgwasm/protocol`                                                  |
+| `pgDump` from `@electric-sql/pglite-tools/pg_dump`                                  | `pgDump` from `@pgxsinkit/pgwasm-pg-dump` (`pg`, `args`, `fileName`)                              |
+| `Repl` from `@electric-sql/pglite-repl`                                             | `Repl` from `@pgxsinkit/pgwasm-repl` (React 19.3 or later)                                        |
+| `dataDir()` from `@electric-sql/pglite-prepopulatedfs`                              | `prepopulatedDataDir()` from `@pgxsinkit/pgwasm-c/prepopulated`                                   |
+| `amcheck` from `@electric-sql/pglite/contrib/amcheck`                               | `amcheck` from `@pgxsinkit/pgwasm-c/contrib/amcheck`                                              |
+
+The Drizzle driver needs `drizzle-orm` 1.0 (the release its peer dependency names), and it never opens a
+database of its own: `drizzle()`, `drizzle("…")` and `drizzle({ connection })` throw
+`UnsupportedDrizzleConfigError`. Create the database with `createPgwasm` and pass it in.
+
+## What you change
+
+**`dataDir` needs a scheme.** `memory://` (or no `dataDir`) is in memory, `idb://<name>` is IndexedDB,
+and `file://<path>` is a directory on disk (Bun). A bare path, which PGlite read as a directory, fails with
+`UnsupportedDataDirError`: write `file://./data` for `./data`. `dataDir` and `fs` are exclusive.
+
+**Some options moved to the build or to `settings`.**
+
+| PGlite option                                                             | pgwasm                                                                                                                                                     |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pgliteWasmModule` (earlier `wasmModule`), `initdbWasmModule`, `fsBundle` | `createCBuild({ postgresWasmModule, initdbWasmModule, fsBundle })`, or all three warmed together in `createCBuild({ assets })`; pass the result as `build` |
+| `-c name=value` in `startParams`, lines of `postgresqlconf`               | `settings: { name: "value" }`                                                                                                                              |
+| `initialMemory`, `initDbStartParams`, `noInitDb`, `icuDataDir`            | not options                                                                                                                                                |
+
+See [warming the artefacts early](/packages/pgwasm/#pgxsinkitpgwasm-c-the-c-build) for `createCBuild({ assets })`.
+
+**Some methods are gone.**
+
+- `clone()`: dump and restore instead,
+  `await createPgwasm({ build: cBuild, loadDataDir: await pg.dumpDataDir() })`.
+- `describeQuery()`: no equivalent.
+- `syncToFs()`: every statement persists before it returns, or in the background with
+  `relaxedDurability`; the OPFS store's strict boundary on demand is `strictSync(pg)`.
+- `offNotification()`, `isInTransaction()`, `copyToFS()`: not on pgwasm.
+
+**One open database per store.** An `idb://` store already open in another context (another tab or
+worker) fails with `StorageInUseError`.
+
+**Typed errors.** Every runtime error extends `PgwasmError`, and a statement Postgres rejects throws
+`DatabaseError` with its `code` and fields. See [the error list](/packages/pgwasm/#typed-errors).
+
+## Existing data
+
+**PGlite 0.5.x data directories open unchanged.** PGlite 0.5 runs PostgreSQL 18.3; the C build runs a later
+PostgreSQL 18 release, which reads the same data directory. An `idb://<name>` store opens under the same
+name, because pgwasm names its IndexedDB database the way PGlite does, and a directory on disk opens as
+`file://<path>`. A store PGlite wrote carries no build record, and the C build claims such stores (see
+[A store belongs to its build](/concepts/postgres-builds/#a-store-belongs-to-its-build)). pgxsinkit's browser
+tests create IndexedDB stores with an earlier C build compiled with Emscripten 3.1.74, the toolchain of
+PGlite 0.5.8, and open, read and write them with the current build in Chromium and WebKit.
+
+<Aside type="tip" title="Keep a copy">
+  Take a `dumpDataDir()` backup with PGlite before the first open with pgwasm, so the data can be restored whatever
+  happens.
+</Aside>
+
+**Earlier PGlite versions need a dump and restore.** PGlite 0.2 runs PostgreSQL 16 and PGlite 0.3 and 0.4
+run PostgreSQL 17; PostgreSQL 18 does not open their data directories. Dump with PGlite's `pg_dump` and run
+the SQL into a new pgwasm database:
+
+```ts
+import { pgDump } from "@electric-sql/pglite-tools/pg_dump";
+
+const dump = await pgDump({ pg: oldPg }); // on PGlite
+const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app-v2" });
+await pg.exec(await dump.text());
+```
+
+A plain dump leaves the restoring session's `search_path` empty; set it back if the session relies on it.
+
+**`opfs-ahp://` stores need a backup.** pgwasm does not read PGlite's one-handle-per-file OPFS layout:
+`opfs-ahp://` fails with `OpfsAhpRemovedError`. Take a `dumpDataDir()` backup on PGlite 0.5 (a SQL dump on
+earlier versions) and pass it as `loadDataDir` when creating the pgwasm database. pgwasm's OPFS store is
+`createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`, which runs in a worker and keeps a data directory in four
+files (see [the OPFS-repacked store](/packages/pgwasm/#the-opfs-repacked-store-pgxsinkitpgwasmopfs)):
+
+```ts
+import { createOpfsPgwasm } from "@pgxsinkit/pgwasm/opfs";
+
+const backup = await oldPg.dumpDataDir(); // on PGlite 0.5
+const pg = await createOpfsPgwasm({ build: cBuild, directory, pgwasm: { loadDataDir: backup } });
+```
+
+## Where pgwasm does not fit
+
+- **Runtimes.** pgwasm is ESM only, for Bun and browsers (pages, dedicated workers, SharedWorkers and
+  extension pages). Node, Deno and CommonJS are not supported.
+- **Browsers.** The C build runs in Safari and iOS 18.4, Chrome 137, Firefox 131 and later releases (see
+  [Supported browsers](/concepts/postgres-builds/#supported-browsers)).
+- **Extensions.** `amcheck` is the only extension. PGlite's other contrib modules (such as `citext`,
+  `bloom` or `cube`) and its separately published extensions (such as pgvector or PostGIS) are not
+  available.
+- **Workers.** There is no drop-in equivalent of `PGliteWorker`. pgxsinkit's
+  [worker mode](/concepts/worker-mode/) runs the local store of its own sync client, not a general-purpose
+  pgwasm database.
+- **Framework bindings.** pgwasm has no React or Vue bindings of its own like `@electric-sql/pglite-react` or
+  `@electric-sql/pglite-vue`. pgxsinkit's React hooks serve its sync client.

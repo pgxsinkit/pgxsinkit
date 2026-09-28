@@ -131,6 +131,7 @@ export default defineConfig({
           items: [
             { label: "What is pgxsinkit?", slug: "start/overview" },
             { label: "Getting started", slug: "start/getting-started" },
+            { label: "Coming from PGlite", slug: "start/coming-from-pglite" },
             { label: "Deploying the server", slug: "start/deploying-the-server" },
             { label: "Operating in production", slug: "start/operating-in-production" },
             { label: "Use these docs with your AI assistant", slug: "start/ai-assistants" },

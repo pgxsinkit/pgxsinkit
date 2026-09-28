@@ -55,5 +55,7 @@ Three, and none is optional:
 ## Where to go next
 
 - [Getting started](/start/getting-started/) — install and wire a minimal read + write.
+- [Coming from PGlite](/start/coming-from-pglite/) — move an app from PGlite to pgwasm, the local Postgres
+  runtime.
 - [Core concepts](/concepts/) — the mental model, in five short pages.
 - [Packages](/packages/) — which `@pgxsinkit/*` package does what.
