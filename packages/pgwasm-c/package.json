@@ -16,8 +16,11 @@
     "crypto": false,
     "fs": false,
     "module": false,
+    "node:crypto": false,
     "node:fs": false,
+    "node:module": false,
     "node:path": false,
+    "node:url": false,
     "path": false,
     "url": false,
     "ws": false

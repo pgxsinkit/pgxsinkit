@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { builtinModules } from "node:module";
 import path from "node:path";
 
 import {
@@ -170,6 +171,51 @@ describe("the build packages' artefacts", () => {
         scratch.cleanup();
       }
     });
+  });
+});
+
+/**
+ * The Emscripten glue loads Node builtins behind `ENVIRONMENT_IS_NODE`, by bare name or `node:` prefix. A
+ * browser bundler that meets one the package's `browser` field does not stub externalises it with a
+ * warning, so every builtin a glue file names must be stubbed under both spellings.
+ */
+// Bun lists its own polyfills among `builtinModules`; Node (and so a bundler) does not treat them as builtins.
+const bunOnlyBuiltins = new Set(["bun", "undici", "ws"]);
+const nodeBuiltins = new Set(builtinModules.filter((name) => !bunOnlyBuiltins.has(name) && !name.startsWith("bun:")));
+
+function builtinSpecifiers(source: string): string[] {
+  const specifiers = [
+    ...source.matchAll(/\b(?:require|import)\(\s*["']([^"']+)["']\s*\)|\bfrom\s*["']([^"']+)["']/g),
+  ].map((match) => match[1] ?? match[2] ?? "");
+  const builtins = specifiers.filter((specifier) => specifier.startsWith("node:") || nodeBuiltins.has(specifier));
+  return [...new Set(builtins.map((specifier) => specifier.replace(/^node:/, "")))].sort();
+}
+
+describe("the build packages' artefact glue", () => {
+  it("names only Node builtins its package's browser field stubs, prefixed and unprefixed", () => {
+    for (const pkg of ARTEFACT_PACKAGES) {
+      const manifest = JSON.parse(readFileSync(path.join(repoRoot, pkg.packageDir, "package.json"), "utf8")) as {
+        browser?: Record<string, unknown>;
+      };
+      const glue = readdirSync(artefactDir(pkg)).filter((name) => name.endsWith(".js"));
+      expect(glue.length).toBeGreaterThan(0);
+      for (const name of glue) {
+        const builtins = builtinSpecifiers(readFileSync(path.join(artefactDir(pkg), name), "utf8"));
+        expect(builtins.length).toBeGreaterThan(0);
+        const unstubbed = builtins
+          .flatMap((builtin) => [builtin, `node:${builtin}`])
+          .filter((specifier) => manifest.browser?.[specifier] !== false);
+        expect({ glue: `${pkg.packageDir}/artefacts/${name}`, unstubbed }).toEqual({
+          glue: `${pkg.packageDir}/artefacts/${name}`,
+          unstubbed: [],
+        });
+      }
+    }
+  });
+
+  it("finds builtins by either spelling, and ignores packages that are not builtins", () => {
+    const source = `require("fs");import("node:module");require("node:fs");require("ws");import x from "node:url";`;
+    expect(builtinSpecifiers(source)).toEqual(["fs", "module", "url"]);
   });
 });
 

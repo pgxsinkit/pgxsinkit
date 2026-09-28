@@ -36,10 +36,13 @@ const FS_INPUTS: Record<string, string[]> = {
   "public-package-artifacts": ["packages/**", "scripts/build-public-packages.ts"],
   // Hashes the build packages' artefacts against their pins. The binaries are gitignored (fetched by the
   // root postinstall), so only the committed files here join the fingerprint; the pins themselves are
-  // on-graph, and the postinstall re-verifies the binaries on every install.
+  // on-graph, and the postinstall re-verifies the binaries on every install. It also checks the glue's Node
+  // builtins against each package's `browser` field.
   "pgwasm-artefacts": [
+    "packages/pgwasm-c/package.json",
     "packages/pgwasm-c/src/**",
     "packages/pgwasm-c/artefacts/**",
+    "packages/pgwasm-pg-dump/package.json",
     "packages/pgwasm-pg-dump/src/**",
     "packages/pgwasm-pg-dump/artefacts/**",
   ],
