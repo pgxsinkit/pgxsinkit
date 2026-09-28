@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+
+import { findSkillFiles, readLibraryVersion, SKILL_PIN_PLACEHOLDER } from "./lib/skill-pins";
 
 // Validate every workspace package's Agent Skills (`skills/**/SKILL.md`) with the @tanstack/intent CLI.
 //
@@ -9,13 +11,12 @@ import path from "node:path";
 // inside a package that has Electric installed. The explicit path is unambiguous. Each package is
 // validated with its own directory as cwd so the CLI's packaging checks read that package's package.json.
 //
-// Beyond the CLI's structural checks, this script also holds each skill's `library_version` to the repo's
-// GIT TAGS (the only version truth under the tag-derived standard, ADR-0001 — package.json versions are
-// 0.0.0 placeholders, so the intent CLI cannot check this itself). A pin may EQUAL the latest tag (the
-// released state) or sit AHEAD of it (the next release being prepared: pins are bumped BEFORE tagging via
-// `bun run skills:pins:write [version]`, so the tagged commit — and the package tarballs built from it,
-// skills included — carries pins that are true of itself). Only a pin BEHIND the latest tag fails: that is
-// incoherent release metadata and must fail before the slower validation lanes start.
+// Beyond the CLI's structural checks, this script holds each skill's `library_version` to the tag-derived
+// standard (ADR-0001), exactly like package.json's `version`: in the repo every pin is the placeholder
+// "0.0.0" and is never hand-edited. The real version is stamped into the packed copy at publish time by
+// `scripts/publish-github-packages.ts`, which also refuses to publish a package whose staged skills do not
+// carry exactly the version being published. `--pins-only` (via `bun run skills:pins:check`) is the fast
+// early lane `validate` / `validate:full` run first.
 
 const root = process.cwd();
 const cli = path.join(root, "node_modules/@tanstack/intent/dist/cli.mjs");
@@ -30,111 +31,39 @@ if (packagesWithSkills.length === 0) {
   process.exit(0);
 }
 
-// The latest tag, straight from git. A shallow/tagless checkout (some CI fetch modes) cannot answer, so
-// the check degrades to a loud warning there rather than failing a build on missing metadata — locally
-// (where commits happen, and the pre-commit hook runs this) tags are always present.
-function latestTag(): string | null {
-  const result = spawnSync("git", ["describe", "--tags", "--abbrev=0"], { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) return null;
-  const tag = result.stdout.trim();
-  return tag.length > 0 ? tag : null;
-}
-
-/** Compare two plain `x.y.z` release versions (the only shape this repo tags). */
-function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
-
-const RELEASE_VERSION = /^\d+\.\d+\.\d+$/;
-
-function checkVersionPins(writeVersion: string | null): boolean {
-  const tag = latestTag();
-  if (tag === null) {
-    console.warn("\n⚠ library_version pin check skipped: no git tag visible (shallow/tagless checkout?).");
-    return true;
-  }
+function checkVersionPins(): boolean {
   const problems: string[] = [];
-  const seen = new Set<string>();
+  let count = 0;
   for (const pkg of packagesWithSkills) {
-    const skillsDir = path.join(packagesDir, pkg, "skills");
-    for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const skillFile = path.join(skillsDir, entry.name, "SKILL.md");
-      if (!existsSync(skillFile)) continue;
-      const content = readFileSync(skillFile, "utf8");
-      const match = content.match(/^(\s*library_version:\s*)"([^"]+)"/m);
-      const pinned = match?.[2];
-      if (writeVersion !== null && match && pinned !== writeVersion) {
-        writeFileSync(skillFile, content.replace(match[0], `${match[1]}"${writeVersion}"`));
-        console.log(`  pinned packages/${pkg}/skills/${entry.name}/SKILL.md: "${pinned}" → "${writeVersion}"`);
-        seen.add(writeVersion);
-        continue;
-      }
-      const where = `packages/${pkg}/skills/${entry.name}/SKILL.md`;
-      if (pinned === undefined || !RELEASE_VERSION.test(pinned)) {
-        problems.push(`${where}: library_version "${pinned ?? "<missing>"}" is not a release version`);
-        continue;
-      }
-      seen.add(pinned);
-      // BEHIND the latest tag = incoherent. EQUAL = the released state. AHEAD = the next
-      // release being PREPARED — pins are bumped BEFORE tagging so the tagged commit (and the package
-      // tarballs built from it, skills included) carries its own version; the tag then lands on a tree
-      // whose pins are already true. Only "behind" fails.
-      if (compareVersions(pinned, tag) < 0) {
-        problems.push(`${where}: library_version "${pinned}" is behind the latest tag "${tag}"`);
+    for (const skillFile of findSkillFiles(path.join(packagesDir, pkg))) {
+      count++;
+      const pinned = readLibraryVersion(readFileSync(skillFile, "utf8"));
+      if (pinned !== SKILL_PIN_PLACEHOLDER) {
+        const where = path.relative(root, skillFile);
+        problems.push(
+          `${where}: library_version "${pinned ?? "<missing>"}" is not the placeholder "${SKILL_PIN_PLACEHOLDER}"`,
+        );
       }
     }
   }
-  // Mixed pins are drift-in-progress whichever way they lean — a half-done bump must not pass.
-  if (seen.size > 1) {
-    problems.push(`pins disagree across skills (${[...seen].sort().join(", ")}) — bump them together`);
-  }
   if (problems.length > 0) {
-    console.error(`\n❌ Skill version pins (latest tag is "${tag}"):\n  ${problems.join("\n  ")}`);
+    console.error(`\n❌ Skill version pins:\n  ${problems.join("\n  ")}`);
     console.error(
-      "Before tagging a release: `bun run skills:pins:write [version]` (default: next patch after the latest " +
-        "tag), review each skill's text against what that release ships, commit, THEN tag that exact version.",
+      `Every SKILL.md carries library_version: "${SKILL_PIN_PLACEHOLDER}" in the repo. The real version is stamped ` +
+        "into the packed copy at publish (scripts/publish-github-packages.ts, tag-derived per ADR-0001) — never " +
+        `edit the pin; set it back to "${SKILL_PIN_PLACEHOLDER}".`,
     );
     return false;
   }
-  const pinned = [...seen][0] ?? tag;
-  const state = pinned === tag ? "match the latest tag" : `are prepared for the next release ("${pinned}")`;
-  console.log(`\nlibrary_version pins ${state} (latest tag "${tag}") across ${packagesWithSkills.length} packages.`);
+  console.log(
+    `\nlibrary_version pins are the "${SKILL_PIN_PLACEHOLDER}" placeholder across ${count} skills in ` +
+      `${packagesWithSkills.length} packages (stamped at publish).`,
+  );
   return true;
 }
 
-// `--write-pins [version]` (via `bun run skills:pins:write [version]`) sets every pin to the given release
-// version, defaulting to the next patch after the latest tag. Pins are checked before structural validation
-// so an incoherent release fails immediately; `--pins-only` is the fast early lane used by `validate`.
-const writeFlagIdx = process.argv.indexOf("--write-pins");
-let writeVersion: string | null = null;
-if (writeFlagIdx >= 0) {
-  const explicit = process.argv[writeFlagIdx + 1];
-  if (explicit !== undefined && !RELEASE_VERSION.test(explicit)) {
-    console.error(`--write-pins expects a release version (x.y.z); received "${explicit}".`);
-    process.exit(1);
-  }
-  if (explicit !== undefined) {
-    writeVersion = explicit;
-  } else {
-    const tag = latestTag();
-    if (tag === null || !RELEASE_VERSION.test(tag)) {
-      console.error("--write-pins needs an explicit version when no release tag is visible.");
-      process.exit(1);
-    }
-    const [major, minor, patch] = tag.split(".").map(Number);
-    writeVersion = `${major}.${minor}.${(patch ?? 0) + 1}`;
-  }
-}
-
 let anyFailed = false;
-if (!checkVersionPins(writeVersion)) anyFailed = true;
+if (!checkVersionPins()) anyFailed = true;
 
 if (process.argv.includes("--pins-only")) {
   process.exit(anyFailed ? 1 : 0);

@@ -15,7 +15,7 @@ description: >-
 metadata:
   type: task
   library: "@pgxsinkit/server"
-  library_version: "0.3.1"
+  library_version: "0.0.0"
   source: https://pgxsinkit.github.io/start/deploying-the-server/
 ---
 

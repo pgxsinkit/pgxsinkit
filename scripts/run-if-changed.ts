@@ -16,8 +16,9 @@ import {
 //
 // The `CODE` preset is `git ls-files -co --exclude-standard` minus a small denylist; explicit globs are
 // matched against that same universe (so untracked-not-ignored files count, gitignored files never do).
-// `--git-tag` folds `git describe --tags --abbrev=0` (or "none") into the fingerprint — for the skills
-// stage, whose pin check compares against the tag, a non-file input no content hash would capture.
+// `--git-tag` folds `git describe --tags --abbrev=0` (or "none") into the fingerprint — for a stage whose
+// result depends on the latest tag, a non-file input no content hash would capture. No stage needs it
+// today: the skills stage stopped reading the tag when skill pins became publish-stamped placeholders.
 //
 // CI / PGXSINKIT_FORCE=1 always run and refresh on pass; PGXSINKIT_NO_CACHE=1 always runs (never skips)
 // but still records on pass. Otherwise the stage is skipped iff its fingerprint already passed.

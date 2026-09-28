@@ -12,7 +12,7 @@ description: >-
 metadata:
   type: task
   library: "@pgxsinkit/pgwasm"
-  library_version: "0.3.1"
+  library_version: "0.0.0"
   source: https://pgxsinkit.github.io/packages/pgwasm/
 ---
 
