@@ -296,6 +296,16 @@ export function opfsCommitmentSentinelPath(storePath: string): readonly [string,
 }
 
 /**
+ * The Web Lock name of a store's OPFS OWNERSHIP (`store-ownership-lock.ts`): held EXCLUSIVELY by the context
+ * that holds the store directory's sync-access handles, from before it opens them until after it closes them,
+ * and taken by anything that deletes the directory. Keyed on the same injective identity as the OPFS paths, so
+ * two valid identities never share a lock.
+ */
+export function storeOwnershipLockName(storePath: string): string {
+  return `${OPFS_TOOLKIT_CONTAINER}:store-owner:${storeIdentityComponent(storePath)}`;
+}
+
+/**
  * OPFS path (segment array) of the placement-probe scratch namespace: `pgxsinkit/probe` (ADR-0049 D6). No
  * identity — the probe is per-SharedWorker-scope, not per-store. Segments, not a joined string.
  */

@@ -36,6 +36,45 @@ test("owner gone: quiesce-by-name from a fresh page then destroy-by-path succeed
   await harnessCall(fresh, "cleanup", store);
 });
 
+// The ORDERING every path-addressed destroy relies on (store-ownership-lock.ts). A store's previous owner can
+// still hold the OPFS store's EXCLUSIVE sync-access handles when its successor deletes the store — a reload or a
+// closed tab terminates the old elected engine worker ASYNCHRONOUSLY — and a `removeEntry` under those handles
+// is refused (Chromium `NoModificationAllowedError`, WebKit `UnknownError`). The delete must WAIT for the owner's
+// release instead. Deterministic: the owner is provably alive (its engine holds the ownership lock) when the
+// destroy is issued, and it is closed only once the destroy is provably parked on that lock.
+test("previous owner still alive: destroy-by-path waits for the owner's release, then deletes", async ({ context }) => {
+  const store = uniqueStore("owner-release");
+  const owner = await context.newPage();
+  await owner.goto("/");
+  expect((await harnessCall(owner, "attach", { storePath: store, factories: true })).ok).toBe(true);
+
+  const fresh = await context.newPage();
+  await fresh.goto("/");
+  expect(await harnessCall(fresh, "startDestroyArtifacts", store)).toEqual({ started: true });
+  // Parked on the live owner's ownership lock — not failed under its handles.
+  await expect
+    .poll(
+      async () => ({
+        destroy: await harnessCall(fresh, "destroyArtifactsState", store),
+        ownerLock: await harnessCall(fresh, "storeOwnerLock", store),
+      }),
+      { timeout: 5_000 },
+    )
+    .toEqual({ destroy: { state: "pending" }, ownerLock: { held: 1, pending: 1 } });
+
+  // The owner leaves (like the wipe reload): its elected engine dies with the document and releases the store.
+  await owner.close();
+  await expect
+    .poll(() => harnessCall(fresh, "destroyArtifactsState", store), { timeout: 15_000 })
+    .toEqual({ state: "ok" });
+  expect(await harnessCall(fresh, "opfsArtefacts", store)).toEqual({
+    sentinelPresent: false,
+    storeDirectoryPresent: false,
+  });
+  expect(await harnessCall(fresh, "storeOwnerLock", store)).toEqual({ held: 0, pending: 0 });
+  await harnessCall(fresh, "cleanup", store);
+});
+
 // The EXACT board scenario: the owner RELOADS (not closes), and the SAME reloaded page runs quiesce+destroy at
 // boot — precisely what the board's wipe-on-boot does (applyPendingLocalDataWipe runs first thing after a wipe
 // reload, against a store whose pre-reload elected engine died with the old document).

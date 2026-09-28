@@ -13,6 +13,7 @@
 // swallowed (deleteSentinel, deleteStoreDirectory). `observeCommitmentNamespace` never creates and never
 // throws — a root/API failure reads as `"unobservable"` (present absence is not historical proof).
 
+import { withStoreOwnership, type OwnershipLocks } from "./store-ownership-lock";
 import { opfsCommitmentSentinelPath, opfsStoreDirectoryPath } from "./store-path";
 
 /**
@@ -34,6 +35,13 @@ export interface OpfsEffectsDeps {
    * `"unobservable"`, and the create effects throw (they are only reached in the opfs engine home).
    */
   getRoot?: () => Promise<DirLike>;
+  /**
+   * The Web Locks surface `deleteStoreDirectory` orders on (`store-ownership-lock.ts`). Omit in production: the
+   * default reads `navigator.locks` off `globalThis`; `null` (or an absent API) skips the ordering.
+   */
+  locks?: OwnershipLocks | null;
+  /** Bound on waiting for the store's owner to release before `deleteStoreDirectory` fails. Default 10 s. */
+  ownershipWaitMs?: number;
 }
 
 /** The effects surface the store-boot wiring drives (create-if-absent / delete-if-present / never-creating observe). */
@@ -42,7 +50,11 @@ export interface OpfsEffects {
   publishSentinel(): Promise<void>;
   /** Delete-if-present the commitment sentinel (`NotFoundError` swallowed). */
   deleteSentinel(): Promise<void>;
-  /** Recursively delete-if-present the store directory `pgxsinkit/stores/<identity>` (`NotFoundError` swallowed). */
+  /**
+   * Recursively delete-if-present the store directory `pgxsinkit/stores/<identity>` (`NotFoundError` swallowed),
+   * under the store's ownership lock: the delete waits (bounded) until the context holding the directory's
+   * sync-access handles has released them, and fails with `StoreOwnershipWaitError` under a live owner.
+   */
   deleteStoreDirectory(): Promise<void>;
   /**
    * Never-creating walk of the commitment namespace. A root/API failure (or the API being absent) reads as
@@ -128,13 +140,25 @@ export function createOpfsEffects(storePath: string, deps?: OpfsEffectsDeps): Op
     async deleteStoreDirectory(): Promise<void> {
       if (getRoot == null) return;
       const path = opfsStoreDirectoryPath(storePath);
-      try {
-        const parent = await walkDirectories(path.slice(0, -1), false);
-        // Recursive: the store directory holds the four VFS-owned files; the whole leaf goes.
-        await parent.removeEntry(path[path.length - 1]!, { recursive: true });
-      } catch (error) {
-        if (!isNotFoundError(error)) throw error;
-      }
+      // Ordering, not retrying: the previous owner (a reloaded page's or a relocated engine's worker) may still
+      // hold the directory's EXCLUSIVE sync-access handles, and a `removeEntry` under them is refused. Its
+      // ownership lock is held until those handles are closed (or its context is gone), so take it first.
+      await withStoreOwnership(
+        storePath,
+        async () => {
+          try {
+            const parent = await walkDirectories(path.slice(0, -1), false);
+            // Recursive: the store directory holds the four VFS-owned files; the whole leaf goes.
+            await parent.removeEntry(path[path.length - 1]!, { recursive: true });
+          } catch (error) {
+            if (!isNotFoundError(error)) throw error;
+          }
+        },
+        {
+          ...(deps?.locks !== undefined ? { locks: deps.locks } : {}),
+          ...(deps?.ownershipWaitMs !== undefined ? { waitMs: deps.ownershipWaitMs } : {}),
+        },
+      );
     },
 
     async observeCommitmentNamespace(): Promise<

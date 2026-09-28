@@ -115,6 +115,7 @@ import {
   type StoreMetaDeps,
   writeStoreMetaRecord,
 } from "./store-meta";
+import { acquireStoreOwnership } from "./store-ownership-lock";
 import {
   classifyNonPersistentStorage,
   NonPersistentStoreError,
@@ -230,6 +231,7 @@ export {
   type ProvisionStalledWire,
 } from "./worker/engine-control";
 export { createOpfsEffects, type OpfsEffects, type OpfsEffectsDeps } from "./opfs-effects";
+export { STORE_OWNERSHIP_WAIT_MS, StoreOwnershipWaitError } from "./store-ownership-lock";
 export {
   COMMITTED_STORE_UNREACHABLE_CODE,
   CommittedStoreUnreachableError,
@@ -547,6 +549,26 @@ function isOpfsRepackedStore(instance: PgwasmClient): boolean {
 const OPFS_REPACKED_STORAGE_NAME = "opfs-repacked";
 
 /**
+ * Keep the store's ownership lock until the database has closed (its build releases the OPFS handles in
+ * `closeFs` on every close, a failed one included), then release it. `Symbol.asyncDispose` routes through
+ * `close`, so both exits are covered; a second close is idempotent here as in pgwasm.
+ */
+function holdOwnershipUntilClosed(instance: PgwasmClient, release: () => void): PgwasmClient {
+  // An injected test factory may return a close-less stand-in: nothing can ever close it, so the lock stays
+  // held for the context's life (its owner never lets go), exactly the semantics of a live store.
+  if (typeof instance.close !== "function") return instance;
+  const close = instance.close.bind(instance);
+  instance.close = async () => {
+    try {
+      await close();
+    } finally {
+      release();
+    }
+  };
+  return instance;
+}
+
+/**
  * Open the opfs-repacked factory with bounded retries and a small linear backoff for transient failures,
  * then propagate the last error — a committed store's final failure is HARD, and an uncommitted candidate's
  * likewise propagates (the caller never exposes an unopened store). A typed build refusal (ADR-0063: the
@@ -664,26 +686,38 @@ export async function createPgwasmClient(
           (() => createOpfsEffects(storePath).getStoreDirectoryHandle());
         const directory = await getStoreDirectoryHandle();
         syncDebug("boot pgwasm.create phase", { phase: "directory-ready" });
-        return openWithBoundedRetries(
-          () =>
-            createOpfsStore({
-              build,
-              directory: directory as CreateOpfsPgwasmOptions["directory"],
-              durability: relaxedDurability ? "relaxed" : "strict",
-              extentSize: OPFS_STORE_EXTENT_SIZE,
-              // The factory's own two phases: handles acquired (`store-opened`) and pgwasm booted
-              // (`pgwasm-ready`). Same rail line, so one grep shows the whole create.
-              onPhase: (phase) => syncDebug("boot pgwasm.create phase", { phase }),
-              // The store is engine-less by construction (only `live` is a create-time extension); the sync
-              // engine attaches post-create (ADR-0032 S1). Restore rides the same `pgwasm` sub-options the
-              // idb path uses; the pre-warmed boot assets ride the `build`.
-              pgwasm: {
-                ...(options?.restoreFrom ? { loadDataDir: options.restoreFrom } : {}),
-                extensions: { live },
-              },
-            }),
-          options?.opfsFactories?.retryDelayMs ?? OPFS_OPEN_BACKOFF_MS,
-        );
+        // The store's OWNERSHIP LOCK (store-ownership-lock.ts), taken before the handles are opened and held
+        // until the database has closed them: a deleter (destroy, wipe, candidate retirement) orders on it, so
+        // it can never `removeEntry` under handles this context still holds. Waiting for it also orders this
+        // open after a dying predecessor's release, ahead of the contention retries below.
+        const releaseOwnership = await acquireStoreOwnership(storePath);
+        let opened: PgwasmClient;
+        try {
+          opened = await openWithBoundedRetries(
+            () =>
+              createOpfsStore({
+                build,
+                directory: directory as CreateOpfsPgwasmOptions["directory"],
+                durability: relaxedDurability ? "relaxed" : "strict",
+                extentSize: OPFS_STORE_EXTENT_SIZE,
+                // The factory's own two phases: handles acquired (`store-opened`) and pgwasm booted
+                // (`pgwasm-ready`). Same rail line, so one grep shows the whole create.
+                onPhase: (phase) => syncDebug("boot pgwasm.create phase", { phase }),
+                // The store is engine-less by construction (only `live` is a create-time extension); the sync
+                // engine attaches post-create (ADR-0032 S1). Restore rides the same `pgwasm` sub-options the
+                // idb path uses; the pre-warmed boot assets ride the `build`.
+                pgwasm: {
+                  ...(options?.restoreFrom ? { loadDataDir: options.restoreFrom } : {}),
+                  extensions: { live },
+                },
+              }),
+            options?.opfsFactories?.retryDelayMs ?? OPFS_OPEN_BACKOFF_MS,
+          );
+        } catch (error) {
+          releaseOwnership();
+          throw error;
+        }
+        return holdOwnershipUntilClosed(opened, releaseOwnership);
       },
       { ...(dataDirScheme ? { dataDir: dataDirScheme } : {}), relaxedDurability },
     )) as PgwasmClient;

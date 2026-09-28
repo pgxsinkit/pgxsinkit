@@ -149,10 +149,10 @@ export interface ElectedEngineWorker {
 /**
  * The default {@link AttachSyncClientOptions.awaitOwnershipRelease} — a documented NO-OP (ADR-0049 step 11b
  * follow-up 1). The OPFS-repacked VFS enforces single-owner access with EXCLUSIVE OPFS sync-access handles
- * (`StoreOwnedError`), not a Web Lock, so there is no ownership lock to await from here without importing the
- * VFS. The bounded wait for the dead worker's agent to release the handle lives entirely in the SUCCESSOR'S OPEN
- * PATH: the respawned engine's `createOpfsPgwasm` open retries on the owned-store contention error until it
- * clears (the `openWithBoundedRetries` wrapper) — the fault-matrix "successor open retries on contention" row.
+ * (`StoreOwnedError`). The wait for the dead worker's agent to release the handles lives in the SUCCESSOR'S OPEN
+ * PATH: the respawned engine first takes the store's ownership Web Lock (`store-ownership-lock.ts`), which the
+ * predecessor holds until its handles are closed or its context is gone, then its `createOpfsPgwasm` open retries
+ * on any residual owned-store contention (the `openWithBoundedRetries` wrapper) — the fault-matrix row.
  * So the coordinator can respawn immediately after a deliberate terminate; its VFS open is the real gate.
  */
 export function resolvedOwnershipRelease(): Promise<void> {
@@ -345,8 +345,10 @@ export function createStoreDestructionEffects(
  * **Precondition: the store is NOT running.** This is the companion to {@link SyncClient.destroy} (the
  * supervised destroy of an ATTACHED store — peer-checked, teardown-acknowledged): reach for
  * `destroyStoreArtifacts` for a store nobody is attached to — an obsolete path a preference change left
- * behind, a wipe of known store paths. Called on a path a live engine still holds, the backend delete throws
- * an ownership error after the bounded retry — loud, and safely RE-RUNNABLE: the destruction sequence is
+ * behind, a wipe of known store paths. The OPFS delete first takes the store's ownership lock
+ * (`store-ownership-lock.ts`), so an owner that is still going away (a reloaded page's dying engine worker) is
+ * waited for, never raced. Called on a path a live engine still holds, it fails with `StoreOwnershipWaitError`
+ * after the bounded wait — loud, and safely RE-RUNNABLE: the destruction sequence is
  * idempotent and phase-recorded (a store whose meta record says `deleting` is refused for boot), so a re-run
  * completes it. No liveness probe is attempted here — it could not be race-free, and the ownership error
  * already fails hard; callers keep failed paths on their own retry list (e.g. the board's Obsolete stores).

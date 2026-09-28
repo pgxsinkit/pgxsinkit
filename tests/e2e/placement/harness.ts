@@ -23,7 +23,7 @@ import {
   wrapEngineWorker,
 } from "../../../packages/client/src/index";
 import { idbStoreExists, readStoreMetaRecord } from "../../../packages/client/src/store-meta";
-import { storeIdentityComponent } from "../../../packages/client/src/store-path";
+import { storeIdentityComponent, storeOwnershipLockName } from "../../../packages/client/src/store-path";
 import {
   DECLARATION_KEY,
   DESTROY_QUERY_KEY,
@@ -116,6 +116,8 @@ export interface EngineIdentityObservation {
 const identityObservers = new Map<string, { sw: SharedWorker; port: MessagePort; log: EngineIdentityObservation[] }>();
 
 const clients = new Map<string, Client>();
+/** Path-addressed destroys started by `startDestroyArtifacts`, observed by `destroyArtifactsState`. */
+const startedDestroys = new Map<string, { state: "pending" | "ok" | "error"; error?: string }>();
 // Provision SharedWorker connections retained per store — the elected provision's shared coordinator posts its
 // keepalive/announce on this connection, so it MUST outlive `provisionSyncWorker` for a later attach to adopt.
 const provisionWorkers = new Map<string, SharedWorker>();
@@ -274,6 +276,12 @@ export interface PlacementHarness {
   ): Promise<{ ok: true; outcome: StoreWorkerQuiesceOutcome } | { ok: false; timedOut: boolean; error?: string }>;
   /** ADR-0050: destroy a store's artifacts BY PATH (no attached client) — the path-addressed delete. */
   destroyArtifacts(storePath: string, timeoutMs?: number): Promise<{ ok: boolean; timedOut: boolean; error?: string }>;
+  /** Start a path-addressed destroy WITHOUT awaiting it (the ownership-lock lane); observe it with the next one. */
+  startDestroyArtifacts(storePath: string): { started: boolean };
+  /** The started destroy's state: `pending`, or its settlement (`ok` / the error message). */
+  destroyArtifactsState(storePath: string): { state: "pending" | "ok" | "error" | "not-started"; error?: string };
+  /** The store's OPFS ownership lock (`storeOwnershipLockName`) as `navigator.locks.query()` sees it, origin-wide. */
+  storeOwnerLock(storePath: string): Promise<{ held: number; pending: number }>;
   /** The currently HELD leader Web Locks (`pgx-leader-*`), via `navigator.locks.query()`. */
   leaderLocks(): Promise<{ held: string[]; pending: string[] }>;
   /**
@@ -703,6 +711,36 @@ const harness: PlacementHarness = {
     } catch (error) {
       return { ok: false, timedOut: false, error: describeError(error).message };
     }
+  },
+
+  startDestroyArtifacts(storePath) {
+    const entry: { state: "pending" | "ok" | "error"; error?: string } = { state: "pending" };
+    startedDestroys.set(storePath, entry);
+    destroyStoreArtifacts(storePath).then(
+      () => {
+        entry.state = "ok";
+      },
+      (error: unknown) => {
+        entry.state = "error";
+        entry.error = `${describeError(error).name}: ${describeError(error).message}`;
+      },
+    );
+    return { started: true };
+  },
+
+  destroyArtifactsState(storePath) {
+    const entry = startedDestroys.get(storePath);
+    return entry ? { ...entry } : { state: "not-started" };
+  },
+
+  async storeOwnerLock(storePath) {
+    const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+    if (!locks?.query) return { held: 0, pending: 0 };
+    const snapshot = await locks.query();
+    const name = storeOwnershipLockName(storePath);
+    const count = (entries: readonly { name?: string }[] | undefined): number =>
+      (entries ?? []).filter((entry) => entry.name === name).length;
+    return { held: count(snapshot.held), pending: count(snapshot.pending) };
   },
 
   async leaderLocks() {
