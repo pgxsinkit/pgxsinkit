@@ -10,6 +10,7 @@
 
 import createInitdbModule from "../artefacts/initdb.js";
 import createPostgresModule from "../artefacts/pglite.js";
+import { ARTEFACT_FILES } from "./artefact-pins";
 
 /** The URLs of the files the C build loads, for fetching and compiling them ahead of a boot. */
 export const cBuildArtefacts = {
@@ -21,4 +22,25 @@ export const cBuildArtefacts = {
   initdbWasm: new URL("../artefacts/initdb.wasm", import.meta.url),
 } as const;
 
-export { createInitdbModule, createPostgresModule };
+/**
+ * @internal One C build's artefacts as the host runs them: the two Emscripten glue factories, the files
+ * they load, and the size of the filesystem bundle the Postgres glue was packaged with. The pinned build's
+ * are {@link pinnedCBuildArtefacts}; the IndexedDB browser lane assembles an earlier release's from its own
+ * files, to open stores that release wrote (the build seam stays one implementation).
+ */
+export interface CBuildArtefactSet {
+  readonly createPostgresModule: typeof createPostgresModule;
+  readonly createInitdbModule: typeof createInitdbModule;
+  readonly postgresWasm: URL;
+  readonly fsBundle: URL;
+  readonly initdbWasm: URL;
+  readonly fsBundleBytes: number;
+}
+
+/** @internal The pinned release's artefacts (`artefact-pins.ts`). */
+export const pinnedCBuildArtefacts: CBuildArtefactSet = {
+  createPostgresModule,
+  createInitdbModule,
+  ...cBuildArtefacts,
+  fsBundleBytes: ARTEFACT_FILES["pglite.data"].bytes,
+};

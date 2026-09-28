@@ -3,8 +3,7 @@
 
 import type { DebugLevel } from "@pgxsinkit/pgwasm/build";
 
-import { ARTEFACT_FILES } from "../artefact-pins";
-import { createPostgresModule } from "../artefacts";
+import type { CBuildArtefactSet } from "../artefacts";
 import type { EmscriptenStream, ModuleOverrides, PostgresModule } from "./emscripten";
 import { preservingExitCode } from "./exit-code";
 import { ICU_DATA_PATH, INITDB_EXE_PATH, LOCALE_LIST_PATH, PGDATA, POSTGRES_EXE_PATH } from "./paths";
@@ -58,9 +57,6 @@ export function isEmscriptenUnwind(error: unknown): boolean {
   return (error as { constructor?: { name?: unknown } }).constructor?.name === "EmscriptenSjLj";
 }
 
-/** The size of the filesystem bundle the pinned glue (`pglite.js`) was packaged with. */
-const FS_BUNDLE_BYTES = ARTEFACT_FILES["pglite.data"].bytes;
-
 const invalidBundleSize = (actual: number, expected: number): Error =>
   new Error(`Invalid filesystem bundle size: ${actual} !== ${expected}`);
 
@@ -101,6 +97,8 @@ function shadowStackOf(instance: WebAssembly.Instance): ShadowStack {
 }
 
 export interface PostgresInstanceConfig {
+  /** The Postgres glue (`pglite.js`) and the size of the filesystem bundle it was packaged with. */
+  readonly glue: Pick<CBuildArtefactSet, "createPostgresModule" | "fsBundleBytes">;
   readonly wasmModule: Promise<WebAssembly.Module>;
   /** The filesystem bundle, a copy of its own for this instance. */
   readonly fsBundle: Promise<ArrayBuffer>;
@@ -148,7 +146,8 @@ export class PostgresInstance {
     // bundle in an async function it never awaits, so a throw from getPreloadedPackage no longer rejects the
     // factory: it is an unhandled rejection, and the boot fails later on a missing bundle file with an
     // unrelated filesystem error.
-    if (fsBundle.byteLength !== FS_BUNDLE_BYTES) throw invalidBundleSize(fsBundle.byteLength, FS_BUNDLE_BYTES);
+    const { createPostgresModule, fsBundleBytes } = config.glue;
+    if (fsBundle.byteLength !== fsBundleBytes) throw invalidBundleSize(fsBundle.byteLength, fsBundleBytes);
     let host: PostgresInstance | undefined;
     let stack: ShadowStack | undefined;
     const pendingHost = (module: PostgresModule): PostgresInstance => {

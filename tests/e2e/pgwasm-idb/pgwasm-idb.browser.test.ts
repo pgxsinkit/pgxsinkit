@@ -4,6 +4,8 @@
 
 import { expect, type Page, test } from "@playwright/test";
 
+import { CONTINUITY_BUILDS } from "./continuity-builds";
+
 /**
  * pgwasm on the C build with `idb://` storage, in Chromium and WebKit: the storage kind that exists
  * only in a browser. The scenarios run in the page (`src.ts`); these tests drive and assert on them.
@@ -232,4 +234,53 @@ test.describe("pg_dump and the REPL", () => {
     expect(await page.locator('head style[data-href="pgwasm-repl"]').count()).toBe(1);
     await page.evaluate(() => window.pgwasmIdb.unmountRepl());
   });
+});
+
+test.describe("an idb:// store an earlier build wrote", () => {
+  const BUILD_MARKER = '{"pgwasm":1,"build":"c","dataFormat":1}\n';
+
+  for (const { tag } of CONTINUITY_BUILDS) {
+    for (const marker of ["marked", "unmarked"] as const) {
+      test(`opens with the current build, reads back and writes: pgwasm-postgres ${tag}, ${marker}`, async ({
+        page,
+      }) => {
+        await openHarness(page);
+        const result = await page.evaluate(([build, store, kind]) => window.pgwasmIdb.continuity(build, store, kind), [
+          tag,
+          `continuity-${tag}-${marker}`,
+          marker,
+        ] as const);
+        // The earlier release's engine wrote the store (its version() names it), and the current one read it.
+        expect(result.earlierVersion).toContain(`(pgwasm-postgres ${tag})`);
+        expect(result.currentVersion).not.toBe(result.earlierVersion);
+        // The earlier build wrote what the test meant it to: a bytea and a ~640 kB text, beside plain rows.
+        expect(result.written).toMatchObject([
+          { id: 1, label: "plain", payload_bytes: null, body_chars: null },
+          { id: 2, label: "bytes", payload_bytes: 8, body_chars: 9 },
+          { id: 3, label: "large", payload_bytes: 320_000, body_chars: 640_000 },
+        ]);
+        // The current build reads every row back identically: Postgres' own sizes and digests, and every value.
+        expect(result.read).toEqual(result.written);
+        expect(result.identical).toBe(true);
+        expect(result.markerWritten).toBe(BUILD_MARKER);
+        if (marker === "marked") {
+          expect(result.markerRead).toBe(BUILD_MARKER);
+          expect(result.refusedWithoutClaim).toBeNull();
+        } else {
+          // ADR-0063: an unmarked store is adopted as the C build's, and never backfilled; a build that does
+          // not claim unmarked directories refuses it.
+          expect(result.markerRead).toBeNull();
+          expect(result.refusedWithoutClaim).toMatchObject({ name: "BuildMismatchError" });
+        }
+        expect(result.markerAfterWrite).toBe(result.markerRead);
+        expect(result.afterWrite).toEqual([
+          { id: 1, label: "plain", body_chars: null },
+          { id: 2, label: "bytes", body_chars: 9 },
+          { id: 3, label: "large", body_chars: 640_000 },
+          { id: 4, label: "after", body_chars: 28 },
+        ]);
+        expect(result.blocked).toBe(false);
+      });
+    }
+  }
 });

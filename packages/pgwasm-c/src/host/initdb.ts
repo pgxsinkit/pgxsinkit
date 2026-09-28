@@ -1,7 +1,7 @@
 // Began as a copy of `@electric-sql/pglite` (taken under its PostgreSQL License option, © ElectricSQL
 // — see NOTICE). Owned outright (ADR-0062); compatibility with PGlite is an anti-goal — evolve freely.
 
-import { createInitdbModule } from "../artefacts";
+import type { CBuildArtefactSet } from "../artefacts";
 import { commandWords } from "./command-line";
 import type { InitdbModule } from "./emscripten";
 import { preservingExitCode } from "./exit-code";
@@ -43,11 +43,14 @@ function assert(condition: unknown, message: string): asserts condition {
  * cluster it creates lands in the instance's `/pglite/data`.
  */
 export async function runInitdb({
+  createInitdbModule,
   postgres,
   initdbWasm,
   debug,
   onCommand,
 }: {
+  /** The initdb glue (`initdb.js`) of the build whose `initdbWasm` this is. */
+  readonly createInitdbModule: CBuildArtefactSet["createInitdbModule"];
   readonly postgres: PostgresInstance;
   readonly initdbWasm: WebAssembly.Module;
   readonly debug: number;

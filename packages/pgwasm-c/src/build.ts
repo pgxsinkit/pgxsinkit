@@ -16,7 +16,7 @@ import type {
 } from "@pgxsinkit/pgwasm/build";
 
 import { ARTEFACT_RELEASE } from "./artefact-pins";
-import { cBuildArtefacts } from "./artefacts";
+import { type CBuildArtefactSet, pinnedCBuildArtefacts } from "./artefacts";
 import { bytesOf, compileModule, loadBundle, prefetch } from "./host/artefact-loader";
 import { readDataDirEntries, readDataDirFile, writeDataDirEntries, writeDataDirFile } from "./host/data-dir";
 import type { PostgresModule } from "./host/emscripten";
@@ -77,6 +77,7 @@ export interface CBuildOptions {
 }
 
 interface Resolved {
+  readonly artefacts: CBuildArtefactSet;
   readonly postgresWasm: () => Promise<WebAssembly.Module>;
   readonly initdbWasm: () => Promise<WebAssembly.Module>;
   readonly fsBundle: () => Promise<ArrayBuffer>;
@@ -165,6 +166,7 @@ class CMountedDataDirectory implements MountedDataDirectory {
     // invocations reset the instance's heap between runs, and a filesystem holding exclusive resources
     // (an OPFS store's handles) must not be initialised twice.
     const scratch = await PostgresInstance.create({
+      glue: this.#resolved.artefacts,
       wasmModule: this.#resolved.postgresWasm(),
       fsBundle: this.#resolved.fsBundle(),
       user: this.#request.user,
@@ -173,6 +175,7 @@ class CMountedDataDirectory implements MountedDataDirectory {
     });
     try {
       const result = await runInitdb({
+        createInitdbModule: this.#resolved.artefacts.createInitdbModule,
         postgres: scratch,
         initdbWasm: await this.#resolved.initdbWasm(),
         debug: this.#request.debug,
@@ -226,6 +229,20 @@ class CMountedDataDirectory implements MountedDataDirectory {
  * defaults; a build object can boot any number of databases.
  */
 export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
+  return createCBuildFrom(C_BUILD_IDENTITY, pinnedCBuildArtefacts, options);
+}
+
+/**
+ * @internal A C build on the given artefacts, recording the given identity: what {@link createCBuild}
+ * builds on the pinned release's. Not exported from the package; the IndexedDB browser lane reaches it
+ * from source to boot an earlier release's glue and files, so the stores that release wrote can be opened
+ * by the current build (tests/e2e/pgwasm-idb/continuity-builds.ts).
+ */
+export function createCBuildFrom(
+  identity: BuildIdentity,
+  artefacts: CBuildArtefactSet,
+  options: CBuildOptions = {},
+): PostgresBuild {
   // Settled once, and handled here: a failed warm-up means the lazy load, never an unhandled rejection.
   const warmed: Promise<CBuildAssets | undefined> =
     options.assets === undefined
@@ -235,17 +252,18 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
           () => undefined,
         );
   const resolved: Resolved = {
+    artefacts,
     postgresWasm: async () => {
       const module = options.postgresWasmModule ?? (await warmed)?.postgresWasmModule;
-      return module === undefined ? compileModule(cBuildArtefacts.postgresWasm) : module;
+      return module === undefined ? compileModule(artefacts.postgresWasm) : module;
     },
     initdbWasm: async () => {
       const module = options.initdbWasmModule ?? (await warmed)?.initdbWasmModule;
-      return module === undefined ? compileModule(cBuildArtefacts.initdbWasm) : module;
+      return module === undefined ? compileModule(artefacts.initdbWasm) : module;
     },
     fsBundle: async () => {
       const bundle = options.fsBundle ?? (await warmed)?.fsBundle;
-      return bundle === undefined ? loadBundle(cBuildArtefacts.fsBundle) : bytesOf(bundle);
+      return bundle === undefined ? loadBundle(artefacts.fsBundle) : bytesOf(bundle);
     },
     options,
   };
@@ -258,7 +276,7 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
   );
 
   return {
-    identity: C_BUILD_IDENTITY,
+    identity,
     capabilities: C_BUILD_CAPABILITIES,
     prepare: () => prepared,
     async boot(request: BootRequest): Promise<MountedDataDirectory> {
@@ -268,10 +286,10 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
       // Start the downloads the warm-up did not cover now; the boot needs them in turn.
       const assets = await warmed;
       if (options.postgresWasmModule === undefined && assets?.postgresWasmModule === undefined) {
-        prefetch(cBuildArtefacts.postgresWasm);
+        prefetch(artefacts.postgresWasm);
       }
       if (options.initdbWasmModule === undefined && assets?.initdbWasmModule === undefined) {
-        prefetch(cBuildArtefacts.initdbWasm);
+        prefetch(artefacts.initdbWasm);
       }
 
       const mount = mountFor(request.storage);
@@ -279,6 +297,7 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
       let instance: PostgresInstance | undefined;
       try {
         instance = await PostgresInstance.create({
+          glue: artefacts,
           wasmModule: resolved.postgresWasm(),
           fsBundle: resolved.fsBundle(),
           user: request.user,

@@ -4,14 +4,18 @@
 
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { continuityBuilds } from "virtual:pgwasm-continuity-builds";
 
 import { createPgwasm, type Pgwasm } from "@pgxsinkit/pgwasm";
-import { cBuild, createCBuild } from "@pgxsinkit/pgwasm-c";
+import { C_BUILD_IDENTITY, cBuild, createCBuild } from "@pgxsinkit/pgwasm-c";
 import { prepopulatedDataDir } from "@pgxsinkit/pgwasm-c/prepopulated";
 import { pgDump } from "@pgxsinkit/pgwasm-pg-dump";
 import { Repl } from "@pgxsinkit/pgwasm-repl";
 
+import { type CBuildArtefactSet, pinnedCBuildArtefacts } from "../../../packages/pgwasm-c/src/artefacts";
+import { createCBuildFrom } from "../../../packages/pgwasm-c/src/build";
 import type { PostgresModule } from "../../../packages/pgwasm-c/src/host/emscripten";
+import { PGDATA } from "../../../packages/pgwasm-c/src/host/paths";
 
 /**
  * The page side of the IndexedDB browser lane: pgwasm on the C build with `idb://` storage, in a real
@@ -88,6 +92,68 @@ function capturingBuild(): { readonly build: ReturnType<typeof createCBuild>; re
 }
 
 /** Wrap the module's `FS.syncfs`, keeping the original for the wrapper to call. */
+/**
+ * An earlier C build (continuity-builds.ts), on its own glue and files: the host is the current one, as
+ * `createCBuild` runs it, and its identity records that release, as that release's own pgwasm did.
+ */
+function continuityBuild(tag: string, onPostgresModule: (module: PostgresModule) => void) {
+  const files = continuityBuilds.find((build) => build.tag === tag);
+  if (files === undefined) throw new Error(`no continuity build ${tag}; see continuity-builds.ts`);
+  const artefacts: CBuildArtefactSet = {
+    // The default exports of that release's pglite.js and initdb.js: the same factories as the pinned glue's.
+    createPostgresModule: files.createPostgresModule as CBuildArtefactSet["createPostgresModule"],
+    createInitdbModule: files.createInitdbModule as CBuildArtefactSet["createInitdbModule"],
+    postgresWasm: new URL(files.postgresWasm, location.href),
+    initdbWasm: new URL(files.initdbWasm, location.href),
+    fsBundle: new URL(files.fsBundle, location.href),
+    fsBundleBytes: files.fsBundleBytes,
+  };
+  return createCBuildFrom(
+    { ...C_BUILD_IDENTITY, dataFormat: files.dataFormat, release: `pgwasm-postgres ${tag}` },
+    artefacts,
+    { onPostgresModule },
+  );
+}
+
+const BUILD_MARKER = `${PGDATA}/PGWASM_BUILD`;
+const readMarker = (module: PostgresModule): string | null =>
+  module.FS.analyzePath(BUILD_MARKER).exists ? new TextDecoder().decode(module.FS.readFile(BUILD_MARKER)) : null;
+
+type Row = Record<string, unknown>;
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a instanceof Uint8Array && b instanceof Uint8Array) {
+    return a.length === b.length && a.every((byte, index) => byte === b[index]);
+  }
+  return a === b;
+}
+
+/** Whether two result sets hold the same values, bytea compared byte for byte. */
+function sameRows(a: readonly Row[], b: readonly Row[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((row, index) => {
+      const other = b[index];
+      return (
+        other !== undefined &&
+        Object.keys(row).length === Object.keys(other).length &&
+        Object.entries(row).every(([column, value]) => sameValue(value, other[column]))
+      );
+    })
+  );
+}
+
+async function versionOf(pg: Pgwasm): Promise<string> {
+  const [row] = (await pg.query<{ version: string }>("SELECT version()")).rows;
+  if (row === undefined) throw new Error("version() returned no row");
+  return row.version;
+}
+
+const CONTINUITY_ROWS = "SELECT id, label, payload, body FROM continuity ORDER BY id";
+/** What Postgres itself says of each row: sizes and digests, compared across the two builds. */
+const CONTINUITY_SUMMARY = `SELECT id, label, octet_length(payload) AS payload_bytes, md5(payload) AS payload_md5,
+  length(body) AS body_chars, md5(body) AS body_md5 FROM continuity ORDER BY id`;
+
 function wrapSyncfs(module: PostgresModule, wrap: (original: Syncfs) => Syncfs): void {
   const fs = module.FS;
   const original: Syncfs = fs.syncfs.bind(fs);
@@ -145,6 +211,98 @@ const harness = {
   },
 
   // ─── IDBFS correctness ────────────────────────────────────────────────────────
+
+  // ─── cross-build continuity ─────────────────────────────────────────────────────
+
+  /**
+   * An earlier build (continuity-builds.ts) creates a store and writes rows to it, a bytea and a large
+   * text among them; `unmarked` then removes its build marker, as a store made before markers (pgxsinkit
+   * ≤0.3.x, PGlite 0.5.8's wasm) has none. The current build opens the store, reads the rows back, writes
+   * a row, and reopens it. A build that does not claim unmarked directories must refuse the unmarked one.
+   */
+  async continuity(
+    tag: string,
+    name: string,
+    marker: "marked" | "unmarked",
+  ): Promise<{
+    readonly earlierVersion: string;
+    readonly currentVersion: string;
+    readonly written: unknown[];
+    readonly read: unknown[];
+    readonly identical: boolean;
+    readonly markerWritten: string | null;
+    readonly markerRead: string | null;
+    readonly refusedWithoutClaim: ErrorShape | null;
+    readonly afterWrite: unknown[];
+    readonly markerAfterWrite: string | null;
+    readonly blocked: boolean;
+  }> {
+    await deleteStore(name, "retry");
+    let earlierModule: PostgresModule | undefined;
+    const earlier = await createPgwasm({
+      build: continuityBuild(tag, (module) => {
+        earlierModule = module;
+      }),
+      dataDir: idb(name),
+    });
+    await earlier.exec(`
+      CREATE TABLE continuity (id serial PRIMARY KEY, label text NOT NULL, payload bytea, body text);
+      INSERT INTO continuity (label) VALUES ('plain');
+      INSERT INTO continuity (label, payload, body) VALUES ('bytes', '\\x00ff7f80deadbeef'::bytea, 'ünïcødé ✓');
+      INSERT INTO continuity (label, payload, body)
+        SELECT 'large', decode(string_agg(md5(i::text), ''), 'hex'), string_agg(md5((-i)::text), '')
+        FROM generate_series(1, 20000) AS i;
+    `);
+    const earlierVersion = await versionOf(earlier);
+    const writtenRows = (await earlier.query<Row>(CONTINUITY_ROWS)).rows;
+    const written = (await earlier.query(CONTINUITY_SUMMARY)).rows;
+    if (earlierModule === undefined) throw new Error("the earlier build instantiated no Postgres module");
+    const markerWritten = readMarker(earlierModule);
+    if (marker === "unmarked") earlierModule.FS.unlink(BUILD_MARKER);
+    await earlier.close();
+
+    const refusedWithoutClaim =
+      marker === "unmarked"
+        ? await errorOf(async () => {
+            const refusing = createCBuildFrom(
+              { ...C_BUILD_IDENTITY, claimsUnmarkedDirectories: false },
+              pinnedCBuildArtefacts,
+            );
+            const opened = await createPgwasm({ build: refusing, dataDir: idb(name) });
+            await opened.close();
+          })
+        : null;
+
+    const { build, module } = capturingBuild();
+    const current = await createPgwasm({ build, dataDir: idb(name) });
+    const markerRead = readMarker(module());
+    const currentVersion = await versionOf(current);
+    const identical = sameRows(writtenRows, (await current.query<Row>(CONTINUITY_ROWS)).rows);
+    const read = (await current.query(CONTINUITY_SUMMARY)).rows;
+    await current.exec("INSERT INTO continuity (label, body) VALUES ('after', 'written by the current build')");
+    await current.close();
+
+    const reopenedBuild = capturingBuild();
+    const reopened = await createPgwasm({ build: reopenedBuild.build, dataDir: idb(name) });
+    const markerAfterWrite = readMarker(reopenedBuild.module());
+    const afterWrite = (
+      await reopened.query("SELECT id, label, length(body) AS body_chars FROM continuity ORDER BY id")
+    ).rows;
+    await reopened.close();
+    return {
+      earlierVersion,
+      currentVersion,
+      written,
+      read,
+      identical,
+      markerWritten,
+      markerRead,
+      refusedWithoutClaim,
+      afterWrite,
+      markerAfterWrite,
+      ...(await deleteStore(name, "report")),
+    };
+  },
 
   /** A second open of the same store, in this page, is refused while the first is open. */
   async secondOwner(name: string): Promise<{ readonly contender: ErrorShape | null; readonly blocked: boolean }> {

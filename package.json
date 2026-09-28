@@ -41,7 +41,7 @@
     "docs:adr:check": "bun scripts/generate-adr-index.ts --check",
     "docs:build": "bun run docs:adr:check && bun run --cwd apps/docs build",
     "e2e:board:serve": "cd apps/board && VITE_E2E=1 bun run build && bun run preview",
-    "e2e:pgwasm-idb:serve": "vite --config tests/e2e/pgwasm-idb/vite.config.ts build && vite --config tests/e2e/pgwasm-idb/vite.config.ts preview",
+    "e2e:pgwasm-idb:serve": "bun scripts/pgwasm-continuity-artefacts.ts && vite --config tests/e2e/pgwasm-idb/vite.config.ts build && vite --config tests/e2e/pgwasm-idb/vite.config.ts preview",
     "e2e:pgwasm-opfs:serve": "vite --config tests/e2e/pgwasm-opfs/vite.config.ts build && vite --config tests/e2e/pgwasm-opfs/vite.config.ts preview",
     "e2e:placement:serve": "vite --config tests/e2e/placement/vite.config.ts build && vite --config tests/e2e/placement/vite.config.ts preview",
     "edge:build": "bun scripts/build-edge-functions.ts",
