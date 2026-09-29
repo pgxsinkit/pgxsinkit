@@ -504,8 +504,8 @@ bun run dev:board
 ```
 
 <Aside type="note" title="The board's gateway is served over HTTPS (HTTP/2) — mkcert is a prerequisite">
-  `@durable-streams/client` holds one live long-poll connection **per synced stream**, and the board syncs six. Over
-  plain HTTP/1.1 those long-polls exhaust the browser's ~6-connections-per-origin cap and writes starve behind them (see
+  `@pgxsinkit/client` holds one live long-poll connection **per synced stream**, and the board syncs six. Over plain
+  HTTP/1.1 those long-polls exhaust the browser's ~6-connections-per-origin cap and writes starve behind them (see
   [Deploying the server → the gateway must speak HTTP/2](/start/deploying-the-server/)). So the demo fronts its gateway
   with a TLS-terminating **HTTP/2 + HTTP/3** Caddy sidecar, and the board's browser origin is `https://localhost:54343`.
   `infra:up` issues the cert with [`mkcert`](https://github.com/FiloSottile/mkcert), but the local CA must be

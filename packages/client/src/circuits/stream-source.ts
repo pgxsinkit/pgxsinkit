@@ -1,6 +1,17 @@
-import { stream, type StreamErrorHandler } from "@durable-streams/client";
-
 import type { StreamEnvelope } from "@pgxsinkit/contracts";
+
+import { parseRetryAfterMs } from "../retry-after";
+import {
+  classifyStatus,
+  failedRead,
+  readRequestUrl,
+  readResponse,
+  retryDelayMs,
+  sleep,
+  StreamReadError,
+  type ReadPosition,
+  type ReadResponse,
+} from "./long-poll";
 
 /** The resume position of a fresh subscription — the start of the stream. */
 export const STREAM_START = "-1";
@@ -9,13 +20,13 @@ export const STREAM_START = "-1";
 export interface StreamBatch {
   envelopes: readonly StreamEnvelope[];
   /**
-   * The offset to resume from. Persist it **with** the applied rows in one transaction: persisted
-   * ahead, a crash loses the envelopes between; persisted behind, they are re-applied. The apply
-   * path is idempotent so the second is survivable and the first is not, which is why this rides
-   * the batch rather than being read off the response afterwards.
+   * The offset to resume from after THIS batch. Persist it **with** the applied rows in one
+   * transaction: persisted ahead, a crash loses the envelopes between; persisted behind, they are
+   * re-applied. The apply path is idempotent so the second is survivable and the first is not, which
+   * is why this rides the batch rather than being read off the stream afterwards.
    */
   offset: string;
-  /** Whether the stream has delivered everything it held when the response was generated. */
+  /** Whether THIS batch reached the tail of the stream as it stood when the server answered. */
   upToDate: boolean;
 }
 
@@ -29,9 +40,8 @@ export interface StreamSourceOptions {
    *
    * A live subscription outlives its token by design — the ADR-0055 default lifetime is five
    * minutes and a subscription runs for hours — so a token frozen at open would 403 the whole
-   * stream at the first TTL boundary. This is the ADR-0013 read-path refresh seam, and
-   * `@durable-streams/client` supports it directly: header values may be async thunks, resolved
-   * afresh per request.
+   * stream at the first TTL boundary. This is the ADR-0013 read-path refresh seam. A token that
+   * cannot be produced (the thunk throws) ends the read with that error.
    */
   token: () => string | Promise<string>;
   /**
@@ -49,18 +59,24 @@ export interface StreamSourceOptions {
 }
 
 /**
- * The `onError` handler for a read.
+ * The token-recovery policy as a function of a read error: resolves with the `authorization` header
+ * to retry with, or `undefined` when the error must stand.
+ */
+export type StreamErrorHandler = (error: Error) => Promise<{ headers: { authorization: string } } | undefined>;
+
+/**
+ * The token-recovery policy the reader applies to every request: **one re-mint per rejection**.
  *
- * `@durable-streams/client`'s retry loop has a sharp edge that a naive handler falls straight off.
- * Returning `{}` re-enters `streamInternal` **immediately** — a bare `while (true) { … continue }`
- * with no backoff of its own — while its backoff wrapper deliberately refuses to back off on any
- * 4xx except 429 (`fetch.ts`: client errors "cannot be backed off on"). So `onError: () => ({})`
- * against a persistently-rejected token is a hot spin, not a slow retry.
+ * On a 401/403 the handler asks `onTokenRejected` for a fresh token and answers with it; if the
+ * fresh token is refused too, it answers `undefined` and the error stands. The second consecutive
+ * rejection is the answer — the token was refreshed and still refused, so this is a revocation, not
+ * an expiry — and retrying past it would turn a revoked entitlement into a hot loop of refused
+ * requests. A revocation must instead surface as an error the caller can act on: truncate the scope
+ * and unsubscribe (ADR-0055 decision 6).
  *
- * This handler is therefore **stateful and single-shot**: one re-mint per rejection, and if the
- * fresh token is rejected too, it returns undefined and the error propagates. A revoked entitlement
- * must surface as an error the caller can act on — truncate the scope and unsubscribe (ADR-0055
- * decision 6) — not as a stream that spins.
+ * Stateful and single-shot: one handler re-mints once. The reader makes a new one for each request, so
+ * a read that lives for hours can re-mint many times, but no request is retried on a second rejection.
+ * Errors that are not 401/403 are not the handler's to recover and answer `undefined`.
  */
 export function createTokenRecovery(
   onTokenRejected: NonNullable<StreamSourceOptions["onTokenRejected"]>,
@@ -69,8 +85,6 @@ export function createTokenRecovery(
   return async (error: Error & { status?: number }) => {
     const status = error.status;
     if (status !== 401 && status !== 403) return undefined;
-    // The second consecutive rejection is the answer: the token was refreshed and still refused, so
-    // this is a revocation, not an expiry.
     if (recovering) return undefined;
 
     recovering = true;
@@ -80,112 +94,207 @@ export function createTokenRecovery(
   };
 }
 
-/** A running subscription. `subscribeJson` is backpressure-aware, so a slow apply throttles reads. */
+/** A running subscription. */
 export interface ShapeStreamSubscription {
-  /** Stop reading and release the connection. */
+  /** Stop reading: abort the request in flight and release the connection. Reports nothing. */
   close(): void;
+}
+
+/** The reader's time and chance, injectable so a test can assert a retry schedule without waiting. */
+export interface ReadInternals {
+  /** Wait out a backoff. Must resolve early when `signal` aborts. */
+  wait: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** The jitter source, uniform on [0, 1). */
+  random: () => number;
 }
 
 /**
  * Read one Circuits shape stream, yielding envelopes in stream order.
  *
- * Resolves once the first response has arrived (so an immediate auth failure surfaces here rather
- * than silently on a background loop) and hands back a subscription that keeps delivering until
- * closed.
+ * pgxsinkit's own long-poll reader of the Durable Streams protocol (ADR-0065 decision 6; the wire is
+ * `long-poll.ts`). It catches up with plain reads from `offset` (so a catch-up response stays
+ * cacheable), and once a response says it is up to date, a live read long-polls the tail, echoing the
+ * server's cursor. `live: false` stops at the first up-to-date response instead.
  *
- * `onEnd` is not optional decoration — without it every mid-session stream death is SILENT.
- * `stream()`'s own `onError` option wraps only the OPENING request; every later long-poll goes
- * through the response's internal `fetchNext`, where a non-2xx throws into the body stream's pull,
- * is marked on the response and ends the `subscribeJson` loop. Nothing calls the batch subscriber
- * again and nothing throws at the caller: the stream simply stops, the rows stay, and nobody
- * re-subscribes. The one place that condition is observable is the response's `closed` promise —
- * it REJECTS on a terminal read error (a `403` past a re-mint, a `404`/`410` on an evicted stream,
- * a lost connection) and RESOLVES on a normal end (`live: false` reaching up-to-date,
- * `Stream-Closed`, or our own {@link ShapeStreamSubscription.close}). So `onEnd(null)` means "this
- * read is over and nothing failed"; `onEnd(error)` is the mid-session reset (ADR-0056 decision 7)
- * that a caller must answer with a re-subscribe.
+ * Resolves once the first response has arrived, so an immediate failure — a refused token, a stream
+ * that does not exist — rejects this call rather than dying on a loop nobody is watching. The first
+ * batch is delivered after that, never during the call: a caller that closes its subscription from
+ * inside `onBatch` already holds it.
  *
- * ORDERING GUARANTEE: `onEnd(null)` is called only AFTER `onBatch` has been handed the batch that
- * ends the read (the up-to-date batch of a `live: false` read; the `Stream-Closed` batch of any
- * read). `closed` alone does not give that — it settles when the transport's fetch loop is done,
- * which for a non-live read can be before the subscriber has consumed the final response — so the
- * normal end is reported off the terminal batch, and a caller may close on `onEnd` without losing it.
+ * Every successful response is one batch, an empty one included (a long poll that timed out delivers
+ * the empty up-to-date batch at the same offset). **Backpressure:** the next request is not sent until
+ * `onBatch` has settled, so a slow apply throttles the read. One request is in flight at a time,
+ * which is one connection per stream while it long-polls.
  *
- * The transport only. Everything above it — the fold, apply modes, the boot gate — stays
- * pgxsinkit's, which is ADR-0009's precedent applied to a new substrate: keep the transport,
- * internalize the semantics.
+ * **Failures, per request:**
+ * - 401/403: one immediate retry with a token from `onTokenRejected` ({@link createTokenRecovery}); a
+ *   second rejection of the same request, or no fresh token, is terminal. Every request of the session
+ *   gets this, not only the opening one, so a read that lives for hours can re-mint many times, but a
+ *   refused token never loops.
+ * - 429 and every 5xx, and network failures (the request, or its body, cut off): retried with backoff
+ *   until they succeed or the caller stops the read. A `Retry-After` is a floor under the backoff.
+ * - Every other status is terminal, 404 and 410 (the stream was never created, or was retired)
+ *   included, as is a response that breaks the protocol ({@link readResponse}).
+ *
+ * **The end of a read.** `onEnd` is not optional decoration: without it a read that dies mid-session
+ * is silent — the rows stay, and nobody re-subscribes. It fires at most once:
+ * - `onEnd(null)` after `onBatch` has been handed the batch that ends the read — the up-to-date batch
+ *   of a `live: false` read, the `Stream-Closed` batch of any read — and has settled on it. A caller
+ *   may close on `onEnd` without losing that batch.
+ * - `onEnd(error)` for a terminal failure after the first response, and for an `onBatch` that throws.
+ *   This is the mid-session reset (ADR-0056 decision 7) a caller answers with a re-subscribe.
+ * - `onEnd(null)` when the caller's `signal` aborts.
+ * - Nothing when the caller called {@link ShapeStreamSubscription.close}: a group tearing its streams
+ *   down would otherwise hear K "the stream ended" reports and try to recover from a stop it ordered.
+ * - Nothing for a failure before the first response: that rejects this call instead.
+ *
+ * The transport only. Everything above it — the fold, apply modes, the boot gate — is the engine's,
+ * which is ADR-0009's precedent applied to a new substrate.
  */
-export async function readShapeStream(
+export function readShapeStream(
   options: StreamSourceOptions,
   onBatch: (batch: StreamBatch) => void | Promise<void>,
   onEnd?: (error: Error | null) => void,
 ): Promise<ShapeStreamSubscription> {
-  const response = await stream<StreamEnvelope>({
-    url: options.url,
-    offset: options.offset ?? STREAM_START,
-    live: options.live ?? true,
-    headers: { authorization: async () => `Bearer ${await options.token()}` },
-    ...(options.onTokenRejected ? { onError: createTokenRecovery(options.onTokenRejected) } : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-  });
+  return readShapeStreamWith({}, options, onBatch, onEnd);
+}
 
+/** {@link readShapeStream} with its time and chance injected. Not public API. */
+export function readShapeStreamWith(
+  internals: Partial<ReadInternals>,
+  options: StreamSourceOptions,
+  onBatch: (batch: StreamBatch) => void | Promise<void>,
+  onEnd?: (error: Error | null) => void,
+): Promise<ShapeStreamSubscription> {
+  const wait = internals.wait ?? sleep;
+  const random = internals.random ?? Math.random;
+  const send: (input: string, init: RequestInit) => Promise<Response> =
+    options.fetch ?? ((input, init) => fetch(input, init));
   const live = options.live ?? true;
 
-  // Our OWN close is not an end worth reporting: the caller asked for it, and a group tearing its
-  // streams down would otherwise hear K "the stream ended" reports and try to recover from a stop it
-  // ordered. `cancel()` resolves `closed` rather than rejecting it, so this suppresses a normal end;
-  // the flag also covers the race where a close lands while a read error is already in flight.
+  // One controller stops everything in flight — the request, its body, a backoff — whichever of the
+  // caller's close() or the caller's signal comes first.
+  const stop = new AbortController();
+  const signal = stop.signal;
+  const forwardAbort = (): void => stop.abort();
+  options.signal?.addEventListener("abort", forwardAbort, { once: true });
+  if (options.signal?.aborted) stop.abort();
+
   let closedByCaller = false;
   let endReported = false;
   const reportEnd = (error: Error | null): void => {
+    options.signal?.removeEventListener("abort", forwardAbort);
     if (endReported || closedByCaller) return;
     endReported = true;
     onEnd?.(error);
   };
 
-  const unsubscribe = response.subscribeJson(async (batch) => {
-    await onBatch({
-      // The server flattens arrays onto the stream (PROTOCOL.md §9.1.2), so a batch's items are
-      // already individual envelopes rather than the arrays a producer appended.
-      envelopes: batch.items,
-      offset: String(batch.offset),
-      // `batch.upToDate`, NOT `response.upToDate`. They answer the same question at different times:
-      // the batch's flag describes THIS batch ("ends at the current end of the stream"), while the
-      // response's is documented as updated *after* each chunk is delivered to the consumer — i.e.
-      // after this callback returns. Reading the response's here yields the PREVIOUS batch's answer,
-      // which on the first catch-up batch is always `false`. Nothing downstream can recover from
-      // that: the commit gate waits for every shape to report up-to-date, so a group whose first
-      // batch is misreported never commits and `ready` never resolves, with the rows sitting in the
-      // inbox and no error anywhere.
-      upToDate: batch.upToDate,
-    });
-    // THE NORMAL END IS REPORTED HERE, off the batch that ends the read — never off `closed`. The
-    // transport settles `closed` when its FETCH loop is done, and for a non-live read whose first
-    // response is already up-to-date that is inside `stream()` itself: the response is enqueued and
-    // the loop closed in the same tick, BEFORE any subscriber has consumed it. An `onEnd(null)` fired
-    // off that moment says "over, nothing failed" while the final batch is still queued, and a caller
-    // that (reasonably) closes on it aborts the subscriber loop with the batch undelivered — a
-    // `live: false` read of a populated stream then yields nothing, silently. The batch that ends a
-    // read is the transport's own stopping rule: a non-live read stops at its first up-to-date
-    // response, and any read stops at `Stream-Closed`.
-    if (batch.streamClosed === true || (!live && batch.upToDate)) reportEnd(null);
-  });
+  /**
+   * One request, retried until it has an answer the session can use. `null` when the read was stopped
+   * while it was in flight; throws when it failed for good.
+   */
+  async function request(position: ReadPosition): Promise<ReadResponse | null> {
+    const url = readRequestUrl(options.url, position);
+    const recover = options.onTokenRejected ? createTokenRecovery(options.onTokenRejected) : null;
+    // The header a re-mint answered with. It carries exactly one retry; every other attempt asks the
+    // token thunk again, so the session never freezes a token, even one it was just handed.
+    let reminted: string | null = null;
+    let attempt = 0;
 
-  void response.closed.then(
-    () => {
-      // A normal transport close is answered by the terminal batch above, which is already queued
-      // for the subscriber. The one normal close with NOTHING queued is the caller's own abort
-      // signal, and that one would otherwise wait forever.
-      if (options.signal?.aborted) reportEnd(null);
-    },
-    (error: unknown) => reportEnd(error instanceof Error ? error : new Error(String(error))),
-  );
+    for (;;) {
+      if (signal.aborted) return null;
+      const authorization = reminted ?? `Bearer ${await options.token()}`;
+      reminted = null;
 
-  return {
+      let response: Response;
+      try {
+        response = await send(url, { method: "GET", headers: { authorization }, signal });
+        if (response.ok) return await readResponse(response, url, position.offset);
+      } catch (error) {
+        if (signal.aborted) return null;
+        if (error instanceof StreamReadError) throw error;
+        // The request or its body never arrived whole: the same read is safe to ask again.
+        await wait(retryDelayMs(++attempt, null, random), signal);
+        continue;
+      }
+
+      const verdict = classifyStatus(response.status);
+      if (verdict === "retry") {
+        await response.body?.cancel().catch(() => {});
+        const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"), Date.now());
+        await wait(retryDelayMs(++attempt, retryAfterMs, random), signal);
+        continue;
+      }
+
+      const failure = await failedRead(response, url);
+      if (verdict === "token-rejected") {
+        const retry = await recover?.(failure);
+        if (retry) {
+          reminted = retry.headers.authorization;
+          continue;
+        }
+      }
+      throw failure;
+    }
+  }
+
+  let position: ReadPosition = { offset: options.offset ?? STREAM_START, cursor: null, longPoll: false };
+  let first: ReadResponse | null = null;
+
+  const subscription: ShapeStreamSubscription = {
     close: () => {
       closedByCaller = true;
-      unsubscribe();
+      options.signal?.removeEventListener("abort", forwardAbort);
+      stop.abort();
     },
   };
+
+  const opened = (async () => {
+    try {
+      first = await request(position);
+      if (first === null) {
+        throw new StreamReadError(`[pgxsinkit] stream read of ${options.url} was aborted before its first response`);
+      }
+      return subscription;
+    } catch (error) {
+      options.signal?.removeEventListener("abort", forwardAbort);
+      throw error;
+    }
+  })();
+
+  /** Deliver, then fetch the next batch, until the read ends. Resolves with what `onEnd` reports. */
+  async function deliver(): Promise<Error | null> {
+    let response = first!;
+    try {
+      for (;;) {
+        if (signal.aborted) return null;
+        await onBatch({ envelopes: response.envelopes, offset: response.offset, upToDate: response.upToDate });
+        if (response.closed || (!live && response.upToDate)) return null;
+
+        position = {
+          offset: response.offset,
+          cursor: response.cursor ?? position.cursor,
+          longPoll: live && response.upToDate,
+        };
+        const next = await request(position);
+        if (next === null) return null;
+        response = next;
+      }
+    } catch (error) {
+      if (signal.aborted) return null;
+      return error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  // Delivery starts one reaction BEHIND the caller's own `await` of the returned promise: reactions
+  // run in the order they were registered, the caller's is registered when this function returns,
+  // and the extra `then` puts ours after it. So the caller holds its subscription before the first
+  // `onBatch`, and `opened` must be returned as it is, not wrapped by an `async` function.
+  void opened
+    .then(() => undefined)
+    .then(
+      async () => reportEnd(await deliver()),
+      () => undefined,
+    );
+  return opened;
 }

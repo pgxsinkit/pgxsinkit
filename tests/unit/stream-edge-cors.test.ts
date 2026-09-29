@@ -1,16 +1,18 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { importStreamTokenKey, mintStreamToken, STREAM_READ_EXPOSED_HEADERS } from "@pgxsinkit/server";
 
 import { createBoardStreamHandler } from "../../apps/board-api/src/core/handlers";
+import { READ_RESPONSE_HEADERS } from "../../packages/client/src/circuits/long-poll";
 import { placementCorsHeaders } from "../../scripts/placement-fixture-server";
 
 // The edge's CORS obligation (ADR-0055 decision 8): the gate proxies durable-streams bytes, and every
-// header the ds client steers by is outside the CORS response safelist. A mount that does not name them
-// on `Access-Control-Expose-Headers` serves a cross-origin reader a headerless response — no error, no
-// offset, so the client re-asks for `offset=-1` forever instead of going live. That failure is invisible
+// header the stream reader steers by is outside the CORS response safelist. A mount that does not name them
+// on `Access-Control-Expose-Headers` serves a cross-origin reader a headerless response — no offset, so
+// pgxsinkit's reader fails the read, and a client still on `@durable-streams/client` re-asks for
+// `offset=-1` forever instead of going live. That failure is invisible
 // to every server-side lane (node fetch ignores CORS entirely), which is why it is pinned here.
 
 const repoRoot = join(import.meta.dir, "..", "..");
@@ -110,18 +112,9 @@ it("every browser-facing mount of the gate names the exposure list", () => {
   expect(mounts.length).toBeGreaterThanOrEqual(3);
 });
 
-// The list is a claim about someone else's client, so it is checked against that client rather than
-// against our memory of it: every stream header name the INSTALLED `@durable-streams/client` ships must
-// be exposable. Resolved from `packages/client`, the workspace package that depends on it.
-it("covers every stream header name the installed durable-streams client ships", () => {
-  const manifest = Bun.resolveSync("@durable-streams/client/package.json", join(repoRoot, "packages", "client"));
-  const dist = readFileSync(join(dirname(manifest), "dist", "index.js"), "utf8");
-
-  const shipped = new Set(
-    [...dist.matchAll(/[`"']([Ss]tream-[A-Za-z-]+)[`"']/g)].map((match) => match[1]!.toLowerCase()),
-  );
-
-  expect(shipped.size).toBeGreaterThanOrEqual(8);
-  expect(shipped).toContain("stream-next-offset");
-  for (const header of shipped) expect(STREAM_READ_EXPOSED_HEADERS).toContain(header);
+// The list is a claim about pgxsinkit's own reader, so it is checked against the reader rather than
+// against our memory of it: every response header the reader reads must be exposable.
+it("covers every response header the stream reader reads", () => {
+  expect(READ_RESPONSE_HEADERS).toContain("stream-next-offset");
+  for (const header of READ_RESPONSE_HEADERS) expect(STREAM_READ_EXPOSED_HEADERS).toContain(header);
 });

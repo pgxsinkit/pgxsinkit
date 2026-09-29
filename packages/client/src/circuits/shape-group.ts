@@ -42,9 +42,9 @@ export interface ShapeGroupOptions {
 /**
  * Run K shape streams as one group.
  *
- * This layer is **ours permanently**, not a bridge to something (ADR-0055 decision 10):
- * `@durable-streams/client` reads one stream and has no multi-stream coordinator, so the K-streams
- * side of decision 4 has to exist either way. What it deliberately does NOT do is imitate Electric's
+ * This layer is **ours permanently**, not a bridge to something (ADR-0055 decision 10): the stream
+ * reader ({@link readShapeStream}) reads one stream and has no multi-stream coordinator, so the
+ * K-streams side of decision 4 has to exist either way. What it deliberately does NOT do is imitate Electric's
  * `MultiShapeStream` — it hands back envelopes and per-stream offsets, which is what the native path
  * actually has, rather than reshaping them into a wire format we no longer speak.
  *

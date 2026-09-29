@@ -193,7 +193,7 @@ preview at `http://localhost:5173`. Use `board:cloud:dev` on port `5660` for sou
   retries from the start of the stream forever — and in worker mode those requests are **invisible in
   the page's Network tab** (see the next note). A second, quieter CORS mistake belongs to the edge only:
   its mount must name `STREAM_READ_EXPOSED_HEADERS` on `Access-Control-Expose-Headers`, or the browser
-  hides every `stream-*` header and the reader wedges without an error.
+  hides every `stream-*` header and every read fails with an error naming the missing `Stream-Next-Offset`.
 - **Sync traffic missing from DevTools** — in worker mode the whole engine runs in a SharedWorker, and
   browsers do not show a SharedWorker's network requests in the page's Network panel; the tab console
   only shows forwarded `[pgxsinkit·w]` rail lines. Inspect the worker itself (`chrome://inspect/#workers`

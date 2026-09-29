@@ -141,7 +141,7 @@ async function subscribeToShape(shapeKey: string, token: string): Promise<Subscr
   // Cold-start tolerance: the edge worker can return a transient 502/503/504 from the gateway while
   // board-sync's bundle is (re)importing (~6s; see the header note). That is a local-compose artifact
   // — a managed BaaS keeps functions warm — so retry the transient before failing the correctness smoke.
-  // The byte path needs no equivalent: `@durable-streams/client` retries 5xx with its own backoff, which
+  // The byte path needs no equivalent: `readShapeStream` retries 5xx with its own backoff, which
   // covers board-stream's separate cold start.
   for (let attempt = 0; attempt < 20 && [502, 503, 504].includes(response.status); attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 500));

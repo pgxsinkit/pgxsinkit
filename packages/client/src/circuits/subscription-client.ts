@@ -108,13 +108,13 @@ export interface SubscriptionSession {
    *
    * A re-mint that FAILS (the control plane is down, unreachable, or answering 5xx) resolves with the
    * token already held rather than rejecting. This is the ADR-0013 "the deployment being down is not
-   * the subject's problem" rule applied at the one place it is easy to get wrong: this promise is
-   * awaited inside `@durable-streams/client`'s header thunk, and a rejection there kills the read
-   * with no path back — the very silence backlog 0010 is about. The held token is still good for up
-   * to `refreshSkewSeconds`, and when it truly lapses the edge answers 403, the stream ends, and the
-   * group re-subscribes (`startCircuitsSync`'s `scheduleRestart`) — which is where a 401 surfaces as
-   * `onAuthError` and a 503 as a retried subscribe, both of them recoverable and both of them
-   * visible.
+   * the subject's problem" rule applied at the one place it is easy to get wrong: the stream reader
+   * awaits this promise (through `token` and `onTokenRejected`) before its requests, and a rejection
+   * there ends the read — every stream of the group then re-subscribes over a blip the held token
+   * would have ridden out. The held token is still good for up to `refreshSkewSeconds`, and when it
+   * truly lapses the edge answers 403, the stream ends, and the group re-subscribes
+   * (`startCircuitsSync`'s `scheduleRestart`) — which is where a 401 surfaces as `onAuthError` and a
+   * 503 as a retried subscribe, both of them recoverable and both of them visible.
    */
   refresh: () => Promise<string | null>;
   /**
@@ -209,12 +209,12 @@ export async function openSubscriptionSession(
    * fire K refreshes for the same window — the exact fan-out ADR-0055 batches the token to avoid.
    *
    * A FAILED re-mint keeps the current token and its expiry, and resolves with it. Not leniency:
-   * this runs inside the read's header thunk, so rejecting would take the stream down silently and
-   * permanently, and it would do so for a condition that is routinely transient — a control plane
-   * restarting, a 503 while the entitlement set catches up (which that route answers precisely so a
-   * client does NOT clear anything), a laptop between networks. The held token stays valid for up to
-   * the refresh skew; past that the edge refuses it, the read ends, and the group's restart path
-   * re-subscribes — the loud, recoverable version of the same failure.
+   * the stream reader awaits it before its requests, so rejecting would end the read and send the
+   * whole group through a re-subscribe, and it would do so for a condition that is routinely
+   * transient — a control plane restarting, a 503 while the entitlement set catches up (which that
+   * route answers precisely so a client does NOT clear anything), a laptop between networks. The held
+   * token stays valid for up to the refresh skew; past that the edge refuses it, the read ends, and
+   * the group's restart path re-subscribes — the loud, recoverable version of the same failure.
    *
    * The expiry is not moved either, so the next {@link token} call asks again: a failing control
    * plane is re-tried once per poll cycle, and the first answer that lands restores the lifecycle
@@ -252,8 +252,8 @@ export async function openSubscriptionSession(
       const refreshed = await refresh();
       if (refreshed !== null) return refreshed;
     }
-    // A refresh that revoked every grant leaves `currentToken` null: the stream-source header thunk
-    // needs a usable bearer, and `Bearer null` is not a state — fail here rather than on the wire.
+    // A refresh that revoked every grant leaves `currentToken` null: the stream reader needs a usable
+    // bearer, and `Bearer null` is not a state — fail here rather than on the wire.
     if (currentToken === null) throw new Error("[pgxsinkit] no stream token — every grant was revoked on refresh");
     return currentToken;
   }

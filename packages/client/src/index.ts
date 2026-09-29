@@ -340,10 +340,15 @@ export {
   serializeCopyValue,
 } from "./sync/copy";
 
-// The Circuits-native read transport (ADR-0055 decision 10). Reads terminate on durable-streams
-// through the edge; everything above the transport stays ours.
+// The Circuits-native read transport (ADR-0055 decision 10): pgxsinkit's own long-poll reader of
+// durable-streams, through the edge (ADR-0065 decision 6). Everything above the transport stays ours.
 export { createTokenRecovery, readShapeStream, STREAM_START } from "./circuits/stream-source";
-export type { ShapeStreamSubscription, StreamBatch, StreamSourceOptions } from "./circuits/stream-source";
+export type {
+  ShapeStreamSubscription,
+  StreamBatch,
+  StreamErrorHandler,
+  StreamSourceOptions,
+} from "./circuits/stream-source";
 export { createShapeGroup } from "./circuits/shape-group";
 export type { GroupShapeSpec, ShapeGroup, ShapeGroupBatch, ShapeGroupOptions } from "./circuits/shape-group";
 export { envelopeToChange, primaryKeyFromStreamKey } from "./circuits/envelope-to-change";

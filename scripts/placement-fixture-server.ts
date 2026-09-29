@@ -54,8 +54,8 @@ export function placementCorsHeaders(origin: string | null, allowedOrigins: stri
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "authorization,apikey,content-type",
     // The edge rides this same origin and the placement suite reads it from a BROWSER, cross-origin from
-    // the preview server. Without this the ds client sees none of the stream headers, never advances past
-    // `offset=-1`, and hot-loops — see `STREAM_READ_EXPOSED_HEADERS` for why that is silent.
+    // the preview server. Without this the stream reader sees none of the stream headers and fails every
+    // read — see `STREAM_READ_EXPOSED_HEADERS` for what the same mistake does to an older client.
     "Access-Control-Expose-Headers": STREAM_READ_EXPOSED_HEADERS.join(", "),
     Vary: "Origin",
   };

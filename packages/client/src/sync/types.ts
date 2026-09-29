@@ -3,7 +3,8 @@
 //
 // What remains here is only what the NATIVE path uses. The shape-stream option and message types this
 // file used to re-export were `@electric-sql/client`'s, and nothing reads them any more: the transport
-// is `@durable-streams/client` and the change contract is `@pgxsinkit/contracts`' `SyncChange`.
+// is pgxsinkit's own stream reader (`circuits/stream-source.ts`) and the change contract is
+// `@pgxsinkit/contracts`' `SyncChange`.
 
 import type { SyncChange } from "@pgxsinkit/contracts";
 

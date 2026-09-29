@@ -40,7 +40,7 @@ latency** (latency is bounded by the read-path echo). Do **not** shorten it to "
 
 ## Serve the gateway over HTTP/2 (the connection budget)
 
-`@durable-streams/client` holds **one live long-poll connection open per subscribed stream** (a subject in K
+`@pgxsinkit/client`'s reader holds **one live long-poll connection open per subscribed stream** (a subject in K
 scopes of a shared shape holds K streams), and browsers cap **HTTP/1.1 at ~6 connections per origin** — so over
 plain HTTP six streams' long-polls consume every slot and the same-origin **write** request is **Stalled in the
 browser's connection queue** for a whole long-poll cycle before it is dispatched. This presents as multi-second
@@ -417,9 +417,9 @@ entitlement-propagation latency.
 **Every `createStreamGate` mount must set `Access-Control-Expose-Headers` from the exported
 `STREAM_READ_EXPOSED_HEADERS`.** CORS lets script read only a short safelist, and every header durable-streams
 answers with is outside it, so a cross-origin browser gets a response whose stream headers are simply not there:
-`@durable-streams/client` steers its read loop off them, never learns an offset, and re-requests from the start
-in a hot loop, with no error raised on either side. It presents as "sync does nothing, and the console is clean".
-Mount details: the `deploying` skill.
+the reader cannot make progress and every read fails, naming the missing `Stream-Next-Offset` (releases built
+on `@durable-streams/client` instead hot-loop from the start with no error on either side). Mount details: the
+`deploying` skill.
 
 ## Debugging latency: `globalThis.__pgxsinkitDebug`
 
@@ -488,7 +488,7 @@ a real rollback, route a permanent policy denial to `quarantined` — never mis-
 - Shortening the convergence interval to chase write latency (no effect; wastes CPU).
 - Serving many-stream sync over plain HTTP/1.1 and blaming the server for stalled writes.
 - Mounting the stream edge on the control plane's origin (one cache key for both read surfaces), or omitting
-  `Access-Control-Expose-Headers` on it — that one hot-loops the client, silently on both sides.
+  `Access-Control-Expose-Headers` on it — that one fails every cross-origin read (and hot-loops older clients).
 - Treating an edge cold start as a toolkit problem, or measuring latency by polling the local store in a loop
   instead of at the network boundary.
 - Treating `deferred` as a failure and "cleaning up" the Outbox — it is rollout skew; those rows self-drain.

@@ -47,6 +47,9 @@ import { drizzle } from "@pgxsinkit/pgwasm/drizzle";
 
 import { syncDebug } from "./debug";
 import { getOutboxTable } from "./local-tables";
+import { parseRetryAfterMs } from "./retry-after";
+
+export { parseRetryAfterMs };
 
 /** The raw local-store seam the Event lane executes through (structurally pgwasm; mirrors `MutationDb`). */
 export interface EventLaneDb {
@@ -373,25 +376,6 @@ const AUTH_STATUSES: ReadonlySet<number> = new Set([401, 403]);
  */
 export function classifyEventBatchFailure(httpStatus: number | null | undefined): "auth" | "retryable" {
   return httpStatus != null && AUTH_STATUSES.has(httpStatus) ? "auth" : "retryable";
-}
-
-/** Parse a `Retry-After` header (delta-seconds or HTTP-date) into ms, or null when absent/unreadable. */
-export function parseRetryAfterMs(headerValue: string | null | undefined, nowMs: number): number | null {
-  if (headerValue == null) {
-    return null;
-  }
-  const trimmed = headerValue.trim();
-  if (trimmed === "") {
-    return null;
-  }
-  if (/^\d+$/.test(trimmed)) {
-    return Number(trimmed) * 1000;
-  }
-  const parsedDate = Date.parse(trimmed);
-  if (Number.isNaN(parsedDate)) {
-    return null;
-  }
-  return Math.max(0, parsedDate - nowMs);
 }
 
 /**

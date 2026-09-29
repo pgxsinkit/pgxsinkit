@@ -88,8 +88,8 @@ const snapshotEnvelope: StreamEnvelope = {
 /**
  * The control plane and the edge, served for real on a loopback port.
  *
- * A `globalThis.fetch` stub would be lighter but not sound: the durable-streams client is imported
- * before this file's first line runs, so a swap here is invisible to whatever reference it captured.
+ * A `globalThis.fetch` stub would be lighter but not sound: a swap here is invisible to any reference
+ * captured before it.
  * Two real routes cost a millisecond and cannot go stale that way.
  */
 const server = Bun.serve({

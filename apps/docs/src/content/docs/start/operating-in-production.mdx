@@ -150,7 +150,7 @@ shapes would lapse after a single missed refresh. Raise `CIRCUITS_SHAPE_IDLE_SEC
 
 ## The browser connection budget (serve the gateway over HTTP/2)
 
-`@durable-streams/client` holds **one live long-poll connection open per synced stream**. A client
+`@pgxsinkit/client`'s reader holds **one live long-poll connection open per synced stream**. A client
 subscribing to six streams keeps six connections continuously busy — and on the shared tier a subject
 holding K scopes of one shape holds K streams, not one — while browsers cap **HTTP/1.1 at ~6
 connections per origin**. So over plain HTTP those long-polls consume every slot and the **write**
@@ -177,15 +177,16 @@ How it recovers depends on _why_ it degraded:
   behind it. It never masks a more actionable status: an auth failure wins over it, and a commit
   failure (below) is never overwritten by it.
 - A **read-stream** error (a dropped stream connection) clears automatically on the next successful
-  batch. `@durable-streams/client` retries only **429** and **503**; every other 4xx is thrown rather
-  than swallowed, which is exactly what lets a 403 on an expired stream token surface and trigger a
-  re-mint instead of presenting as a stall. A connection that dies by **hanging** rather than failing
-  (a pulled cable mid-long-poll) produces neither a failure nor a batch, so a runtime claiming `ready`
-  is additionally held to a **read-silence window** (`readSilenceMs`, default 45s — a healthy stream's
-  long-poll always cycles well inside it): silence past the window drops `ready` to the same
-  self-recovering `degraded`. That is the phase to key an offline/"connection needed" surface off;
-  `navigator.onLine` is not a substitute. Recovery is wired to delivered traffic — any batch arriving
-  clears it and re-arms the window.
+  batch. The reader retries **429**, every **5xx** and network failures with backoff. A **401/403**
+  gets one re-mint and one retry, so an expired stream token is replaced instead of presenting as a
+  stall, and a token refused again ends the read, as every other 4xx does, rather than being swallowed.
+  A connection that dies by **hanging** rather than failing (a pulled cable mid-long-poll) produces
+  neither a failure nor a batch, so a runtime claiming `ready` is additionally held to a
+  **read-silence window** (`readSilenceMs`, default 45s — a healthy stream's long-poll always cycles
+  well inside it): silence past the window drops `ready` to the same self-recovering `degraded`. That
+  is the phase to key an offline/"connection needed" surface off; `navigator.onLine` is not a
+  substitute. Recovery is wired to delivered traffic — any batch arriving clears it and re-arms the
+  window.
 - An **auth** failure on the read path is its own phase, not a `degraded`. A persistent 401/403 from
   the control plane puts the runtime in **`auth-needed`** while subscribe keeps retrying for a fresh
   token, so the app can prompt for re-login; it clears the moment a batch lands. This is the phase
@@ -293,8 +294,8 @@ directly:
 - `boot pgwasm build warm` (only when the host times its pre-warm on the rail, as the board demo does — see
   next section)
 
-**The read path itself does not emit rail lines.** Its transport is `@durable-streams/client` and that
-request loop is not instrumented on this rail. Read it at the two boundaries instead: `boot client ready` (fired when
+**The read path itself does not emit rail lines.** Its transport, `@pgxsinkit/client`'s own long-poll
+reader, is not instrumented on this rail. Read it at the two boundaries instead: `boot client ready` (fired when
 the first initial sync completes) and the runtime's `status` phase, which names `syncing`, `ready`,
 `degraded` (with `lastError`) and `auth-needed`. For per-request detail, inspect the network layer
 directly — and in worker mode that means inspecting the **worker**, not the page (see below).

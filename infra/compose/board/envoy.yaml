@@ -42,10 +42,10 @@ static_resources:
                           # Permissive demo CORS. `expose_headers: "*"` would let the browser read the
                           # durable-streams `stream-*` response headers (next-offset/up-to-date/cursor/
                           # closed) the sync client drives its read loop off — a too-narrow list hides
-                          # them all and the reader wedges with no error. It is deliberately NOT what the
+                          # them all and every read fails. It is deliberately NOT what the
                           # board relies on: the edge function exposes that set itself
                           # (`STREAM_READ_EXPOSED_HEADERS`), because a mount correct only behind this
-                          # gateway hot-loops elsewhere.
+                          # gateway fails elsewhere.
                           allow_origin_string_match:
                             - safe_regex: { regex: ".*" }
                           allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD"

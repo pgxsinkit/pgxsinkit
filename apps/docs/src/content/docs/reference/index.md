@@ -22,9 +22,9 @@ use directly:
 - **[@pgxsinkit/pgwasm-pg-dump](/api/pgwasm-pg-dump/readme/)** — `pgDump` and its errors.
 - **[@pgxsinkit/pgwasm-repl](/api/pgwasm-repl/readme/)** — the `<Repl>` component.
 
-The read-path reader lives inside `@pgxsinkit/client` (`src/circuits/`, ADR-0055) over
-`@durable-streams/client`, rather than in a separate package, so it is not documented as its own entry
-— see [Packages](/packages/) for where it fits.
+The read-path reader, its transport included, lives inside `@pgxsinkit/client` (`src/circuits/`,
+ADR-0055), rather than in a separate package, so it is not documented as its own entry — see
+[Packages](/packages/) for where it fits.
 
 New to the library? Start with [Core concepts](/concepts/) for the model, then [Packages](/packages/)
 for what to install.

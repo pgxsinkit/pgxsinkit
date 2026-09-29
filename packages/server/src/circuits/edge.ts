@@ -188,21 +188,22 @@ export function readStreamToken(request: Request): string | null {
  * durable-streams protocol answers with is outside it, so a CROSS-ORIGIN reader sees NONE of them
  * unless the mount names them on `Access-Control-Expose-Headers`.
  *
- * The failure that follows is silent and expensive rather than loud. `@durable-streams/client` drives
- * its entire read loop off these headers — verified by grepping the installed 0.2.6 dist
- * (`@durable-streams/client/dist/index.js`, mirrored in its shipped `src/`): `Stream-Next-Offset`,
- * `Stream-Cursor` and `Stream-Closed` are read per response, `Stream-Up-To-Date` is a presence check
- * (`headers.has`, which is why it is easy to miss), `stream-sse-data-encoding` decides SSE payload
- * decoding, and `etag` is read on the stream-metadata path. Stripped of them, the client never learns
- * an offset: it re-requests `offset=-1` forever and never switches to a live long poll, which presents
- * as a hot loop of hundreds of requests per second per shape with no error raised anywhere.
+ * Two generations of client read these. `@pgxsinkit/client`'s own reader (`READ_RESPONSE_HEADERS` in
+ * its `circuits/long-poll.ts`, which a unit test holds to this list) steers by `Stream-Next-Offset`,
+ * `Stream-Up-To-Date` (a presence check, which is why it is easy to miss), `Stream-Cursor` and
+ * `Stream-Closed`. Stripped of them it cannot make progress and fails the read, loudly. Clients still
+ * in the field on `@durable-streams/client` (0.2.x, which pgxsinkit read through until ADR-0065
+ * decision 6) drive their whole read loop off the same four and also read `stream-sse-data-encoding`
+ * (SSE payload decoding) and `etag` (the stream-metadata path). Stripped of them, that client never
+ * learns an offset: it re-requests `offset=-1` forever and never switches to a live long poll, which
+ * presents as a hot loop of hundreds of requests per second per shape with no error raised anywhere.
+ * Both floor their retry backoff on `Retry-After`; without it they fall back on their own schedule.
  *
- * `Stream-Seq`, `Stream-TTL` and `Stream-Expires-At` are request headers in that client version. They
- * are named here anyway because this list is a statement about the ds protocol's response namespace
- * rather than about which subset one client version happens to read today — exposing a header a
- * response never carries is inert, while omitting one that it does carry wedges the reader. The
- * `Producer-*` headers are deliberately absent: they belong to the write path, which does not come
- * through this gate.
+ * `Stream-Seq`, `Stream-TTL` and `Stream-Expires-At` are read by neither. They are named here
+ * anyway because this list is a statement about the ds protocol's response namespace rather than about
+ * which subset one client version happens to read today — exposing a header a response never carries
+ * is inert, while omitting one that it does carry wedges the reader. The `Producer-*` headers are
+ * deliberately absent: they belong to the write path, which does not come through this gate.
  *
  * EVERY mount of `createStreamGate` must put these on `Access-Control-Expose-Headers` of the ACTUAL
  * (non-preflight) response. The gate cannot do it itself — it forwards the upstream response's
@@ -220,6 +221,7 @@ export const STREAM_READ_EXPOSED_HEADERS: readonly string[] = [
   "stream-expires-at",
   "stream-sse-data-encoding",
   "etag",
+  "retry-after",
 ];
 
 /**
@@ -248,7 +250,8 @@ interface ProxiedEnvelope {
  *
  * Everything else is kept VERBATIM — every `stream-*` header and the content type. The client's whole
  * read loop drives off them (see {@link STREAM_READ_EXPOSED_HEADERS}); an edge that dropped
- * `stream-next-offset` while rewriting would present as a hot loop, not as a redaction bug.
+ * `stream-next-offset` while rewriting would present as a failed read (to a client still on
+ * `@durable-streams/client`, a hot loop), not as a redaction bug.
  */
 function rewrittenEgressHeaders(upstream: Headers): Headers {
   const headers = new Headers(upstream);

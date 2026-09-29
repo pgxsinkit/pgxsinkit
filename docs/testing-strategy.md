@@ -445,6 +445,52 @@ the host sees:
   decision): apps refresh them. No test covers opening one; a `dumpDataDir()` backup names its members
   relative to the data directory and restores across.
 
+## The read transport is pgxsinkit's own (ADR-0065 decision 6, 2026-09-29)
+
+`@durable-streams/client` 0.2.7 is gone from `@pgxsinkit/client`. The reader is ours: `circuits/long-poll.ts`
+(the wire: one catch-up or long-poll request of a JSON stream, what its answer means, the backoff) and
+`circuits/stream-source.ts` (the session: `readShapeStream`, `createTokenRecovery`). It was written from the
+protocol specification (PROTOCOL.md at `pgxsinkit/durable-streams@a172acc`), not from the package's source. The
+public surface is unchanged except that `createTokenRecovery` now returns our own `StreamErrorHandler` (same call
+shape, exported). On the wire it sends what the package sent: `GET` with `authorization: Bearer <token>` and nothing
+else, `offset`, then `live=long-poll` (only once a response said up to date, so catch-up reads stay cacheable), then
+`cursor` (the latest `Stream-Cursor`); it retries 429, every 5xx and network failures on the same schedule (full
+jitter under 100 ms × 1.3ⁿ, capped at 60 s, unlimited, `Retry-After` as a floor) and delivers a `204` as an empty
+up-to-date batch, which the read-silence watchdog above relies on. What changed:
+
+- **Token recovery covers every request of a read**, not only the opening one: a mid-session 401/403 re-mints once
+  and retries at once, where the package ended the read. A second rejection of the same request, or a declined
+  re-mint, ends it as before.
+- **The token thunk is asked for every request, including after a recovery.** The package's `onError` merged the
+  re-minted header over the thunk, so after an opening re-mint it sent that token, unrefreshed, for the rest of the
+  session.
+- **Strict backpressure.** The next request goes out only after `onBatch` settles; the package fetched one response
+  ahead while the subscriber worked.
+- **Protocol violations fail the read** instead of re-requesting forever: no `Stream-Next-Offset` (the shape of a
+  cross-origin mount that does not expose the stream headers), a body that is not a JSON array (the package wrapped a
+  lone value), and an empty response that neither advances nor reaches the tail. The package did not check the
+  content type after its first response; the reader checks none, and relies on the array.
+- **A body cut off mid-response is retried** with backoff; the package ended the read.
+- **A status that is neither 2xx, 401/403, 429 nor 5xx is terminal**, 3xx included; the package retried anything
+  that was not a 4xx.
+- **`Retry-After`** is parsed by the library's shared `parseRetryAfterMs` (integer delta-seconds or an HTTP-date),
+  where the package also took fractional seconds and capped a date at an hour. `retry-after` joins
+  `STREAM_READ_EXPOSED_HEADERS`, so a cross-origin reader can see it.
+- **No pause while the page is hidden.** On a page's main thread the package aborted its long poll when
+  `document.hidden` and resumed with a non-live request; the reader keeps reading. Worker mode never paused.
+- **No console output.** The package warned about `http://` URLs in a browser.
+- **Errors are `StreamReadError`s** carrying `status` and the server's reason, in place of the package's
+  `FetchError`/`DurableStreamError`. Nothing in pgxsinkit inspects more than `status`.
+
+Coverage: `tests/unit/circuits-stream-source.test.ts` drives each of the reader's promises against a scripted edge
+(opening, the per-request token, token rejection, retries and the backoff schedule, backpressure, batch offsets,
+the end contract, live and non-live, protocol violations); `tests/unit/stream-edge-cors.test.ts` holds
+`STREAM_READ_EXPOSED_HEADERS` to the reader's `READ_RESPONSE_HEADERS` (it used to grep the package's `dist`).
+End to end, every integration lane reads through it: `test:integration:contract` and
+`test:integration:implementation` in Bun, `test:integration:worker` and `test:integration:placement` in Chromium
+(both read the edge cross-origin, so they also prove the exposure list), and `test:integration:board` calls
+`readShapeStream` directly against the deployed edge.
+
 ## Offline return (board ADR-0010)
 
 The board demo's app shell is served offline by a hand-rolled, runtime-capture service worker
@@ -483,9 +529,9 @@ test:
   `signInAs` translates to a `SignInConnectionError`; a 5xx of the same class, and any `AuthApiError`
   (a rejected credential), stay verbatim. This makes the auth-error vocabulary an upgrade gate — a
   supabase-js bump that changes it must be re-pinned here.
-- **The outage signal the pattern keys off — the subscribe classifier.** `@durable-streams/client`
-  retries only `429`/`503` and throws every other 4xx, and the control plane is where a credential or a
-  reachability problem actually lands, so the classification happens on subscribe: a `ControlPlaneError`
+- **The outage signal the pattern keys off — the subscribe classifier.** The stream reader retries
+  `429`, `5xx` and network failures and ends the read on every other 4xx, and the control plane is where a
+  credential or a reachability problem actually lands, so the classification happens on subscribe: a `ControlPlaneError`
   whose status is `401`/`403` raises `auth-needed` through `onAuthError`; anything else raises
   `degraded`/`stream` through `onSubscribeError` while subscribe keeps retrying with backoff. The runtime
   side pins the transitions: never mask `auth-needed` or a commit-failure `degraded` with a stream one,

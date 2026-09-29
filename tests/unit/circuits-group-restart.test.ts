@@ -97,8 +97,8 @@ function dsResponse(envelopes: StreamEnvelope[], offset = "0000000000000001"): R
 /**
  * A long-poll that never answers, released only when the test tears down.
  *
- * It is released with a `404` rather than a rejection, and that is not cosmetic: the ds client's
- * backoff wrapper retries a rejected fetch FOREVER (only a non-429/503 4xx propagates), so a stub
+ * It is released with a `404` rather than a rejection, and that is not cosmetic: the stream reader
+ * retries a rejected fetch FOREVER, with backoff (only a 4xx other than 429 ends the read), so a stub
  * that rejected on teardown would spin the router instead of ending the read.
  */
 function hang(init: RequestInit | undefined, release: Promise<void>): Promise<Response> {
@@ -444,8 +444,8 @@ it("retries a start whose streams cannot be opened, rather than failing it", asy
       registry: privateRegistry,
       engine: stableEngine(),
       // The first two opens are refused outright; the third is the edge coming back. A `404` and not
-      // a socket error on purpose: the ds client retries a rejected fetch internally and forever, so
-      // only a non-429/503 4xx reaches this client's own recovery at all.
+      // a socket error on purpose: the stream reader retries a rejected fetch internally and forever, so
+      // only a 4xx other than 429 reaches this client's own recovery at all.
       read: async (_path, attempt, init) => {
         if (attempt <= 2) return new Response("edge down", { status: 404 });
         if (attempt === 3) return dsResponse([draftEnvelope()]);

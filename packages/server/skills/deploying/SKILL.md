@@ -7,7 +7,7 @@ description: >-
   strip the function-name path prefix, resolve claims in resolveAuthClaims), the deny-by-default
   apply-function ACL and --grant-execute-to (ADR-0054), and splitting write, control plane, and edge
   into three functions — the edge on its own origin, because the cache key is the URL (ADR-0055), plus
-  the Access-Control-Expose-Headers that mount must set or the client hot-loops.
+  the Access-Control-Expose-Headers that mount must set or cross-origin reads fail.
   Also covers the Event lane (ADR-0053): the /api/events route, the eventGate hook, the pgmq
   prerequisite and pgxsinkit-generate --events queue DDL, and defineEventConsumer as a long-lived Bun
   process never deployed serverless — plus its bounded drainOnce mode for platforms with no
@@ -91,14 +91,16 @@ mounting forecloses ever putting a CDN in front of the shared tier without also 
 `Access-Control-Expose-Headers: <STREAM_READ_EXPOSED_HEADERS>` on the actual (non-preflight) response.**
 Export that constant from `@pgxsinkit/server` and join it — do not retype the list. CORS lets script read
 only a short safelist of response headers, and every header durable-streams answers with is outside it, so
-a cross-origin browser gets a response whose stream headers are simply _not there_. The ds client steers
-its whole read loop off them (`Stream-Next-Offset`, `Stream-Cursor`, `Stream-Closed`,
-`Stream-Up-To-Date`), so stripped of them it never learns an offset, never switches to a live long poll,
-and re-requests `offset=-1` in a hot loop — hundreds of requests per second per shape, with no error
-raised on either side. `createStreamGate` cannot do this for you: it forwards the upstream response's
-headers, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision that only
-the mount makes. **Do not rely on the gateway.** A permissive `expose_headers: "*"` at istio/envoy makes
-the mount look correct behind that one deployment and hot-loop everywhere else.
+a cross-origin browser gets a response whose stream headers are simply _not there_. `@pgxsinkit/client`'s
+reader steers by them (`Stream-Next-Offset`, `Stream-Cursor`, `Stream-Closed`, `Stream-Up-To-Date`;
+`Retry-After` refines its backoff), so stripped of them it cannot make progress and every read fails with an
+error naming the missing `Stream-Next-Offset`. Clients from releases that read through
+`@durable-streams/client` fail worse: they never learn an offset, never switch to a live long poll, and
+re-request `offset=-1` in a hot loop — hundreds of requests per second per shape, with no error raised on
+either side. `createStreamGate` cannot do this for you: it forwards the upstream response's headers, and an
+exposure list means nothing without the `Access-Control-Allow-Origin` decision that only the mount makes.
+**Do not rely on the gateway.** A permissive `expose_headers: "*"` at istio/envoy makes the mount look
+correct behind that one deployment and fail everywhere else.
 
 The control plane and the edge share the stream-token signing key, and nothing else. Both read functions
 import the same registry as the write function and share `resolveAuthClaims`, which keeps the ingress

@@ -3,7 +3,7 @@ import { expect, it } from "bun:test";
 import { createShapeGroup, type ShapeGroupBatch } from "@pgxsinkit/client";
 import type { StreamEnvelope } from "@pgxsinkit/contracts";
 
-// The multi-stream coordinator (ADR-0055 decisions 4 + 10). @durable-streams/client reads ONE
+// The multi-stream coordinator (ADR-0055 decisions 4 + 10). The stream reader reads ONE
 // stream, so the K-streams layer is ours permanently. Two properties carry weight here: deliveries
 // are serialized (the apply path's inbox and commit queue assume one batch at a time, and K streams
 // answer concurrently), and group up-to-date is the ADR-0031 alignment — every shape, not any.

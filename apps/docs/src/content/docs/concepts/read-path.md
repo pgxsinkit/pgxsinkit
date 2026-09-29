@@ -98,8 +98,9 @@ PostgreSQL  →  Circuits engine  →  durable-streams  →  the edge  →  pgwa
 4. **The edge** (`createStreamGate`, mounted at `/v1/stream`) serves the durable-streams reads: it
    verifies the stream token, checks the grant against the live entitlement set, and proxies bytes.
 
-5. **The local store** (pgwasm) is fed through `@pgxsinkit/client`'s own reader (`readShapeStream`, over
-   `@durable-streams/client`) and applies the stream into local tables. The app reads from there.
+5. **The local store** (pgwasm) is fed through `@pgxsinkit/client`'s own reader (`readShapeStream`, a
+   long-poll reader of the durable-streams protocol) and applies the stream into local tables. The app
+   reads from there.
 
 **Cell values on the wire are Postgres output text.** The engine's cell model is `null`, integer,
 float, boolean and **text**, so every other type — `json`/`jsonb`, arrays, timestamps, `uuid`,

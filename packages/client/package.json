@@ -40,7 +40,6 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "dependencies": {
-    "@durable-streams/client": "0.2.7",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/pgwasm": "workspace:*",
     "@pgxsinkit/pgwasm-c": "workspace:*",

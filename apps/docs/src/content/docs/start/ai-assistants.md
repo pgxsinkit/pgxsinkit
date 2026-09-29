@@ -49,10 +49,6 @@ bunx @tanstack/intent@latest load @pgxsinkit/client#core   # print one skill
 bunx @tanstack/intent@latest install                       # add "load a matching skill first" guidance to AGENTS.md / CLAUDE.md
 ```
 
-(Use the `@latest` form: `@durable-streams/client` — which `@pgxsinkit/client` depends on for the read
-path's transport — also installs an `intent` binary, so a bare `intent` in `node_modules/.bin` can
-resolve to the wrong CLI.)
-
 ## The six things assistants get wrong
 
 1. **It is a toolkit, not a demo or a data layer.** The `@pgxsinkit/*` packages are the product.
@@ -81,8 +77,8 @@ and each silently makes a live app feel slow or flaky. An assistant wiring a rea
   surface, and it can only be fronted if it is addressable apart from the private one.
 - **Every `createStreamGate` mount must set `Access-Control-Expose-Headers`** from the exported
   `STREAM_READ_EXPOSED_HEADERS`. Without it a cross-origin browser cannot read the stream headers the
-  client steers its read loop off, and it re-requests from the start of the stream in a hot loop — with
-  no error raised on either side.
+  client steers its read loop off, and every read fails (older clients, built on `@durable-streams/client`,
+  instead re-request from the start of the stream in a hot loop, with no error raised on either side).
 - **A browser opens one long-poll connection per stream.** With several streams the HTTP/1.1
   ~6-per-origin cap starves writes — serve the gateway over **HTTP/2**.
 - **Serverless edges cold-start.** The first write after idle lags; warm the worker and set its

@@ -38,7 +38,7 @@ yourself only to use them directly.
 - **Read path:** `@pgxsinkit/client` subscribes through the server's control plane and reads the
   granted durable-streams through its stream edge — its own reader lives in `src/circuits/`
   (`subscription-client.ts`, `stream-source.ts`, `shape-group.ts`, `stream-inbox.ts`, `group-sync.ts`),
-  over `@durable-streams/client`; `src/sync/` keeps only the applier (`apply.ts`, `fold.ts`, `copy.ts`,
+  transport included (`long-poll.ts`); `src/sync/` keeps only the applier (`apply.ts`, `fold.ts`, `copy.ts`,
   `subscription-state.ts`). See [The read path](/concepts/read-path/).
 - **Event lane** (only if your registry declares `streams`): `@pgxsinkit/contracts` registers the streams
   and defines the wire contracts; `@pgxsinkit/client` stages appends in the local Outbox and flushes them;

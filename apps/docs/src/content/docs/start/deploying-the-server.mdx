@@ -126,13 +126,15 @@ private one.
   Set `Access-Control-Expose-Headers` from the exported `STREAM_READ_EXPOSED_HEADERS` on the **actual** (non-preflight)
   response — join that constant, never retype the list. CORS lets script read only a short safelist of response headers,
   and every header durable-streams answers with is outside it, so a cross-origin browser gets a response whose stream
-  headers are simply *not there*. `@durable-streams/client` steers its whole read loop off them (`Stream-Next-Offset`,
-  `Stream-Cursor`, `Stream-Closed`, `Stream-Up-To-Date`), so stripped of them it never learns an offset, never switches
-  to a live long poll, and re-requests from the start of the stream in a hot loop — hundreds of requests per second per
-  shape, with no error raised on either side. `createStreamGate` cannot do this for you: it forwards the upstream
-  response's headers, and an exposure list means nothing without the `Access-Control-Allow-Origin` decision only the
-  mount makes. **Do not rely on the gateway** — a permissive `expose_headers: "*"` at istio/Envoy makes the mount look
-  correct behind that one deployment and hot-loop everywhere else.
+  headers are simply *not there*. `@pgxsinkit/client`'s reader steers by them (`Stream-Next-Offset`, `Stream-Cursor`,
+  `Stream-Closed`, `Stream-Up-To-Date`; `Retry-After` refines its backoff), so stripped of them it cannot make progress
+  and every read fails with an error naming the missing `Stream-Next-Offset`. Clients from releases that read through
+  `@durable-streams/client` fail worse: they never learn an offset, never switch to a live long poll, and re-request
+  from the start of the stream in a hot loop — hundreds of requests per second per shape, with no error raised on either
+  side. `createStreamGate` cannot do this for you: it forwards the upstream response's headers, and an exposure list
+  means nothing without the `Access-Control-Allow-Origin` decision only the mount makes. **Do not rely on the gateway**
+  — a permissive `expose_headers: "*"` at istio/Envoy makes the mount look correct behind that one deployment and fail
+  everywhere else.
 </Aside>
 
 The control plane and the edge share the stream-token signing key, and nothing else. Both read
@@ -367,7 +369,7 @@ createSyncServer({
 
 ### The gateway must speak HTTP/2 — one long-poll connection per stream
 
-`@durable-streams/client` holds **one live long-poll connection open per synced stream**, and one
+`@pgxsinkit/client`'s reader holds **one live long-poll connection open per synced stream**, and one
 stream is one shape — so a subject holding K scopes of a shared-tier shape keeps K connections
 continuously busy, not one. Browsers cap **HTTP/1.1 at ~6 connections per origin**, so on a plain-HTTP
 gateway those long-polls consume every slot and the **write** request (which shares the origin) gets
