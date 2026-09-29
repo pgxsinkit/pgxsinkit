@@ -107,9 +107,21 @@ function mutableEntitlements(allowed: Set<string>): EntitlementSet {
 }
 
 /**
- * Enough of a turn for a fire-and-forget release to have travelled through the router and the
- * handler. `close()` is synchronous by design, so a test can only observe the request after the fact,
- * and a NEGATIVE assertion ("nothing was sent") has no signal to wait on at all.
+ * Poll until a fire-and-forget release has travelled through the router and the handler to the engine.
+ * `close()` is synchronous by design, so a test can only observe the request after the fact.
+ */
+async function waitUntil(predicate: () => boolean, label: string): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > 5_000) throw new Error(`timed out waiting for ${label}`);
+    await Bun.sleep(1);
+  }
+}
+
+/**
+ * A NEGATIVE assertion ("nothing was sent") has no signal to wait on, so it waits out a fixed turn
+ * instead: enough for a release to have travelled, had one been sent. Too short a turn can only let a
+ * wrong send go unseen; it cannot fail a correct run.
  */
 async function settle(): Promise<void> {
   await Bun.sleep(25);
@@ -323,7 +335,7 @@ describe("a subscription session's close", () => {
     expect(await session.refresh()).not.toBeNull();
 
     session.close();
-    await settle();
+    await waitUntil(() => engine.released.length === 2, "both claims to reach the engine");
 
     expect(engine.released.sort()).toEqual(["s1", "s2"]);
   });
@@ -342,6 +354,7 @@ describe("a subscription session's close", () => {
     session.close();
     session.close();
     session.close();
+    await waitUntil(() => engine.released.length > 0, "the release to reach the engine");
     await settle();
 
     expect(routed.releaseCalls()).toBe(1);
