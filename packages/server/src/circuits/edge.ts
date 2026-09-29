@@ -85,7 +85,7 @@ export interface StreamGateOptions {
   entitlements?: EntitlementSet;
   /**
    * Base URL of the durable-streams server, with whatever stream prefix it is mounted under — the
-   * same value the engine is given as `ELECTRIC_CIRCUITS_DS_URL`, since both address the same paths.
+   * same value the engine is given as `CIRCUITS_DS_URL`, since both address the same paths.
    */
   durableStreamsUrl: string;
   /**

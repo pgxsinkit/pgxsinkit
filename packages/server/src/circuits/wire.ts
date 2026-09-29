@@ -58,7 +58,7 @@ export interface CircuitsShapeHandle {
   subscription: string;
   /**
    * How long this subscription may go unrenewed before the engine releases it
-   * (`ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`, default 1800). `0` means leases never lapse, because that
+   * (`CIRCUITS_SHAPE_IDLE_SECS`, default 1800). `0` means leases never lapse, because that
    * setting also disables dormancy.
    *
    * Reported rather than guessed: the renewal cadence is the deployment's to set, and a control plane

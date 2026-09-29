@@ -81,7 +81,7 @@ export interface SubscribeOptions {
  *
  * The control plane renews every live claim on exactly one cadence: the token re-mint, which the
  * client drives at `expiresAt - skew` and which therefore lands at most `ttlSeconds` apart. The
- * engine releases a claim not renewed within `leaseSeconds` (`ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`).
+ * engine releases a claim not renewed within `leaseSeconds` (`CIRCUITS_SHAPE_IDLE_SECS`).
  * So a deployment whose lease window is under two TTLs has no margin at all: one refresh delayed by a
  * retry, a redeploy, or a sleeping tab, and a live session's shape goes dormant underneath it. The
  * factor of two is the margin for exactly one missed refresh.
@@ -91,7 +91,7 @@ export interface SubscribeOptions {
  * you" — and never a denial: a client told it lost entitlement truncates its rows.
  */
 export class CircuitsLeaseConfigError extends Error {
-  /** The engine's `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`, as the create response reported it. */
+  /** The engine's `CIRCUITS_SHAPE_IDLE_SECS`, as the create response reported it. */
   readonly leaseSeconds: number;
   /** The stream-token TTL this control plane is configured with. */
   readonly ttlSeconds: number;
@@ -99,11 +99,11 @@ export class CircuitsLeaseConfigError extends Error {
   constructor(leaseSeconds: number, ttlSeconds: number) {
     super(
       `[pgxsinkit] the sync engine's shape lease window (${leaseSeconds}s, ` +
-        `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS) is shorter than twice this control plane's stream-token TTL ` +
+        `CIRCUITS_SHAPE_IDLE_SECS) is shorter than twice this control plane's stream-token TTL ` +
         `(${ttlSeconds}s, the \`ttlSeconds\` option). Claims are renewed on the token re-mint, so a single ` +
         `missed refresh would let a live session's subscription lapse and its shape go dormant underneath ` +
-        `it. Raise ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS to at least ${2 * ttlSeconds}, lower \`ttlSeconds\` to ` +
-        `at most ${Math.floor(leaseSeconds / 2)}, or set ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS=0 to disable ` +
+        `it. Raise CIRCUITS_SHAPE_IDLE_SECS to at least ${2 * ttlSeconds}, lower \`ttlSeconds\` to ` +
+        `at most ${Math.floor(leaseSeconds / 2)}, or set CIRCUITS_SHAPE_IDLE_SECS=0 to disable ` +
         `leases entirely.`,
     );
     this.name = "CircuitsLeaseConfigError";

@@ -1,6 +1,6 @@
 ---
 title: pgxsinkit
-description: An offline-first sync toolkit for PostgreSQL/Supabase, ElectricSQL's Circuits engine, Drizzle, and pgwasm (Postgres in the browser).
+description: An offline-first sync toolkit for PostgreSQL/Supabase, the Circuits engine, Drizzle, and pgwasm (Postgres in the browser).
 template: splash
 hero:
   tagline: Opinionated, Offline-first, RLS-aware sync between PostgreSQL/Supabase and Drizzle/pgwasm at the edge.
@@ -29,7 +29,7 @@ import { Card, CardGrid } from "@astrojs/starlight/components";
 ## Two paths, one toolkit
 
 pgxsinkit is the **`@pgxsinkit/*`** library set. It gives a local-first app a read path that
-streams Postgres rows to the local store (pgwasm, Postgres in WebAssembly) through ElectricSQL's Circuits engine and durable-streams, and a
+streams Postgres rows to the local store (pgwasm, Postgres in WebAssembly) through the Circuits engine and durable-streams, and a
 write path that takes local edits back to Postgres through a typed write route — with per-row access
 control on both (Postgres row-level security on writes, a matching shape predicate on reads).
 

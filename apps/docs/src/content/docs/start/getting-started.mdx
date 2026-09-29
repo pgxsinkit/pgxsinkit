@@ -13,16 +13,16 @@ This page gets you from zero to a working read + write path. For what each packa
 - **PostgreSQL 17+** (Supabase-compatible; the write path uses Supabase-style auth claims for RLS),
   running with **`wal_level = logical`** — the Circuits engine ingests logical replication and creates
   its own replication slot. Supabase's images already ship it; verify with `postgres -C wal_level`.
-- **The read path's two services**: ElectricSQL's **Circuits engine**
-  (`ghcr.io/pgxsinkit/electric-circuits/engine`, pinned by sha tag) and a **durable-streams** server
-  (`ghcr.io/pgxsinkit/durable-streams-rust`, the pgxsinkit fork, also pinned by sha tag). The engine is
-  configured entirely through four environment variables:
+- **The read path's two services**: the **Circuits engine** (`ghcr.io/pgxsinkit/circuits/engine`) and a
+  **durable-streams** server (`ghcr.io/pgxsinkit/circuits/durable-streams`). Both are built in
+  [pgxsinkit/circuits](https://github.com/pgxsinkit/circuits) and released together under one tag, so
+  pin the pair with the same one. The engine is configured entirely through four environment variables:
 
   ```bash
-  ELECTRIC_CIRCUITS_PG_URL=postgres://…      # the database it replicates from
-  ELECTRIC_CIRCUITS_DS_URL=http://ds:8791    # the durable-streams server it publishes into
-  ELECTRIC_CIRCUITS_PG_TABLES=issue,team,…   # an EXPLICIT list of bare table names — never `*`
-  ELECTRIC_CIRCUITS_BIND=0.0.0.0:7010        # its control API, which must not be client-reachable
+  CIRCUITS_PG_URL=postgres://…      # the database it replicates from
+  CIRCUITS_DS_URL=http://ds:8791    # the durable-streams server it publishes into
+  CIRCUITS_PG_TABLES=issue,team,…   # an EXPLICIT list of bare table names — never `*`
+  CIRCUITS_BIND=0.0.0.0:7010        # its control API, which must not be client-reachable
   ```
 
   `*` introspects every `public` table with a primary key, which sweeps in tables you never meant to

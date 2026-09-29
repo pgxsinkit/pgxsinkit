@@ -15,7 +15,7 @@ import {
 
 import { circuitsPgTablesEnv, resolveCircuitsPgTables } from "../../scripts/lib";
 
-// The Circuits engine takes an EXPLICIT table list (`ELECTRIC_CIRCUITS_PG_TABLES`): it introspects each
+// The Circuits engine takes an EXPLICIT table list (`CIRCUITS_PG_TABLES`): it introspects each
 // named table, sets REPLICA IDENTITY FULL on it, and its pgoutput decoder drops changes for any relation
 // that is not on the list. The lane runners DERIVE that list from the registries the lanes exercise
 // rather than requiring `PGXSINKIT_CIRCUITS_PG_TABLES` from a developer's `.env` — these tests pin the

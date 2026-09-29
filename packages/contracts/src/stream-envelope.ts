@@ -1,7 +1,7 @@
 /**
  * The change envelope carried on every Circuits table and shape stream.
  *
- * Restated rather than imported from `@electric-circuits/protocol`, for the reasons given on
+ * Restated rather than imported from `@circuits/protocol`, for the reasons given on
  * {@link Predicate}: this is the wire contract pgxsinkit commits to, the protocol package is alpha,
  * and a published library should not put an alpha peer in its public types. The engine's serde
  * definitions are authoritative; any divergence is a bug here.

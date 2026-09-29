@@ -351,7 +351,7 @@ describe("the lease window must cover the token TTL", () => {
     await expect(subscribeWith(500, 300)).rejects.toThrow(CircuitsLeaseConfigError);
     // Both numbers and the knob that fixes them are named: the operator reading this log owns both.
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
-    await expect(subscribeWith(500, 300)).rejects.toThrow(/500s.*ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS/s);
+    await expect(subscribeWith(500, 300)).rejects.toThrow(/500s.*CIRCUITS_SHAPE_IDLE_SECS/s);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a real promise typed as void
     await expect(subscribeWith(500, 300)).rejects.toThrow(/300s.*ttlSeconds/s);
   });
@@ -467,7 +467,7 @@ describe("the re-mint renews every grant it re-authorizes", () => {
         }
         if (verdict === "outage") throw new CircuitsEngineError(503, "degraded", "engine degraded");
         if (held !== undefined && verdict === "renew") return answer(held, request.table, claim);
-        // An operator lowered ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS under a live session: the claim is
+        // An operator lowered CIRCUITS_SHAPE_IDLE_SECS under a live session: the claim is
         // renewed, but the window it now lives in no longer covers two of this deployment's TTLs.
         if (held !== undefined && verdict === "short-lease") {
           return { ...answer(held, request.table, claim), leaseSeconds: 60 };

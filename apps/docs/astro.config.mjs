@@ -34,7 +34,7 @@ export default defineConfig({
     starlight({
       title: "pgxsinkit",
       description:
-        "An offline-first sync toolkit for PostgreSQL/Supabase, ElectricSQL's Circuits engine, Drizzle, and pgwasm (Postgres in the browser).",
+        "An offline-first sync toolkit for PostgreSQL/Supabase, the Circuits engine, Drizzle, and pgwasm (Postgres in the browser).",
       logo: {
         light: "./src/assets/pgxsinkit-wordmark.svg",
         dark: "./src/assets/pgxsinkit-wordmark-dark.svg",
@@ -54,7 +54,7 @@ export default defineConfig({
         starlightLlmsTxt({
           projectName: "pgxsinkit",
           description:
-            "pgxsinkit is an offline-first sync toolkit for the PostgreSQL -> Circuits engine -> durable-streams -> pgwasm read path and the client -> write API -> PostgreSQL write path. Subscriptions are granted by a control plane and every read is gated at a stream edge. The @pgxsinkit/* packages are the product; a demo board app and an integration + performance harness prove and harden them. It targets engineers building local-first apps on Postgres/Supabase with Drizzle, ElectricSQL's Circuits engine, and pgwasm, the toolkit's own Postgres-in-WebAssembly runtime (which began as PGlite).",
+            "pgxsinkit is an offline-first sync toolkit for the PostgreSQL -> Circuits engine -> durable-streams -> pgwasm read path and the client -> write API -> PostgreSQL write path. Subscriptions are granted by a control plane and every read is gated at a stream edge. The @pgxsinkit/* packages are the product; a demo board app and an integration + performance harness prove and harden them. It targets engineers building local-first apps on Postgres/Supabase with Drizzle, the Circuits engine, and pgwasm, the toolkit's own Postgres-in-WebAssembly runtime (which began as PGlite).",
         }),
         contractsTypeDoc({
           entryPoints: ["../../packages/contracts/src/index.ts"],

@@ -21,7 +21,7 @@ request logs alone — or the first time a host asks for a server-side logging s
   table (`competency_association`, behind `langListMembershipZh`) made every language subscribe
   batch 503 once a second for over an hour. The host's request log showed only
   `POST /sync/v1/subscribe -> 503`; the client showed "0 of 8 ready"; the engine logged nothing
-  (see electric-circuits backlog 0001). Finding the cause meant deriving the registry's table list
+  (see backlog 0001 of pgxsinkit/circuits). Finding the cause meant deriving the registry's table list
   by hand and diffing it against the engine's `/tables`.
 
 ## The fix

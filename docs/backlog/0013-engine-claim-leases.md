@@ -1,7 +1,7 @@
 # 0013 — Engine-side claim leases (make shape release retry-safe and bound the leak)
 
 Status: done (2026-08-22)
-Opened: 2026-08-22 · Area: the pgxsinkit `electric-circuits` fork (`apps/engine/src/engine/lifecycle.rs`),
+Opened: 2026-08-22 · Area: `pgxsinkit/circuits` (`apps/engine/src/engine/lifecycle.rs`),
 `packages/server/src/circuits/subscribe.ts` (`refreshStreamToken`, `releaseStreamGrants`)
 Reopen trigger: active shape count or engine RSS growing without bound in a long-running deployment,
 or any second consumer of the release route.
@@ -14,7 +14,7 @@ The "robust form" below, in full — the engine grew it, and pgxsinkit consumes 
 first-class identity. `POST /shapes` takes a caller-chosen `subscription` id and echoes it back with
 `leaseSeconds`; repeating the create with that id **renews** the claim and returns the same handle
 (an id held by a different shape is `409`); `DELETE /shapes/{id}?subscription=…` releases **that**
-claim and repeating it is a no-op `200`; a claim not renewed within `ELECTRIC_CIRCUITS_SHAPE_IDLE_SECS`
+claim and repeating it is a no-op `200`; a claim not renewed within `CIRCUITS_SHAPE_IDLE_SECS`
 is released by the retention sweeper, so a crashed client's claims lapse instead of pinning a shape.
 
 **pgxsinkit** (this repo):

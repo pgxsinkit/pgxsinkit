@@ -58,7 +58,7 @@ resolve to the wrong CLI.)
 1. **It is a toolkit, not a demo or a data layer.** The `@pgxsinkit/*` packages are the product.
 2. **The two paths are separate and asymmetric.** Writes do not travel back down the read path.
 3. **There is one write path.** No selectable backend; one in-database apply function.
-4. **The engine's table list is explicit, never `*`.** `ELECTRIC_CIRCUITS_PG_TABLES` names bare table
+4. **The engine's table list is explicit, never `*`.** `CIRCUITS_PG_TABLES` names bare table
    names; `*` sweeps in every `public` table with a primary key. A schema-qualified registry is refused
    outright — the engine keys tables by bare name end to end.
 5. **The local pgwasm schema is not full DDL parity** with Postgres.

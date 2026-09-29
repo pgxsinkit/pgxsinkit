@@ -10,7 +10,7 @@ import { getColumnTable, getTableName, type AnyColumn } from "drizzle-orm";
  * also what makes the repo's SQL-tier rule reachable at tier ① here: authoring is real column
  * objects and typed values end to end, with no string to escape and nothing to interpolate.
  *
- * These types mirror `@electric-circuits/protocol`'s `Predicate` union exactly. They are restated
+ * These types mirror `@circuits/protocol`'s `Predicate` union exactly. They are restated
  * rather than imported: this is the wire contract pgxsinkit commits to, the protocol package is
  * alpha, and a published library should not put an alpha peer in its public types. Any divergence
  * is a bug here — the engine's serde definitions are authoritative.

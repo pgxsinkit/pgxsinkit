@@ -1,6 +1,6 @@
 ---
 title: What is pgxsinkit?
-description: An offline-first sync toolkit for Postgres, ElectricSQL's Circuits engine, Drizzle, and pgwasm — what you install, and how its two paths fit together.
+description: An offline-first sync toolkit for Postgres, the Circuits engine, Drizzle, and pgwasm — what you install, and how its two paths fit together.
 ---
 
 pgxsinkit is an **offline-first sync toolkit**: the `@pgxsinkit/*` packages you install to give a
@@ -45,7 +45,7 @@ Three, and none is optional:
 - **PostgreSQL with `wal_level = logical`.** The Circuits engine ingests logical replication and
   creates its own replication slot. Supabase's Postgres images already ship `wal_level = logical`;
   verify with `postgres -C wal_level` rather than assuming.
-- **An explicit table list for the engine, never `*`.** `ELECTRIC_CIRCUITS_PG_TABLES` names the tables
+- **An explicit table list for the engine, never `*`.** `CIRCUITS_PG_TABLES` names the tables
   the engine replicates. `*` introspects every `public` table with a primary key, which sweeps in
   tables you never meant to publish (the write-side operations log among them).
 - **A gateway that speaks HTTP/2.** The client holds one live long-poll per synced stream, so a subject

@@ -14,7 +14,7 @@ they are not one channel — the read path carries the read direction only, neve
 PostgreSQL  →  Circuits engine  →  durable-streams  →  pgwasm
 ```
 
-Postgres is the source of truth. ElectricSQL's Circuits engine maintains **shapes** (filtered row
+Postgres is the source of truth. The Circuits engine maintains **shapes** (filtered row
 sets, including membership fan-out) over the logical replication stream and publishes each one into
 durable-streams; the client subscribes through the pgxsinkit control plane and reads those streams
 through the stream edge, where they land in the local store (pgwasm). The app reads from it. This path is live

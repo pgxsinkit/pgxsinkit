@@ -18,13 +18,14 @@ Canonical timestamps are stored as bigint microseconds since the unix epoch and 
 
 ## Requirements
 
-The read path runs on ElectricSQL's **Circuits engine** (pgxsinkit pins a published image of its own
-fork, `ghcr.io/pgxsinkit/electric-circuits/engine`) writing into a **durable-streams** log that the
-client reads through a token-gated stream edge. Three things it requires:
+The read path runs on the **Circuits engine** (`ghcr.io/pgxsinkit/circuits/engine`) writing into a
+**durable-streams** log (`ghcr.io/pgxsinkit/circuits/durable-streams`) that the client reads through a
+token-gated stream edge. Both images are built in
+[pgxsinkit/circuits](https://github.com/pgxsinkit/circuits) and released together. Three things it requires:
 
 - **PostgreSQL 17+ with `wal_level = logical`.** The engine ingests logical replication and creates its
   own replication slot. Supabase Postgres ships this already.
-- **An explicit table list for the engine** (`ELECTRIC_CIRCUITS_PG_TABLES`), never `*`. `*` introspects
+- **An explicit table list for the engine** (`CIRCUITS_PG_TABLES`), never `*`. `*` introspects
   every `public` table that has a primary key and replicates all of them — including tables you never
   meant to publish. The names are **bare** and unqualified: the engine introspects `public` by bare name,
   and the shape compiler matches it.

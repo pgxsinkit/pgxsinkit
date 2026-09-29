@@ -10,7 +10,7 @@ The repository is split into three boundaries:
 
 The read path is two halves. `packages/client/src/circuits` is the **reader** ([adr/0055](adr/0055-circuits-native-sync-core.md)): it subscribes through the control plane (`subscription-client.ts`), reads each shape's durable-streams log (`stream-source.ts`), stages deliveries by offset (`stream-inbox.ts`), and drives a consistency group (`shape-group.ts`, `group-sync.ts`, `sync-engine.ts`). `packages/client/src/sync` is the **applier** — internalized into the client (ADR-0009), originally vendored from upstream `@electric-sql/pglite-sync`. Upstream compatibility is an explicit anti-goal ([adr/0028](adr/0028-own-the-sync-engine-outright.md)): it is ours to evolve — a serialized commit queue, a registry-item-driven apply ladder, and registry-declared consistency groups. The registry entry is the engine's per-table spec ([adr/0029](adr/0029-registry-item-driven-ingest-engine.md)): apply strategy, `json`/COPY casts, local table identity, and metadata DDL all derive from the Drizzle model — never carried through the option surface, never introspected from `information_schema`.
 
-The only transport dependency is `@durable-streams/client` (pinned `0.2.6`, `packages/client/package.json`): long-poll, offsets, backoff, and nothing above it (ADR-0055 decision 10).
+The only transport dependency is `@durable-streams/client` (pinned `0.2.7`, `packages/client/package.json`): long-poll, offsets, backoff, and nothing above it (ADR-0055 decision 10).
 
 `@pgxsinkit/client` wraps the internal sync engine (`packages/client/src/circuits/group-sync.ts` + `sync-engine.ts`) — the place to layer retries and instrumentation. There is no separate sync-engine package (see [adr/0007](adr/0007-absorb-sync-engine.md)).
 

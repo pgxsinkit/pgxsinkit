@@ -1,7 +1,7 @@
 # 0014 — A cross-stream commit fence (live cross-shape atomicity, not just aligned)
 
 Status: candidate (recorded 2026-08-22)
-Opened: 2026-08-22 · Area: the pgxsinkit `electric-circuits` fork (`apps/engine/src/engine/output.rs`,
+Opened: 2026-08-22 · Area: `pgxsinkit/circuits` (`apps/engine/src/engine/output.rs`,
 the incremental-maintenance emission path), `packages/client/src/circuits/stream-inbox.ts`
 (`isGroupUpToDate`), `packages/client/src/circuits/sync-engine.ts` (the commit gate)
 Reopen trigger: a consumer observes a live half-applied cross-table transaction in practice, or

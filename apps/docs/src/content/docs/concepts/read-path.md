@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-The read path streams rows from Postgres **through ElectricSQL's Circuits engine and
+The read path streams rows from Postgres **through the Circuits engine and
 durable-streams** to the client and keeps the local store up to date — nothing goes from Postgres to the
 client directly. The app reads exclusively from the local store; it never queries Postgres or the engine
 directly at read time.
@@ -311,7 +311,7 @@ Three things the read path needs from the deployment underneath it:
 
 - **Postgres running `wal_level = logical`.** The engine opens its own replication slot. Supabase's
   Postgres image already ships it — check with `postgres -C wal_level` rather than re-adding flags.
-- **An explicit table list for the engine, never `*`.** `ELECTRIC_CIRCUITS_PG_TABLES` names the tables
+- **An explicit table list for the engine, never `*`.** `CIRCUITS_PG_TABLES` names the tables
   it ingests, by bare name. `*` introspects every `public` table carrying a primary key, which sweeps
   in tables that were never sync state.
 - **A gateway speaking HTTP/2 to browsers.** One long-poll is held per stream, so a subject in K

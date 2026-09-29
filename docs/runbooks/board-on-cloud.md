@@ -59,7 +59,7 @@ was removed, and Electric Cloud is shutting down.
 
 - the **Circuits engine**, which needs a **direct** (non-pooler) logical-replication connection to the
   project's database, creates its own slot, and takes an explicit bare-name table list
-  (`ELECTRIC_CIRCUITS_PG_TABLES`); and
+  (`CIRCUITS_PG_TABLES`); and
 - a **durable-streams** server, which the engine writes to and the edge reads from.
 
 Supabase Cloud hosts neither, and this repo deploys neither — nothing in `board:cloud:*` stands them up.

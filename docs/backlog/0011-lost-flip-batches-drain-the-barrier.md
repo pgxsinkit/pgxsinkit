@@ -4,7 +4,7 @@ Status: promoted → adr/0056 (decision 3 amended 2026-08-21)
 
 ## Resolution
 
-The engine pgxsinkit deploys is the pgxsinkit fork of `electric-circuits` (`0d336cf`), and it closes
+The engine pgxsinkit deploys has been pgxsinkit's own since `0d336cf` (now in `pgxsinkit/circuits`), and it closes
 both halves of this. Failed flip propagation is **retried** rather than dropped; a batch abandoned
 after its retries **keeps its `pendingFlips` count held**, so the barrier can never read zero over
 lost work; the abandoned batch is counted in a new `flipFailures` term on `GET /replication/lsn`; and

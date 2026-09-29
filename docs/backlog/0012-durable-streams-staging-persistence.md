@@ -60,7 +60,7 @@ un-written-back pages truncates a tail, which is exactly this case.
 2. **`--data-dir` on a mounted PVC.** Non-negotiable and easy to get wrong: `--data-dir` defaults to a
    temp dir, so wal without it fsyncs every append and discards it on restart while looking perfectly
    healthy. The fork now **refuses to start** on that combination
-   (pgxsinkit/durable-streams-rust, `--durability wal` requires an explicit `--data-dir`), so this
+   (the log server, `--durability wal` requires an explicit `--data-dir`), so this
    fails loudly at deploy rather than silently at the first node loss — but the volume still has to
    exist.
 3. **A storage class with honest fsync — only an open question off local-path.** A local-path PVC is a
@@ -76,7 +76,7 @@ un-written-back pages truncates a tail, which is exactly this case.
    or accept the "catalog entirely lost" outcome above (full resync + orphaned streams) as the
    recovery path. Accepting it is defensible; leaving it undecided is not.
 6. **Network isolation — the server has no authentication.** None: the only credentials anywhere in
-   `durable-streams-rust` are the S3 keys for the optional cold tier. Anyone who can reach the port
+   the log server are the S3 keys for the optional cold tier. Anyone who can reach the port
    can read any stream, append to any stream, and `DELETE` any stream — including `meta/catalog`,
    which would hand the engine the "catalog entirely lost" path on demand. This is by design and
    matches classic Electric: authorization belongs to the edge, which for us is `board-stream`
