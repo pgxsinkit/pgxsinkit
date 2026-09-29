@@ -77,5 +77,6 @@ complete as ADRs are added.
 - [ADR-0062 — Absorb PGlite as pgwasm (upstream compatibility is an anti-goal)](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0062-absorb-pglite-as-pgwasm.md)
 - [ADR-0063 — Build permanence and `storage.build`](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0063-build-permanence-and-storage-build.md)
 - [ADR-0064 — The C build's supply chain](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0064-c-build-supply-chain.md)
+- [ADR-0065 — Own the Circuits stack: one repository for the engine and the log server](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0065-own-the-circuits-stack.md)
 
 <!-- adr:list:end -->

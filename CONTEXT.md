@@ -74,6 +74,14 @@ internal to the client, no longer a separate or vendored package. Also avoid fra
 the frontier as an LSN: positions are per-stream offsets, comparable only within a
 stream.
 
+**Circuits stack**:
+The two server-side programs of the read path, taken together: the Circuits engine,
+which turns PostgreSQL replication into maintained shapes, and the durable-streams
+server, which holds the log those shapes are written to and clients read from. A
+deployment runs the two as a matched pair.
+_Avoid_: "Electric", "Electric Circuits", "ElectricSQL" for either program or for the
+pair — both are maintained under pgxsinkit's own names.
+
 **Stream inbox**:
 The pure, in-memory staging buffer between a Consistency group's durable-streams
 subscriptions and the Sync applier — the offset-keyed successor to the LSN-keyed **Shape
