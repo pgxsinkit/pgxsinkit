@@ -5,6 +5,14 @@ and [ADR-0062](0062-absorb-pglite-as-pgwasm.md)'s ownership from the client to t
 read path. Amends [ADR-0055](0055-circuits-native-sync-core.md) decision 10: the read transport
 becomes pgxsinkit's own code. Not yet implemented.
 
+Status note (2026-09-29): decision 6 is implemented in pgxsinkit, commit `b893af7`. The reader is
+`packages/client/src/circuits/long-poll.ts` (one catch-up or long-poll request and what its answer means)
+and `stream-source.ts` (the session), written from the protocol specification at
+`pgxsinkit/durable-streams@a172acc`; `@durable-streams/client` is gone from `@pgxsinkit/client` and from
+`bun.lock`, and `STREAM_READ_EXPOSED_HEADERS` gains `retry-after`. The public API is unchanged but for
+one added type export, `StreamErrorHandler`, which `createTokenRecovery` now returns in place of the
+package's. Its behaviour drift from the package is recorded in `docs/testing-strategy.md`.
+
 ## Context
 
 The read path's server side is two Rust programs, each maintained as a fork in its own repository.

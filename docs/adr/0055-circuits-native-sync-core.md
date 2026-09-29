@@ -2,7 +2,7 @@
 
 Status: accepted (2026-08-20). Amended by [ADR-0065](0065-own-the-circuits-stack.md) (2026-09-29):
 decision 10's transport becomes pgxsinkit's own long-poll reader, and `@durable-streams/client` stops
-being a runtime dependency. Not yet implemented.
+being a runtime dependency. The amendment is implemented in `b893af7` (2026-09-29).
 
 ## Context
 
