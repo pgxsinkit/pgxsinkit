@@ -71,7 +71,7 @@ const OFFLINE_BOOT_MS = 90_000;
 const UNREACHABLE_MS = 60_000;
 // Convergence after reconnect: the journal's jittered per-mutation backoff tops out at 30s and the worker's
 // fallback convergence sweep is 15s, so a write can legitimately sit for the better part of a minute before
-// its retry fires — and the journal row only clears once the ack AND the Electric echo have landed.
+// its retry fires — and the journal row only clears once the ack AND the read-path echo have landed.
 const CONVERGE_MS = 120_000;
 
 // The board's dev handle on `window` in the VITE_E2E build (board-client-provider). The board has NO
@@ -244,7 +244,7 @@ test("(A1) online: the Admin activates chat, writes, converges, and the worker t
   await expect(adminPage.getByText("No messages in this channel yet.")).toHaveCount(0);
 
   // Both writes must be fully CONVERGED before the network goes away: a journal row clears only once the
-  // server acked it AND the Electric echo reconciled the overlay away, so an empty journal here means the two
+  // server acked it AND the read-path echo reconciled the overlay away, so an empty journal here means the two
   // rows the offline leg asserts are server-origin durable rows, not optimistic local state.
   await adminPage.getByRole("button", { name: "Inspector" }).click();
   await expect(inspector(adminPage)).toBeVisible();

@@ -201,7 +201,7 @@ export interface PlacementHarness {
   provision(input: { storePath: string; timeoutMs?: number }): Promise<AttachResult>;
   /**
    * SERVER-LANE attach: boots the REAL sync engine (`server.sync.worker.ts`, `fkSyncRegistry`) against the fixture
-   * server — Electric shape catch-up + the write API. Only the SERVER lanes call this (they skip when the fixture
+   * server — shape catch-up + the write API. Only the SERVER lanes call this (they skip when the fixture
    * env is absent).
    */
   attachServer(input: { storePath: string; timeoutMs?: number }): Promise<AttachResult>;

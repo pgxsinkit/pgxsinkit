@@ -321,6 +321,6 @@ describe("exportData portable SQL export (ADR-0035)", () => {
 
   // The one drain path the unit harness cannot honestly exercise: `acked` writes clear ONLY via the synced
   // echo through the Convergence barrier, which needs a real read path. Exercised in the integration lane
-  // (a real Postgres → Electric → pgwasm round trip), NOT faked here (a fake echo would prove nothing).
+  // (a real Postgres → read path → pgwasm round trip), NOT faked here (a fake echo would prove nothing).
   it.todo("drains `acked` writes via the synced echo before exporting — integration lane (sync-engine-e2e)", () => {});
 });

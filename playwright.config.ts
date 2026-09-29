@@ -16,7 +16,7 @@ import { defineConfig, devices } from "@playwright/test";
 // Origins (board-compose.yml): the app is served on http://localhost:5173 (the board's established
 // origin, already in the board-sync CORS allow-list — the DEV server now lives on 5660 for the kube
 // flow and plays no part here); its default backend origin is the caddy h1/h2/h3
-// front at https://localhost:54343 — so the six Electric long-polls + the SharedWorker multiplex over
+// front at https://localhost:54343 — so the six read-path long-polls + the SharedWorker multiplex over
 // one h2 connection, exactly the scenario the front exists for. The SharedWorker is same-origin to the
 // app (5173); its cross-origin fetches reach :54343 over TLS.
 //

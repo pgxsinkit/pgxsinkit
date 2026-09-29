@@ -26,7 +26,7 @@ export interface IssueActions {
  * The Issue write surface (board Phase 5). Each call is a single optimistic `issue.update`: the local
  * Overlay updates immediately (so the live board re-renders this frame), then the convergence trigger
  * (`autoSync`, board-client.ts) flushes it to `board-write` and reconciles once the server value
- * streams back through Electric. `updated_at_us` is server-stamped (a managed field), so the
+ * streams back through the read path. `updated_at_us` is server-stamped (a managed field), so the
  * `reject-if-stale` Conflict policy compares against the version the edit was based on.
  */
 export function useIssueActions(): IssueActions {

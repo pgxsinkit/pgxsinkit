@@ -171,7 +171,7 @@ describe("bulk apply (ADR-0014 Phase 3)", () => {
   });
 
   it("applyUpsertsToTable round-trips the srs-card shape INSIDE pg.transaction (the engine's real context)", async () => {
-    // The engine applies every Electric batch inside `pg.transaction(tx => …)` and hands the applier the
+    // The engine applies every read-path batch inside `pg.transaction(tx => …)` and hands the applier the
     // TRANSACTION, not the instance — a different executor/serialization path than the raw-pg tests above.
     const id = "c0000000-0000-0000-0000-000000000003";
     await drizzleOver(pg)

@@ -23,7 +23,7 @@ import type { BootReport } from "@pgxsinkit/client";
 //     sample so each is a genuinely cold worker.
 //   Run C (offline, ×2):  the SAME warm store as B, booted exactly like B (worker mode, no harness
 //     rewiring), but with the sync backend REALLY unreachable: the run STOPS the `board-functions`
-//     container — which hosts BOTH pgxsinkit data endpoints (`/functions/v1/board-sync`, the Electric shape
+//     container — which hosts BOTH pgxsinkit data endpoints (`/functions/v1/board-sync`, the shape
 //     proxy, and `/functions/v1/board-write`, the mutation ingress) — for the duration of the samples, then
 //     starts it again. `board-auth` (GoTrue, `/auth/v1`) is a SEPARATE container and stays up, so the
 //     persisted session still authenticates, and the caddy front keeps serving the app shell; the only

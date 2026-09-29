@@ -503,7 +503,7 @@ describe("client facade contract", () => {
 
     try {
       // syncEnabled:false isolates the WRITE contract from the read stream — the pessimistic flush is a
-      // foreground server round-trip, so no Electric timing is involved and the assertions are exact.
+      // foreground server round-trip, so no read-path timing is involved and the assertions are exact.
       const client = await createSyncClient({
         registry: projectsSyncRegistry,
         controlPlaneUrl: stack.controlPlaneUrl,

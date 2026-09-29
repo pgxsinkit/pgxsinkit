@@ -881,7 +881,7 @@ export function App() {
                 value={formatDuration(metrics.convergenceSweepMs)}
                 detail={
                   connection.mode === "live" && connection.syncEnabled
-                    ? "Ack replay from Electric into pgwasm and overlay cleanup"
+                    ? "Ack replay from the read path into pgwasm and overlay cleanup"
                     : "Disabled unless live mode and sync echo are both enabled"
                 }
               />
@@ -1416,7 +1416,7 @@ async function waitForFlushConvergence(
     const rowCount = Object.values(rowCounts).reduce((total, value) => total + value, 0);
 
     onProgress({
-      label: "Waiting for Electric convergence across hot tables",
+      label: "Waiting for read-path convergence across hot tables",
       completed: Math.min(rowCount, totalRows),
       total: totalRows,
     });
@@ -1435,7 +1435,7 @@ async function waitForFlushConvergence(
     await yieldForPoll();
   }
 
-  throw new Error(`Timed out waiting for Electric convergence across ${describeHotTableScope(bundle)}.`);
+  throw new Error(`Timed out waiting for read-path convergence across ${describeHotTableScope(bundle)}.`);
 }
 
 async function queryRowCounts(client: PerfLabClient, bundle: SyntheticRegistryBundle) {
@@ -1507,7 +1507,7 @@ function describeFlushOutcome(
   if (after.ackedCount > 0 && after.pendingCount === 0 && after.failedCount === 0) {
     return convergenceMs === null
       ? "Acked by write backend"
-      : `Acked by write backend and converged via Electric (${convergenceMs.toFixed(2)} ms)`;
+      : `Acked by write backend and converged through the read path (${convergenceMs.toFixed(2)} ms)`;
   }
 
   return "Queue churn completed";
@@ -1565,7 +1565,7 @@ function describeConnection(connection: ConnectionInput) {
     return "offline loopback transport";
   }
 
-  return `live perf-lab backend ${connection.batchWriteUrl} as ${connection.authIdentity}${connection.syncEnabled ? " with Electric echo" : " without Electric echo"}`;
+  return `live perf-lab backend ${connection.batchWriteUrl} as ${connection.authIdentity}${connection.syncEnabled ? " with read-path echo" : " without read-path echo"}`;
 }
 
 function describeConnectionNote(connection: ConnectionInput) {
@@ -1578,10 +1578,10 @@ function describeConnectionNote(connection: ConnectionInput) {
   }
 
   if (connection.syncEnabled) {
-    return "The default live path seeds the dedicated backend, syncs those rows into pgwasm, flushes local mutations upstream, and waits for the Electric echo to clear overlay state again.";
+    return "The default live path seeds the dedicated backend, syncs those rows into pgwasm, flushes local mutations upstream, and waits for the read-path echo to clear overlay state again.";
   }
 
-  return "Live mode without Electric echo still talks to the dedicated perf-lab backend, but it stops before the full downstream convergence phase.";
+  return "Live mode without read-path echo still talks to the dedicated perf-lab backend, but it stops before the full downstream convergence phase.";
 }
 
 function buildRuntimeDescriptor(scenario: ScenarioInput, connection: ConnectionInput) {

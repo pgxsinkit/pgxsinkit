@@ -11,9 +11,9 @@ description = "Run the standard repository validation suite"
 run = "bun run format-check && bun run lint-check && bun run test"
 
 [tasks.infra-up]
-description = "Start PostgreSQL and ElectricSQL locally"
+description = "Start PostgreSQL and the Circuits stack locally"
 run = "bun run infra:up"
 
 [tasks.infra-down]
-description = "Stop local PostgreSQL and ElectricSQL"
+description = "Stop local PostgreSQL and the Circuits stack"
 run = "bun run infra:down"

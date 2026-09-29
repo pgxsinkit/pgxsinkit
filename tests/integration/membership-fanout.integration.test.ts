@@ -181,7 +181,7 @@ describe("membership fan-out (readwrite) integration", () => {
   // documented caveat (apps/board/docs/consumer-review.md) is that only a *live* shape receives this
   // delta; this test holds a live subscription throughout, so it proves the live path end-to-end.
   it("revokes a member's rows from their LIVE shape when their membership is deleted (move-out)", async () => {
-    // Fully-isolated identities so Electric serves this subject a BRAND-NEW shape (a unique `sub` →
+    // Fully-isolated identities so the engine serves this subject a BRAND-NEW shape (a unique `sub` →
     // unique where-params → no cached handle from the fan-out test, whose churn would otherwise mask the
     // result). The only thing under test is: live shape + delete the subquery's SOURCE row → move-out.
     const REV_WS = uuid();
@@ -212,7 +212,7 @@ describe("membership fan-out (readwrite) integration", () => {
       // (`workspace_id IN (SELECT workspace_id FROM workspace_members WHERE member_id = $sub)`).
       await server.drizzle.delete(workspaceMembersTable).where(eq(workspaceMembersTable.id, REV_MEMBERSHIP));
 
-      // Electric must re-evaluate the dependent shape and stream the move-out; the item leaves the store.
+      // The engine must re-evaluate the dependent shape and stream the move-out; the item leaves the store.
       await waitFor(async () => {
         expect(await itemCount(memberPg)).toBe(0);
       });
@@ -269,7 +269,7 @@ describe("membership fan-out (readwrite) integration", () => {
   }, 30_000);
 
   // ADR-0024 Slice 1 — the MOVE-IN twin of the revocation test: ADDING a membership while the member's
-  // shape is live must stream the now-visible rows IN (Electric delivers them as `is_move_in` snapshot
+  // shape is live must stream the now-visible rows IN (the engine delivers them as `is_move_in` snapshot
   // inserts), so the rows appear with no reload. This is the exact mechanism the board demo relies on
   // when an admin adds someone to a team (the team's board + tickets should appear). The regression it
   // guards: those snapshot inserts carry no LSN, so the engine's change dedup dropped them and the rows
@@ -300,7 +300,7 @@ describe("membership fan-out (readwrite) integration", () => {
         .insert(workspaceMembersTable)
         .values({ id: MVI_MEMBERSHIP, workspaceId: MVI_WS, memberId: MVI_MEMBER, role: "member" });
 
-      // Electric re-evaluates the dependent shape and streams the move-in; the row materialises live.
+      // The engine re-evaluates the dependent shape and streams the move-in; the row materialises live.
       await waitFor(async () => {
         expect(await itemBody(memberPg, MVI_ITEM)).toBe("appear on join");
       });

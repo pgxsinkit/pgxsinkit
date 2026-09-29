@@ -23,7 +23,7 @@ if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
 }
 
 // The board's SharedWorker entry (ADR-0032 S3). ONE sync engine per (user, store) runs here — pgwasm, the
-// schema, the mutation journal, the Electric shape streams and the convergence loop — fanned out to every
+// schema, the mutation journal, the shape streams and the convergence loop — fanned out to every
 // tab on the same store over the bridge. Vite bundles this as a worker chunk when the app does
 // `new SharedWorker(new URL("./board-sync.worker.ts", import.meta.url), { name })` (see store-registry-default).
 //

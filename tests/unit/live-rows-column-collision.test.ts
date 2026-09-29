@@ -23,7 +23,7 @@ import {
 import { memoryStoreForTests, testStoreAcknowledgment } from "../../packages/client/src/testing";
 import { liveFieldAliases, remapAliasedLiveRow, type SelectedFields } from "../../packages/react/src/remap-live-row";
 
-// The live-query seam bug (root-caused from emergent's first browser+Electric learner e2e lane): a live
+// The live-query seam bug (root-caused from emergent's first browser + read-path learner e2e lane): a live
 // read built from a Drizzle select over a JOIN of two tables sharing a column name (two `title`) compiles
 // to a SELECT with duplicate OUTPUT column names — Drizzle emits no aliases, it maps result columns
 // positionally. Legal as a plain query, but pgwasm's `live` extension MATERIALISES it and fails

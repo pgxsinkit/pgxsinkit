@@ -33,11 +33,11 @@ import { computePercentiles } from "./scenario";
 //   - membership fan-out: visible via an `IN (SELECT … FROM membership …)` subquery,
 //   - grant-scope:        visible via a JWT-resident grant set (no join).
 //
-// Because Electric cannot read RLS, each shape is measured three ways, so we can
+// Because the engine cannot read RLS, each shape is measured three ways, so we can
 // compare what the *direct-read* endpoint pays (RLS) against what the *synced* path
-// pays (the Electric shape `where`) against the unfiltered floor:
+// pays (the shape `where`) against the unfiltered floor:
 //   - baseline    — privileged SELECT, no predicate (the floor),
-//   - shape-query — privileged SELECT + the resolved row-filter `where` (what Electric runs),
+//   - shape-query — privileged SELECT + the resolved row-filter `where` (what the engine runs),
 //   - rls         — SET ROLE authenticated + claims, policy active (what a direct read runs).
 //
 // The RLS line is measured for both the InitPlan-correct policy and the deliberately
@@ -94,7 +94,7 @@ type GovernedFixtureTable = AnyPgTable & { id: AnyPgColumn; createdAtUs: AnyPgCo
 /**
  * Author the measured read (optionally shape-filtered) as a tier-① builder over the fixture pgTable
  * and render it ONCE with inline params — the sampled statement stays a pre-rendered raw string, so
- * no per-iteration builder work contaminates the timing. The Electric-grammar `shapeWhere` fragment
+ * no per-iteration builder work contaminates the timing. The `shapeWhere` fragment
  * is a measured artifact and is embedded byte-exact via `sql.raw`.
  */
 function renderGovernedReadQuery(table: GovernedFixtureTable, shapeWhere?: string): string {
@@ -285,7 +285,7 @@ function buildFnRowsGrantScopePolicies(): ReturnType<typeof pgPolicy>[] {
 
 function membershipScenario(): ScenarioSpec {
   const tableName = `${PREFIX}work_items`;
-  // The synced (Electric) path's authorization is the same subquery, run privileged as a plain WHERE.
+  // The synced path's authorization is the same subquery, run privileged as a plain WHERE.
   const shapeWhere = `"workspace_id" in (select "workspace_id" from ${PREFIX}workspace_members where "member_id" = '${FOCAL_SUBJECT}')`;
   return {
     key: "membership",
@@ -377,7 +377,7 @@ export interface RlsReadScenarioMetric {
   modes: RlsReadModeMetric[];
   cliffRatioP95: number; // rls-naive p95 / rls-correct p95 (indexed)
   indexSpeedupP95: number; // rls-correct no-index p95 / rls-correct indexed p95
-  /** indexed RLS p95 ÷ indexed shape-query p95, per RLS variant (1.0 = as fast as the Electric shape). */
+  /** indexed RLS p95 ÷ indexed shape-query p95, per RLS variant (1.0 = as fast as the shape). */
   vsShapeP95: Record<string, number>;
   /** indexed EXPLAIN ANALYZE plan, per RLS variant. */
   explains: Record<string, string>;

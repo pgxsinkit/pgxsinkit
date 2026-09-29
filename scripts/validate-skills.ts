@@ -8,7 +8,7 @@ import { findSkillFiles, readLibraryVersion, SKILL_PIN_PLACEHOLDER } from "./lib
 //
 // Invokes the CLI by its explicit resolved path on purpose: `@electric-sql/client` also ships an
 // `intent` binary, so `bunx @tanstack/intent` / the `.bin/intent` shim can resolve to the wrong one from
-// inside a package that has Electric installed. The explicit path is unambiguous. Each package is
+// inside a package that has it installed. The explicit path is unambiguous. Each package is
 // validated with its own directory as cwd so the CLI's packaging checks read that package's package.json.
 //
 // Beyond the CLI's structural checks, this script holds each skill's `library_version` to the tag-derived

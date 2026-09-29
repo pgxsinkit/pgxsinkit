@@ -141,7 +141,7 @@ describe("pathological-case resilience (ADR-0021)", () => {
 
 // A read PROJECTION (defineReadProjection, ADR-0025) reads the OWNER's physical rows under a DISTINCT
 // local identity (`as`). `entry.table` is the OWNER's physical table, but a consumer imports and queries
-// the projection ONLY through `entry.localTable` (the `as` name — where Electric syncs its rows). So the
+// the projection ONLY through `entry.localTable` (the `as` name — where the read path syncs its rows). So the
 // guard must token the localTable identity, not the owner's physical name.
 const authoringOwner = defineSyncTable({
   tableName: "authoring_item",

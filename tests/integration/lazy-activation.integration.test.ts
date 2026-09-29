@@ -235,7 +235,7 @@ describe("lazy on-demand activation streams rows (real engine)", () => {
   // engine stores in `pg_temp.subscriptions_metadata` for a session-scoped group. So boot B finds NO cursor
   // for the group (the session table is empty on a new engine), treats it as a brand-new subscription, and
   // re-streams the whole shape from scratch over the recreated-empty TEMP table. Pre-ADR-0042 the durable
-  // cursor survived and boot B resumed from it over emptiness — Electric re-sent nothing and the history
+  // cursor survived and boot B resumed from it over emptiness — the read path re-sent nothing and the history
   // never re-arrived. No boot sweep exists in this design: storage placement makes the cursor session-scoped.
   it("lazy + ephemeral: rows re-arrive after an engine restart over a warm store (ADR-0042 session cursor)", async () => {
     const authorId = "01970000-0000-7000-8000-0000000a0003";

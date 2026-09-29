@@ -35,7 +35,7 @@ async function seedSyncedAuthor(db: PgwasmDb, id: string, version: number) {
     .values({ id, name: "Seeded", createdAtUs: BigInt(version), updatedAtUs: BigInt(version) });
 }
 
-/** Apply an Electric echo by advancing the synced row's Server version — fires the reconcile trigger. */
+/** Apply an read-path echo by advancing the synced row's Server version — fires the reconcile trigger. */
 async function applyEcho(db: PgwasmDb, id: string, version: number) {
   await drizzleOver(db)
     .update(demoSyncRegistry.authors.localTable)

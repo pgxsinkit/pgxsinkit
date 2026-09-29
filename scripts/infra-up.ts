@@ -27,7 +27,7 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv): void {
 const CERT_DIR = "infra/compose/certs";
 
 // Issue the board's TLS cert for the caddy HTTP/2 + HTTP/3 front (the fix for browser write-starvation
-// behind the board's 6 Electric long-polls — see board-compose.yml `caddy`). mkcert signs it with the
+// behind the board's 6 read-path long-polls — see board-compose.yml `caddy`). mkcert signs it with the
 // locally trusted CA, so the browser, and HTTP/3's QUIC (which refuses an untrusted cert), accept it
 // with no extra steps. Returns whether the cert is available so the readiness wait can skip 54343 when
 // it is not. mkcert is needed only for the interactive browser demo: the container lanes (integration

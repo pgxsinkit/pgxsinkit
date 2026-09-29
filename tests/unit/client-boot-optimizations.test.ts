@@ -77,7 +77,7 @@ describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
     await mock.module("@pgxsinkit/pgwasm/live", () => ({ live: {} }));
     const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
     await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
-    // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so its namespace now comes
+    // The sync engine is attached post-create (ADR-0032 S1), so its namespace now comes
     // from `createSyncEngine`'s return rather than the mocked `pgwasm.create` instance.
     // The subscription metadata store, which the reset path now calls directly (there is no engine
     // namespace to route through). Stubbed whole: these tests drive boot, not the metadata store.

@@ -15,7 +15,7 @@ export const CONNECTION_NEEDED_SIGN_IN = "Signing in needs a connection. Reconne
 /**
  * Whether the read path currently cannot reach the backend, read off the same {@link SyncRuntimeStatus}
  * the SyncBadge renders. `degraded` is the runtime's only "the stream is not being served" phase: a
- * network-level shape-stream failure has no HTTP status, so Electric retries it forever INSIDE its own
+ * network-level shape-stream failure has no HTTP status, so the reader retries it forever INSIDE its own
  * backoff wrapper and it never surfaces as a stream error at all — the runtime learns of it through
  * `backoffOptions.onFailedAttempt` (pgxsinkit `read-stream-stall.ts`) and enters `degraded`, clearing back
  * to `syncing`/`ready` on the next delivered batch. That recovery is why callers derive this at render

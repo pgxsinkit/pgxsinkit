@@ -14,7 +14,7 @@ import { router } from "./router";
 import { theme } from "./theme";
 
 // Dev-only: turn on the toolkit's opt-in sync/convergence instrumentation so the console shows the
-// per-phase timing of a write (enqueue → convergence pass → board-write → Electric echo → apply →
+// per-phase timing of a write (enqueue → convergence pass → board-write → read-path echo → apply →
 // live-query re-render). Filter the console to "pgxsinkit" and enable Verbose to read it; flip off at
 // runtime with `globalThis.__pgxsinkitDebug = false`. Never on in a production build — except the e2e
 // lane's (`VITE_E2E=1`): its scenarios assert the rail lines against the built artifact.

@@ -2,9 +2,9 @@ import { spawnSync } from "node:child_process";
 
 // `test:integration:board` — the board demo's end-to-end smoke lane (plan Phase 9).
 //
-// Unlike the toolkit integration suites (which spin up an ISOLATED, ephemeral postgres+electric stack
+// Unlike the toolkit integration suites (which spin up an ISOLATED, ephemeral postgres + Circuits stack
 // per run, scripts/run-integration-suite.ts), this drives the demo's REAL deployment topology — the
-// trimmed self-hosted Supabase + Electric stack with the two bundled Deno edge functions. That stack
+// trimmed self-hosted Supabase + Circuits stack with the two bundled Deno edge functions. That stack
 // has fixed ports and one project name (infra/compose/board-compose.yml), so this lane OWNS it: it
 // brings the board stack up, seeds the deterministic fixtures, runs the smoke, and tears the stack
 // down (volumes included). It therefore CANNOT run alongside a dev board stack you care about — it

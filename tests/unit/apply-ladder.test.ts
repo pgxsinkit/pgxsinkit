@@ -139,7 +139,7 @@ describe("apply ladder", () => {
   });
 
   it("copy tier runs COPY even for a table with a primary key (no PK guard), escaping special chars", async () => {
-    // COPY needs no ON CONFLICT: an Electric `insert` is a new row (post-truncate or first send), so
+    // COPY needs no ON CONFLICT: an `insert` from the read path is a new row (post-truncate or first send), so
     // it cannot legitimately collide. A primary key must NOT divert away from COPY.
     await createTablesFromSchema(pg, { copyTarget });
 

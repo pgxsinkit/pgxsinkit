@@ -1505,7 +1505,7 @@ async function waitForConvergence(
         await verifyLocalRowExpectations(registry, handle.client, expectations);
 
         if (diagnostics.mutation.ackedCount > 0) {
-          throw new Error(`${handle.key} still has acknowledged mutations waiting for Electric echo`);
+          throw new Error(`${handle.key} still has acknowledged mutations waiting for read-path echo`);
         }
 
         return;
@@ -1533,7 +1533,7 @@ async function waitForConvergence(
     const recentEntityState = await readLocalEntityStateDiagnostics(registry, handle.client, recentMutations);
     const recentServerEntityState = await readServerEntityStateDiagnostics(registry, recentMutations);
     const waitReason = isAckOnlyMutationState(diagnostics.mutation)
-      ? "waiting for Electric echo to clear acknowledged mutations"
+      ? "waiting for read-path echo to clear acknowledged mutations"
       : "waiting for local mutation state to drain";
 
     throw new Error(

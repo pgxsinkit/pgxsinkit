@@ -132,7 +132,7 @@ function ChannelMessages({ channelId, profiles }: { channelId: string; profiles:
 
 // Compose box pinned under the thread. Posts an optimistic Message into the active Channel (board
 // Phase 7); the local thread re-renders this frame and the post fans out to every other Channel member
-// on the next Electric live cycle. Enter sends, Shift+Enter inserts a newline. Mounted with a
+// on the next live read. Enter sends, Shift+Enter inserts a newline. Mounted with a
 // `key={channelId}` by the parent, so switching Channels starts a fresh draft.
 function MessageComposer({ channelId, channelName }: { channelId: string; channelName: string }) {
   const actions = useMessageActions();

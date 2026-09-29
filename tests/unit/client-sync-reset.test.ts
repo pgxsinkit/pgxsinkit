@@ -518,7 +518,7 @@ describe("createSyncClient subscription reset", () => {
 
     // The "Up to date offline" lie (maintainer-observed): a pulled cable HANGS the live long-poll, so
     // nothing fails (the stall probe hears only settled attempts) and nothing delivers — a runtime that
-    // reached `ready` this session kept claiming it indefinitely. A healthy Electric stream is never
+    // reached `ready` this session kept claiming it indefinitely. A healthy stream is never
     // silent (the long-poll cycles with at least a bare up-to-date), so silence past the window while
     // claiming `ready` IS evidence, and the phase must drop to the shared stream-degraded state.
     const emissions: string[] = [];

@@ -1,6 +1,6 @@
 // The MINIMAL registry the placement lanes drive (ADR-0049 step 12). These lanes prove the PLACEMENT
 // machinery — the probe verdict, election + succession, relocation outcomes, destroy peer-refusal, meta-record
-// recognition — NOT sync convergence, so `syncEnabled: false` is the default posture and no Electric/write
+// recognition — NOT sync convergence, so `syncEnabled: false` is the default posture and no read-path/write
 // server is contacted. One writable table gives a local-mutation surface adequate to observe a relocation
 // outcome; a raw `SELECT` gives a read surface. Copied down to the smallest shape the repo's own worker-bridge
 // unit fixture (`tests/unit/worker-one-shot-reads.test.ts`) uses.

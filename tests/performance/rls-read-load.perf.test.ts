@@ -10,7 +10,7 @@ import { assertPerfBudgets, evaluatePerfBudget, writePerfReport } from "./suppor
 const env = readIntegrationEnv();
 
 // RLS read-load: measures the cost of RLS-governed reads at scale for the membership-fanout and
-// JWT grant-scope authorization shapes, three ways each (baseline / Electric shape-query / direct-read
+// JWT grant-scope authorization shapes, three ways each (baseline / shape-query / direct-read
 // RLS) across {InitPlan-correct, naive} × {with index, without index}. The hard budget is the correct,
 // indexed RLS p95 — the path a direct-read endpoint actually takes; the naive and no-index lines, plus
 // the cliff / index-speedup / RLS-vs-shape ratios, are reported (and EXPLAIN ANALYZE captured) so the
@@ -48,7 +48,7 @@ describe("performance: RLS read load", () => {
             visibleRowEstimate: scenario.visibleRowEstimate,
             cliffRatioP95: round(scenario.cliffRatioP95),
             indexSpeedupP95: round(scenario.indexSpeedupP95),
-            // Each RLS variant's indexed p95 as a multiple of the Electric shape query (1.0 = as fast).
+            // Each RLS variant's indexed p95 as a multiple of the shape query (1.0 = as fast).
             // rls-anyarray / rls-fnrows are the planner-guiding experiments; ~1 means they close the gap.
             vsShapeP95: Object.fromEntries(
               Object.entries(scenario.vsShapeP95).map(([mode, ratio]) => [mode, round(ratio)]),

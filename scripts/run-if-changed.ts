@@ -25,7 +25,7 @@ import {
 
 const REGISTRY = "registry.json";
 
-// Paths a code stage (typecheck/lint/electric/sync) can never be affected by. Each entry must be
+// Paths a code stage (typecheck/lint/sync) can never be affected by. Each entry must be
 // provably incapable of changing a code stage's result; an under-invalidation could only hide here.
 const CODE_DENYLIST = ["docs/**", "apps/docs/**", "**/*.md", "brand/**", "LICENSE", "NOTICE"];
 

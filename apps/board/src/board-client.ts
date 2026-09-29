@@ -49,7 +49,7 @@ export const { SyncClientProvider, useSyncClient, useLiveRows, useLiveDrizzleRow
  * `autoSync` is a pausable convergence trigger (board Phase 8): the standard browser trigger (online /
  * visibilitychange / a 1.5s fallback) gated behind the Offline toggle. Each pass runs `flush` (send
  * pending mutations to `board-write`) → `reconcile` (clear the optimistic Overlay once the server value
- * streams back via Electric), started once sync is ready and stopped on `stop()`. While the toggle is
+ * streams back through the read path), started once sync is ready and stopped on `stop()`. While the toggle is
  * Offline the pass is suppressed, so writes stage into the local journal and only flush on reconnect.
  * Returns the client paired with its {@link OfflineControl} so the UI can drive the toggle.
  */

@@ -6,7 +6,7 @@ export interface MessageActions {
   /**
    * Post a Message into a Channel (board Phase 7). A single optimistic `message.create`: the local
    * Overlay gains the row immediately (so the live thread re-renders this frame), then the convergence
-   * trigger flushes it to `board-write` and reconciles once the server value streams back via Electric.
+   * trigger flushes it to `board-write` and reconciles once the server value streams back through the read path.
    * `authorId` and the timestamps are server-managed (`authUid` / `nowMicroseconds`), so compose only
    * supplies `channelId` + `body`; the optimistic overlay still stamps the author from the session, so
    * the row renders attributed to the current user immediately rather than as "Unknown" until echo.

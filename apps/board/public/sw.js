@@ -12,7 +12,7 @@
 //     wasm/data blobs and the worker scripts are captured AS THE APP FETCHES THEM ANYWAY, so a visitor
 //     who bounces off the login screen downloads nothing extra.
 //
-// Cross-origin traffic (Supabase auth, the Electric read path, the write API) is never touched: those
+// Cross-origin traffic (Supabase auth, the read path, the write API) is never touched: those
 // requests must fail honestly offline so the sync runtime reports `degraded` and the app renders its
 // connection-needed states.
 //

@@ -7,7 +7,7 @@ import { startPlacementFixtureServer } from "./placement-fixture-server";
 // `test:browser:placement:server` (all configured browsers) / `test:integration:placement` (Chromium) — the
 // ADR-0049 step-12 SERVER-backed placement lanes. Mirrors
 // scripts/run-integration-suite.ts (per-run podman project, allocated ports, teardown ALWAYS) but ALSO boots an
-// in-process fixture server (the REAL createSyncServer write handler + Electric proxy over the container stack,
+// in-process fixture server (the REAL createSyncServer write handler + stream edge over the container stack,
 // with a control surface), threads its URLs to the Playwright build via env, and runs the placement suite. The
 // serverless `test:browser:placement` is untouched: the three server lanes detect `PLACEMENT_SERVER_URL` and skip
 // with a precise reason when it is absent, so the default suite needs no podman.

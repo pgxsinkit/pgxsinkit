@@ -225,7 +225,7 @@ describe("circuits -> pgwasm sync integration", () => {
               payload: {
                 id: "01963227-d4c7-72db-b858-f89f6af8f992",
                 title: "Visible after API write",
-                description: "Electric should stream this down",
+                description: "The read path should stream this down",
                 author_id: "01963227-d4c7-72db-b858-f89f6af8f921",
                 status: "in_progress",
                 priority: "high",

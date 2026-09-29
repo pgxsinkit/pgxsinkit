@@ -6,7 +6,7 @@ export interface TeamActions {
   /**
    * Rename a Team (Admin-only; pgxsinkit ADR-0025 showcase). A single optimistic `team.update`. `team`
    * is `readwrite` only in the Admin (authoritative) registry, so this handle exists only on an Admin
-   * client; the rename converges to every member's board via the Electric echo (their `team` is
+   * client; the rename converges to every member's board via the read-path echo (their `team` is
    * `asReadonly`, so they read the new name but have no write handle to change it). `updated_at_us` is
    * the Server version — stamped by the apply function (managed field), never sent in the patch.
    */

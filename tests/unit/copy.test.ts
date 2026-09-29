@@ -328,7 +328,7 @@ describe("COPY TEXT serializer", () => {
   // The cleanest safety proof for "COPY can bootstrap any table": serialize a value through COPY and
   // compare the stored result (as text) against the same value written by an ordinary parameterized
   // INSERT — the app's canonical write path. Locale-independent (both rows share the session), and it
-  // covers both the exotic SQL types Electric delivers as strings and the non-string JS runtime types
+  // covers both the exotic SQL types the read path delivers as strings and the non-string JS runtime types
   // (Date, special floats) the serializer must handle.
   describe("COPY matches a parameterized INSERT (every type is bootstrap-safe)", () => {
     async function copyVsInsert(
@@ -387,7 +387,7 @@ describe("COPY TEXT serializer", () => {
       expect(copied).toBe(inserted);
     });
 
-    // Exotic SQL types Electric delivers as their text representation: serialization is passthrough +
+    // Exotic SQL types the read path delivers as their text representation: serialization is passthrough +
     // COPY-escaping, so the proof is that the stored value is identical to a parameterized insert.
     const stringDelivered: ReadonlyArray<readonly [string, string]> = [
       ["timestamptz", "2021-01-01 12:34:56.789+00"],

@@ -442,7 +442,7 @@ describe("sync config contracts", () => {
     ).toEqual(["id", "title", "updated_at_us"].sort());
     expect((entry.clientProjection?.omitColumns ?? []).slice().sort()).toEqual(["heavyBlob", "ownerId"].sort());
 
-    // The Electric `columns` allow-list keeps the heavy column off the wire (not merely stripped after).
+    // The `columns` allow-list keeps the heavy column off the wire (not merely stripped after).
     expect(projection.shape?.rowFilter?.columns?.slice().sort()).toEqual(["id", "title", "updated_at_us"].sort());
     expect(projection.shape?.rowFilter?.revision).toBe("admin-summary-1");
 

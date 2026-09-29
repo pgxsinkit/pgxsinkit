@@ -7,7 +7,7 @@
  * smoke that imports from every published entry point and exercises the offline-capable
  * surface. This proves the *published* contract — the `exports` map, `types`, `main`, and the
  * cross-package dependency graph — rather than the in-repo source the unit tests import.
- * The DB/Electric round-trip stays in the integration lane.
+ * The DB/read-path round-trip stays in the integration lane.
  *
  * Run: `bun run fixture:smoke`. Exits non-zero on any drift (a missing export, a broken
  * exports map, an unresolvable dependency).

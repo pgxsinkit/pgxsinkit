@@ -44,7 +44,7 @@ function TeamMembersCard({
   const [busy, setBusy] = useState(false);
 
   // Admin-only Team rename (pgxsinkit ADR-0025). An optimistic `team.update`; the new name converges to
-  // every member's board via the Electric echo. A Member's client has no `team` write handle at all.
+  // every member's board via the read-path echo. A Member's client has no `team` write handle at all.
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(teamName);
   const [renaming, setRenaming] = useState(false);

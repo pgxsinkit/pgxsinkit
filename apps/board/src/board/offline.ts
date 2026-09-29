@@ -18,7 +18,7 @@ export interface OfflineControl {
  * they just are not sent — so the journal visibly fills while offline. Going back online fires one
  * immediate pass to flush the queue and reconcile.
  *
- * Scope note: this pauses the outbound path only. The inbound Electric subscription has no client-side
+ * Scope note: this pauses the outbound path only. The inbound read-path subscription has no client-side
  * pause/resume seam (`stop()` closes pgwasm), so the toggle is honestly "your edits queue locally and
  * sync when you reconnect" rather than a full network cut. A first-class read-path pause is a toolkit
  * capability for later.
@@ -26,7 +26,7 @@ export interface OfflineControl {
 export function createOfflineControl(): OfflineControl {
   // A slow fallback cadence. Convergence is now event-driven — a local write requests a pass on enqueue
   // (client requestPass), and the real-time <table>_reconcile_on_sync trigger clears overlays on the
-  // Electric echo — so this interval only catches retries/recovery, not the happy path. Every engine
+  // read-path echo — so this interval only catches retries/recovery, not the happy path. Every engine
   // query costs WASM overhead regardless of complexity (~50ms, measured before the pgwasm switch — ADR-0062),
   // so a frequent poll is the dominant idle-CPU cost; at 15s a fully idle board is effectively quiet.
   const base = createBrowserConvergenceTrigger({ intervalMs: 15_000 });

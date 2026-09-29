@@ -110,7 +110,7 @@ export type MembershipRow = { id: string; teamId: string; userId: string };
  * Read from the **base synced table**, not the `_read_model` view: `team_member` is `readwrite` only in
  * the Admin (authoritative) registry; the Member registry consumes it via `asReadonly` and so has no
  * overlay-merged view (pgxsinkit ADR-0025). The base table exists in both, so this one hook serves both
- * roles. Trade-off: an Admin's optimistic add/remove appears here once the Electric echo lands (a
+ * roles. Trade-off: an Admin's optimistic add/remove appears here once the read-path echo lands (a
  * round-trip), not instantly — acceptable, and the optimistic surface is already shown by issues.
  */
 export function useTeamMemberships() {
@@ -152,7 +152,7 @@ const issueColumns = {
 
 // Issues are ordered by title (id tiebreak for duplicates) — a DETERMINISTIC, edit-stable key. With no
 // ORDER BY the render order was heap-scan order, and a Postgres UPDATE relocates the tuple — so every
-// Electric echo (own writes ~1–3s later, other users' anytime) visibly shuffled cards within a column.
+// read-path echo (own writes ~1–3s later, other users' anytime) visibly shuffled cards within a column.
 // Title only changes on an explicit rename, where an instant reorder is expected behaviour.
 export function useTeamIssues(teamId: string) {
   const { rows, loading, hydrating } = useLiveDrizzleRows(

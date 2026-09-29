@@ -131,7 +131,7 @@ function associatedObjects(entity: Entity): AssocObject[] {
   const base: AssocObject = {
     name: entity.table,
     kind: "table",
-    purpose: "Synced rows from the server — Electric writes the read path into here.",
+    purpose: "Synced rows from the server — the read path writes into here.",
   };
   if (entity.mode !== "readwrite" || !entity.overlay || !entity.journal || !entity.readModel || !entity.syncState) {
     return [base];

@@ -19,7 +19,7 @@ import { createSchemaTestPgwasm } from "../support/pgwasm-store";
 // row + overlay lingered forever behind the echo barrier.
 
 // A `lazy` never-activated readwrite entry: its local journal/overlay/synced tables are still provisioned
-// (DDL is emitted for every registered writable entry; `subscription` only gates Electric streaming), so a
+// (DDL is emitted for every registered writable entry; `subscription` only gates read-path streaming), so a
 // blind write flushes + acks + retires cleanly with the group never activated — the write-only pattern.
 const ledgerRegistry = defineSyncRegistry({
   ledger: defineSyncTable({

@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import { FetchRouter } from "@pgxsinkit/server";
 
-// CORS origin resolution on the router (shared with the electric proxy via resolveCorsOrigin):
+// CORS origin resolution on the router (shared with the stream edge via resolveCorsOrigin):
 // exact-match allow-list, plus the "*" entry that reflects any request origin — used by dev/demo
 // deployments where auth is a bearer token and enumerating every local origin is churn.
 describe("FetchRouter — CORS origins", () => {

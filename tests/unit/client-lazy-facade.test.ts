@@ -101,7 +101,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     await mock.module("@pgxsinkit/pgwasm/live", () => ({ live: {} }));
     const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");
     await mock.module("@pgxsinkit/pgwasm/drizzle", () => ({ ...realDrizzle, drizzle: () => ({ mocked: true }) }));
-    // The sync engine is attached post-create as `.electric` (ADR-0032 S1), so the recording namespace
+    // The sync engine is attached post-create (ADR-0032 S1), so the recording namespace
     // now lives on `createSyncEngine`'s return rather than on the mocked `pgwasm.create` instance.
     // The subscription metadata store, which the desync/discard paths now call directly (there is no
     // engine namespace to route through). `deleteSubscriptionState` is what the ADR-0021 assertions
@@ -323,7 +323,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
     // It stopped the group (so the stream can't re-fill the truncated cache) and the relation is dormant.
     expect(stopGroupCalls).toEqual(["archive-shape"]);
     expect(client.isSynced("archive")).toBe(false);
-    // CRITICAL (review fix): it deleted the group's persisted Electric subscription, so re-activation
+    // CRITICAL (review fix): it deleted the group's persisted subscription, so re-activation
     // re-streams from scratch rather than resuming the old cursor and never re-sending the truncated rows.
     expect(deleteSubscriptionCalls).toEqual(["archive-shape"]);
     // And it truncated the (singleton) group's local cluster.
