@@ -38,7 +38,7 @@ import type { StreamSourceOptions } from "./stream-source";
  *
  * `flipFailures` is the term the others cannot express. A flip batch abandoned after its retries
  * carried membership effects that are **gone**, not late: the engine keeps that batch's
- * `pendingFlips` count held forever and latches itself degraded — 503 on `/v1/health` and on every
+ * `pendingFlips` count held forever and latches itself degraded — 503 on `/ready` and on every
  * membership-bearing route, subquery streams reaped, recovery only by operator restart. The waiting
  * terms are therefore honest but permanently unsatisfied, which is indistinguishable from a slow
  * engine; this term is how a client tells the two apart.

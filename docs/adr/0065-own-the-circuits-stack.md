@@ -3,7 +3,7 @@
 Status: accepted (2026-09-29). Extends [ADR-0028](0028-own-the-sync-engine-outright.md)'s anti-goal
 and [ADR-0062](0062-absorb-pglite-as-pgwasm.md)'s ownership from the client to the server side of the
 read path. Amends [ADR-0055](0055-circuits-native-sync-core.md) decision 10: the read transport
-becomes pgxsinkit's own code. Not yet implemented.
+becomes pgxsinkit's own code. Implemented except for steps 2 and 4 of decision 8; see the status notes.
 
 Status note (2026-09-29): decision 6 is implemented in pgxsinkit, commit `b893af7`. The reader is
 `packages/client/src/circuits/long-poll.ts` (one catch-up or long-poll request and what its answer means)
@@ -12,6 +12,21 @@ and `stream-source.ts` (the session), written from the protocol specification at
 `bun.lock`, and `STREAM_READ_EXPOSED_HEADERS` gains `retry-after`. The public API is unchanged but for
 one added type export, `StreamErrorHandler`, which `createTokenRecovery` now returns in place of the
 package's. Its behaviour drift from the package is recorded in `docs/testing-strategy.md`.
+
+Status note (2026-09-29): decisions 1 to 5 are implemented. `pgxsinkit/circuits` exists, with the engine's
+history and the log server's replayed under `apps/durable-streams`, and publishes both images from one
+commit. Step 1 of decision 8 (the move and the rename) is its commit `4c6da35`; step 3 (the compatibility
+adapter's removal) was brought forward, since nothing about it depends on Rust 1.99, and is its commits
+`2f30abf`, `3267490` and `b45a592`. The removal took more than `GET /v1/shape`: the fleet health route
+`/v1/health`, every `ELECTRIC_*` setting and the StatsD exporter were Electric compatibility too. One
+setting the native path needs was renamed instead of removed: `CIRCUITS_PG_POOL_SIZE`. pgxsinkit pins the
+pair at `sha-9bfd480`, which is the first image without any of it. Steps 2 and 4 are not done.
+
+Status note (2026-09-29): the consequence about the engine fork's `compat-branch` is settled, and nothing
+was brought over. The branch was the earlier design, built for the adapter: real LSNs on changes and a
+fan-out frontier. Its engine fixes were made again on `develop` for the native path the day the branch
+stopped (that repository's `f314de7` and `2ba5ab8`), and [ADR-0056](0056-catchup-alignment-on-stream-offsets.md)
+replaced the LSN frontier with stream offsets and the engine's convergence barrier.
 
 ## Context
 

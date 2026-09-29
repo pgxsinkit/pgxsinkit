@@ -8,7 +8,7 @@ The engine pgxsinkit deploys has been pgxsinkit's own since `0d336cf` (now in `p
 both halves of this. Failed flip propagation is **retried** rather than dropped; a batch abandoned
 after its retries **keeps its `pendingFlips` count held**, so the barrier can never read zero over
 lost work; the abandoned batch is counted in a new `flipFailures` term on `GET /replication/lsn`; and
-the engine latches itself **degraded** — `503` on `/v1/health` and on every membership-bearing route,
+the engine latches itself **degraded** — `503` on `/ready` and on every membership-bearing route,
 subquery shape streams reaped, recovery only by operator restart.
 
 That is the reopen trigger below, fired. pgxsinkit now reads `flipFailures` through the control-plane

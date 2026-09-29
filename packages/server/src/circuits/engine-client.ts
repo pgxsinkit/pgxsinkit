@@ -132,7 +132,7 @@ export function createCircuitsEngineClient(options: CircuitsEngineOptions) {
      * `flipFailures > 0` means a batch was **abandoned** after exhausting its propagation retries:
      * those membership effects are gone rather than late. The engine keeps the abandoned batch's
      * `pendingFlips` count held — so the waiting terms never falsely read converged — and latches
-     * itself degraded: `/v1/health` answers 503, so do its membership-bearing routes, and a reaper
+     * itself degraded: `/ready` answers 503, so do its membership-bearing routes, and a reaper
      * deletes every subquery shape stream. Recovery is an operator restart.
      *
      * The answer is VALIDATED, not cast. An engine that does not report both counters cannot answer
