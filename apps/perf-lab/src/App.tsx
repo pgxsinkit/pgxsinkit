@@ -148,6 +148,11 @@ const initialMetrics: LabMetrics = {
   lastRunAt: null,
 };
 
+// Outside the component: the log line reads the clock, which React's purity rule forbids in component scope.
+function timestampedLogLine(message: string): string {
+  return `${new Date().toLocaleTimeString()}  ${message}`;
+}
+
 export function App() {
   const [scenario, setScenario] = useState<ScenarioInput>(defaultScenario);
   const [selectedPresetKey, setSelectedPresetKey] = useState<string | null>(defaultPresetKey);
@@ -569,7 +574,7 @@ export function App() {
   }
 
   function appendLog(message: string) {
-    const line = `${new Date().toLocaleTimeString()}  ${message}`;
+    const line = timestampedLogLine(message);
     startTransition(() => {
       setLogs((current) => [line, ...current].slice(0, 40));
     });
