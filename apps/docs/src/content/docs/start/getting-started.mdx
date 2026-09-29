@@ -49,6 +49,8 @@ This page gets you from zero to a working read + write path. For what each packa
 bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 # React bindings (optional)
 bun add @pgxsinkit/react
+# An app that builds with Vite (see below)
+bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c @pgxsinkit/pgwasm-pg-dump
 ```
 
 </TabItem>
@@ -58,6 +60,8 @@ bun add @pgxsinkit/react
 pnpm add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 # React bindings (optional)
 pnpm add @pgxsinkit/react
+# An app that builds with Vite (see below)
+pnpm add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c @pgxsinkit/pgwasm-pg-dump
 ```
 
 </TabItem>
@@ -67,6 +71,8 @@ pnpm add @pgxsinkit/react
 npm install @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 # React bindings (optional)
 npm install @pgxsinkit/react
+# An app that builds with Vite (see below)
+npm install @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c @pgxsinkit/pgwasm-pg-dump
 ```
 
 </TabItem>
@@ -76,6 +82,8 @@ npm install @pgxsinkit/react
 yarn add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 # React bindings (optional)
 yarn add @pgxsinkit/react
+# An app that builds with Vite (see below)
+yarn add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c @pgxsinkit/pgwasm-pg-dump
 ```
 
 </TabItem>
@@ -83,18 +91,26 @@ yarn add @pgxsinkit/react
 
 The packages are published to public npm; install them with whichever package manager your app uses —
 pgxsinkit mandates none. Peer dependencies are `drizzle-orm` and `zod`. The client brings its local Postgres,
-[pgwasm](/packages/pgwasm/), and the C Postgres build as ordinary dependencies; there is nothing else to
-install or override.
+[pgwasm](/packages/pgwasm/), and the C Postgres build as ordinary dependencies; there is nothing to
+override.
 
-If your app builds with Vite, exclude the two packages that ship WebAssembly files next to their code from
-dependency pre-bundling, which would move the modules away from their files:
+If your app builds with Vite, keep pgwasm and the two packages that ship WebAssembly files next to their
+code out of dependency pre-bundling, and list all three in your app's own dependencies:
 
 ```ts
 // vite.config.ts
 export default defineConfig({
-  optimizeDeps: { exclude: ["@pgxsinkit/pgwasm-c", "@pgxsinkit/pgwasm-pg-dump"] },
+  optimizeDeps: {
+    exclude: ["@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm-c", "@pgxsinkit/pgwasm-pg-dump"],
+  },
 });
 ```
+
+Pre-bundling would move the two packages' code away from their WebAssembly files. Both import pgwasm, so
+a pre-bundled pgwasm would load a second time on the dev server, and an `instanceof` check against one of
+its error classes would fail. Vite resolves an excluded package from your app, not from the client that
+imports it, so a package manager that links only an app's direct dependencies (pnpm, Bun workspaces) finds
+the three only when the app lists them.
 
 ## Stand up the write path
 

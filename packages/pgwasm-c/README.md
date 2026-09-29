@@ -21,11 +21,13 @@ referenced as `new URL("…", import.meta.url)`, so bundlers copy and fingerprin
 ## Bundlers
 
 Vite: exclude the package from dependency pre-bundling, which would move the module away from its
-files:
+files. Exclude `@pgxsinkit/pgwasm` with it, so the dev server loads pgwasm once, and list both in the
+app's own dependencies: Vite resolves an excluded package from the app, even when another package
+imports it.
 
 ```ts
 // vite.config.ts
-export default defineConfig({ optimizeDeps: { exclude: ["@pgxsinkit/pgwasm-c"] } });
+export default defineConfig({ optimizeDeps: { exclude: ["@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm-c"] } });
 ```
 
 ## Warming the artefacts early

@@ -65,11 +65,13 @@ All three are `PgwasmError`s from `@pgxsinkit/pgwasm`; `PgDumpUnsupportedBuildEr
 ## Bundlers
 
 The package ships pg_dump's WebAssembly next to its code, referenced as `new URL("…", import.meta.url)`,
-so bundlers copy and fingerprint it. With Vite, exclude the package from dependency pre-bundling:
+so bundlers copy and fingerprint it. With Vite, exclude the package from dependency pre-bundling.
+Exclude `@pgxsinkit/pgwasm` with it, so the dev server loads pgwasm once, and list both in the app's own
+dependencies: Vite resolves an excluded package from the app, even when another package imports it.
 
 ```ts
 // vite.config.ts
-export default defineConfig({ optimizeDeps: { exclude: ["@pgxsinkit/pgwasm-pg-dump"] } });
+export default defineConfig({ optimizeDeps: { exclude: ["@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm-pg-dump"] } });
 ```
 
 pg_dump is built by [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres) from

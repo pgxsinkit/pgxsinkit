@@ -14,6 +14,16 @@ driver. This page is for an app that uses PGlite today without PGlite extensions
 bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c
 ```
 
+An app that builds with Vite keeps PGlite out of dependency pre-bundling. Name both packages there
+instead:
+
+```ts
+// vite.config.ts
+export default defineConfig({
+  optimizeDeps: { exclude: ["@pgxsinkit/pgwasm", "@pgxsinkit/pgwasm-c"] },
+});
+```
+
 ## Before and after
 
 With PGlite:
