@@ -28,7 +28,7 @@ import { type BrowserContext, expect, type Locator, type Page, test } from "@pla
 //   Context D — the COLD return (the maintainer's manual repro, and the regression this lane exists to hold):
 //     ONE online session with no reload anywhere, close the tab, outlive the SharedWorker's extendedLifetime
 //     grace so the engine is genuinely dead, then return offline. The new tab must cold-boot the engine from
-//     the service-worker cache alone (worker script, pglite wasm/data) and still paint the board from the
+//     the service-worker cache alone (worker script, pgwasm wasm/data) and still paint the board from the
 //     local store. (A2)/(B2) reopen fast enough that a SURVIVING worker can answer; only this context proves
 //     the boot path with nothing alive and nothing fetchable.
 //
@@ -454,7 +454,7 @@ test("(D) cold return: the worker died, the engine cold-boots offline, the board
     const offlinePage = await openOfflineShell(context);
 
     // The full cold offline boot: session restored from localStorage, store reopened, engine worker script +
-    // pglite wasm/data all served from the worker cache, board painted from local rows.
+    // pgwasm wasm/data all served from the worker cache, board painted from local rows.
     await waitForBoardReady(offlinePage, OFFLINE_BOOT_MS);
     await expect(teamNav(offlinePage).getByText("Growth", { exact: true })).toBeVisible();
 

@@ -251,12 +251,12 @@ describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
   // `pgwasm.create` as `relaxedDurability` through each surface: the `createSyncClient` boot (default + declared
   // strict), the internal `createPgwasmClient` carrier directly, and the `defineSyncWorker` default
   // `createStore` factory whose provision mint resolves durability off its registry.
-  it("defaults durability to relaxed → relaxedDurability true into PGlite.create (createSyncClient)", async () => {
+  it("defaults durability to relaxed → relaxedDurability true into createPgwasm (createSyncClient)", async () => {
     await makeClient({});
     expect(capturedCreateOptions?.["relaxedDurability"]).toBe(true);
   });
 
-  it('resolves registry storage.durability:"strict" → relaxedDurability false into PGlite.create (createSyncClient)', async () => {
+  it('resolves registry storage.durability:"strict" → relaxedDurability false into createPgwasm (createSyncClient)', async () => {
     const { attachSyncRegistryStorage } = await import("@pgxsinkit/contracts");
     await makeClient({ registry: attachSyncRegistryStorage(bootRegistry(), { durability: "strict" }) });
     expect(capturedCreateOptions?.["relaxedDurability"]).toBe(false);

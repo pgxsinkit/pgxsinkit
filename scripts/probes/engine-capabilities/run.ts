@@ -6,7 +6,7 @@ import path from "node:path";
 // and webkit, serves the probe page over a same-origin Bun static server, collects
 // the P1-P4 core results per engine, then runs P5 (the handle ceiling) in a SEPARATE
 // browser instance per engine so a wedge cannot poison the core run. Also runs the
-// PGlite datadir width probe. Writes one combined, host-specific JSON record to the
+// pgwasm datadir width probe. Writes one combined, host-specific JSON record to the
 // repo's gitignored tmp/results/ tree — this output is regenerable and never tracked.
 //
 // Re-verifies the engine facts recorded in the "Engine capability rationale" section
@@ -287,7 +287,7 @@ async function main(): Promise<void> {
     chromiumLowFd = { skipped: `not linux (${hostOs})` };
   }
 
-  console.log(`\n=== PGlite datadir width probe ===`);
+  console.log(`\n=== pgwasm datadir width probe ===`);
   let datadir: { files: number; directories: number } | { error: string };
   try {
     const dd = await countDatadirFiles();
@@ -312,7 +312,7 @@ async function main(): Promise<void> {
     },
     engines: engineResults,
     chromiumLowFdP5: chromiumLowFd,
-    pgliteDatadir: datadir,
+    pgwasmDatadir: datadir,
   };
 
   // Host-specific, regenerable output is NOT tracked: it goes under the repo's

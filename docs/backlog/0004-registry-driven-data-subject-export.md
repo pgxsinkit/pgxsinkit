@@ -8,7 +8,7 @@ request, or any compliance requirement lands that demands a data-subject export.
 ## The item
 
 A "give me all my personal data" (GDPR Art. 15 access / Art. 20 portability) export. Considered
-during the client-side PGlite export design (2026-07-10) and deliberately kept out of it.
+during the client-side store export design (2026-07-10) and deliberately kept out of it.
 
 Why the client-side export is the wrong artefact for this:
 

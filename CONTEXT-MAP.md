@@ -11,7 +11,7 @@ This repo holds three bounded contexts with deliberately separate vocabularies.
   toolkit end-to-end for a human to see. An exerciser, not the product.
 - [OPFS Repacked VFS](./packages/pgwasm/docs/opfs/CONTEXT.md) —
   `@pgxsinkit/pgwasm/opfs` (`packages/pgwasm/src/opfs`), the packed-storage OPFS filesystem under
-  pgwasm (moved from `packages/pglite-opfs-repacked` in ADR-0062 step 3). A storage engine, not sync: it deliberately shares no vocabulary with
+  pgwasm (moved here from its own package in ADR-0062 step 3). A storage engine, not sync: it deliberately shares no vocabulary with
   the Toolkit ("journal", "group") or with Postgres ("checkpoint", "WAL",
   "page" are reserved upward and banned here).
 

@@ -8,7 +8,7 @@
  * several worker threads to reach ONE store, and a worker running wasm parks in futexes, so it cannot
  * await a promise to get a file answered. The store therefore lives alone in a coordinator worker and
  * every other thread asks for file operations over a `SharedArrayBuffer`, blocking in `Atomics.wait`
- * until the coordinator answers. Nothing here knows about PGlite, wasm, or OPFS.
+ * until the coordinator answers. Nothing here knows about the engine, wasm, or OPFS.
  *
  * ## Topology
  *

@@ -109,7 +109,7 @@ here were board-internal infra, not toolkit gaps — recorded for completeness:
   `app_metadata.roles` carrying `admin` — the same claim the read filters and RLS read.
 - Identity changes stay in the same page realm. Sign-out navigates away from authenticated
   subscriptions before unmounting the old sync provider; worker mode detaches that tab, while
-  in-process mode disposes live queries before closing PGlite. The next identity can then open its
+  in-process mode disposes live queries before closing pgwasm. The next identity can then open its
   separately mapped store immediately, without waiting for the old worker's lifetime to expire.
 
 ## Phase 4 — read path (board / chat / admin all-teams)
@@ -119,7 +119,7 @@ read path is otherwise faithful to the docs):
 
 12. **`useLiveDrizzleRows` returned rows keyed by the underlying snake_case column
     names, not the select's field keys.** The hook runs a Drizzle select's `.toSQL()`
-    through PGlite's live query, which yields raw DB-named columns; typed access on the
+    through the engine's live query, which yields raw DB-named columns; typed access on the
     builder keys (`row.assigneeId`) then silently read `undefined` (every assignee
     avatar rendered "?"). → **ergonomics** (fixed upstream, `packages/react`): new
     `remapLiveRow` uses the select's `_.selectedFields` metadata to map snake_case rows
@@ -278,7 +278,7 @@ a capability **gap**, not a defect.
     change: a custom `ConvergenceTrigger` whose `shouldConverge()` is gated behind an app `online`
     flag (writes still stage into the journal; reconnect fires one pass to flush). But there is no
     matching seam to pause the **inbound** Electric subscription without `client.stop()`, which closes
-    PGlite (teardown, not pause) — and re-subscribing has no client API. So a faithful "fully offline"
+    pgwasm (teardown, not pause) — and re-subscribing has no client API. So a faithful "fully offline"
     (also stop _receiving_) isn't expressible; the toggle is honestly "your edits queue locally and
     sync on reconnect". → **capability gap** (no app-layer workaround attempted): the toolkit wants a
     first-class read-path pause/resume (e.g. `client.setSyncEnabled(false)` that halts the shape
@@ -286,7 +286,7 @@ a capability **gap**, not a defect.
     without tearing down the store. A future ADR.
 
 Deferred to a later increment (no toolkit gap, just scope): a **team-scope frontier-LSN** readout (no
-client API surfaces the consistency group's frontier today). _(The PGlite **REPL tab** — `@electric-sql/pglite-repl`
+client API surfaces the consistency group's frontier today). _(The **REPL tab** — now `@pgxsinkit/pgwasm-repl` —
 over the live local store, plus a schema map of the synced tables and their overlay/journal/views — has
 since been added on the Database tab.)_
 
@@ -295,13 +295,13 @@ since been added on the Database tab.)_
 A profiling pass on two things that _felt_ slow. Both turned out to be **outside the sync rail** — the
 toolkit's read/write/converge primitives are fast; the costs were a too-eager convergence cadence and the
 self-hosted edge-runtime's worker lifecycle. Measure CPU via a `/proc/<pid>/stat` utime+stime **delta**,
-not `ps %cpu` (a lifetime average); measure latency at the **network**, not by polling PGlite in a loop
-(every PGlite WASM query is ~50ms and serializes on the one worker thread, so a tight poll loop inflates
+not `ps %cpu` (a lifetime average); measure latency at the **network**, not by polling the store in a loop
+(every engine WASM query was ~50ms at the time and serializes on the one worker thread, so a tight poll loop inflates
 the very number it reports — this bit us repeatedly).
 
 - **Idle CPU ~70% of a core → ~2% (no toolkit defect, a cadence fix).** The convergence driver polled
   every 1.5s and each pass ran `reconcileTable` for every writable table unconditionally — a transaction
-  - clear/retire CTEs even on an empty journal — and those writes fired PGlite's live-query `NOTIFY`
+  - clear/retire CTEs even on an empty journal — and those writes fired the engine's live-query `NOTIFY`
     triggers, re-running every mounted query. Fixes, all upstream: `reconcileTable` idle-skips behind one
     cheap `EXISTS` probe; convergence is **event-driven** (`requestPass()` on enqueue) so the interval
     drops to a 15s fallback. Convergence latency is unchanged (it is bounded by the echo, not the interval).
@@ -322,7 +322,7 @@ the very number it reports — this bit us repeatedly).
   so the board-sync long-poll is not recycled (and the read path forced to reconnect) once a minute.
 
   Secondary, logged: reloading the board tab after editing a core client module (HMR full-reload while
-  PGlite resumes a rotated shape handle) can spin a shape refetch loop to 100% — dev-only friction.
+  the sync engine resumes a rotated shape handle) can spin a shape refetch loop to 100% — dev-only friction.
 
 - **"A write takes 6–13s to appear in the other browser" is the browser's HTTP/1.1 connection cap — not
   the sync rail, and not even the edge cold start.** Per-phase client instrumentation

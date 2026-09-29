@@ -1090,7 +1090,7 @@ describe("live-query manager review fixes (ADR-0040 fix round)", () => {
   });
 });
 
-describe("live-query manager PGlite #1055 param guard", () => {
+describe("live-query manager #1055 param guard", () => {
   it("throws for an out-of-order-placeholder spec WITHOUT ever calling the underlying live.query/incrementalQuery", async () => {
     const fake = new FakeLive();
     const manager = makeManager(fake);

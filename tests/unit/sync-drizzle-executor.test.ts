@@ -27,7 +27,7 @@ const widgets = pgTable("widgets", {
 });
 
 describe("drizzleOverPg adapter (ADR-0028)", () => {
-  it("runs select/insert/delete over a plain PGlite connection", async () => {
+  it("runs select/insert/delete over a plain pgwasm connection", async () => {
     const pg = await createFreshTestPgwasm();
     await createTablesFromSchema(pg, { widgets });
     const db = drizzleOverPg(pg);

@@ -1,6 +1,6 @@
 import { syncDebug, storeIndexedDbDatabaseName, type PgwasmClient } from "@pgxsinkit/client";
 
-// Spare-store binding (board cold-boot optimisation B). PGlite's `initdb` + IDBFS open costs ~1.9s even
+// Spare-store binding (board cold-boot optimisation B). The store's `initdb` + IDBFS open costs ~1.9s even
 // once the WASM is pre-warmed (optimisation A, see ./pgwasm-warm), and it otherwise can't start until
 // sign-in answers because the store is keyed by user id. This module breaks that ordering: on the login
 // SCREEN it eagerly creates an ANONYMOUS store under a generated id (consuming the WASM warm), then BINDS
@@ -58,7 +58,7 @@ export interface StoreRegistryState {
   obsolete?: string[];
 }
 
-/** A PGlite instance opened by an adapter, paired with the store id it actually opened. */
+/** A pgwasm instance opened by an adapter, paired with the store id it actually opened. */
 export interface OpenedStore {
   pgwasm: PgwasmClient;
   /** The opened id — usually the requested one, but a fresh replacement id when a corrupt spare recovered. */
@@ -79,7 +79,7 @@ export interface StoreRegistryAdapters {
   listDatabases: () => Promise<readonly string[] | null>;
   /** Delete an IndexedDB database by name (best-effort). */
   deleteDatabase: (name: string) => Promise<void>;
-  /** Create the raw PGlite store at `storePath` (consumes the WASM warm) — the eager/opening step. */
+  /** Create the raw pgwasm store at `storePath` (consumes the WASM warm) — the eager/opening step. */
   createStore: (storePath: string) => Promise<PgwasmClient>;
   /** Destroy every local artifact of a NOT-running store by path (OPFS directory + sentinel + meta + idb) —
    * the library's `destroyStoreArtifacts` (ADR-0050). MAY reject (a live worker still holds the store);
@@ -97,10 +97,10 @@ export interface EnsureSpareResult {
 }
 
 /**
- * The result of {@link StoreRegistry.openUserStore}. `pglite` is the (possibly still-pending) precreated
+ * The result of {@link StoreRegistry.openUserStore}. `pgwasm` is the (possibly still-pending) precreated
  * instance to hand to `createSyncClient` via `precreatedPgwasm`; it is absent only on the fallback
  * path, where the caller opens `storePath` itself. `storePath` is always the store's plain path (ADR-0036)
- * — the library's fallback if `pglite` rejects, and the actual store on the deterministic fallback path.
+ * — the library's fallback if `pgwasm` rejects, and the actual store on the deterministic fallback path.
  */
 export interface OpenUserStoreResult {
   storeId: string | null;
@@ -263,7 +263,7 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
   // Page-local memo of the in-flight/settled open PER userId. Bootstrap prewarm and the board provider
   // both call openUserStore(userId) on a signed-in reload; they MUST share one result so a single store
   // is opened. Without this a second call would (a) mint a SECOND binding for an unmapped user, or
-  // (b) open a SECOND PGlite instance on the same IndexedDB store for a mapped user — both corruption
+  // (b) open a SECOND pgwasm instance on the same IndexedDB store for a mapped user — both corruption
   // hazards. Keyed by userId so distinct identities still get distinct stores.
   const openByUser = new Map<string, Promise<OpenUserStoreResult>>();
 
@@ -366,7 +366,7 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
         } else {
           opened = openSpareRecovering(plan.storeId);
         }
-        const pglite = opened.then(async (result) => {
+        const pgwasm = opened.then(async (result) => {
           // A corrupt spare recovered to a fresh id: re-point the user's binding at the store we actually
           // opened. The returned `storePath` (the original claim id) is then only ever the reject-fallback,
           // and unused because this resolved.
@@ -374,7 +374,7 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
           return result.pgwasm;
         });
         // A claimed spare is schemaless by construction (created but never schema-exec'd) — provably fresh.
-        return { storeId: plan.storeId, storePath: storePathForStore(plan.storeId), pgwasm: pglite, fresh: true };
+        return { storeId: plan.storeId, storePath: storePathForStore(plan.storeId), pgwasm, fresh: true };
       }
 
       syncDebug("boot store claimed", { spare: false, mapped: false });
@@ -495,8 +495,8 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
       openByUser.set(userId, opening);
       // Failure-retry: drop the memo if the open ULTIMATELY FAILED so a later call re-opens rather than
       // handing back a permanently-rejected instance (mirrors the warm module's drop-cache-on-failure).
-      // The only real failure is the precreated pglite rejecting (the actual initdb/IDBFS open failing);
-      // a fallback result (no pglite — the library opens `storePath` itself) is a deterministic,
+      // The only real failure is the precreated pgwasm rejecting (the actual initdb/IDBFS open failing);
+      // a fallback result (no pgwasm — the library opens `storePath` itself) is a deterministic,
       // cheap, cacheable success and is deliberately kept. openUserStoreUncached swallows into that
       // fallback and never rejects, but the outer-rejection arm guards defensively regardless.
       void opening.then(
@@ -537,15 +537,15 @@ export function createStoreRegistry(adapters: StoreRegistryAdapters): StoreRegis
         // Order against the claim path's LATER eager reconcile does not matter: reconcileMapEntry only writes
         // while `map[userId]` is still the id it recovered FROM (the stalled spare), and we have just
         // re-pointed away from that — so a reconcile arriving after this call is already a no-op.
-        const pglite = adapters.createStore(storePath);
-        const result: OpenUserStoreResult = { storeId, storePath, pgwasm: pglite, fresh: true };
+        const pgwasm = adapters.createStore(storePath);
+        const result: OpenUserStoreResult = { storeId, storePath, pgwasm, fresh: true };
         // Replace the per-user memo: the memoised result still describes the STALLED store, and the provider
         // mount that follows the caller's retry must share the store we actually attached to.
         const remembered = Promise.resolve(result);
         openByUser.set(userId, remembered);
         // Same drop-cache-on-failure as openUserStore — and it also OBSERVES this rejection, which nothing
         // else would: the worker-mode caller attaches by store path and never awaits this promise.
-        void pglite.catch(() => {
+        void pgwasm.catch(() => {
           if (openByUser.get(userId) === remembered) openByUser.delete(userId);
         });
         syncDebug("boot spare store stalled — rebinding", { stalledStoreId, storeId, minted });

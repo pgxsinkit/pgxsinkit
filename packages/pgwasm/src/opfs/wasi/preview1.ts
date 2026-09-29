@@ -7,7 +7,7 @@
  * not speak that API — it speaks `wasi_snapshot_preview1`, thirty-odd i32-returning imports over its
  * own linear memory. This module is the seam: every WASI file call a guest makes is translated into a
  * broker request, and the errno the broker already speaks (the protocol's numbers ARE WASI preview1
- * errnos) is handed straight back. Nothing here knows about PGlite, OPFS, or any particular engine —
+ * errnos) is handed straight back. Nothing here knows about pgwasm, OPFS, or any particular engine —
  * it needs a client, a way to reach the guest's memory, and nothing else.
  *
  * ## What it owns and what it refuses to touch

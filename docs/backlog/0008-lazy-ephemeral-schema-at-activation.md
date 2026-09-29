@@ -7,7 +7,7 @@ Opened: 2026-07-27 · Area: client boot (schema exec), ephemeral consistency gro
 
 The ADR-0053-era engine-boot measurement campaign (emergent, 2026-07-26/27) decomposed the warm
 boot's `schemaExec` phase after the fingerprint fast path already skips the durable replay. What
-remains on every warm boot is the `pglite.exec` crossings, not JS work:
+remains on every warm boot is the `pgwasm.exec` crossings, not JS work:
 
 - the `pgxsinkit_local_meta` bootstrap exec,
 - the stored-fingerprint read, and
@@ -48,6 +48,6 @@ Design questions to settle before building (this item is parked at the design-pa
 ## Trigger to pick it up
 
 Warm-boot profiling shows `schemaExecMs` is a meaningful share of what remains between
-`pglite.create done` and `localReadReady` (it is today: the two other big blocks — create-time
+`pgwasm.create done` and `localReadReady` (it is today: the two other big blocks — create-time
 asset load and adoption — were addressed by the 2026-07 campaign), or an ephemeral-heavy registry
 lands in a consumer and pushes the every-boot exec up.

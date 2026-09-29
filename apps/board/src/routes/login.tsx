@@ -126,14 +126,14 @@ export function LoginRoute() {
   };
 
   // Ensure a spare store while the user reads the identity list and decides who to sign in as (board
-  // optimisations A + B). This GCs orphaned stores, then eagerly creates an anonymous PGlite store under a
-  // generated id — which itself consumes the WASM warm (~2.5s cold) AND pays PGlite's ~1.9s initdb/IDBFS
+  // optimisations A + B). This GCs orphaned stores, then eagerly creates an anonymous pgwasm store under a
+  // generated id — which itself consumes the WASM warm (~2.5s cold) AND pays the store's ~1.9s initdb/IDBFS
   // open — so the post-sign-in boot only binds the (already-created) store and applies schema, instead of
   // paying either cost on the critical path. Fire-and-forget and idempotent; any failure is swallowed and
   // sign-in falls back to the deterministic per-user store.
   //
   // Gated on auth having RESOLVED to no session: the spare is only ever consumed by a login from this
-  // screen, and PGlite runs its initdb WASM on the MAIN thread — a signed-in remount (the post-login
+  // screen, and pgwasm runs its initdb WASM on the MAIN thread — a signed-in remount (the post-login
   // redirect passes through here) would otherwise mint the next spare's ~1.9s of initdb right while the
   // board is doing its first renders and live-query reads on that same thread. An anonymous revisit
   // (logout, user switch) still lands here with no session and mints the next spare then — exactly when
@@ -341,7 +341,7 @@ export function LoginRoute() {
       <Modal opened={deleteModalOpen} onClose={deleteModal.close} title="Delete all local board data?" centered>
         <Stack>
           <Text size="sm">
-            This deletes <strong>all local board data on this browser profile</strong> — every PGlite IndexedDB store
+            This deletes <strong>all local board data on this browser profile</strong> — every pgwasm IndexedDB store
             and the board's stored bindings. <strong>Unflushed writes are lost.</strong>
           </Text>
           <Text size="sm">

@@ -81,7 +81,7 @@ const settle = async (n = 8) => {
   for (let i = 0; i < n; i++) await tick();
 };
 
-async function makePglite(): Promise<PgwasmClient> {
+async function makePgwasm(): Promise<PgwasmClient> {
   const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   return pg as unknown as PgwasmClient;
 }
@@ -124,7 +124,7 @@ describe("the adoption budget leaves a provision that settles inside it untouche
       provisionAdoptionBudgetMs: 60_000,
       createStore: async (storePath) => {
         created.push(storePath);
-        instance = await makePglite();
+        instance = await makePgwasm();
         return instance;
       },
     });
@@ -169,7 +169,7 @@ describe("a spare whose create never settles refuses the attach typed instead of
       createStore: () => {
         opens.count += 1;
         return new Promise<PgwasmClient>((resolve) => {
-          releaseCreate = () => resolve(makePglite());
+          releaseCreate = () => resolve(makePgwasm());
         });
       },
     });
@@ -217,7 +217,7 @@ describe("a spare whose create never settles refuses the attach typed instead of
     // `bootPromise` was cleared by the refusal, so a later attach retries the boot — and the spare it waited
     // on is adopted the moment its create lands (nothing was thrown away). Wait for the provision's OWN
     // settlement (its `provision-ack` is posted after the worker's attempt settled and cleared
-    // `provisionAttempt`), not a fixed delay: `makePglite()` is a real memory-pgwasm boot, and under a loaded
+    // `provisionAttempt`), not a fixed delay: `makePgwasm()` is a real memory-pgwasm boot, and under a loaded
     // machine a timed wait re-attaches while the create is still landing — refused again at once, because
     // the budget is already spent (the exact behaviour the runbook documents for a too-early retry).
     releaseCreate();

@@ -79,7 +79,7 @@ report?.storageFallbackReason; // present ONLY when an opfs-capable boot opened 
 ```
 
 - **`storageBackend`** is derived from the dataDir scheme at the single store-mint seam. It is
-  _omitted_ for a bring-your-own PGlite instance whose backend the toolkit did not mint (it never
+  _omitted_ for a bring-your-own pgwasm instance whose backend the toolkit did not mint (it never
   guesses).
 - **`engineHome`** is `"in-process"` for the main-thread/Bun client, `"shared-worker"` for SW-direct,
   and `"elected-worker"` for the dedicated elected engine. Both browser worker homes run their real
@@ -179,7 +179,7 @@ executionLimit: {
 ## Provision adoption budget (on by default)
 
 **Symptom.** After sign-in the app sits on "Starting local database…" forever. The forwarded rail shows
-`boot pglite.create start` with no matching `done` and no error, then a `worker store provision still
+`boot pgwasm.create start` with no matching `done` and no error, then a `worker store provision still
 pending` line every 5 s. The pre-created **spare store** (the login screen's warm mint) is stuck inside
 its create, and the attach behind it was waiting for it with no bound.
 
@@ -208,9 +208,9 @@ old unbounded wait (not recommended — a stalled spare then hangs every attach)
 throws at construction. This bounds the ACCELERATOR only: nothing is inferred from it about whether the
 engine is alive, and D5's refusal of timing-based engine-death detection is unchanged.
 
-**More rail.** The OPFS create now also emits `boot pglite.create phase` with `phase` =
-`module-loaded` → `directory-ready` → `vfs-opened` → `pglite-ready`, so a stalled create is attributable
-to a step (factory module load, store-directory handle, sync-access-handle acquisition, PGlite boot)
+**More rail.** The OPFS create now also emits `boot pgwasm.create phase` with `phase` =
+`module-loaded` → `directory-ready` → `store-opened` → `pgwasm-ready`, so a stalled create is attributable
+to a step (factory module load, store-directory handle, sync-access-handle acquisition, pgwasm boot)
 instead of being a silent gap between `start` and `done`.
 
 ## `destroy()` (peer refusal, force)

@@ -40,7 +40,7 @@ type StartCircuitsSyncInput = {
 
 const startCircuitsSyncMock = mock(
   async (
-    _pglite: unknown,
+    _pgwasm: unknown,
     _input: StartCircuitsSyncInput,
   ): Promise<{ unsubscribe: () => void; tables: Record<string, never> }> => {
     order.push("startCircuitsSync");

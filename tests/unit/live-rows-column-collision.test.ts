@@ -117,7 +117,7 @@ describe("live-rows column-collision helpers", () => {
   });
 });
 
-// ─── In-process seam: `client.subscribeLiveRows` over `pglite.live` ──────────────────────────────────
+// ─── In-process seam: `client.subscribeLiveRows` over `pgwasm.live` ──────────────────────────────────
 describe("subscribeLiveRows over a same-named-column JOIN (in-process seam)", () => {
   let client: SyncClient<CollidingRegistry> | undefined;
 

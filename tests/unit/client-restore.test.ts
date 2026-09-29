@@ -407,10 +407,11 @@ describe("restore — boot a client from a store backup (ADR-0035 decision 6)", 
     const garbage = new Blob([new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03])]);
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .resolves/.rejects matchers return a real promise typed as void
     await expect(makeMemoryClient("restore-dst-corrupt", { restoreFrom: garbage })).rejects.toBeDefined();
-    // PGlite 0.5.4's Emscripten runtime sets `process.exitCode = 1` when the create ABORTS on the corrupt
-    // tarball — even though the rejection above is caught and asserted (probed; recorded in the upstream
-    // report draft in tmp/agents/). Left in place, bun test exits 1 with every test passing. Clear exactly
-    // the poisoned code here: a genuine test failure still sets bun's own failure exit afterwards.
+    // The Emscripten runtime sets `process.exitCode = 1` when the create ABORTS on the corrupt tarball —
+    // even though the rejection above is caught and asserted (probed before the pgwasm switch, ADR-0062;
+    // recorded in the upstream report draft in tmp/agents/). Left in place, bun test exits 1 with every test
+    // passing. Clear exactly the poisoned code here: a genuine test failure still sets bun's own failure exit
+    // afterwards.
     process.exitCode = 0;
   });
 });

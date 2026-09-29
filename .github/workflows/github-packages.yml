@@ -120,11 +120,12 @@ jobs:
       - run: bun install
       - run: bun run build:public-packages
       # Write .npmrc so the publish step (`scripts/publish-github-packages.ts`) can authenticate to
-      # GitHub Packages (npm.pkg.github.com). This MUST come after `bun install`: the scope-registry
-      # line reroutes EVERY @pgxsinkit spec — including the @electric-sql/pglite fork alias, which
-      # installs from public npm and whose bun.lock entry has an empty (default-registry) source —
-      # so an .npmrc written before the install sends the fork's tarball fetch to GitHub Packages,
-      # which 404s the npmjs-style path (observed at pin 0.5.4-pgx.10, run 29799463427).
+      # GitHub Packages (npm.pkg.github.com). It stays after `bun install`: the scope-registry line
+      # reroutes EVERY @pgxsinkit spec, so a @pgxsinkit package installed from public npm (a bun.lock
+      # entry with an empty, default-registry source) would have its tarball fetched from GitHub
+      # Packages, which 404s the npmjs-style path. The old engine fork was one (observed at pin
+      # 0.5.4-pgx.10, run 29799463427); today every @pgxsinkit entry in bun.lock is a workspace
+      # package, so the order only guards against the next such dependency.
       - name: Configure GitHub Packages registry + auth (publish only)
         env:
           GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}

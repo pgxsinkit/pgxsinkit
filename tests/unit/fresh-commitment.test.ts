@@ -205,7 +205,7 @@ class FakeMetaIdb {
     store.data.set(storeIdentityComponent(storePath), { phase, updatedAt: 1 });
   }
 
-  seedPgliteDb(storePath: string): void {
+  seedPgwasmDb(storePath: string): void {
     const name = storeIndexedDbDatabaseName(storePath);
     if (!this.dbs.has(name)) this.dbs.set(name, new FakeDatabase(this.log));
   }
@@ -311,7 +311,7 @@ describe("resolveFreshBoot — every opfs boot goes through the phase machine (A
 
   it("existing recordless idb store → downgrades to idb; no barrier (invariant 14)", async () => {
     const metaIdb = new FakeMetaIdb();
-    metaIdb.seedPgliteDb("recordless-x");
+    metaIdb.seedPgwasmDb("recordless-x");
     const root = new FakeDir();
     const fresh = await resolveFreshBoot("recordless-x", true, undefined, browserSeams(root, metaIdb));
 
@@ -382,7 +382,7 @@ describe("resolveFreshBoot — a no-grant home REFUSES an opfs-committed store (
     const metaIdb = new FakeMetaIdb();
     const root = new FakeDir();
     metaIdb.seedMeta(storePath, "deleting");
-    metaIdb.seedPgliteDb(storePath);
+    metaIdb.seedPgwasmDb(storePath);
     await seedStoreDir(root, storePath);
     await seedSentinel(root, storePath);
 

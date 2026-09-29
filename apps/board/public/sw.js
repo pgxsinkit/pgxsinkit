@@ -8,7 +8,7 @@
 //   • navigations → network-first with cache fallback. Fresh deploys therefore win on every online
 //     navigation, which is why there is no update prompt: an online visit can never be served a stale
 //     shell.
-//   • every other same-origin GET → cache-first with background fill. The app bundle, the PGlite
+//   • every other same-origin GET → cache-first with background fill. The app bundle, the pgwasm
 //     wasm/data blobs and the worker scripts are captured AS THE APP FETCHES THEM ANYWAY, so a visitor
 //     who bounces off the login screen downloads nothing extra.
 //
@@ -16,7 +16,7 @@
 // requests must fail honestly offline so the sync runtime reports `degraded` and the app renders its
 // connection-needed states.
 //
-// No cache pruning. Content-hashed entries from superseded deploys and PGlite bumps are dead weight,
+// No cache pruning. Content-hashed entries from superseded deploys and pgwasm bumps are dead weight,
 // never wrong answers, and every nuke-on-update scheme breaks offline return until the next full online
 // boot — the capability itself (ADR-0010: accepted garbage; storage eviction is the backstop).
 
@@ -119,7 +119,7 @@ async function networkFirstDocument(event, request) {
 }
 
 // Everything else: cache first, then fetch and fill. Everything this branch sees is content-hashed —
-// Vite fingerprints the bundle, the worker scripts AND the PGlite wasm/data blobs — so a stale hit is
+// Vite fingerprints the bundle, the worker scripts AND the pgwasm wasm/data blobs — so a stale hit is
 // impossible; the only un-hashed same-origin URL, the document, belongs to the navigation branch.
 async function cacheFirstAsset(event, request) {
   const cache = await caches.open(CACHE);

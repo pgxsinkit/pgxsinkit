@@ -353,7 +353,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     engineStorage?.durability ?? getSyncRegistryStorage(options.registry)?.durability ?? "relaxed";
   // The declared build (ADR-0063), read at mint time for the same reason as durability.
   const currentBuild = () => engineStorage?.build ?? getSyncRegistryStorage(options.registry)?.build ?? "c";
-  const builtInCreatePglite: StoreEngineFactory =
+  const builtInCreateStore: StoreEngineFactory =
     options.createStore ??
     ((storePath: string, backendOverride?: "memory") =>
       createPgwasmClient(storePath, {
@@ -381,7 +381,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     const declaredEngine = engineStorage?.engine?.module;
     let store: PgwasmClient;
     if (declaredEngine === undefined) {
-      store = await builtInCreatePglite(storePath, backendOverride);
+      store = await builtInCreateStore(storePath, backendOverride);
     } else {
       const factory = await resolveStoreEngine(declaredEngine);
       syncDebug("worker store engine declared", { storePath, module: declaredEngine });
@@ -406,7 +406,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   const liveSubs = new Map<string, LiveSub>();
   // The live-query lifecycle (pgwasm registration, diff listener, and the ADR-0040 decision-1 awaited-teardown
   // set) lives in a single manager owned per engine. Created lazily on first subscribe because it needs the
-  // booted client's `live` namespace (`active.pglite.live`); the worker never restarts its engine in place
+  // booted client's `live` namespace (`active.pgwasm.live`); the worker never restarts its engine in place
   // (ADR-0040 decision 7), so one manager serves the host's whole lifetime. `close()` disposes it.
   let liveManager: LiveQueryManager | null = null;
   const ensureLiveManager = (active: SyncClient<TRegistry>): LiveQueryManager =>
@@ -447,7 +447,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   // as `BootReport.provision` (with `phases.pgwasmCreateMs = null`) instead of timing a create it never ran.
   let provisioned: {
     storePath: string;
-    pglite: Promise<PgwasmClient>;
+    pgwasm: Promise<PgwasmClient>;
     stamp: Promise<{ initdbMs: number; provisionReadyAt: number }>;
   } | null = null;
   // A provision request performs a bounded authority read before it may mint. An attach that arrives during
@@ -734,7 +734,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
     // Never adopt when restoring (restore boots a brand-new store from the backup, not the provisioned one).
     const adoptingProvisioned = restoreFrom == null && provisioned != null && provisioned.storePath === storePath;
     const precreatedPgwasm = adoptingProvisioned
-      ? provisioned!.pglite
+      ? provisioned!.pgwasm
       : restoreFrom
         ? undefined
         : options.precreatedPgwasm;
@@ -856,7 +856,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
   const dispatchRpc = async (active: SyncClient<TRegistry>, op: RpcOp, args: unknown[]): Promise<unknown> => {
     // Guarded-read parser re-application (ADR-0032 decision 4). A guarded read compiled by the tab's
     // Drizzle-over-bridge arrives as the {@link GuardedQueryWireArgs} tuple `[sql, params?, { rowMode? }, use?]`:
-    // the `parsers` map drizzle's pglite session normally passes could not cross the bridge (it is FUNCTIONS,
+    // the `parsers` map the pgwasm drizzle session normally passes could not cross the bridge (it is FUNCTIONS,
     // not clonable), so the tab stripped it and we re-apply the identical map here before executing. Without it
     // pgwasm's default parsers would turn the identity-parsed OIDs (temporal OIDs + `numeric[]`) into `Date`s
     // and numbers, whereas the in-process drizzle session sees them as raw STRINGS — so a guarded read would
@@ -937,7 +937,7 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
       case "diagnostics":
         return active.diagnostics(args[0] as TableKey | undefined);
       case "rawQuery":
-        // Inspection read (ADR-0032 S2): run straight against the worker's own store — `active.pglite`
+        // Inspection read (ADR-0032 S2): run straight against the worker's own store — `active.pgwasm`
         // exists worker-side (it's the in-process client). `Results` rows/fields structured-clone across
         // the wire (Dates survive postMessage), so the tab receives the same shape it would in-process.
         // The options arg is the clonable RawQueryOptions subset (rowMode, plus the ADR-0061 COPY `blob`).
@@ -1283,17 +1283,17 @@ export function defineSyncWorker<const TRegistry extends SyncTableRegistry>(
           }
 
           const provisionStartedAt = nowStamp();
-          const pglite = Promise.resolve().then(() => createStore(storePath, backendOverride));
-          const stamp = pglite.then(() => {
+          const pgwasm = Promise.resolve().then(() => createStore(storePath, backendOverride));
+          const stamp = pgwasm.then(() => {
             const readyAt = nowStamp();
             return { initdbMs: readyAt - provisionStartedAt, provisionReadyAt: readyAt };
           });
-          provisioned = { storePath, pglite, stamp };
+          provisioned = { storePath, pgwasm, stamp };
           // Guard unobserved rejections when no attach ever adopts the spare (the page navigated away).
-          void pglite.catch(() => undefined);
+          void pgwasm.catch(() => undefined);
           void stamp.catch(() => undefined);
           syncDebug("worker store provisioned", { storePath });
-          await pglite;
+          await pgwasm;
         });
         provisionAttempt = attempt;
         const attemptStartedAt = nowStamp();

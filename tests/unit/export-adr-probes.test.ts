@@ -116,7 +116,7 @@ describe("ADR-0035 probe (a): ephemeral (pg_temp) bytes in a LIVE store-backup t
     expect(regBare).toBeNull();
     expect(regPublic).toBeNull();
 
-    // (ii) Scan the RAW tarball bytes for the sentinel. OBSERVED on PGlite 0.5.4 (bun): the sentinel is
+    // (ii) Scan the RAW tarball bytes for the sentinel. OBSERVED (bun, since before the pgwasm switch): the sentinel is
     // ABSENT — ephemeral (pg_temp) ROW DATA does not reach the datadir dump, so a store backup does not leak
     // it. (The table's NAME can appear elsewhere as a bare identifier in durable metadata / a reconcile
     // function body — that is not row content and is not what this asserts.) This is the reassuring outcome

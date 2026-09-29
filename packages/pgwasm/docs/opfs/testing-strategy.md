@@ -13,10 +13,10 @@ substrings; a renamed or removed test must update this map in the same change.
 | Data-before-metadata operations, zero barriers, strict ordering, and poison                                    | `pgwasm-opfs-operations.test.ts`                                                                   |
 | Two-repack quarantine, projected replacement, forced-strict activation, and quota retry                        | `pgwasm-opfs-repack.test.ts`                                                                       |
 | Port operation labels and browser-failure persistence outcomes                                                 | `pgwasm-opfs-port.test.ts` and `pgwasm-opfs-fault-campaign.test.ts`                                |
-| PGlite construction, awaited host sync, cleanup, and poison delivery                                           | `pgwasm-opfs-adapter.test.ts` and `pgwasm-opfs-workload.test.ts`                                   |
+| pgwasm construction, awaited host sync, cleanup, and poison delivery                                           | `pgwasm-opfs-adapter.test.ts` and `pgwasm-opfs-workload.test.ts`                                   |
 | Actual OPFS handles and worker, tab, and browser termination                                                   | `tests/e2e/pgwasm-opfs/pgwasm-opfs.browser.test.ts`                                                |
 | Synchronous broker wire protocol, chunking, errno pass-through, per-client fd ownership, and detach            | `pgwasm-opfs-broker-operations.test.ts`, `-broker-transport.test.ts`, `-broker-lifecycle.test.ts`  |
-| Commit durability across a crash at a chosen store call, through the PGlite factory, both durability modes     | `pgwasm-opfs-crash-reopen.test.ts` (see [Crash and reopen](#crash-and-reopen-through-the-factory)) |
+| Commit durability across a crash at a chosen store call, through the pgwasm factory, both durability modes     | `pgwasm-opfs-crash-reopen.test.ts` (see [Crash and reopen](#crash-and-reopen-through-the-factory)) |
 
 The broker suites run both thread arrangements deliberately. `-broker-operations` and
 `-broker-transport` put the store and the blocking `serveForever()` loop in a Worker and block the
@@ -104,7 +104,7 @@ disk` runs in a persistent profile, so the handles write real files: eight relax
 seven past any metadata flush, then `worker.terminate()`, and a fresh worker finds all eight, intact,
 with an index scan agreeing with a sequential scan.
 
-The PGlite workload test exercises transactions, updates, deletes, concurrent submitted reads,
+The pgwasm workload test exercises transactions, updates, deletes, concurrent submitted reads,
 constant four-handle ownership, strict close, and exact reopen through the package factory. No test in
 this package claims completed-flush protection from power loss, media failure, or external edits.
 
@@ -122,7 +122,7 @@ frames the image holds) and through the factory (the table must be a commit pref
 equal a sequential scan, every payload must be the one written, `verify_heapam` and
 `bt_index_check(heapallindexed)` must be clean, and the store must take a new commit and a clean close).
 
-The workload is PGlite on a strict-closed seed, 64 KiB extents: commits c1–c8 insert a row each, commit
+The workload is pgwasm on a strict-closed seed, 64 KiB extents: commits c1–c8 insert a row each, commit
 9 inserts 2,000 rows in one statement (8 MB of arena writes, over the 4 MiB amortization threshold), an
 explicit `strictSync()`, then c10–c12. The promise asserted first is the floor — strict: every commit
 that returned before the power died; relaxed: every commit the last strict boundary covered (a
@@ -150,7 +150,7 @@ page (`data_checksums=on` verifies every page the scans and `amcheck` read). Wha
 beyond the promise:
 
 - **The arena alone decides.** In every row applied = arena-applied and flushed = metadata-applied.
-  PGlite's WAL segment is preallocated and written in place, so no WAL record needs a metadata frame to
+  pgwasm's WAL segment is preallocated and written in place, so no WAL record needs a metadata frame to
   be found, and redo re-extends any relation whose growth the metadata log lost. Unflushed metadata
   lost no commit here. (Not covered: a WAL segment switch, which creates and renames a segment file
   through the metadata log.)
@@ -161,7 +161,7 @@ beyond the promise:
   arena) made c2–c4 durable during c5 and c5–c8 durable during the bulk; the arena-only amortization
   flush alone made the bulk recoverable. Its loss window is the commits since the last arena flush
   (c5–c8 at "c8 returned"; c10–c12 at "c12 returned").
-- **`fsync=off` changes nothing for PGlite**, which always boots Postgres with `-F` and never forwards a
+- **`fsync=off` changes nothing for pgwasm**, which always boots Postgres with `-F` and never forwards a
   guest fsync to the store: both columns are its only behaviour. A pgrust host that stops forwarding
   guest fsyncs as store-wide strict syncs moves its relaxed stores from the strict column's boundaries
   (one per WAL flush) to the relaxed column's.
@@ -173,19 +173,19 @@ still meet the floor; a changed observation must be re-recorded here deliberatel
 
 **Fixed (2026-09-25): a transient platform write failure inside a commit could be acknowledged.** Found
 by this file. When an arena write made no progress the store rethrew the platform's own error without
-poisoning. PGlite's filesystem bridge (`tryFSOperation`) maps a thrown error to an errno only if it has
-a truthy numeric `code`, and its main loop (`execProtocolRawSync`) ran `_PostgresMainLoopOnce()` inside a
-catch that swallowed everything but its longjmp sentinel. So a plain `Error`, or a `DOMException` whose
-legacy code is 0 (`UnknownError`), thrown by the commit's WAL write unwound Postgres out of `XLogWrite`
-and vanished: the statement resolved, strict's sync flushed a store that never received the WAL, and a
-reopen did not have the commit. A coded error (`QuotaExceededError`, legacy code 22, which PGlite read
-as the errno `EFBIG`) failed the commit, but the engine then spun forever on its next statement, a
-synchronous loop that makes no platform call.
+poisoning. The engine's filesystem bridge (`tryFSOperation`, before the pgwasm switch) mapped a thrown
+error to an errno only if it had a truthy numeric `code`, and its main loop (`execProtocolRawSync`) ran
+`_PostgresMainLoopOnce()` inside a catch that swallowed everything but its longjmp sentinel. So a plain
+`Error`, or a `DOMException` whose legacy code is 0 (`UnknownError`), thrown by the commit's WAL write
+unwound Postgres out of `XLogWrite` and vanished: the statement resolved, strict's sync flushed a store
+that never received the WAL, and a reopen did not have the commit. A coded error (`QuotaExceededError`,
+legacy code 22, which the engine read as the errno `EFBIG`) failed the commit, but the engine then spun
+forever on its next statement, a synchronous loop that makes no platform call.
 
 The store half. An arena write the platform rejected before confirming a byte, and a failed metadata-log
 append, now poison the store and throw `StoreFailedError` (`code` 29, `EIO`, the platform's error as
 `cause`), and every later call throws the same until close (README "Durability", matrix row 49).
-Through PGlite, Postgres gets `EIO` in `XLogWrite`, PANICs, and the commit rejects with `could not write
+Through pgwasm, Postgres gets `EIO` in `XLogWrite`, PANICs, and the commit rejects with `could not write
 to log file …: I/O error`; nothing reaches the platform after the failed write; every image reopens
 without the commit. `strict: a transient platform write failure in a commit's WAL write fails the commit
 and poisons the store` asserts all of it for an uncoded `DOMException`, a plain `Error`, and a coded
@@ -194,20 +194,21 @@ cache-only queries, and still closes every handle`: a query that reaches a poiso
 with Postgres's own I/O error (SQLSTATE 58030), where the store's exception used to be swallowed and
 the failure surfaced only at the host sync.
 
-The PGlite half shipped in the `@pgxsinkit/pglite` fork at 0.5.8-pgx.2. The main loop fails the
-instance on any exception that is not the Emscripten unwind or longjmp it uses for Postgres errors, so
-the failing statement rejects naming the cause, every later statement throws that failure at once, and
-`close()` releases the filesystem without running the aborted engine's shutdown, then rejects with the
-failure; `tryFSOperation` maps an error without a code to `EIO`. On 0.5.8-pgx.1 the statement after
-such a failure spun, synchronously, where no test timeout could catch it. `strict: after a failed WAL
+The engine half shipped in the engine fork's 0.5.8-pgx.2, before the pgwasm switch (ADR-0062), and
+pgwasm keeps it. The main loop fails the instance on any exception that is not the Emscripten unwind or
+longjmp it uses for Postgres errors, so the failing statement rejects naming the cause, every later
+statement throws that failure at once, and `close()` releases the filesystem without running the
+aborted engine's shutdown, then rejects with the failure; the filesystem bridge maps an error without a
+code to `EIO`. On the fork's 0.5.8-pgx.1 the statement after such a failure spun, synchronously, where
+no test timeout could catch it. `strict: after a failed WAL
 write the next statement throws the same failure and close releases every handle` asserts the fixed
 behaviour for all three errors: the next `query` and `exec` reject with the commit's own error,
 `close()` rejects, and the store closes every handle it opened.
 
 The store's retryable platform failures (zero barriers, arena growth, reads) still surface the
 platform's own error and do not poison, by design (rows 4 and 20, `ambiguous fresh arena growth leaves
-no metadata and is safely retryable`). Since 0.5.8-pgx.2 PGlite reports an uncoded one to Postgres as
-`EIO` instead of its main loop swallowing it.
+no metadata and is safely retryable`). Since the fork's 0.5.8-pgx.2 the engine reports an uncoded one to
+Postgres as `EIO` instead of its main loop swallowing it.
 
 ## Conformance record — 2026-07-21
 

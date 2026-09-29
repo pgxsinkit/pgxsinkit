@@ -98,7 +98,7 @@ export class DurabilityModeMismatchError extends Error {
   readonly storeCode = "DURABILITY_MODE_MISMATCH";
 
   constructor() {
-    super("the PGlite host attempted a non-awaited OPFS repacked sync");
+    super("the pgwasm host attempted a non-awaited OPFS repacked sync");
     this.name = "DurabilityModeMismatchError";
   }
 }
@@ -117,7 +117,7 @@ export class StoreClosedError extends Error {
  * The live instance is poisoned and retains its first terminal cause.
  *
  * It carries a numeric `code` (`EIO`), as `FsError` does, so an engine's filesystem bridge that maps
- * coded errors to errnos (PGlite's) reports an I/O error to the engine instead of letting an exception
+ * coded errors to errnos (pgwasm's) reports an I/O error to the engine instead of letting an exception
  * unwind through it. It is deliberately NOT an `FsError`: an `FsError` leaves the store usable, a
  * `StoreFailedError` means every later call fails the same way until close.
  */

@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // `live-initial` (`hydratingTables`), and posts `live-hydrated` only after the caught-up rows' diff on the
 // SAME port (rows-before-signal). The tab (`attachSyncClient`) turns a non-empty `hydratingTables` into the
 // subscription's `hydrated` promise. Driven over a bun `MessageChannel` with a fully controllable fake
-// `pglite.live` + startCircuitsSync stub — no real pgwasm/network (mirrors `client-lazy-facade`).
+// `pgwasm.live` + startCircuitsSync stub — no real pgwasm/network (mirrors `client-lazy-facade`).
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
@@ -23,7 +23,7 @@ const workerRegistry = {
   },
 } as unknown as SyncTableRegistry;
 
-// ─── Controllable fake `pglite.live` (incrementalQuery for single-PK subscriptions) ──────────────────
+// ─── Controllable fake `pgwasm.live` (incrementalQuery for single-PK subscriptions) ──────────────────
 type LiveListener = (results: { rows: Record<string, unknown>[] }) => void;
 class FakeLiveQuery {
   readonly initialResults: { rows: Record<string, unknown>[] };

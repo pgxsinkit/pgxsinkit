@@ -9,7 +9,7 @@ import { availableParallelism } from "node:os";
 // shard the files into independent `bun test` invocations and run them in a worker pool of size
 // NB_CPUS/2 (override with PGXSINKIT_TEST_CONCURRENCY). Files that mock a process-global module must run
 // alone, so each gets its own single-file shard; the rest are bin-packed (longest-first) into one shard
-// per worker to amortize the per-process boot. The global PGlite cleanup (bunfig preload →
+// per worker to amortize the per-process boot. The global pgwasm cleanup (bunfig preload →
 // tests/support/setup.ts) keeps each shard's process flat regardless of how many files it holds.
 
 // Suites that call `mock.module` (process-global) — must each run in their own process.

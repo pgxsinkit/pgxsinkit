@@ -28,17 +28,17 @@
  * and batching metadata-log appends until the next sync): a lever that moves one of them must say so.
  *
  * Every reopen also asserts consistency: the store opens, recovery replays exactly the complete
- * metadata frames the image holds (a torn frame is never applied), PGlite starts and runs crash
+ * metadata frames the image holds (a torn frame is never applied), pgwasm starts and runs crash
  * recovery, the table is a prefix of the commit sequence, an index scan and a sequential scan return
  * the same rows, every payload is the one written, `verify_heapam` and `bt_index_check(heapallindexed)`
- * find nothing (PGlite runs `data_checksums=on`, so every page those read is checksum-verified: no
+ * find nothing (pgwasm runs `data_checksums=on`, so every page those read is checksum-verified: no
  * partially applied block), and the recovered store accepts a new commit and a clean close.
  *
- * PGlite always boots Postgres with `-F` (`fsync=off`): its guest never fsyncs, in either mode, and its
+ * pgwasm always boots Postgres with `-F` (`fsync=off`): its guest never fsyncs, in either mode, and its
  * durability is entirely the factory's awaited host sync. The pgrust engine is not in this repo — its
  * host (the pglite-v-pgrust bench's client) reaches this same store through the sync broker and the
  * WASI adapter, and since 2026-09-24 boots relaxed stores with `fsync=off` too, so a relaxed pgrust
- * store now reaches the platform on the same boundaries as a relaxed PGlite store here. This file
+ * store now reaches the platform on the same boundaries as a relaxed pgwasm store here. This file
  * covers the store core under pgwasm; it does not cover that host.
  */
 import { beforeAll, describe, expect, test } from "bun:test";
@@ -279,7 +279,7 @@ function every(commits: number): Record<CrashImageModel, Outcome> {
 
 /**
  * The images split by the ARENA alone: those that kept its unflushed writes recovered `arenaKept`, those
- * that lost them `arenaLost`, whatever happened to the metadata files. PGlite's WAL segment is
+ * that lost them `arenaLost`, whatever happened to the metadata files. pgwasm's WAL segment is
  * preallocated and written in place, so no WAL record needs a metadata frame to be found, and redo
  * re-extends any relation whose growth the metadata log lost.
  */
@@ -640,19 +640,19 @@ describe("opfs-repacked crash and reopen through the pgwasm factory", () => {
          * legacy code 22).
          *
          * FIXED (2026-09-25). Found by this file: the store rethrew the platform's own error on an arena
-         * write that made no progress, without poisoning. PGlite maps a thrown filesystem error to an errno
-         * only when it has a truthy numeric `code` (`tryFSOperation`), and its main loop
-         * (`execProtocolRawSync`) swallowed every exception but its longjmp sentinel, so an uncoded error
+         * write that made no progress, without poisoning. The engine then (before the pgwasm switch) mapped a
+         * thrown filesystem error to an errno only when it had a truthy numeric `code` (`tryFSOperation`), and
+         * its main loop (`execProtocolRawSync`) swallowed every exception but its longjmp sentinel, so an uncoded error
          * unwound Postgres out of `XLogWrite` and vanished: the commit was ACKNOWLEDGED under strict
-         * durability and a reopen did not have it. A coded one failed the commit (as `EFBIG` — PGlite read
+         * durability and a reopen did not have it. A coded one failed the commit (as `EFBIG` — the engine read
          * the DOM legacy code as an errno), but the engine then spun forever on its next statement.
          *
          * The store now poisons itself on such a write and throws `StoreFailedError`, `code` EIO, whatever
-         * the platform threw (README "Durability"). PGlite maps it to an I/O error, Postgres PANICs in
+         * the platform threw (README "Durability"). pgwasm maps it to an I/O error, Postgres PANICs in
          * `XLogWrite` and reports it, and the commit fails; every later store call fails the same way, so
          * nothing reaches the platform after the failed write and no later host sync can acknowledge
-         * anything. The PGlite side (the next statement throwing instead of spinning, fixed in
-         * `@pgxsinkit/pglite` 0.5.8-pgx.2) is the second test below.
+         * anything. The engine side (the next statement throwing instead of spinning, fixed in the engine
+         * fork's 0.5.8-pgx.2 and kept by pgwasm) is the second test below.
          */
         const PLATFORM_WRITE_FAILURES = [
           ["uncoded DOMException", () => new DOMException("transient OPFS write failure", "UnknownError")],
@@ -725,11 +725,11 @@ describe("opfs-repacked crash and reopen through the pgwasm factory", () => {
         );
 
         /**
-         * The PGlite half, passing since `@pgxsinkit/pglite` 0.5.8-pgx.2: `execProtocolRawSync` fails the
-         * instance on any exception that is not the Emscripten unwind/longjmp it uses for Postgres errors, so a
-         * statement after the PANIC throws the failure at once, and `close()` releases everything without
-         * running the aborted engine's shutdown, then rejects with that failure. On 0.5.8-pgx.1 the next
-         * statement spun synchronously in that loop, where no test timeout can interrupt it.
+         * The engine half, passing since the engine fork's 0.5.8-pgx.2 and kept by pgwasm: the main loop fails
+         * the instance on any exception that is not the Emscripten unwind/longjmp it uses for Postgres errors, so
+         * a statement after the PANIC throws the failure at once, and `close()` releases everything without
+         * running the aborted engine's shutdown, then rejects with that failure. On the fork's 0.5.8-pgx.1 the
+         * next statement spun synchronously in that loop, where no test timeout can interrupt it.
          */
         test(
           "strict: after a failed WAL write the next statement throws the same failure and close releases every handle",

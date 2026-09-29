@@ -26,24 +26,24 @@ async function createContext() {
   return { db, runtime: createMutationRuntime({ db, registry: demoSyncRegistry, batchWriteUrl }) };
 }
 
-type PGliteDb = Awaited<ReturnType<typeof createSchemaTestPgwasm>>;
+type PgwasmDb = Awaited<ReturnType<typeof createSchemaTestPgwasm>>;
 type DemoRuntime = Awaited<ReturnType<typeof createContext>>["runtime"];
 
-async function seedSyncedAuthor(db: PGliteDb, id: string, version: number) {
+async function seedSyncedAuthor(db: PgwasmDb, id: string, version: number) {
   await drizzleOver(db)
     .insert(demoSyncRegistry.authors.localTable)
     .values({ id, name: "Seeded", createdAtUs: BigInt(version), updatedAtUs: BigInt(version) });
 }
 
 /** Apply an Electric echo by advancing the synced row's Server version — fires the reconcile trigger. */
-async function applyEcho(db: PGliteDb, id: string, version: number) {
+async function applyEcho(db: PgwasmDb, id: string, version: number) {
   await drizzleOver(db)
     .update(demoSyncRegistry.authors.localTable)
     .set({ updatedAtUs: BigInt(version) })
     .where(eq(demoSyncRegistry.authors.localTable.id, id));
 }
 
-async function journalCount(db: PGliteDb, id: string) {
+async function journalCount(db: PgwasmDb, id: string) {
   const journal = getJournalTable(demoSyncRegistry, "authors");
   const rows = await drizzleOver(db).select({ count: count() }).from(journal).where(eq(journal["id"]!, id));
   return rows[0]?.count ?? 0;
@@ -60,7 +60,7 @@ interface SyncStateRow {
   quarantineState: string | null;
 }
 
-async function readSyncState(db: PGliteDb, id: string): Promise<SyncStateRow | null> {
+async function readSyncState(db: PgwasmDb, id: string): Promise<SyncStateRow | null> {
   const view = getSyncStateView(demoSyncRegistry, "authors");
   const rows = await drizzleOver(db)
     .select({

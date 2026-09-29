@@ -354,7 +354,7 @@ describe("durable recovery-required marker (slice 2)", () => {
     const storePath = await freshStorePath("race");
     // Provision the fs store (schema + a clean `false` marker), then drive the race over its raw pgwasm.
     const provisioner = await bootFsClient(todosRegistry, storePath);
-    const rawPglite = provisioner.pgwasm;
+    const rawPgwasm = provisioner.pgwasm;
 
     const unitA = "11111111-1111-1111-1111-111111111111";
     const unitB = "22222222-2222-2222-2222-222222222222";
@@ -366,7 +366,7 @@ describe("durable recovery-required marker (slice 2)", () => {
     const bSendingGate = deferred();
     const bSendingCommitted = deferred();
     const wrappingDb: MutationDb = {
-      exec: (sql) => rawPglite.exec(sql),
+      exec: (sql) => rawPgwasm.exec(sql),
       query: async <TRow extends Record<string, unknown> = Record<string, unknown>>(
         sql: string,
         params?: unknown[],
@@ -381,12 +381,12 @@ describe("durable recovery-required marker (slice 2)", () => {
           if (sendingUpdateCount === 1) {
             bReachedSending.resolve();
             await bSendingGate.promise;
-            const result = await rawPglite.query<TRow>(sql, params);
+            const result = await rawPgwasm.query<TRow>(sql, params);
             bSendingCommitted.resolve();
             return result;
           }
         }
-        return rawPglite.query<TRow>(sql, params);
+        return rawPgwasm.query<TRow>(sql, params);
       },
     };
 
@@ -428,7 +428,7 @@ describe("durable recovery-required marker (slice 2)", () => {
       // guarded clear — which MUST be SKIPPED because B's span is still open.
       await runtime.flushUnit(unitA);
 
-      const markerAfterA = await rawPglite.query<{ value: string }>(
+      const markerAfterA = await rawPgwasm.query<{ value: string }>(
         "SELECT value FROM pgxsinkit_local_meta WHERE key = $1",
         [MARKER_KEY],
       );
@@ -439,7 +439,7 @@ describe("durable recovery-required marker (slice 2)", () => {
       await bSendingCommitted.promise;
 
       // A committed `sending` row now coexists with the marker `true` — the invariant held.
-      const sendingRows = await rawPglite.query<{ n: number }>(
+      const sendingRows = await rawPgwasm.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM todos_mutations WHERE status = 'sending'",
       );
       expect(sendingRows.rows[0]?.n).toBe(1);
@@ -535,7 +535,7 @@ describe("durable recovery-required marker (slice 2)", () => {
   it("17. a sender that enters while the clear is in flight rewrites the marker true (no stale-flag skip)", async () => {
     const storePath = await freshStorePath("clear-race");
     const provisioner = await bootFsClient(todosRegistry, storePath);
-    const rawPglite = provisioner.pgwasm;
+    const rawPgwasm = provisioner.pgwasm;
 
     const unitA = "55555555-5555-5555-5555-555555555555";
     const unitB = "66666666-6666-6666-6666-666666666666";
@@ -547,7 +547,7 @@ describe("durable recovery-required marker (slice 2)", () => {
     let watchBSending = false;
     let markerTrueUpserts = 0;
     const wrappingDb: MutationDb = {
-      exec: (sql) => rawPglite.exec(sql),
+      exec: (sql) => rawPgwasm.exec(sql),
       query: async <TRow extends Record<string, unknown> = Record<string, unknown>>(
         sql: string,
         params?: unknown[],
@@ -559,12 +559,12 @@ describe("durable recovery-required marker (slice 2)", () => {
         if (onMeta && /\bupdate\b/.test(lower) && p.some((x) => x === "false")) {
           clearReached.resolve();
           await clearGate.promise;
-          return rawPglite.query<TRow>(sql, params);
+          return rawPgwasm.query<TRow>(sql, params);
         }
         // A marker upsert to `true` (a sender's `ensureRecoveryMarker`) — the thing a stale-flag skip suppresses.
         if (onMeta && lower.includes("insert") && p.some((x) => x === "true")) {
           markerTrueUpserts += 1;
-          return rawPglite.query<TRow>(sql, params);
+          return rawPgwasm.query<TRow>(sql, params);
         }
         // Unit B's `sending` UPDATE committing (the durable row that must survive under the marker `true`).
         if (
@@ -573,11 +573,11 @@ describe("durable recovery-required marker (slice 2)", () => {
           lower.includes("_mutations") &&
           p.some((x) => x === "sending")
         ) {
-          const result = await rawPglite.query<TRow>(sql, params);
+          const result = await rawPgwasm.query<TRow>(sql, params);
           bSendingCommitted.resolve();
           return result;
         }
-        return rawPglite.query<TRow>(sql, params);
+        return rawPgwasm.query<TRow>(sql, params);
       },
     };
 
@@ -628,7 +628,7 @@ describe("durable recovery-required marker (slice 2)", () => {
       clearGate.resolve();
       await pA;
 
-      const marker = await rawPglite.query<{ value: string }>("SELECT value FROM pgxsinkit_local_meta WHERE key = $1", [
+      const marker = await rawPgwasm.query<{ value: string }>("SELECT value FROM pgxsinkit_local_meta WHERE key = $1", [
         MARKER_KEY,
       ]);
       expect(marker.rows[0]?.value).toBe("true");
@@ -651,7 +651,7 @@ describe("durable recovery-required marker (slice 2)", () => {
   it("18. a guard-blocked clear keeps the marker true and leaves the flag false (next sender re-writes true)", async () => {
     const storePath = await freshStorePath("guard-blocked");
     const provisioner = await bootFsClient(todosRegistry, storePath);
-    const rawPglite = provisioner.pgwasm;
+    const rawPgwasm = provisioner.pgwasm;
 
     const unitA = "77777777-7777-7777-7777-777777777777";
     const unitB = "88888888-8888-8888-8888-888888888888";
@@ -661,7 +661,7 @@ describe("durable recovery-required marker (slice 2)", () => {
     let onNextMarkerTrueUpsert: (() => void) | null = null;
     const aSendingCommitted = deferred();
     const wrappingDb: MutationDb = {
-      exec: (sql) => rawPglite.exec(sql),
+      exec: (sql) => rawPgwasm.exec(sql),
       query: async <TRow extends Record<string, unknown> = Record<string, unknown>>(
         sql: string,
         params?: unknown[],
@@ -675,11 +675,11 @@ describe("durable recovery-required marker (slice 2)", () => {
           notify?.();
         }
         if (/\bupdate\b/.test(lower) && lower.includes("todos_mutations") && p.some((x) => x === "sending")) {
-          const result = await rawPglite.query<TRow>(sql, params);
+          const result = await rawPgwasm.query<TRow>(sql, params);
           aSendingCommitted.resolve();
           return result;
         }
-        return rawPglite.query<TRow>(sql, params);
+        return rawPgwasm.query<TRow>(sql, params);
       },
     };
     const runtime = createMutationRuntime({
@@ -715,7 +715,7 @@ describe("durable recovery-required marker (slice 2)", () => {
       // B flushes to completion → its settle issues the clear, whose guard is BLOCKED by A's `sending` row, so
       // the marker stays `true` and the flag is left `false` (not reset back to `true`).
       await runtime.flushUnit(unitB);
-      const markerAfterB = await rawPglite.query<{ value: string }>(
+      const markerAfterB = await rawPgwasm.query<{ value: string }>(
         "SELECT value FROM pgxsinkit_local_meta WHERE key = $1",
         [MARKER_KEY],
       );

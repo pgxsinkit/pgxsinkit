@@ -10,7 +10,7 @@
 // lazy-group guard worker-side and Drizzle's own result mapping (relational/nested included) runs on the tab.
 // `ensureSynced` (async lazy-activation) is a plain RPC to the shared engine, and `isSynced` — a SYNCHRONOUS
 // peek, so never an RPC — is answered from the started-state snapshot the worker computes on its own client
-// and pushes (ADR-0059). The only members that stay unsupported are the genuinely tab-local ones — `pglite`
+// and pushes (ADR-0059). The only members that stay unsupported are the genuinely tab-local ones — `pgwasm`
 // (no local store) and `dropReadCache` (an engine-wide cache rebuild) — each throwing a clear error saying why.
 
 import type {
@@ -803,7 +803,7 @@ export interface AttachSyncClientOptions<TRegistry extends SyncTableRegistry> {
  * token after an app auth-state change, ADR-0032 decision 3). One-shot Drizzle reads
  * (`query`/`queryRow`/`queryRaw`/`queryRawRow`) and `ensureSynced` ARE proxied to the worker, and `isSynced`
  * is answered from the worker-pushed started-state snapshot (ADR-0059); the members that throw are the
- * structurally unproxiable ones — `pglite`, `dropReadCache`, and `drizzle.transaction()`.
+ * structurally unproxiable ones — `pgwasm`, `dropReadCache`, and `drizzle.transaction()`.
  */
 export type AttachedSyncClient<TRegistry extends SyncTableRegistry> = SyncClient<TRegistry> & {
   notifyAuthChanged: () => void;
@@ -2237,7 +2237,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
   const noBridgeTransaction = (): never => {
     throw new Error(
       "[pgxsinkit] client.drizzle.transaction() is not available on a worker-attached client: a read " +
-        "transaction needs a local PGlite the tab does not have. Use one-shot reads (client.query) instead.",
+        "transaction needs a local store the tab does not have. Use one-shot reads (client.query) instead.",
     );
   };
   // The ONE encoder of the `guardedQuery` positional wire tuple ({@link GuardedQueryWireArgs}): both tab-side
@@ -2254,7 +2254,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     const options = rowMode ? { rowMode } : {};
     return use ? [sql, params, options, use] : [sql, params, options];
   };
-  // A `PgwasmClient`-shaped bridge executor Drizzle runs reads against (ADR-0032 decision 4). Drizzle's pglite
+  // A `PgwasmClient`-shaped bridge executor Drizzle runs reads against (ADR-0032 decision 4). Drizzle's pgwasm
   // driver calls only `client.query` for reads and `client.transaction` for `.transaction()`. `query` routes
   // to the worker's `guardedQuery` RPC (stripping drizzle's non-serializable `parsers` to just `rowMode`; the
   // worker re-applies drizzle's identity parsers) and returns the full `Results` so Drizzle's mapping runs on
@@ -2411,7 +2411,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     retryFailed: (table) => rpc<void>("retryFailed", [table]),
     recoverSending: (table) => rpc<void>("recoverSending", [table]),
     readMutationDetails: (table) => rpc<MutationDetail[]>("readMutationDetails", [table]),
-    // Inspection reads run in the worker (ADR-0032 S2) — the same surface as the in-process client. `pglite`
+    // Inspection reads run in the worker (ADR-0032 S2) — the same surface as the in-process client. `pgwasm`
     // itself stays blocked (below); these route the raw statement over the RPC round-trip instead.
     // `options.blob` (ADR-0061) makes this the single-statement COPY bulk load too: the bytes ride the SAME
     // RPC and are TRANSFERRED (detached tab-side), never cloned.
@@ -2555,7 +2555,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     liveQueryDiagnostics: () => rpc<LiveQueryDiagnostics[]>("liveQueryDiagnostics", []),
     // Store backup (ADR-0035): the worker runs the live export on its owned client (its lifecycle slot
     // serialises it against every tab). The dump crosses back as a transferred `ArrayBuffer`; rebuild the
-    // `File` tab-side from the wire form — NOT in the notSupported set (unlike the local `pglite` reads).
+    // `File` tab-side from the wire form — NOT in the notSupported set (unlike the local `pgwasm` reads).
     exportStore: async (exportOptions?: StoreExportOptions): Promise<StoreExportResult> => {
       const wire = await rpc<ExportArtefactWire>("exportStore", [exportOptions]);
       return {
@@ -2566,7 +2566,7 @@ export async function attachSyncClient<const TRegistry extends SyncTableRegistry
     },
     // Diagnostic dump (ADR-0035): the worker runs the throwaway-clone dump on its owned client (same
     // lifecycle slot as every tab). The SQL crosses back as the same transferred `ArrayBuffer`; rebuild the
-    // `File` tab-side. NOT in the notSupported set (unlike the local `pglite` reads).
+    // `File` tab-side. NOT in the notSupported set (unlike the local `pgwasm` reads).
     exportDiagnostics: async (exportOptions?: DiagnosticExportOptions): Promise<DiagnosticExportResult> => {
       const wire = await rpc<ExportArtefactWire>("exportDiagnostics", [exportOptions]);
       return {

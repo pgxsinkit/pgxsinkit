@@ -6,8 +6,8 @@
 // The MOTIVATING path is KEYLESS `live.query` — the React hooks never pass `pkColumns`, so that is the path a
 // GenreTV-shaped hook takes. `live.incrementalQuery` (single-PK) is measured alongside as a COMPARISON only.
 //
-// Setup lanes, on an in-memory PGlite with a representative joined aggregate (empty AND ~1.5k result rows):
-//   (a) plain `pglite.query(materialSql)` execution
+// Setup lanes, on an in-memory pgwasm with a representative joined aggregate (empty AND ~1.5k result rows):
+//   (a) plain `pgwasm.query(materialSql)` execution
 //   (b) `live.query` registration end-to-end (KEYLESS — the motivating hook path)
 //   (b') `live.incrementalQuery` registration end-to-end (single-PK — comparison)
 //   (c) manager.subscribe on a fresh fingerprint, KEYLESS (registration + seed + first snapshot)
@@ -16,7 +16,7 @@
 //   (e) retained rejoin (resubscribe a kept-alive zero-subscriber entry)
 //
 // The write→diff propagation lane (1-vs-N subscribers, shared vs independent registrations) is OPT-IN via
-// `--propagation` — it waits on real PGlite live-notification timing under writes, so it takes minutes and
+// `--propagation` — it waits on real pgwasm live-notification timing under writes, so it takes minutes and
 // must never sit on a blocking path. Heap scaling stays in the perf lab (native memoryUsage would not model
 // the browser/WASM deployment). See tmp/agents/live-query-setup-decomposition-results.md.
 
@@ -77,7 +77,7 @@ function median(samples: number[]): number {
 }
 
 async function timed(fn: () => Promise<void>, iterations: number): Promise<{ median: number; min: number }> {
-  // One warm-up (JIT + PGlite lazy paths) before measuring.
+  // One warm-up (JIT + pgwasm lazy paths) before measuring.
   await fn();
   const samples: number[] = [];
   for (let i = 0; i < iterations; i++) {
@@ -171,7 +171,7 @@ function printTable(label: string, results: Record<string, { median: number; min
 // The write→diff propagation lane (`--propagation`): after a dependent-table write, how long until EVERY
 // subscriber has its diff — one shared deduped registration fanning out to N, versus N independent
 // registrations each rerunning the SQL. This is the write-side cost retention/dedup trades against. Heavy
-// (real PGlite live-notification latency × N × iterations), so it is opt-in and expected to take minutes —
+// (real pgwasm live-notification latency × N × iterations), so it is opt-in and expected to take minutes —
 // run it in the background, never on a conversational blocking path.
 async function measurePropagation(
   authors: number,

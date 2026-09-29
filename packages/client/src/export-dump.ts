@@ -88,7 +88,7 @@ export interface CloneDumpPhases {
 
 /** The raw SQL bytes plus the pipeline phase walls — {@link runThrowawayCloneDump}'s result. */
 export interface CloneDumpResult {
-  /** The `pg_dump` output bytes (unwrapped from pglite-tools' `File` polyfill). */
+  /** The `pg_dump` output bytes (unwrapped from the `File` `pgDump` returns). */
   sqlBytes: Uint8Array<ArrayBuffer>;
   /** The pipeline phase timings, all offset from the caller's `startPerf` anchor. */
   phases: CloneDumpPhases;
@@ -132,10 +132,10 @@ export async function runThrowawayCloneDump(
   );
 
   // Step 2 — boot the throwaway. Memory-backed via the resolution module's SCHEME selection (ADR-0036
-  // decision 5: NEVER PGlite's explicit `fs: new MemoryFS()` — on 0.5.4 a `dumpDataDir` from an explicit-fs
-  // instance silently omits post-initdb relation files). No extensions at all — not even `live` — and no
-  // sync runtime: the clone exists only to be read out by `pg_dump`, and `DEALLOCATE ALL` has nothing
-  // here to corrupt.
+  // decision 5: NEVER pgwasm's explicit `fs: new MemoryFS()` — as probed before the pgwasm switch (ADR-0062),
+  // a `dumpDataDir` from an explicit-fs instance silently omits post-initdb relation files). No extensions at
+  // all — not even `live` — and no sync runtime: the clone exists only to be read out by `pg_dump`, and
+  // `DEALLOCATE ALL` has nothing here to corrupt.
   const cloneDataDir = resolveStoreDataDir(nextCloneStorePath(), "memory");
   const cloneBootStartedAtMs = nowMs() - startPerf;
   const cloneBootStartPerf = nowMs();
@@ -215,9 +215,9 @@ export async function performDiagnosticExport(
 
   const storeId = deriveStoreId(deps.storePath);
   const fileName = options.fileName ?? `${storeId}-${compactTimestamp()}-diagnostics.sql`;
-  // Build the artefact `File` from the raw bytes, NOT by re-wrapping pglite-tools' `File`: it is a polyfill
-  // in non-browser hosts, and `new File([polyfillFile], name)` keeps the polyfill's own name (the same bun
-  // quirk the store backup hit) — the bytes-first path guarantees the store-scoped name/mime stick.
+  // Build the artefact `File` from the raw bytes, NOT by re-wrapping the `File` `pgDump` returned: a wrapped
+  // polyfilled `File` keeps its own name in non-browser hosts (the same bun quirk the store backup hit) — the
+  // bytes-first path guarantees the store-scoped name/mime stick whatever `File` the dump hands back.
   const file = new File([sqlBytes], fileName, { type: "application/sql" });
 
   // Snapshot diagnostics of the LIVE store (the clone is already closed) — the journal state whose rows the

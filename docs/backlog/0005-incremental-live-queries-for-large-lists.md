@@ -16,11 +16,11 @@ row identity), so the wire is delta-shaped regardless. The bridge protocol suppo
 Investigated while fixing the board's echo-timed card shuffle (fixed instead with a deterministic
 ORDER BY — the correct fix; incremental mode was neither necessary nor sufficient).
 
-## What incremental mode would buy — and cost (from the PGlite live-extension source, 0.5.4)
+## What incremental mode would buy — and cost (from the live-extension source, read at upstream 0.5.4)
 
 `live.incrementalQuery` = `live.changes` + JS reconstruction:
 
-- PGlite keeps **two temp state tables holding full copies of the result set** per subscription and
+- The extension keeps **two temp state tables holding full copies of the result set** per subscription and
   re-runs a prepared three-way diff (window functions + INSERT/DELETE/UPDATE UNION arms) on every
   dependent-table change; a JS layer then rebuilds the full ordered array per fire by walking an
   `__after__` linked list.
@@ -40,7 +40,7 @@ Hidden sharp edges (none documented upstream; all confirmed in source):
    `if (!row) break`, i.e. a desynced chain **silently truncates the result**. Deterministic ORDER BY
    is a hard prerequisite.
 3. **More teardown machinery per subscription** (state tables, prepared statements, triggers) —
-   enlarges the surface of the PGlite unsubscribe-vs-close race
+   enlarges the surface of the live unsubscribe-vs-close race
    (tmp/agents/upstream-pglite-live-unsubscribe-close-hang.md).
 4. Windowed `offset`/`limit` pagination is `live.query`-only; incremental forfeits it.
 

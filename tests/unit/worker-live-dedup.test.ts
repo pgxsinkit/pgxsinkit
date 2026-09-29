@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 // Real-pgwasm coverage for live-query DEDUPLICATION over the worker bridge (ADR-0040 Slice 3, decisions 2/3).
 // A real in-memory engine behind `defineSyncWorker`, driven by two `attachSyncClient` tabs over bun
-// `MessageChannel`s (no actual Worker). `pglite.live` is wrapped to COUNT registrations, so "one registration
+// `MessageChannel`s (no actual Worker). `pgwasm.live` is wrapped to COUNT registrations, so "one registration
 // per fingerprint" is asserted directly. Proves: two tabs on the same SQL share ONE registration and both
 // receive a local mutation's diff; unsubscribing/closing one tab leaves the other live; and two tabs with
 // DIFFERENT `use` sets on the same SQL still share one registration (`use` is excluded from the fingerprint).

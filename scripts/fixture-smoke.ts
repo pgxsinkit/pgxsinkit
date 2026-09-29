@@ -205,7 +205,7 @@ await assert.rejects(
   "package-internal OPFS modules must remain blocked by the export map",
 );
 
-// client: stand up a REAL offline client (in-memory PGlite, sync disabled) and prove a local
+// client: stand up a REAL offline client (in-memory pgwasm, sync disabled) and prove a local
 // write/read round-trip through the published surface — not just that the factory exists. The
 // live round-trip against real infra lives in the integration lane (and createSyncServer touches its
 // db at construction, so it is exercised there, not here). The read URLs are never contacted when

@@ -1,10 +1,10 @@
-// Dev-only aggregated PGlite query profiler.
+// Dev-only aggregated pgwasm query profiler.
 //
-// PGlite's own logging is all-or-nothing — either nothing useful or a per-statement flood a human
-// can't read. This instead wraps a PGlite instance's `query`/`exec` and AGGREGATES by a normalized
+// The engine's own logging is all-or-nothing — either nothing useful or a per-statement flood a human
+// can't read. This instead wraps a pgwasm instance's `query`/`exec` and AGGREGATES by a normalized
 // SQL fingerprint (counts + timing), so you get signal, not noise: which statements run, how often,
-// and how much WASM time they cost. Crucial because every PGlite query carries ~50ms of fixed WASM
-// overhead, so idle cost is about query *frequency*, not weight.
+// and how much WASM time they cost. Crucial because every query carries fixed WASM overhead (~50ms,
+// measured before the pgwasm switch — ADR-0062), so idle cost is about query *frequency*, not weight.
 //
 // Wrapping is installed only while running (start) and removed on stop, so there is zero overhead when
 // idle. Wired to `window.__boardProfiler` in dev (board-client-provider). Typical use from the console:
@@ -24,9 +24,9 @@ export interface QueryStat {
 export interface ProfilerReport {
   windowSec: number;
   queriesPerSec: number;
-  /** PGlite busy time per wall-second (ms). */
+  /** pgwasm busy time per wall-second (ms). */
   busyMsPerSec: number;
-  /** busyMsPerSec / 10 — a rough "% of one CPU core" the PGlite layer is spending. */
+  /** busyMsPerSec / 10 — a rough "% of one CPU core" the pgwasm layer is spending. */
   pctOfOneCore: number;
   /** Per-fingerprint stats, sorted by total cost (the biggest offenders first). */
   byCost: QueryStat[];
@@ -45,9 +45,9 @@ export interface PgwasmProfiler {
 }
 
 // The two methods we wrap. `(...args: never[])` is the lint-clean "any function" shape, so a real
-// PGlite instance (whose `query`/`exec` take a `string` first) is assignable here.
-type PgliteFn = (...args: never[]) => Promise<unknown>;
-type PgliteLike = { query: PgliteFn; exec: PgliteFn };
+// pgwasm instance (whose `query`/`exec` take a `string` first) is assignable here.
+type PgwasmFn = (...args: never[]) => Promise<unknown>;
+type PgwasmLike = { query: PgwasmFn; exec: PgwasmFn };
 
 interface Bucket {
   count: number;
@@ -60,18 +60,18 @@ function fingerprint(method: string, arg: unknown): string {
   sql = sql
     .replace(/\s+/g, " ")
     .trim()
-    // PGlite live queries are prepared as live_query_<hash>_get — collapse the hash so all live-query
+    // pgwasm live queries are prepared as live_query_<hash>_get — collapse the hash so all live-query
     // executes bucket together rather than fragmenting into hundreds of one-off rows.
     .replace(/live_query_[0-9a-f]+/gi, "live_query_*")
     .slice(0, 100);
   return `${method} :: ${sql}`;
 }
 
-export function createPgwasmProfiler(pglite: PgliteLike): PgwasmProfiler {
+export function createPgwasmProfiler(pgwasm: PgwasmLike): PgwasmProfiler {
   const buckets = new Map<string, Bucket>();
   let running = false;
   let windowStartMs = 0;
-  const originals: Partial<Record<"query" | "exec", PgliteFn>> = {};
+  const originals: Partial<Record<"query" | "exec", PgwasmFn>> = {};
 
   const record = (key: string, durationMs: number) => {
     const bucket = buckets.get(key) ?? { count: 0, totalMs: 0, maxMs: 0 };
@@ -82,9 +82,9 @@ export function createPgwasmProfiler(pglite: PgliteLike): PgwasmProfiler {
   };
 
   const wrap = (method: "query" | "exec") => {
-    originals[method] = pglite[method];
-    const original = pglite[method].bind(pglite) as (...args: unknown[]) => Promise<unknown>;
-    pglite[method] = (async (...args: unknown[]) => {
+    originals[method] = pgwasm[method];
+    const original = pgwasm[method].bind(pgwasm) as (...args: unknown[]) => Promise<unknown>;
+    pgwasm[method] = (async (...args: unknown[]) => {
       const key = fingerprint(method, args[0]);
       const started = performance.now();
       try {
@@ -92,13 +92,13 @@ export function createPgwasmProfiler(pglite: PgliteLike): PgwasmProfiler {
       } finally {
         record(key, performance.now() - started);
       }
-    }) as PgliteFn;
+    }) as PgwasmFn;
   };
 
   const unwrap = () => {
     for (const method of ["query", "exec"] as const) {
       const original = originals[method];
-      if (original) pglite[method] = original;
+      if (original) pgwasm[method] = original;
       delete originals[method];
     }
   };

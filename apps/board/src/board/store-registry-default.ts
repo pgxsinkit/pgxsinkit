@@ -32,12 +32,12 @@ import {
 // to resolve DOM globals — this file is only ever imported by the board app (login route + board-client),
 // which typecheck under apps/board/tsconfig (DOM lib).
 //
-// ADR-0032 S3: when the browser has `SharedWorker`, the sync engine (PGlite included) runs in a per-store
+// ADR-0032 S3: when the browser has `SharedWorker`, the sync engine (pgwasm included) runs in a per-store
 // SharedWorker, not on the tab. The store-registry's PURE logic — id binding, the spare, GC, corrupt
 // recovery — is unchanged; only the `createStore` SIDE EFFECT swaps: instead of creating a tab-side
-// PGlite, it constructs the store's SharedWorker (named by its store path, so the browser dedupes N tabs
+// pgwasm, it constructs the store's SharedWorker (named by its store path, so the browser dedupes N tabs
 // onto one engine) and sends a `provision` (initdb only, schemaless, engine idle) that the later attach
-// adopts. Where `SharedWorker` is missing, `createStore` keeps creating a tab-side PGlite (the in-process
+// adopts. Where `SharedWorker` is missing, `createStore` keeps creating a tab-side pgwasm (the in-process
 // fallback, ADR-0032 decision 2) — today's behavior, untouched. The board is idb-only.
 
 // `boardWorkerMode` (re-exported from ./engine-host for board-client's import) is "not in-process" — true for
@@ -177,13 +177,13 @@ export function boardEngineWorkerFactory(storePath: string): () => SharedWorker 
 }
 
 // A placeholder the worker-mode `createStore` resolves to: in worker mode the raw store lives in the
-// worker, so there is no tab-side PGlite. The registry only awaits this promise (resolve = store ready,
+// worker, so there is no tab-side pgwasm. The registry only awaits this promise (resolve = store ready,
 // reject = corrupt → recover); board-client IGNORES the value and attaches by store name instead.
 const WORKER_STORE_PLACEHOLDER = {} as unknown as PgwasmClient;
 
 // The local-store seam (./store-factory), resolved once for THIS scope: with `VITE_BOARD_STORE_FACTORY` set
 // to a module URL, that module mints the store here too, so the seam is the board's — not just the worker's
-// — and a browser without `SharedWorker` can never silently open a PGlite store while the configured engine
+// — and a browser without `SharedWorker` can never silently open a pgwasm store while the configured engine
 // sits unused. Unset ⇒ `undefined` ⇒ the create below is untouched. The `import()` stays opaque to the
 // bundler (`@vite-ignore`): the URL is a runtime value naming a module OUTSIDE this repo. The worker entry
 // (board-sync.worker.ts) resolves the same seam for the SharedWorker engine home.
@@ -254,7 +254,7 @@ export function createBoardStoreAdapters(): StoreRegistryAdapters {
     // off every thread that matters), resolving when the worker acks — a rejected provision (initdb failed)
     // propagates so the pure logic's corrupt-spare recovery deletes the idb and re-provisions under a fresh
     // id, exactly as it recovers a corrupt tab-side create. In the in-process fallback: create the tab-side
-    // store (`createInProcessStore` above — PGlite consuming the login-screen WASM warm, optimisation A).
+    // store (`createInProcessStore` above — pgwasm consuming the login-screen WASM warm, optimisation A).
     createStore: (storePath) =>
       boardWorkerMode
         ? getBoardEnginePort(storePath)

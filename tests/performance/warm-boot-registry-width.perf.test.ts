@@ -133,7 +133,7 @@ function fmt(value: number | null): string {
   return value == null ? "n/a" : value.toFixed(1);
 }
 
-describe("performance: warm-boot registry width (PGlite-only, no containers)", () => {
+describe("performance: warm-boot registry width (pgwasm-only, no containers)", () => {
   it(
     "records cold-engine warm-store boot phase timings across 1 / 16 / 50 writable tables",
     async () => {
@@ -188,7 +188,7 @@ describe("performance: warm-boot registry width (PGlite-only, no containers)", (
       ];
       const lines = [
         "",
-        "[perf] warm-boot registry-width baseline (cold-engine warm-store boot; PGlite fs store; recovery marker + exact schema fingerprint + ADR-0041 staged boot)",
+        "[perf] warm-boot registry-width baseline (cold-engine warm-store boot; pgwasm fs store; recovery marker + exact schema fingerprint + ADR-0041 staged boot)",
         header.join(" | "),
         rows
           .map((row) =>

@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // `detach` arriving during those awaits must not leave an orphan subscription live past the port. The worker
 // registers the in-flight subscribe SYNCHRONOUSLY in `pendingSubscribes` before the first await and marks it
 // cancelled on unsubscribe/detach; after the awaits it tears the subscription down instead of recording it.
-// Driven over a fully-mocked `pglite.live` whose registration can be HELD pending, with raw bridge envelopes
+// Driven over a fully-mocked `pgwasm.live` whose registration can be HELD pending, with raw bridge envelopes
 // posted on a second port so `queryId` and message timing are fully controllable.
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";

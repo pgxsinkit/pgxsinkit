@@ -672,7 +672,7 @@ export async function createPgwasmClient(
   // resolution above (ADR-0047's default logic is untouched): `relaxed` → the factory's `"relaxed"`, else
   // `"strict"`. The open is retried a bounded number of times for transient failures, then propagates.
   if (dataDir.startsWith("opfs://")) {
-    const opfsPglite = (await timeAsync(
+    const opfsPgwasm = (await timeAsync(
       "boot pgwasm.create",
       async () => {
         const createOpfsStore =
@@ -723,10 +723,10 @@ export async function createPgwasmClient(
     )) as PgwasmClient;
     // No brand is needed: the store reports itself as persistent through `pg.storage`, so the BYO
     // non-persistent guard accepts it when it is adopted as a `precreatedPgwasm` (provision-then-attach).
-    return opfsPglite;
+    return opfsPgwasm;
   }
 
-  const pglite = (await timeAsync(
+  const pgwasm = (await timeAsync(
     "boot pgwasm.create",
     () => {
       const createOptions: PgwasmOptions<{ live: typeof live }> = {
@@ -756,7 +756,7 @@ export async function createPgwasmClient(
     // The raw store is deliberately sync-less here (only `live` is a create-time extension); the sync runtime
     // never lands on the instance at all (ADR-0032 S1).
   )) as PgwasmClient;
-  return pglite;
+  return pgwasm;
 }
 
 // ─── ADR-0049 step 11c: FRESH/RESTORE commitment boot wiring ───────────────────────────────────────────
@@ -927,14 +927,14 @@ export async function resolveFreshBoot(
  * barrier. The barrier requires it (data-before-authority, invariant 3); a store that is not on the OPFS-repacked
  * filesystem has none, which is a boot invariant violation. `/opfs` is imported lazily, as the factory is.
  */
-function resolveEngineStrictSync(pglite: PgwasmClient): () => Promise<void> {
-  if (!isOpfsRepackedStore(pglite)) {
+function resolveEngineStrictSync(pgwasm: PgwasmClient): () => Promise<void> {
+  if (!isOpfsRepackedStore(pgwasm)) {
     throw new Error(
       "[pgxsinkit] fresh commitment: the store is not on the OPFS-repacked filesystem, so it has no strict " +
         "sync — the commitment barrier requires an OPFS-repacked engine (data-before-authority, invariant 3).",
     );
   }
-  return async () => (await import("@pgxsinkit/pgwasm/opfs")).strictSync(pglite);
+  return async () => (await import("@pgxsinkit/pgwasm/opfs")).strictSync(pgwasm);
 }
 
 export async function runFreshCommitmentBarrier(
@@ -1139,15 +1139,15 @@ export interface CreateSyncClientOptions<TRegistry extends SyncTableRegistry> {
    */
   build?: PostgresBuild;
   resetSubscriptionKeys?: string[];
-  prepareLocalDbBeforeSchema?: (pglite: PgwasmClient) => Promise<void>;
-  prepareLocalDbAfterSchema?: (pglite: PgwasmClient) => Promise<void>;
+  prepareLocalDbBeforeSchema?: (pgwasm: PgwasmClient) => Promise<void>;
+  prepareLocalDbAfterSchema?: (pgwasm: PgwasmClient) => Promise<void>;
   onStatusChange?: (status: SyncRuntimeStatus) => void;
   onTableInitialSync?: (tableKey: string) => void;
   /**
    * A fully-provisioned pgwasm instance the CALLER owns end-to-end. The client runs NONE of its
    * post-create boot steps against it — no schema exec, prepare hooks, or registry reconciliation
    * (journal recovery still runs, as it does on every path). Use it only when the caller has already
-   * applied the registry schema itself. Contrast the three PGlite-provenance seams:
+   * applied the registry schema itself. Contrast the three store-provenance seams:
    * - {@link storePath} (default) — the client creates the store AND runs every post-create step.
    * - {@link precreatedPgwasm} — the caller creates the raw store (via {@link createPgwasmClient}), but
    *   the client still runs every post-create step (schema, prepare hooks, and reconciliation), exactly as
@@ -1428,7 +1428,7 @@ export interface PrepareQueryInput<TRegistry extends SyncTableRegistry> {
  * The narrow live-rows seam (ADR-0032 S2 §4) both client modes implement so the `@pgxsinkit/react` hooks
  * work against either. Input for a reactive subscription: the compiled SQL + params (from a Drizzle
  * builder's `.toSQL()` or a raw string) and the result's `pkColumns` (drives worker-side diff keying;
- * omit for a keyless query). The in-process client runs it directly over `pglite.live`; the worker-attached
+ * omit for a keyless query). The in-process client runs it directly over `pgwasm.live`; the worker-attached
  * client runs the live query in the worker and streams DIFFs across the bridge.
  */
 export interface SubscribeLiveRowsInput {
@@ -1543,7 +1543,7 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
    * scheduling) without awaiting. Idempotent. The first action of every teardown path — stop()/destroy() call it,
    * and the SharedWorker host calls it before draining subscribes / disposing live queries so no teardown step
    * races a still-live engine. Not a substitute for stop()/destroy(): the awaited teardown (unsubscribe, dispose,
-   * pglite.close) still follows. Callers rarely invoke it directly.
+   * pgwasm.close) still follows. Callers rarely invoke it directly.
    */
   haltActivity: () => void;
   stop: () => Promise<void>;
@@ -1868,9 +1868,9 @@ export interface SyncClient<TRegistry extends SyncTableRegistry> {
   hydratingTablesFor: (query: { sql: string; use?: readonly string[] }) => readonly string[];
   /**
    * The live-rows seam (ADR-0032 S2 §4): register a reactive query and receive its initial ordered
-   * snapshot plus subsequent updates via `onRows`. The React live hooks consume THIS (not `pglite.live`
+   * snapshot plus subsequent updates via `onRows`. The React live hooks consume THIS (not `pgwasm.live`
    * directly), so they run unchanged against both the in-process client (which implements it over
-   * `pglite.live`) and the worker-attached client (which implements it over the bridge). Prefer the
+   * `pgwasm.live`) and the worker-attached client (which implements it over the bridge). Prefer the
    * higher-level `@pgxsinkit/react` hooks; this is the lower-level primitive they build on.
    */
   subscribeLiveRows: <TRow extends Record<string, unknown> = Record<string, unknown>>(
@@ -2001,7 +2001,7 @@ export interface RawStatement {
  * and pgwasm reads `/dev/blob` from a `Blob`, so it is wrapped HERE, at the one place the two meet.
  * A statement's own `blob` ({@link RawStatement.blob}) wins over the call-level {@link RawQueryOptions.blob}.
  */
-function toPgliteQueryOptions(
+function toPgwasmQueryOptions(
   options?: RawQueryOptions,
   statementBlob?: Uint8Array<ArrayBuffer>,
 ): QueryOptions | undefined {
@@ -2363,7 +2363,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     return timedCreate();
   };
 
-  let pglite: PgwasmClient;
+  let pgwasm: PgwasmClient;
   // Whether the boot adopted the caller's `precreatedPgwasm` (vs. falling back to a fresh create) — gates
   // whether the provision stamp is honoured (ADR-0034).
   let adoptedPrecreated = false;
@@ -2374,7 +2374,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     refuseIfNonPersistent(options.pgwasmInstance);
     // ADR-0063: the adopted instance's own build must be the declared one.
     assertStoreBuild(declaredBuild, options.pgwasmInstance.build, "pgwasmInstance");
-    pglite = options.pgwasmInstance;
+    pgwasm = options.pgwasmInstance;
   } else if (options.precreatedPgwasm) {
     // The caller created the raw store eagerly via `createPgwasmClient`; the client still owns every
     // post-create step below. A REJECTED eager create must never fail the boot: fall back to the normal
@@ -2391,16 +2391,16 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // ADR-0063: checked outside the reject-fallback, so the refusal propagates (never swallowed as a
       // rejected create that falls back to minting on the supplied build).
       assertStoreBuild(declaredBuild, outcome.instance.build, "precreatedPgwasm");
-      pglite = outcome.instance;
+      pgwasm = outcome.instance;
       adoptedPrecreated = true;
     } else {
-      syncDebug("boot precreated pglite rejected — falling back to storePath create", {
+      syncDebug("boot precreated pgwasm rejected — falling back to storePath create", {
         error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
       });
-      pglite = await openOwnedStore();
+      pgwasm = await openOwnedStore();
     }
   } else {
-    pglite = await openOwnedStore();
+    pgwasm = await openOwnedStore();
   }
   // ADR-0049 decision 12: stamp the fallback reason once the mint's backend is settled. Guarded on `probeGranted`
   // (an opfs-capable boot) — a plain idb boot never enters the fresh phase machine, so it never sets one.
@@ -2418,7 +2418,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // its `storageBackend` from the instance's own `storage` where recognisable; an unknown filesystem leaves it
   // omitted (`setStorageBackend` is first-wins, so a fallback-create is never clobbered).
   if (options.pgwasmInstance != null || adoptedPrecreated) {
-    const byoBackend = storageBackendFromStorage(pglite.storage);
+    const byoBackend = storageBackendFromStorage(pgwasm.storage);
     if (byoBackend) {
       openedStorageBackend = byoBackend;
       bootReportBuilder.setStorageBackend(byoBackend);
@@ -2431,7 +2431,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // run, and the memory test lane has no meta machinery at all. The bounded meta read is kicked off HERE and folded
   // into `commitmentBarrierPending` at the milestone below, so it overlaps schema exec instead of preceding it.
   const adoptedCommitmentGate =
-    (options.pgwasmInstance != null || adoptedPrecreated) && backendOverride !== "memory" && isOpfsRepackedStore(pglite)
+    (options.pgwasmInstance != null || adoptedPrecreated) && backendOverride !== "memory" && isOpfsRepackedStore(pgwasm)
       ? resolveAdoptedCommitmentBarrier(fallbackStorePath)
       : null;
   // The gate's rejection is observed at the milestone (fail closed, invariant 12); this only keeps an unrelated
@@ -2515,7 +2515,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
    * report, the activation replay — is written against {@link SyncGroupsRuntime}.
    */
   const startSyncRuntime = (promotedGroups: ReadonlySet<string>): Promise<SyncGroupsRuntime> =>
-    startCircuitsSync(pglite, {
+    startCircuitsSync(pgwasm, {
       registry: options.registry,
       controlPlaneUrl: readTransport.controlPlaneUrl,
       streamBaseUrl: readTransport.streamBaseUrl,
@@ -2609,14 +2609,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         armReadSilenceWatchdog();
       },
       onLazyActivated: (groupKey: string) => {
-        void writeLazyGroupActivation(pglite, options.registry, groupKey);
+        void writeLazyGroupActivation(pgwasm, options.registry, groupKey);
       },
     });
 
   if (!options.pgwasmInstance) {
     if (options.prepareLocalDbBeforeSchema) {
       const prepareBeforeSchema = options.prepareLocalDbBeforeSchema;
-      await bootReportBuilder.phase("prepare", "boot prepare(before-schema)", () => prepareBeforeSchema(pglite));
+      await bootReportBuilder.phase("prepare", "boot prepare(before-schema)", () => prepareBeforeSchema(pgwasm));
     }
 
     // Durable-schema fingerprint fast path. The whole block stays inside the
@@ -2624,11 +2624,11 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     await bootReportBuilder.phase("schemaExec", "boot local schema", async () => {
       // (2) The minimal bootstrap first — one small crossing so the `local_schema_fingerprint` read/write
       // below has its `pgxsinkit_local_meta` table before the durable replay is decided.
-      await pglite.exec(buildLocalMetaBootstrapSql(options.registry));
+      await pgwasm.exec(buildLocalMetaBootstrapSql(options.registry));
 
       // (3) Generate the durable SQL (JS-only) and hash it; compare with the stored fingerprint.
       const currentFingerprint = computeLocalSchemaFingerprint(options.registry);
-      const storedFingerprint = await readStoredLocalSchemaFingerprint(pglite, options.registry);
+      const storedFingerprint = await readStoredLocalSchemaFingerprint(pgwasm, options.registry);
 
       if (storedFingerprint === currentFingerprint) {
         // (4a) Match → SKIP the durable replay entirely; the persisted durable schema is already current.
@@ -2644,8 +2644,8 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         syncDebug("boot local schema fingerprint mismatch — replaying durable schema", {
           hadStored: storedFingerprint != null,
         });
-        await pglite.exec(generateDurableLocalSchemaSql(options.registry));
-        await writeStoredLocalSchemaFingerprint(pglite, options.registry, currentFingerprint);
+        await pgwasm.exec(generateDurableLocalSchemaSql(options.registry));
+        await writeStoredLocalSchemaFingerprint(pgwasm, options.registry, currentFingerprint);
         bootReportBuilder.setSchemaFastPath({ skipped: false, fingerprintMatch: false });
       }
 
@@ -2653,13 +2653,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       // crossing when the registry declares no ephemeral entry (the generator returns "").
       const ephemeralSql = generateEphemeralLocalSchemaSql(options.registry);
       if (ephemeralSql.length > 0) {
-        await pglite.exec(ephemeralSql);
+        await pgwasm.exec(ephemeralSql);
       }
     });
 
     if (options.prepareLocalDbAfterSchema) {
       const prepareLocalDbAfterSchema = options.prepareLocalDbAfterSchema;
-      await bootReportBuilder.phase("prepare", "boot prepare(local-db)", () => prepareLocalDbAfterSchema(pglite));
+      await bootReportBuilder.phase("prepare", "boot prepare(local-db)", () => prepareLocalDbAfterSchema(pgwasm));
     }
   }
 
@@ -2677,7 +2677,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // exist below (a write never fires during boot, so it is a harmless no-op until then).
   let activateOrdinaryWriteTables: ((tables: readonly string[]) => void) | null = null;
   const mutationRuntime = createMutationRuntime({
-    db: pglite,
+    db: pgwasm,
     registry: options.registry,
     batchWriteUrl: options.batchWriteUrl,
     // pgxsinkit owns the local schema (and the `pgxsinkit_local_meta` marker table) unless the caller
@@ -2703,7 +2703,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   const eventLane: EventLaneRuntime | null =
     eventLaneUrl != null && !options.pgwasmInstance
       ? createEventLaneRuntime({
-          db: pglite,
+          db: pgwasm,
           registry: options.registry,
           batchEventUrl: eventLaneUrl,
           ...(options.getAuthToken ? { getAuthToken: options.getAuthToken } : {}),
@@ -2746,7 +2746,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     if (options.pgwasmInstance) return;
     versionEvent = await bootReportBuilder.phase("storeVersionReconcile", "boot store-version reconcile", () =>
       reconcileLocalStoreVersion({
-        db: pglite,
+        db: pgwasm,
         registry: options.registry,
         runtime: mutationRuntime,
         ...(options.onSchemaChange ? { onSchemaChange: options.onSchemaChange } : {}),
@@ -2780,7 +2780,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     await runReconcileStage();
   }
 
-  const drizzleDb = createDrizzleDatabase(pglite, buildSchema(options.registry));
+  const drizzleDb = createDrizzleDatabase(pgwasm, buildSchema(options.registry));
   // Static index of the registry's lazy relations (ADR-0021), driving the read-path safety net.
   const lazyGuardIndex = buildLazyGuardIndex(options.registry);
 
@@ -2889,7 +2889,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // client that may have booted with sync off, so the relations cannot be a function of a runtime
     // flag. It is also cheap and idempotent: `IF NOT EXISTS` throughout, and the session-scoped halves
     // (ADR-0042) have to be re-created every boot regardless, since they live in `pg_temp`.
-    await migrateSubscriptionMetadataTables({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA });
+    await migrateSubscriptionMetadataTables({ pg: pgwasm, metadataSchema: DEFAULT_METADATA_SCHEMA });
     if (disposed) return;
 
     if (syncEnabled) {
@@ -2900,7 +2900,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
           versionEvent?.status === "rebuilt"
             ? [...(options.resetSubscriptionKeys ?? []), ...allGroupSubscriptionKeys(options.registry)]
             : options.resetSubscriptionKeys;
-        await resetSubscriptionsIfRequested(pglite, resetKeys);
+        await resetSubscriptionsIfRequested(pgwasm, resetKeys);
         // Re-check after the awaited reset: a stop during it must still abort BEFORE the network shape streams
         // start (BLOCKER 2 — cannot start sync after stop).
         if (disposed) return;
@@ -2910,7 +2910,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
 
         // Promote any `lazy + persistent` group activated on a previous boot back into the eager set
         // (ADR-0021 §2); the sync engine does no DB read of its own.
-        const promotedGroups = await readActivatedLazyGroups(pglite, options.registry);
+        const promotedGroups = await readActivatedLazyGroups(pgwasm, options.registry);
         if (disposed) return;
 
         sync = await bootReportBuilder.phase("syncStart", "boot sync start", () => startSyncRuntime(promotedGroups));
@@ -3226,14 +3226,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     // revert the durable promotion (a no-op for ephemeral, which never persisted a flag) so the next boot
     // holds the relation dormant again.
     if (activeSync != null && groupKey != null) activeSync.stopGroup(groupKey);
-    if (groupKey != null) await clearLazyGroupActivation(pglite, options.registry, groupKey);
+    if (groupKey != null) await clearLazyGroupActivation(pgwasm, options.registry, groupKey);
     // CRITICAL: delete the group's persisted stream subscription so a later re-activation re-streams the
     // shape from scratch. Without this it would resume from the old cursor and never re-send the rows we
     // truncate below — leaving the relation permanently missing its pre-desync data.
-    if (groupKey != null) await resetSubscriptionsIfRequested(pglite, [groupKey]);
+    if (groupKey != null) await resetSubscriptionsIfRequested(pgwasm, [groupKey]);
     // Clean-truncate every member's local cluster.
     for (const member of groupTableKeys) {
-      await pglite.exec(buildDesyncTableSql(options.registry, member as string));
+      await pgwasm.exec(buildDesyncTableSql(options.registry, member as string));
     }
   };
 
@@ -3396,22 +3396,22 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // own result mapping runs on the tab.
   const guardedRawQuery: SyncClient<TRegistry>["guardedRawQuery"] = async (sql, params, options, use) => {
     await gateAndGuardRead(sql, use);
-    return pglite.query(sql, params as unknown[] | undefined, options);
+    return pgwasm.query(sql, params as unknown[] | undefined, options);
   };
 
   // The live-query manager (ADR-0040) — the SAME module the worker uses (decision 6), so the in-process
   // client gets one lifecycle contract: dedup of identical concurrent subscriptions within this client,
   // bounded zero-subscriber keep-alive (`options.liveQueries`), and awaited teardown (decision 1 — `dispose()`
-  // settles every un-awaited unsubscribe before `pglite.close()`, subsuming the old pending-teardowns set).
+  // settles every un-awaited unsubscribe before `pgwasm.close()`, subsuming the old pending-teardowns set).
   // It cannot dedup across tabs (that is the worker's job) but keeps the contract identical across both forms.
   const liveManager: LiveQueryManager = createLiveQueryManager({
-    live: pglite.live,
+    live: pgwasm.live,
     ...(options.liveQueries ? { policy: options.liveQueries } : {}),
   });
 
   const client: SyncClient<TRegistry> = {
     drizzle: drizzleDb,
-    pgwasm: pglite,
+    pgwasm,
     views: buildViews(options.registry),
     tables: Object.fromEntries(
       Object.keys(options.registry).map((tableKey) => [
@@ -3451,13 +3451,13 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       status.isRunning = false;
       options.onStatusChange?.(status);
       // Tear the engine down (abort every shape stream) immediately before closing the DB — the exact
-      // point PGlite's own close used to invoke the former extension's close hook (ADR-0032 S1). Order
-      // preserved: convergence stop → sync unsubscribe → status → engine close → pglite close.
+      // point the store's own close used to invoke the former extension's close hook (ADR-0032 S1). Order
+      // preserved: convergence stop → sync unsubscribe → status → engine close → pgwasm close.
       sync?.unsubscribe();
       // Dispose the live-query manager before closing pgwasm (ADR-0040 decisions 1 & 6): it cancels any
-      // keep-alive timers and awaits every in-flight live `unsubscribe()`, so none races `pglite.close()`.
+      // keep-alive timers and awaits every in-flight live `unsubscribe()`, so none races `pgwasm.close()`.
       await liveManager.dispose();
-      await pglite.close();
+      await pgwasm.close();
     },
     destroy: (destroyOptions) =>
       // Run inside the SAME lifecycle slot the exports use (ADR-0035 decision 4), so a destructive wipe can
@@ -3505,14 +3505,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         sync?.unsubscribe();
         status.isRunning = false;
         options.onStatusChange?.(status);
-        await pglite.exec(buildWipeLocalStoreSql(options.registry));
+        await pgwasm.exec(buildWipeLocalStoreSql(options.registry));
         // Same teardown ordering as `stop`: abort the engine's streams before closing the DB, the moment
-        // the former extension close hook fired during `pglite.close()` (ADR-0032 S1).
+        // the former extension close hook fired during `pgwasm.close()` (ADR-0032 S1).
         sync?.unsubscribe();
         // Dispose the live-query manager before closing pgwasm — same close-vs-unsubscribe hang guard as
         // `stop()` (ADR-0040 decisions 1 & 6).
         await liveManager.dispose();
-        await pglite.close();
+        await pgwasm.close();
         // ADR-0049 step 10b: phase-aware destructive lifecycle. The wipe + close above cleared the local store;
         // now finish the store-meta / OPFS-namespace side. Every recorded browser store runs the full destructive
         // lifecycle (set `deleting` → delete commitment
@@ -3544,18 +3544,18 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
         // racing it would capture a half-rebuilt cache in the artefact (some tables dropped, some re-created,
         // none re-streamed yet). The slot makes the drop+rebuild atomic against any concurrent export.
         lifecycleSlot.run("dropReadCache", async () => {
-          await pglite.exec(buildDropReadCacheSql(options.registry));
-          await pglite.exec(generateLocalSchemaSql(options.registry));
+          await pgwasm.exec(buildDropReadCacheSql(options.registry));
+          await pgwasm.exec(generateLocalSchemaSql(options.registry));
           // A full durable-schema exec re-stamps the durable-schema fingerprint (slice 3): exec and stamp
           // travel together so the next boot's fast path can trust the rebuilt cache's fingerprint.
           await writeStoredLocalSchemaFingerprint(
-            pglite,
+            pgwasm,
             options.registry,
             computeLocalSchemaFingerprint(options.registry),
           );
           // Reset the read-path subscriptions so the rebuilt synced tables re-stream from scratch
           // rather than the bookkeeping believing they are already caught up (ADR-0006).
-          await resetSubscriptionsIfRequested(pglite, allGroupSubscriptionKeys(options.registry));
+          await resetSubscriptionsIfRequested(pgwasm, allGroupSubscriptionKeys(options.registry));
         })
       );
     },
@@ -3625,18 +3625,18 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       ...(eventLane ? { outbox: await eventLane.outboxStatus() } : {}),
     }),
     // The registry-wide mutation-status API (slice 4). Assigned just below the object so it can close over
-    // this client's own `subscribeLiveRows` + `pglite.query` seams — the SAME factory the worker facade uses.
+    // this client's own `subscribeLiveRows` + `pgwasm.query` seams — the SAME factory the worker facade uses.
     mutations: undefined as unknown as MutationsApi<TRegistry>,
     // Inspection surface (see the interface doc): straight through to the underlying store, no journal /
     // overlay involvement. The worker facade runs the identical call inside the worker's own client.
     // `options.blob` is the single-statement COPY form: the bytes are wrapped into the `Blob` pgwasm reads
-    // from `/dev/blob` (see {@link toPgliteQueryOptions}) — a bulk load that needs no transaction around it.
+    // from `/dev/blob` (see {@link toPgwasmQueryOptions}) — a bulk load that needs no transaction around it.
     rawQuery: (sql, params, options) =>
-      pglite.query(sql, params as unknown[] | undefined, toPgliteQueryOptions(options)),
+      pgwasm.query(sql, params as unknown[] | undefined, toPgwasmQueryOptions(options)),
     // `rawExec` takes no blob: pgwasm's `exec` runs a multi-statement script through the simple protocol,
     // which has no `/dev/blob` hook — a COPY-from-blob load goes through `rawQuery`/`rawTransaction`.
-    rawExec: (sql, options) => pglite.exec(sql, withoutCopyBlob(options)),
-    // The atomic form of the same surface. `pglite.transaction` opens ONE transaction and rolls it back on a
+    rawExec: (sql, options) => pgwasm.exec(sql, withoutCopyBlob(options)),
+    // The atomic form of the same surface. `pgwasm.transaction` opens ONE transaction and rolls it back on a
     // throw, so the all-or-nothing guarantee is the store's, not a re-implementation here. An empty list is
     // answered without touching the store at all — an empty transaction would be pure overhead on the single
     // WASM thread (and, in worker mode, would serialise behind whatever else the engine is doing).
@@ -3644,7 +3644,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       if (statements.length === 0) {
         return [];
       }
-      return pglite.transaction(async (tx) => {
+      return pgwasm.transaction(async (tx) => {
         const results: Results[] = [];
         for (const statement of statements) {
           // A statement carrying `blob` is a `COPY … FROM '/dev/blob'` bulk load: its bytes become the
@@ -3653,7 +3653,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
             await tx.query(
               statement.sql,
               statement.params as unknown[] | undefined,
-              toPgliteQueryOptions(options, statement.blob),
+              toPgwasmQueryOptions(options, statement.blob),
             ),
           );
         }
@@ -3681,7 +3681,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     groupReady: groupReadyForTable,
     hydratingTablesFor,
     // The live-rows seam, now delegated to the shared `LiveQueryManager` (ADR-0040 decision 6) — identical
-    // contract to the pre-adoption inline `pglite.live.query` seam, but with dedup of identical concurrent
+    // contract to the pre-adoption inline `pgwasm.live.query` seam, but with dedup of identical concurrent
     // subscriptions, keep-alive (`keepAliveMs`), and awaited teardown for free. The manager delivers a diff
     // stream (`deliverInitial` + `deliverDiff`); we fold it back into FULL ordered row arrays with a
     // per-subscription `LiveRowsMaterializer` (the SAME piece `attachSyncClient` uses tab-side), so the
@@ -3766,7 +3766,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       return lifecycleSlot.run("exportStore", () =>
         performStoreExport(
           {
-            pgwasm: pglite,
+            pgwasm,
             readMutationStats: () => mutationRuntime.readMutationStats(),
             ...(options.storePath != null ? { storePath: options.storePath } : {}),
           },
@@ -3777,14 +3777,14 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
     exportDiagnostics: async (exportOptions) => {
       // Same lifecycle discipline as `exportStore` (ADR-0035): await engine-ready first (wait out a boot
       // rather than reject during it), THEN take the single slot so a concurrent export/lifecycle op is
-      // refused with a typed busy error. The diagnostic dump runs the live datadir dump on `pglite`, then
+      // refused with a typed busy error. The diagnostic dump runs the live datadir dump on `pgwasm`, then
       // clones it in memory — the live engine every reference here holds is never closed (the addendum's
       // whole reason for the throwaway clone over the abandoned suspend/reopen seam).
       await ready;
       return lifecycleSlot.run("exportDiagnostics", () =>
         performDiagnosticExport(
           {
-            pgwasm: pglite,
+            pgwasm,
             readMutationStats: () => mutationRuntime.readMutationStats(),
             ...(options.storePath != null ? { storePath: options.storePath } : {}),
           },
@@ -3803,7 +3803,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
       return lifecycleSlot.run("exportData", () =>
         performDataExport(
           {
-            pgwasm: pglite,
+            pgwasm,
             readMutationStats: () => mutationRuntime.readMutationStats(),
             flush: () => mutationRuntime.flush(),
             syncedTableNames: collectDataExportSyncedTableNames(options.registry),
@@ -3818,12 +3818,12 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   };
 
   // Wire the mutation-status API over this client's shared seams (slice 4): its live-rows seam (over
-  // `pglite.live` via the manager) and its one-shot `pglite.query`. The worker facade wires the SAME factory
+  // `pgwasm.live` via the manager) and its one-shot `pgwasm.query`. The worker facade wires the SAME factory
   // over the bridge, so `client.mutations` behaves identically in both modes.
   client.mutations = createMutationsApi({
     registry: options.registry,
     subscribeLiveRows: client.subscribeLiveRows,
-    query: (sql, params) => pglite.query<Record<string, unknown>>(sql, params),
+    query: (sql, params) => pgwasm.query<Record<string, unknown>>(sql, params),
   });
 
   // ─── ADR-0049 step 11c: FRESH/RESTORE commitment barrier — the LOCAL-INIT MILESTONE, PRE-EXPOSE ──────────
@@ -3841,7 +3841,7 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
   // `openOwnedStore`, so the fresh flag is necessarily false whenever the gate ran.
   if (adoptedCommitmentGate) commitmentBarrierPending = await adoptedCommitmentGate;
   if (commitmentBarrierPending) {
-    await runFreshCommitmentBarrier(fallbackStorePath, resolveEngineStrictSync(pglite));
+    await runFreshCommitmentBarrier(fallbackStorePath, resolveEngineStrictSync(pgwasm));
   }
 
   // ─── Local-read core complete → resolve `localReadReady`, then run the write/sync tail in the background ──
@@ -3911,7 +3911,7 @@ function allGroupSubscriptionKeys<TRegistry extends SyncTableRegistry>(registry:
   return [...new Set(keys)];
 }
 
-async function resetSubscriptionsIfRequested(pglite: PgwasmClient, keys: string[] | undefined) {
+async function resetSubscriptionsIfRequested(pgwasm: PgwasmClient, keys: string[] | undefined) {
   if (!keys || keys.length === 0) {
     return;
   }
@@ -3925,7 +3925,7 @@ async function resetSubscriptionsIfRequested(pglite: PgwasmClient, keys: string[
   // No migrate here: boot provisions the metadata relations unconditionally, before this can run.
   await Promise.all(
     uniqueKeys.map((key) =>
-      deleteSubscriptionState({ pg: pglite, metadataSchema: DEFAULT_METADATA_SCHEMA, subscriptionKey: key }),
+      deleteSubscriptionState({ pg: pgwasm, metadataSchema: DEFAULT_METADATA_SCHEMA, subscriptionKey: key }),
     ),
   );
 }

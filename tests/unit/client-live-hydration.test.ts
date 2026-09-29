@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun
 // `hydrated` promise now spans EVERY referenced consistency group — eager AND lazy — that is not yet
 // caught up at subscribe time, with the same rows-before-signal ordering the lazy path already had. Cached
 // rows paint immediately; a steady-state (all-ready) subscription builds no promise and pays no extra
-// refresh; a sync-disabled client never gates. Driven over a fully controllable fake `pglite.live` +
+// refresh; a sync-disabled client never gates. Driven over a fully controllable fake `pgwasm.live` +
 // startCircuitsSync stub (no real pgwasm/network), mirroring `client-lazy-facade.test.ts`.
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
@@ -28,7 +28,7 @@ function hydrationRegistry(): SyncTableRegistry {
   } as unknown as SyncTableRegistry;
 }
 
-// ─── Controllable fake `pglite.live` ────────────────────────────────────────────────────────────────
+// ─── Controllable fake `pgwasm.live` ────────────────────────────────────────────────────────────────
 type LiveListener = (results: { rows: Record<string, unknown>[] }) => void;
 class FakeLiveQuery {
   readonly initialResults: { rows: Record<string, unknown>[] };

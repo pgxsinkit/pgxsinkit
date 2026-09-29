@@ -79,14 +79,14 @@ select {
   flex-direction: column;
 }
 
-.repl-panel .PGliteRepl-root {
+.repl-panel .pgwasm-repl-root {
   flex: 1;
   min-height: 400px;
   display: flex;
   flex-direction: column;
 }
 
-.repl-panel .PGliteRepl-output {
+.repl-panel .pgwasm-repl-output {
   flex: 1;
   min-height: 0;
   max-height: 70%;

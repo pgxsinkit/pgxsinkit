@@ -163,7 +163,7 @@ function defaultKey(entities: Entity[]): string {
  * A schema map of the local store, shown under the REPL on the Database tab. It lists the "main" synced
  * tables and, for whichever one is selected, the utility objects pgxsinkit keeps alongside it — the
  * optimistic overlay, the mutation journal + its sequence, the read-model / sync-state views, and the
- * reconcile trigger. Names and row counts come from the live PGlite catalog so it reflects what is
+ * reconcile trigger. Names and row counts come from the live pgwasm catalog so it reflects what is
  * actually provisioned for this identity, not a hard-coded list.
  */
 export function SchemaOverview() {

@@ -99,14 +99,14 @@ void (async () => {
   void boardStoreRegistry.destroyObsoleteStores();
 
   // Eager mapped-store open (board cold-boot optimisation B, reload path). On a signed-in reload the
-  // user's PGlite store open otherwise doesn't start until BoardClientProvider mounts — its ~1.9s initdb
+  // user's pgwasm store open otherwise doesn't start until BoardClientProvider mounts — its ~1.9s initdb
   // then sits fully on the critical path. Kicking it here (before React render) starts the
   // open in parallel with React mount / auth restore / route transition; openUserStore's per-userId memo
   // makes the provider's later call adopt this in-flight open. Guarded internally: a fresh anonymous
   // visitor has no session → this no-ops, and any failure is swallowed (never a boot dependency).
   void prewarmMappedStoreForSession();
 
-  // Note: deliberately no <React.StrictMode>. The board boots a single stateful PGlite/IndexedDB
+  // Note: deliberately no <React.StrictMode>. The board boots a single stateful pgwasm/IndexedDB
   // instance per identity (BoardClientProvider); StrictMode's dev-only double-invoke would open it
   // twice on the same store path. Lifecycle is managed explicitly via the provider's effect cleanup.
   ReactDOM.createRoot(document.getElementById("root")!).render(

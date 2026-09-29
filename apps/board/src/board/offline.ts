@@ -19,16 +19,16 @@ export interface OfflineControl {
  * immediate pass to flush the queue and reconcile.
  *
  * Scope note: this pauses the outbound path only. The inbound Electric subscription has no client-side
- * pause/resume seam (`stop()` closes PGlite), so the toggle is honestly "your edits queue locally and
+ * pause/resume seam (`stop()` closes pgwasm), so the toggle is honestly "your edits queue locally and
  * sync when you reconnect" rather than a full network cut. A first-class read-path pause is a toolkit
  * capability for later.
  */
 export function createOfflineControl(): OfflineControl {
   // A slow fallback cadence. Convergence is now event-driven — a local write requests a pass on enqueue
   // (client requestPass), and the real-time <table>_reconcile_on_sync trigger clears overlays on the
-  // Electric echo — so this interval only catches retries/recovery, not the happy path. Every PGlite
-  // query costs ~50ms of WASM overhead regardless of complexity, so a frequent poll is the dominant
-  // idle-CPU cost; at 15s a fully idle board is effectively quiet.
+  // Electric echo — so this interval only catches retries/recovery, not the happy path. Every engine
+  // query costs WASM overhead regardless of complexity (~50ms, measured before the pgwasm switch — ADR-0062),
+  // so a frequent poll is the dominant idle-CPU cost; at 15s a fully idle board is effectively quiet.
   const base = createBrowserConvergenceTrigger({ intervalMs: 15_000 });
   const listeners = new Set<() => void>();
   let online = true;

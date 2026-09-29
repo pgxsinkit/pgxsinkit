@@ -67,7 +67,7 @@ const startedTables = new Set<string>();
 // Captured from the mutation-runtime options so the mock `create` can drive ADR-0039 write-activation.
 let capturedOnOrdinaryEnqueue: ((tables: readonly string[]) => void) | undefined;
 
-// Minimal `pglite.live` so `subscribeLiveRows` (via the live-query manager) works in the mock harness.
+// Minimal `pgwasm.live` so `subscribeLiveRows` (via the live-query manager) works in the mock harness.
 type LiveListener = (results: { rows: Record<string, unknown>[] }) => void;
 class FakeLiveQuery {
   readonly initialResults = { rows: [] as Record<string, unknown>[] };

@@ -4,14 +4,14 @@ import type { SyncTableRegistry } from "@pgxsinkit/contracts";
 
 const destroyMock = mock(async (): Promise<void> => undefined);
 const createSyncClientMock = mock(
-  async (): Promise<{ pglite: { name: string }; ready: Promise<void>; destroy: () => Promise<void> }> => ({
-    pglite: { name: "perf-lab-db" },
+  async (): Promise<{ pgwasm: { name: string }; ready: Promise<void>; destroy: () => Promise<void> }> => ({
+    pgwasm: { name: "perf-lab-db" },
     ready: Promise.resolve(),
     destroy: destroyMock,
   }),
 );
 
-describe("perf-lab pglite loader", () => {
+describe("perf-lab pgwasm loader", () => {
   beforeAll(async () => {
     await mock.module("@pgxsinkit/client", () => ({
       createSyncClient: createSyncClientMock,

@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 // SQL with DIFFERENT `use` sets against a consistency group that is still catching up. The assertions: ONE
 // pgwasm registration is shared (dedup — `use` is excluded from the fingerprint), and EACH tab's hydration
 // flow settles independently with rows-before-`live-hydrated` on its own port. Uses the same fully-mocked
-// `pglite.live` + startCircuitsSync harness as `worker-live-hydration.test.ts` (no real pgwasm/network).
+// `pgwasm.live` + startCircuitsSync harness as `worker-live-hydration.test.ts` (no real pgwasm/network).
 
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 
@@ -20,7 +20,7 @@ const workerRegistry = {
   },
 } as unknown as SyncTableRegistry;
 
-// ─── Controllable fake `pglite.live`: one shared FakeLiveQuery, refresh fans to every subscribed listener ──
+// ─── Controllable fake `pgwasm.live`: one shared FakeLiveQuery, refresh fans to every subscribed listener ──
 type LiveListener = (results: { rows: Record<string, unknown>[] }) => void;
 class FakeLiveQuery {
   readonly initialResults: { rows: Record<string, unknown>[] };

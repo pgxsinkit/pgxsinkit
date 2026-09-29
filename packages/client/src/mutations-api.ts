@@ -4,7 +4,7 @@
 // journal — the O(writable-table) fan-out the proposal set out to remove.
 //
 // It is a FACTORY over the two seams BOTH client modes already share — `subscribeLiveRows` (in-process over
-// `pglite.live`; worker-attached over the bridge) and a one-shot `query` (in-process `pglite.query`;
+// `pgwasm.live`; worker-attached over the bridge) and a one-shot `query` (in-process `pgwasm.query`;
 // worker-attached the `rawQuery` RPC) — so the worker bridge needs ZERO protocol change. Every runtime query
 // is Drizzle-built over `getAllMutationsView` (tier ①); consumers never touch generated journal relation
 // names.
@@ -125,7 +125,7 @@ export interface MutationsApiDeps<TRegistry extends SyncTableRegistry> {
     input: { sql: string; params: readonly unknown[] },
     onRows: (rows: TRow[]) => void,
   ) => Promise<{ initialRows: TRow[]; unsubscribe: () => void }>;
-  /** One-shot query seam (in-process `pglite.query`; worker-attached the `rawQuery` RPC). Rows are UNMAPPED. */
+  /** One-shot query seam (in-process `pgwasm.query`; worker-attached the `rawQuery` RPC). Rows are UNMAPPED. */
   query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
 }
 

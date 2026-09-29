@@ -180,14 +180,14 @@ describe("board spare-store registry", () => {
     expect(harness.deletedDatabases).not.toContain(idbNameForStore("spare-1"));
   });
 
-  it("memoises per userId: two opens for the same user share one create and the same pglite promise", async () => {
+  it("memoises per userId: two opens for the same user share one create and the same pgwasm promise", async () => {
     const harness = makeHarness({ initial: { version: 1, map: { "user-1": "store-1" } } });
     const registry = createStoreRegistry(harness.adapters);
 
     const a = await registry.openUserStore("user-1");
     const b = await registry.openUserStore("user-1");
 
-    // Same result object (memoised promise), so the same in-flight pglite — never a second instance on
+    // Same result object (memoised promise), so the same in-flight pgwasm — never a second instance on
     // the same IndexedDB store.
     expect(a).toBe(b);
     expect(a.pgwasm).toBe(b.pgwasm);

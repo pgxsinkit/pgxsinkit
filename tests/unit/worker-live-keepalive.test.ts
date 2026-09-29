@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 // Real-pgwasm coverage for bounded zero-subscriber KEEP-ALIVE over the worker bridge (ADR-0040 Slice 4). A
 // real in-memory engine behind `defineSyncWorker` configured with a generous `defaultKeepAliveMs`, driven by
-// an `attachSyncClient` tab over a bun `MessageChannel`. `pglite.live` is wrapped to COUNT registrations
+// an `attachSyncClient` tab over a bun `MessageChannel`. `pgwasm.live` is wrapped to COUNT registrations
 // (injected timers aren't available across the bridge, so the assertion is on registration COUNT, not
 // wall-clock): unsubscribe then resubscribe the same SQL reuses the retained registration (one registration
 // total), and `host.close()` disposes cleanly with a retained entry present (its timer cancelled — no hang).

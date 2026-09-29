@@ -1,16 +1,17 @@
-# PGlite filesystem operation inventory
+# pgwasm filesystem operation inventory
 
 This is the Phase 1 gate for the store format. It inventories the pinned
 `BaseFilesystem` surface before the closed transaction-record union is defined.
-The source of truth is `@electric-sql/pglite/basefs` as provided by the pinned
-`@pgxsinkit/pglite` fork.
+The source of truth is pgwasm's `BaseFilesystem`
+(`packages/pgwasm/src/fs/base-filesystem.ts`).
 
 The Emscripten adapter performs several translations that are part of the host
 contract:
 
 - `getattr` and `lookup` call `lstat`;
-- `setattr` may call `chmod`, `truncate`, and `utimes`; the pinned host currently
-  calls `truncate` twice when a size is present, so truncation must be idempotent;
+- `setattr` may call `chmod`, `truncate`, and `utimes`; truncation must be
+  idempotent (the host before the pgwasm switch called `truncate` twice when a
+  size was present);
 - `mknod` calls `mkdir` for directories and `writeFile(path, "")` for files;
 - stream `open` calls `open(path)` without forwarding flags or mode;
 - duplicated streams share one descriptor and close it when the shared refcount

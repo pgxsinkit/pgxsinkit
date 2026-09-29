@@ -13,7 +13,7 @@ import { quiesceThenDestroyStore } from "./store-registry-default";
 
 // Board-local "Delete local data" (login screen affordance). Wipes every local store the board holds on
 // THIS browser profile so a demo visitor can start clean without digging into browser settings — the
-// PGlite store artifacts (OPFS directory + sentinel + meta + idb) and the board's own localStorage bindings.
+// pgwasm store artifacts (OPFS directory + sentinel + meta + idb) and the board's own localStorage bindings.
 //
 // This module is the DOM wiring only: it binds real globalThis surfaces (localStorage / IndexedDB /
 // navigator.locks / the store-registry-default quiesce-then-destroy) into {@link WipeSurfaces} and drives the

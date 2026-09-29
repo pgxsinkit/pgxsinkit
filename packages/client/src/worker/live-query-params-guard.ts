@@ -1,7 +1,7 @@
-// A defensive guard against PGlite upstream bug https://github.com/electric-sql/pglite/issues/1055 on the
-// live-query path. WHY this exists:
+// A defensive guard against upstream bug https://github.com/electric-sql/pglite/issues/1055 on the
+// live-query path, which the `live` extension carried until the pgwasm switch (ADR-0062). WHY this exists:
 //
-// PGlite 0.5.4's `live.query` / `live.incrementalQuery` inline bound params into a `CREATE TEMP VIEW`
+// The inherited `live.query` / `live.incrementalQuery` inline bound params into a `CREATE TEMP VIEW`
 // (via `formatQuery`) WHENEVER `params.length > 0`. That inlining rewrites every `$N` placeholder with
 // `sql.replace(/\$([0-9]+)/g, (_, n) => "%" + n + "L")` — emitting `%NL`, which is Postgres `format()`'s
 // "pad to width N, consume the NEXT argument sequentially" directive, NOT the positional `%N$L` it means to
@@ -9,17 +9,18 @@
 //   - out-of-order placeholders (`… $2 … $1 …`) silently bind params in TEXTUAL order → wrong rows;
 //   - a repeated placeholder (`$1 … $1`) throws `too few arguments for format()`;
 //   - a skipped placeholder silently mis-binds.
-// The ONLY input shape under which pgwasm's broken inlining is still correct: the placeholders, read in
+// The ONLY input shape under which that broken inlining is still correct: the placeholders, read in
 // textual order, are exactly `$1, $2, …, $n` (n = params.length) — each appearing exactly once, strictly
 // ascending. Drizzle-compiled SQL always satisfies this (its serializer numbers params in the same
 // left-to-right pass that emits them); hand-written raw SQL may not.
 //
 // So this guard fails LOUDLY at the client boundary for any other shape, turning a silent wrong-rows /
-// cryptic-`format()` failure into an actionable error naming the upstream bug. It can be DELETED once
-// transcrobes/pgxsinkit pin a pgwasm release whose `formatQuery` emits the positional `%N$L`.
+// cryptic-`format()` failure into an actionable error naming the upstream bug. pgwasm's own `formatQuery`
+// emits the positional `%N$L` (tests/unit/pgwasm-live-format-query.test.ts), so the guard no longer
+// protects pgwasm itself; whether to delete it is an open decision.
 
 /**
- * Throw if `sql` + `params` would hit pgwasm bug #1055's broken param inlining (see the module header).
+ * Throw if `sql` + `params` would hit bug #1055's broken param inlining (see the module header).
  *
  * `params.length === 0` returns immediately: pgwasm skips `formatQuery` entirely in that case, so any `$N`
  * tokens are Postgres's own concern, not this guard's. Otherwise the SQL is scanned with the SAME regex
@@ -46,7 +47,7 @@ export function assertLiveQueryParamsSafe(sql: string, params: readonly unknown[
 
   const found = numbers.length === 0 ? "(none)" : numbers.map((n) => `$${n}`).join(", ");
   throw new Error(
-    `[pgxsinkit] live query hits PGlite bug #1055 ` +
+    `[pgxsinkit] live query hits upstream bug #1055 ` +
       `(https://github.com/electric-sql/pglite/issues/1055): its live-query param inlining binds $N ` +
       `placeholders SEQUENTIALLY (in textual order), not positionally, so anything but a strictly ` +
       `ascending $1..$n each used once silently mis-binds or throws. Found placeholders [${found}] for ` +

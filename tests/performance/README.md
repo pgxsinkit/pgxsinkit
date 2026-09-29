@@ -114,7 +114,7 @@ Concurrent test matrix:
 - `PGXSINKIT_PERF_MATRIX_PRESETS=smoke PGXSINKIT_PERF_MATRIX_SCENARIOS=mixed-small-bursts bun run test:performance:concurrent:matrix` runs a single matrix cell through the matrix runner
 - `PGXSINKIT_PERF_MATRIX_FAIL_FAST=true bun run test:performance:concurrent:matrix` stops on the first failing matrix case instead of collecting all failures
 
-The browser lab is intended for browser-based full-cycle testing of the client runtime under large synced datasets. It ships with one-click presets for local-100k, wide-schema, and mixed-pressure runs. In the default live mode it reprovisions a dedicated perf-lab write server for the active synthetic registry, seeds rows into PostgreSQL, waits for those rows to sync into browser PGlite down the read path, stages pending mutations through the real client runtime, flushes them upstream, and waits for the read-path echo to clear overlay state again.
+The browser lab is intended for browser-based full-cycle testing of the client runtime under large synced datasets. It ships with one-click presets for local-100k, wide-schema, and mixed-pressure runs. In the default live mode it reprovisions a dedicated perf-lab write server for the active synthetic registry, seeds rows into PostgreSQL, waits for those rows to sync into browser pgwasm down the read path, stages pending mutations through the real client runtime, flushes them upstream, and waits for the read-path echo to clear overlay state again.
 
 Set `PGXSINKIT_PERF_MUTATION_BATCH_SIZE` before `bun run perf:lab` to change how many local mutations the browser lab stages per `client.mutate.batch(...)` call. The default is `1`, which keeps one-mutation-at-a-time behavior.
 

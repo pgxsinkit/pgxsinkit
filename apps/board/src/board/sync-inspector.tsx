@@ -184,9 +184,9 @@ function shortKey(entityKey: Record<string, string>): string {
 /**
  * Which store backend this boot actually opened, for the Storage readout. `storageBackend` is
  * AUTHORITATIVE whenever the report carries it (the client derives it at its own mint seam). The board
- * does not always get one: it brings its OWN PGlite — the store registry mints the spare — and the client
+ * does not always get one: it brings its OWN pgwasm — the store registry mints the spare — and the client
  * omits `storageBackend` for a BYO instance whose backend it cannot derive (docs/mobile.md, "Device-verified
- * results": on the board's BYO-PGlite mint the client omits `storageBackend` from the boot report).
+ * results": on the board's BYO-pgwasm mint the client omits `storageBackend` from the boot report).
  *
  * For those boots the ENGINE HOME identifies it instead, because a home is only ever chosen for storage
  * reasons (ADR-0049 decision 12): a tab-elected dedicated worker exists for exactly one purpose — to hold

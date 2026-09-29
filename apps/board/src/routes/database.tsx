@@ -12,14 +12,14 @@ import { useIsTouch } from "../lib/use-touch";
 const Repl = lazy(() => import("@pgxsinkit/pgwasm-repl").then((module) => ({ default: module.Repl })));
 
 /**
- * A SQL REPL over the signed-in identity's LOCAL PGlite store. What you can query here is exactly what the
+ * A SQL REPL over the signed-in identity's LOCAL pgwasm store. What you can query here is exactly what the
  * read path synced to you (RLS-scoped via `board-sync`), so it doubles as a window onto the read-path
  * scoping the rest of the demo asserts. The REPL is fed the client's `rawQuery`/`rawExec` inspection
  * surface via `replAdapter` (not `client.pgwasm`, which is unavailable in worker mode) — in worker mode
  * that routes each statement through the sync bridge. The REPL follows the OS colour scheme to match the
  * board's `defaultColorScheme="auto"`.
  *
- * Note: statements run raw against PGlite — a write here bypasses the mutation journal / optimistic
+ * Note: statements run raw against pgwasm — a write here bypasses the mutation journal / optimistic
  * overlay, so it stays local and will not converge. It's an inspection tool, not a write path.
  */
 export function DatabaseRoute() {
@@ -54,8 +54,8 @@ export function DatabaseRoute() {
             </Center>
           }
         >
-          {/* The REPL prop wants a full `PGlite`, but drives only `.query`/`.exec`; the adapter satisfies both
-              and routes through the bridge in worker mode. Minimal structural cast at the seam. */}
+          {/* The REPL takes any `ReplDatabase` (`.query`/`.exec`); the adapter satisfies it and routes through
+              the bridge in worker mode. */}
           <Repl pg={replAdapter(client)} theme="auto" border showTime />
         </Suspense>
       )}

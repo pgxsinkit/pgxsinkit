@@ -632,19 +632,19 @@ export function App() {
           className={`tab-btn${tab === "repl" ? " tab-btn--active" : ""}`}
           onClick={() => setTab("repl")}
         >
-          PGlite REPL
+          pgwasm REPL
         </button>
       </nav>
 
       <section className="repl-panel" style={tab === "repl" ? undefined : { display: "none" }}>
-        {replProxy ? <Repl pg={replProxy} border theme="auto" showTime /> : <p>Prepare the lab to inspect PGlite.</p>}
+        {replProxy ? <Repl pg={replProxy} border theme="auto" showTime /> : <p>Prepare the lab to inspect pgwasm.</p>}
       </section>
 
       <div style={tab === "lab" ? undefined : { display: "none" }}>
         <section className="hero">
           <p className="eyebrow">Browser Perf Lab</p>
           <p className="lede">
-            This lab exercises the real browser PGlite client against a dedicated perf-lab backend, synthetic registry
+            This lab exercises the real browser pgwasm client against a dedicated perf-lab backend, synthetic registry
             topologies, and browser-local read models so large-shape lifecycle changes can be measured without leaving
             the app.
           </p>
@@ -876,7 +876,7 @@ export function App() {
                 value={formatDuration(metrics.convergenceSweepMs)}
                 detail={
                   connection.mode === "live" && connection.syncEnabled
-                    ? "Ack replay from Electric into PGlite and overlay cleanup"
+                    ? "Ack replay from Electric into pgwasm and overlay cleanup"
                     : "Disabled unless live mode and sync echo are both enabled"
                 }
               />
@@ -1374,7 +1374,7 @@ async function waitForSyncedSeed(
     const currentRowCount = Object.values(rowCounts).reduce((total, value) => total + value, 0);
 
     onProgress({
-      label: "Waiting for server seed to sync into PGlite across hot tables",
+      label: "Waiting for server seed to sync into pgwasm across hot tables",
       completed: Math.min(currentRowCount, totalRows),
       total: totalRows,
     });
@@ -1573,7 +1573,7 @@ function describeConnectionNote(connection: ConnectionInput) {
   }
 
   if (connection.syncEnabled) {
-    return "The default live path seeds the dedicated backend, syncs those rows into PGlite, flushes local mutations upstream, and waits for the Electric echo to clear overlay state again.";
+    return "The default live path seeds the dedicated backend, syncs those rows into pgwasm, flushes local mutations upstream, and waits for the Electric echo to clear overlay state again.";
   }
 
   return "Live mode without Electric echo still talks to the dedicated perf-lab backend, but it stops before the full downstream convergence phase.";

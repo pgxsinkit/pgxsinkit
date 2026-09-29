@@ -23,7 +23,7 @@ const demoOutDir = process.env["BOARD_DEMO_OUTDIR"];
 // constructible on a cross-origin-ISOLATED page, and isolation is a property of the SERVED HEADERS, not of
 // the app: `crossOriginIsolated` is false without them, in the document AND in the SharedWorker (a shared
 // worker takes its embedder policy from its OWN script response, so serving these on every response — which
-// is what `headers` does — is what makes the engine home isolated too). The default board (PGlite, no
+// is what `headers` does — is what makes the engine home isolated too). The default board (pgwasm, no
 // threads) neither needs nor wants them, so this stays off unless asked for: COEP `require-corp` makes every
 // NO-CORS cross-origin subresource fail closed. The board loads none — its own assets are same-origin and
 // its backend traffic is `fetch` with CORS, which COEP does not touch — but a store-factory module served

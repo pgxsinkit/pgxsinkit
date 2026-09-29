@@ -32,7 +32,7 @@ Browser facts, from primary sources:
 ### Out of scope
 
 - **Browsers without `SharedWorker`** (notably Samsung Internet). The in-process
-  tab-side PGlite fallback remains in the code and keeps whatever behavior it has,
+  tab-side pgwasm fallback remains in the code and keeps whatever behavior it has,
   but it is **not a supported mobile mode**: no mobile work targets it, no lane
   asserts it, no UX messaging references it. (In main-thread fallback the OPFS
   backend is structurally unavailable anyway — `FileSystemSyncAccessHandle` is
@@ -172,7 +172,7 @@ the reads — driver kept at `tmp/agents/cdp-eval.ts`), reading each boot's
   _post-boot_ half is now shipped too: the Sync Inspector's **Storage readout**
   shows the engaged engine home, backend, and boot kind/duration straight off
   each boot's report. Where the report omits `storageBackend` (the board's
-  BYO-PGlite mint — the client can't derive a backend it didn't mint), the
+  BYO-pgwasm mint — the client can't derive a backend it didn't mint), the
   readout derives `opfs-repacked` from the engine home and labels it `(derived)`:
   an elected home exists only to hold the OPFS handles, and a shared-worker home
   without a declared backend means the probe granted them there. Deriving it

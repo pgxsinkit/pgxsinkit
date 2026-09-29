@@ -9,8 +9,8 @@ consumer appears that cannot use the spare-store pattern and needs the overlap i
 
 ## Problem / evidence
 
-On a cold boot, the initial shape catch-up cannot start until the local PGlite store exists,
-because the sync engine is a **PGlite extension**: `PGlite.create(dataDir, { extensions: {
+On a cold boot, the initial shape catch-up cannot start until the local store exists,
+because the sync engine is a **database extension**: the store's `create(dataDir, { extensions: {
 electric: … } })` runs the extension setup as part of create, and `syncShapesToTables` — with the
 `new MultiShapeStream(...)` that triggers the first network fetch — is a method on that namespace.
 The two cold-boot rocks (store create ≈ 1.9s post-WASM-warm; catch-up ≈ 1.0–2.9s depending on
@@ -27,7 +27,7 @@ Recorded from the implementation attempt so a reopen does not re-derive it:
 
 - (a) a new pg-independent `packages/client/src/sync/prefetch.ts` that buckets the eager groups and
   constructs `MultiShapeStream` + `ShapeInbox` + a buffering subscriber, starting the network
-  before `PGlite.create` resolves;
+  before the store's `create` resolves;
 - (b) extract the ingest loop (the pure-memory part of the subscribe callback) into a shared
   function — it currently intertwines ingest with the DB-bound `enqueueCommit()`;
 - (c) an **adoption** branch in `syncShapesToTables` that reuses the prefetched
@@ -35,7 +35,7 @@ Recorded from the implementation attempt so a reopen does not re-derive it:
   re-subscribe, because the Electric client's `#publish` delivers only to current subscribers with
   **no replay buffer**, so swapping subscribers loses the already-fetched catch-up;
 - (d) thread the prefetch handle through `startConfiguredSync`/`startGroupSync`;
-- (e) gate on a provably-cold store only: no `pgliteInstance`, `idb://` scheme, and
+- (e) gate on a provably-cold store only: no `pgwasmInstance`, `idb://` scheme, and
   `indexedDB.databases()` shows no `/pgwasm/<path>` entry — anything else takes the exact
   sequential path.
 

@@ -211,19 +211,19 @@ describe("app-schema prepare hooks run IN THE WORKER (consumer app-level schema)
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
-      prepareLocalDbBeforeSchema: async (pglite) => {
+      prepareLocalDbBeforeSchema: async (pgwasm) => {
         calls.push("before");
         // Registry-derived local table `todos` does NOT exist yet at this point.
-        const probe = await pglite.query<{ reg: string | null }>("select to_regclass('public.todos')::text as reg");
+        const probe = await pgwasm.query<{ reg: string | null }>("select to_regclass('public.todos')::text as reg");
         syncedTableBeforeSchema = probe.rows[0]?.reg ?? null;
         // App-level DDL that must precede the registry tables — assert it survives to the attached client.
-        await pglite.exec("create table app_notes (id int primary key, note text not null)");
-        await pglite.exec("insert into app_notes (id, note) values (1, 'boot note')");
+        await pgwasm.exec("create table app_notes (id int primary key, note text not null)");
+        await pgwasm.exec("insert into app_notes (id, note) values (1, 'boot note')");
       },
-      prepareLocalDbAfterSchema: async (pglite) => {
+      prepareLocalDbAfterSchema: async (pgwasm) => {
         calls.push("after");
         // By now the registry schema exec has run, so the synced local table `todos` exists.
-        const probe = await pglite.query<{ reg: string | null }>("select to_regclass('public.todos')::text as reg");
+        const probe = await pgwasm.query<{ reg: string | null }>("select to_regclass('public.todos')::text as reg");
         syncedTableAfterSchema = probe.rows[0]?.reg ?? null;
       },
     });
@@ -350,11 +350,11 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
       {
         get: () => {
           poisonHits++;
-          throw new Error("boot poison: pglite unavailable");
+          throw new Error("boot poison: pgwasm unavailable");
         },
         set: () => {
           poisonHits++;
-          throw new Error("boot poison: pglite unavailable");
+          throw new Error("boot poison: pgwasm unavailable");
         },
       },
     ) as unknown as PgwasmClient;
@@ -503,7 +503,7 @@ describe("boot failure rejects the attach (ADR-0032 FIX 1)", () => {
 });
 
 describe("write RPC round trip (ADR-0032 decision 4)", () => {
-  it("a create via the attach client lands in the worker's PGlite and resolves", async () => {
+  it("a create via the attach client lands in the worker's pgwasm and resolves", async () => {
     const host = await makeHost();
     const { client } = await attach(host);
     await client.ready;

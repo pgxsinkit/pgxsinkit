@@ -22,7 +22,7 @@ if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
   (globalThis as { __pgxsinkitDebug?: boolean }).__pgxsinkitDebug = true;
 }
 
-// The board's SharedWorker entry (ADR-0032 S3). ONE sync engine per (user, store) runs here — PGlite, the
+// The board's SharedWorker entry (ADR-0032 S3). ONE sync engine per (user, store) runs here — pgwasm, the
 // schema, the mutation journal, the Electric shape streams and the convergence loop — fanned out to every
 // tab on the same store over the bridge. Vite bundles this as a worker chunk when the app does
 // `new SharedWorker(new URL("./board-sync.worker.ts", import.meta.url), { name })` (see store-registry-default).
@@ -36,7 +36,7 @@ if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
 //
 // `x-region` stays WRITE-ONLY (writeRequestHeaders) exactly as in-process: the write function is DB-bound
 // and wins from the regional pin, while the read path is meant to be CDN-fronted. The worker
-// loads PGlite's own boot assets on `create`; those hit the same-origin HTTP cache the login screen's
+// loads pgwasm's own boot assets on `create`; those hit the same-origin HTTP cache the login screen's
 // `warmCBuildAssets` already primed (the tab warm is pure HTTP-cache priming in worker mode).
 
 // The local-store seam (./store-factory): with `VITE_BOARD_STORE_FACTORY` set to a module URL, THAT module

@@ -67,7 +67,7 @@ export interface BootReport {
   /** Boot start → `onInitialSync` (all eager groups caught up). */
   totalMs: number;
   /**
-   * Boot start → `localReadReady` resolved (ADR-0041): PGlite open, durable schema compatible, store-version
+   * Boot start → `localReadReady` resolved (ADR-0041): pgwasm open, durable schema compatible, store-version
    * reconcile complete, and the drizzle read facade built — cached reads are safe with ZERO network. `null`
    * when the boot rejected before the stage. Additive field; `reportVersion` stays `1`.
    */

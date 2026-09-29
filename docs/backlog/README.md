@@ -19,7 +19,7 @@ Rules:
 ## Items
 
 - [0001 — Stale-handle retry storm through the CDN chain](0001-stale-handle-retry-storm.md) — parked
-- [0002 — Move the client onto PGliteWorker](0002-pglite-worker.md) — promoted → adr/0032
+- [0002 — Move the client onto PGliteWorker](0002-client-worker.md) — promoted → adr/0032
 - [0003 — Cold-store shape prefetch overlap](0003-cold-store-shape-prefetch-overlap.md) — promoted → adr/0032
 - [0004 — Registry-driven data-subject export (GDPR)](0004-registry-driven-data-subject-export.md) — candidate
 - [0005 — Opt-in keyed incremental live queries for very large lists](0005-incremental-live-queries-for-large-lists.md) — parked

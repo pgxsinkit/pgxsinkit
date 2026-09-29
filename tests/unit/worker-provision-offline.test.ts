@@ -175,7 +175,7 @@ class FakeAuthorityIdb {
   }
 
   /** Seed pgwasm's idb database for a store, as a store minted on the idb backend leaves it. */
-  seedPgliteDb(storePath: string): void {
+  seedPgwasmDb(storePath: string): void {
     this.pgwasmDatabases.add(storeIndexedDbDatabaseName(storePath));
   }
 
@@ -268,7 +268,7 @@ async function sentinelPresent(root: FakeOpfsDir, storePath: string): Promise<bo
 }
 
 /** A fresh prepopulated memory pgwasm (skips the ~2s initdb) as the raw store the worker would `create`. */
-async function makePglite(): Promise<PgwasmClient> {
+async function makePgwasm(): Promise<PgwasmClient> {
   const pg = await createPgwasm({ build: cBuild, loadDataDir: await prepopulatedDataDir(), extensions: { live } });
   return pg as unknown as PgwasmClient;
 }
@@ -358,7 +358,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async () => {
         creates += 1;
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -403,7 +403,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       ...testStoreAcknowledgment(),
       createStore: async () => {
         order.push("create-replacement");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -436,7 +436,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -460,7 +460,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
     const order: string[] = [];
     const idb = new FakeAuthorityIdb(order);
     // No meta record, a pristine commitment namespace — but pgwasm's idb database for this store EXISTS.
-    idb.seedPgliteDb(storePath);
+    idb.seedPgwasmDb(storePath);
     const root = new FakeOpfsDir(order);
     installGrantedScope(idb, root);
 
@@ -473,7 +473,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -513,7 +513,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -548,7 +548,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -580,7 +580,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -613,7 +613,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       ...testStoreAcknowledgment(),
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -644,7 +644,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       ...testStoreAcknowledgment(),
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -679,7 +679,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       ...testStoreAcknowledgment(),
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -721,7 +721,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       ...testStoreAcknowledgment(),
       createStore: async () => {
         order.push("create");
-        return makePglite();
+        return makePgwasm();
       },
     });
     hosts.push(host);
@@ -749,7 +749,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async (storePath) => {
         created.push(storePath);
-        instance = await makePglite();
+        instance = await makePgwasm();
         return instance;
       },
     });
@@ -827,7 +827,7 @@ describe("provision → adopt (ADR-0032 decision 5)", () => {
       convergenceIntervalMs: 10_000_000,
       createStore: async (storePath) => {
         created.push(storePath);
-        instance = await makePglite();
+        instance = await makePgwasm();
         return instance;
       },
     });
@@ -868,7 +868,7 @@ describe("role-selected registry (ADR-0032 S3, config.role → resolveRegistry)"
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A memory precreated store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPgwasm: makePglite(),
+      precreatedPgwasm: makePgwasm(),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -916,7 +916,7 @@ describe("role-selected registry (ADR-0032 S3, config.role → resolveRegistry)"
       streamBaseUrl: "http://127.0.0.1:1/v1/stream",
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       ...testStoreAcknowledgment(),
-      precreatedPgwasm: makePglite(),
+      precreatedPgwasm: makePgwasm(),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -949,7 +949,7 @@ describe("Offline toggle over the bridge (ADR-0032 S3, set-online)", () => {
       batchWriteUrl: "http://127.0.0.1:1/api/mutations",
       // A memory precreated store (test only) — acknowledge it past the BYO refusal (ADR-0036).
       ...testStoreAcknowledgment(),
-      precreatedPgwasm: makePglite(),
+      precreatedPgwasm: makePgwasm(),
       syncEnabled: false,
       installGlobal: false,
       convergenceIntervalMs: 10_000_000,
@@ -1006,14 +1006,14 @@ describe("the DECLARED store engine (ADR-0050 addendum 2026-09-08)", () => {
       // prevent.
       createStore: async () => {
         order.push("built-in");
-        return makePglite();
+        return makePgwasm();
       },
       loadStoreEngineModule: async (url) => {
         imported.push(url);
         return {
           default: async (path: string) => {
             order.push(`declared:${path}`);
-            return makePglite();
+            return makePgwasm();
           },
         };
       },
@@ -1046,7 +1046,7 @@ describe("the DECLARED store engine (ADR-0050 addendum 2026-09-08)", () => {
       ...testStoreAcknowledgment(),
       createStore: async () => {
         order.push("built-in");
-        return makePglite();
+        return makePgwasm();
       },
       loadStoreEngineModule: async () => ({ notAFactory: 1 }),
     });
@@ -1082,7 +1082,7 @@ describe("the DECLARED store engine (ADR-0050 addendum 2026-09-08)", () => {
       ...testStoreAcknowledgment(),
       createStore: async () => {
         order.push("built-in");
-        return makePglite();
+        return makePgwasm();
       },
       loadStoreEngineModule: async () => {
         throw new Error("the loader must not run for an undeclared engine");

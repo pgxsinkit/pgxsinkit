@@ -111,7 +111,7 @@ const ISSUE_TITLES = [
   "Shape handle expiry not resumed cleanly",
   "Member fan-out misses a co-member on add",
   "Cross-team move leaks into the source board",
-  "PGlite cold start exceeds budget",
+  "pgwasm cold start exceeds budget",
   "Convergence dot stuck on a quarantined row",
   "Chat backlog renders out of order",
   "Avatar colors collide for two members",

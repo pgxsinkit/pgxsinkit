@@ -108,9 +108,10 @@ Raw `useLiveRows(sql, { params })` does **no** remap — its rows carry the raw 
 ad-hoc SQL where you control the column names; prefer `useLiveDrizzleRows` for typed reads. The Drizzle
 builder is rebuilt when the `deps` array changes (same contract as `useEffect`). When you pass `params`,
 the positional `$N` placeholders in the raw SQL must be strictly sequential `$1..$n`, each used exactly
-once — the `live` extension's inherited bug #1055 (electric-sql/pglite#1055) inlines live-query params textually rather than positionally, so any other shape
-mis-binds; the client now rejects it with a clear error naming the bug. A Drizzle builder always compiles
-to that safe shape, so this only affects hand-written raw SQL.
+once — the client guards against upstream bug electric-sql/pglite#1055 (live-query params inlined textually
+rather than positionally, which the `live` extension inherited) and rejects any other shape with a clear
+error naming the bug. A Drizzle builder always compiles to that safe shape, so this only affects
+hand-written raw SQL.
 
 ## Writes go through `client.tables`, not the hooks
 

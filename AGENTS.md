@@ -81,7 +81,7 @@ coordinator delegating to a subagent MUST include this prohibition in the brief.
 ## Project intent
 
 Build and maintain the `@pgxsinkit/*` **toolkit** — an offline-first sync library for the
-`PostgreSQL -> Circuits engine -> durable-streams -> PGlite` read path and the
+`PostgreSQL -> Circuits engine -> durable-streams -> pgwasm` read path and the
 `client -> write API -> PostgreSQL` write path. The toolkit is the product; the demo app (`apps/board`), the minimal reference server
 (`apps/write-api`), and the integration + performance harness exist to prove and harden it. pgxsinkit
 is a standalone open-source library — never treat it as any particular downstream application's data
@@ -99,8 +99,7 @@ vocabulary.
   maintainer". The README's top is consumer-facing too; only its Development section is for
   contributors. Pages that use Starlight components (`<Steps>`, `<Aside>`, `<Tabs>`, …) must be
   `.mdx`, not `.md` — components silently render as plain text in `.md`.
-- Use `tmp/linearlite` and `tmp/pglite` only as reference inputs.
-- Do not treat `tmp/` as project code. It is reference material only.
+- Do not treat `tmp/` as project code.
 - The read-path reader lives at `packages/client/src/circuits/` (ADR-0055) and the applier it feeds at `packages/client/src/sync/` (ADR-0009, originally seeded from upstream `@electric-sql/pglite-sync`). Upstream compatibility is an anti-goal (ADR-0028) — never justify code, test shape, or raw SQL by upstream parity, and never propose re-syncing with upstream; the engine evolves freely and is held to repo standards. `tests/unit/circuits-*.test.ts` + `tests/unit/sync-apply.test.ts` are the owned behavioural unit tests (the read-path safety net), and the `test:integration:implementation` lane files prove them end to end; keep both green through refactors.
 - Keep production-facing logic in the workspace packages, not in ad hoc scripts.
 - Record any protocol or behavior drift in `docs/testing-strategy.md`.
@@ -129,4 +128,4 @@ Integration suites must run through the package scripts that launch isolated com
 1. Fix root causes, not just happy-path examples.
 2. Add explicit error messages at boundary layers.
 3. Prefer deterministic tests and polling helpers over sleeps.
-4. Document assumptions if the Circuits engine, durable-streams, or PGlite behavior is version-sensitive.
+4. Document assumptions if the Circuits engine, durable-streams, or pgwasm behavior is version-sensitive.

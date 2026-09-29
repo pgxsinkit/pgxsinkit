@@ -15,14 +15,14 @@ import { getSyncStateView } from "@pgxsinkit/client";
 
 import { useLiveDrizzleRows } from "./board-client";
 
-// The read surface over the local PGlite store. Readonly tables (profile/team/channel) are read from
+// The read surface over the local pgwasm store. Readonly tables (profile/team/channel) are read from
 // their synced local tables; readwrite tables (issue/message) from their `_read_model` views (which
 // merge the synced cache with the optimistic overlay — relevant once Phase 5 adds writes). Every query
 // is already scoped: the store only holds the rows `board-sync` streamed for the signed-in identity.
 //
-// `useLiveDrizzleRows` returns rows keyed by the select's field names (the hook remaps PGlite's raw
+// `useLiveDrizzleRows` returns rows keyed by the select's field names (the hook remaps the store's raw
 // snake_case columns back to the builder keys — packages/react/remap-live-row). NB the `created_at_us`
-// bigint column is declared `mode: "bigint"`, so its inferred type is `bigint`, but PGlite returns int8
+// bigint column is declared `mode: "bigint"`, so its inferred type is `bigint`, but int8 arrives
 // as a string at runtime — hence `Number(...)` coercion where it's formatted (features/chat).
 //
 // CONVENTION: every hook here returns `settled` — true once the live query has delivered its first
@@ -37,7 +37,7 @@ import { useLiveDrizzleRows } from "./board-client";
 // grace window after their last consumer unmounts: the two parameterized reads (useTeamIssues,
 // useChannelMessages) re-materialize on EVERY channel/team switch, and the shell trio (useTeams,
 // useProfileMap, useChannels) remounts on every board↔chat tab switch — so a 60s window makes the
-// switch-back reuse the warm PGlite registration instantly instead of paying the hundreds-of-ms
+// switch-back reuse the warm pgwasm registration instantly instead of paying the hundreds-of-ms
 // re-materialization the ADR measured. Bounded by the worker's count/row budgets, which are authoritative
 // over any hint. The other hooks (memberships/server-values/convergence/all-issues) stay route-scoped
 // (default keep-alive 0), torn down on unmount. One obvious knob, used in all five:
@@ -222,7 +222,7 @@ const issueSyncStateId = issueSyncState["id"]!;
  * per Issue that has any local activity. A live Drizzle query over the toolkit's view object — the
  * board reads `conflictState` to surface reject-if-stale conflicts inline (Phase 6) and
  * `pendingCount`/`quarantinedCount` for the convergence dots + Inspector (Phase 8). The two counts are
- * int8 at runtime (PGlite returns them as strings), hence the `Number(...)` coercion.
+ * int8 at runtime (they arrive as strings), hence the `Number(...)` coercion.
  */
 export function useIssueConvergence() {
   const { rows, loading, hydrating } = useLiveDrizzleRows(

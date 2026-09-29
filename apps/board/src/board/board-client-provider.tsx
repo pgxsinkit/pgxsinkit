@@ -37,7 +37,7 @@ export function useBoardOffline(): OfflineControl | null {
 }
 
 /**
- * Boots the board's sync client for the signed-in identity: opens the local PGlite store, applies the
+ * Boots the board's sync client for the signed-in identity: opens the local pgwasm store, applies the
  * registry schema, and starts streaming the `board-sync` shapes the identity is allowed to see. Each
  * identity gets its own local store. Children render once the client is ready; rows then arrive
  * reactively (`useLiveRows`) as the initial sync streams in.
@@ -98,13 +98,13 @@ function BoardClientBoot({ userId, isAdmin, children }: { userId: string; isAdmi
         created = next;
         setOffline(nextOffline);
         // Dev-only console handles. `__boardClient` pokes the live client (stage a conflict, inspect
-        // convergence, flush on demand); `__boardProfiler` is the aggregated PGlite query profiler
-        // (start()/stop() → which statements cost what — the managed alternative to PGlite's
+        // convergence, flush on demand); `__boardProfiler` is the aggregated pgwasm query profiler
+        // (start()/stop() → which statements cost what — the managed alternative to the engine's
         // all-or-nothing logging). Never shipped — gated on the Vite dev build, plus the e2e lane's
         // PRODUCTION build (`VITE_E2E=1`, set only by the `e2e:board:serve` script: the Playwright
         // scenarios introspect through these handles, and the lane deliberately tests the built
-        // artifact). In WORKER mode the PGlite lives in the SharedWorker (ADR-0032), so the tab has no
-        // direct `pglite` to profile — expose the attach client but skip the profiler (the queries run
+        // artifact). In WORKER mode pgwasm lives in the SharedWorker (ADR-0032), so the tab has no
+        // direct `pgwasm` to profile — expose the attach client but skip the profiler (the queries run
         // off-thread; profile them via the worker).
         if (import.meta.env.DEV || import.meta.env["VITE_E2E"] === "1") {
           const dev = globalThis as typeof globalThis & {

@@ -2,9 +2,9 @@
 
 Measurements were taken on 2026-07-20 on Linux x86-64 with Bun 1.3.14, headless Chromium 149,
 and Firefox 151. Browser results use actual OPFS sync-access handles and construct the database only
-through `createOpfsRepackedPGlite`. The deterministic core profile uses the same `RepackedVfs` seam
-with the in-memory persistence port so recovery and replacement work can be measured without browser
-storage noise.
+through the package's OPFS factory (now `createOpfsPgwasm`). The deterministic core profile uses the
+same `RepackedVfs` seam with the in-memory persistence port so recovery and replacement work can be
+measured without browser storage noise.
 
 These are coarse regression budgets, not cross-machine promises. Correctness invariants take
 precedence over every target.

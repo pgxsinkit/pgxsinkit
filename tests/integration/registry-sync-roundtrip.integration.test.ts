@@ -76,7 +76,7 @@ const groupedDemoRegistry = {
   todos: { ...demoSyncRegistry.todos, consistencyGroup: "demo" },
 };
 
-describe("circuits -> pglite sync integration", () => {
+describe("circuits -> pgwasm sync integration", () => {
   let stack!: NativeSyncStack<ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>>;
   let server!: ReturnType<typeof createSyncServer<typeof demoSyncRegistry>>;
   const serverDb = createServerDb(demoSyncRegistry, env.databaseUrl);
@@ -120,7 +120,7 @@ describe("circuits -> pglite sync integration", () => {
     await serverDb.close();
   });
 
-  it("syncs seeded postgres rows into pglite", async () => {
+  it("syncs seeded postgres rows into pgwasm", async () => {
     await server.request("/api/mutations", {
       method: "POST",
       headers: {
@@ -179,7 +179,7 @@ describe("circuits -> pglite sync integration", () => {
     }
   }, 30_000);
 
-  it("delivers new API writes to an active pglite subscriber", async () => {
+  it("delivers new API writes to an active pgwasm subscriber", async () => {
     const localPg = await createLocalTodoStore();
     const { sync, initialSyncDone } = await startTestSync(localPg, stack);
 

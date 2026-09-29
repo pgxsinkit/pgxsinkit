@@ -18,7 +18,7 @@ import { liveFieldAliases, remapAliasedLiveRow, remapLiveRow, type SelectedField
  * Minimal interface satisfied by every Drizzle select/query builder.
  * Calling `.toSQL()` extracts the SQL string and positional params without
  * executing the query, so they can be fed into pgwasm's live query API. `_.selectedFields` is the
- * select's field metadata, used to remap PGlite's snake_case rows back to the builder's field keys
+ * select's field metadata, used to remap pgwasm's snake_case rows back to the builder's field keys
  * ({@link remapLiveRow}) — without it the typed rows would carry the underlying column names.
  */
 interface DrizzleSqlBuilder<TRows extends readonly unknown[]> extends PromiseLike<TRows> {
@@ -43,17 +43,17 @@ interface LiveRowsState<TRows> {
 }
 
 /**
- * The raw direct-pgwasm subscription used only by `useLiveRows`'s explicit-`pglite` override (tests/multi-db).
- * Wraps `pglite.live.query` into the client's {@link LiveRowsSubscription} shape so the hook body treats the
+ * The raw direct-pgwasm subscription used only by `useLiveRows`'s explicit-`pgwasm` override (tests/multi-db).
+ * Wraps `pgwasm.live.query` into the client's {@link LiveRowsSubscription} shape so the hook body treats the
  * override and the seam identically. The normal path goes through `client.subscribeLiveRows`.
  */
-function subscribeRawPglite<TRow extends Record<string, unknown>>(
-  pglite: PgwasmClient,
+function subscribeRawPgwasm<TRow extends Record<string, unknown>>(
+  pgwasm: PgwasmClient,
   query: string,
   params: unknown[],
   onRows: (rows: TRow[]) => void,
 ): Promise<LiveRowsSubscription<TRow>> {
-  return pglite.live.query<TRow>(query, params).then((registered: LiveQuery<TRow>) => {
+  return pgwasm.live.query<TRow>(query, params).then((registered: LiveQuery<TRow>) => {
     const listener = (results: LiveQueryResults<TRow>) => onRows(results.rows);
     registered.subscribe(listener);
     return {
@@ -131,23 +131,23 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     },
   ): { rows: TRow[]; loading: boolean; error: Error | null } {
     const contextClient = useContext(SyncClientContext);
-    // An explicit `pglite` override keeps the raw direct-pgwasm path (tests/multi-db); otherwise the query
+    // An explicit `pgwasm` override keeps the raw direct-pgwasm path (tests/multi-db); otherwise the query
     // runs through the client's live-rows seam, so this hook works against the worker-attached client too
-    // (which has no local `pglite`) exactly as against the in-process client (ADR-0032 S2 §4).
-    const overridePglite = options?.pgwasm;
+    // (which has no local `pgwasm`) exactly as against the in-process client (ADR-0032 S2 §4).
+    const overridePgwasm = options?.pgwasm;
     const ready = options?.ready ?? true;
 
     const paramsKey = JSON.stringify(options?.params ?? []);
     const stableParams = useMemo<unknown[]>(() => JSON.parse(paramsKey) as unknown[], [paramsKey]);
 
-    const canRun = ready && (overridePglite != null || contextClient != null);
+    const canRun = ready && (overridePgwasm != null || contextClient != null);
     // The run token: ONE object whose identity changes exactly when the subscription inputs change, and
     // `null` when the hook cannot subscribe. It is the effect's only dependency AND the tag on every
     // snapshot the effect writes, so `loading` is derived during render ("does the snapshot belong to the
     // current run?") instead of being written synchronously from the effect.
     const run = useMemo(
-      () => (canRun ? { query, params: stableParams, client: contextClient, pglite: overridePglite } : null),
-      [canRun, query, stableParams, contextClient, overridePglite],
+      () => (canRun ? { query, params: stableParams, client: contextClient, pgwasm: overridePgwasm } : null),
+      [canRun, query, stableParams, contextClient, overridePgwasm],
     );
 
     const [snapshot, setSnapshot] = useState<{ run: typeof run; rows: TRow[]; error: Error | null }>({
@@ -169,10 +169,10 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
         }
       };
 
-      // The raw-pgwasm override subscribes directly (unchanged); the seam path is the SAME `pglite.live`
+      // The raw-pgwasm override subscribes directly (unchanged); the seam path is the SAME `pgwasm.live`
       // wrapper the in-process client exposes, so behaviour is identical when no override is given.
-      const subscribe = run.pglite
-        ? subscribeRawPglite<TRow>(run.pglite, run.query, run.params, onRows)
+      const subscribe = run.pgwasm
+        ? subscribeRawPgwasm<TRow>(run.pgwasm, run.query, run.params, onRows)
         : run.client!.subscribeLiveRows<Record<string, unknown>>({ sql: run.query, params: run.params }, (rows) =>
             onRows(rows as TRow[]),
           );
@@ -307,7 +307,7 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
       // Scan the compiled SQL for the lazy relations the query reads (∪ `use`), ACTIVATE them (streams
       // started, tripwire satisfied), THEN subscribe via the client's live-rows seam — so a query is never
       // registered against a dormant lazy relation (ADR-0021), and the same hook drives both the in-process
-      // client (seam over `pglite.live`) and the worker-attached client (seam over the bridge, ADR-0032 S2 §4).
+      // client (seam over `pgwasm.live`) and the worker-attached client (seam over the bridge, ADR-0032 S2 §4).
       // Activation is NOT catch-up: the subscription registers immediately (local/cached rows paint, and an
       // offline client is never blocked behind the network), while `hydrating` stays true until the
       // subscription's `hydrated` promise resolves. That promise now spans EVERY referenced consistency

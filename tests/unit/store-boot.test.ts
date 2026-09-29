@@ -213,7 +213,7 @@ class FakeMetaIdb {
     store.data.set(storeIdentityComponent(storePath), { phase, updatedAt: 1 });
   }
 
-  seedPgliteDb(storePath: string): void {
+  seedPgwasmDb(storePath: string): void {
     const name = storeIndexedDbDatabaseName(storePath);
     if (!this.dbs.has(name)) this.dbs.set(name, new FakeDatabase(this.log));
   }
@@ -330,7 +330,7 @@ describe("resolveStoreBoot — virgin creation", () => {
 describe("resolveStoreBoot — recordless-idb recognition", () => {
   it("no record + existing idb store → boot-idb-authoritative, record written idb-authoritative + idb://", async () => {
     const metaIdb = new FakeMetaIdb();
-    metaIdb.seedPgliteDb("recordless");
+    metaIdb.seedPgwasmDb("recordless");
     const root = new FakeDir();
     const resolution = await resolveStoreBoot("recordless", {
       hasOpfsSyncAccess: false,
@@ -348,7 +348,7 @@ describe("resolveStoreBoot — recordless-idb recognition", () => {
     // record, store directory, or commitment sentinel is ever created. The only route to another backend is a
     // deliberate `destroyStoreArtifacts()` / `client.destroy()` followed by a fresh boot.
     const metaIdb = new FakeMetaIdb();
-    metaIdb.seedPgliteDb("recordless-granted");
+    metaIdb.seedPgwasmDb("recordless-granted");
     const root = new FakeDir();
 
     const resolution = await resolveStoreBoot("recordless-granted", {
@@ -433,7 +433,7 @@ describe("resolveStoreBoot — committed / repair", () => {
     const storePath = "committed-beside-idb";
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta(storePath, "opfs-committed");
-    metaIdb.seedPgliteDb(storePath);
+    metaIdb.seedPgwasmDb(storePath);
     const root = new FakeDir();
     await seedStoreDir(root, storePath);
     await seedSentinel(root, storePath);
@@ -481,7 +481,7 @@ describe("resolveStoreBoot — candidate rebuild", () => {
     const storePath = "cand-over-idb";
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta(storePath, "opfs-candidate");
-    metaIdb.seedPgliteDb(storePath);
+    metaIdb.seedPgwasmDb(storePath);
     const root = new FakeDir();
     await seedStoreDir(root, storePath);
     await seedSentinel(root, storePath);
@@ -527,7 +527,7 @@ describe("resolveStoreBoot — resume deletion then re-classify", () => {
   it("record deleting → completes deletion (opfs + idb) then re-classifies to virgin", async () => {
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta("del", "deleting");
-    metaIdb.seedPgliteDb("del");
+    metaIdb.seedPgwasmDb("del");
     const root = new FakeDir();
     await seedStoreDir(root, "del");
     await seedSentinel(root, "del");
@@ -551,7 +551,7 @@ describe("resolveDeniedBootAuthority — denied-home authority handoff", () => {
   it("removes the old sentinel, publishes idb authority, and protects replacement journal data on a granted boot", async () => {
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta("denied-delete", "deleting");
-    metaIdb.seedPgliteDb("denied-delete");
+    metaIdb.seedPgwasmDb("denied-delete");
     const root = new FakeDir();
     await seedStoreDir(root, "denied-delete");
     await seedSentinel(root, "denied-delete");
@@ -568,7 +568,7 @@ describe("resolveDeniedBootAuthority — denied-home authority handoff", () => {
 
     // The replacement IDB now contains locally owed work. A later granted boot must follow the record instead
     // of minting a fresh opfs store over it.
-    metaIdb.seedPgliteDb("denied-delete");
+    metaIdb.seedPgwasmDb("denied-delete");
     const granted = await resolveStoreBoot("denied-delete", {
       hasOpfsSyncAccess: true,
       deps: browserDeps(root, metaIdb),
@@ -582,7 +582,7 @@ describe("resolveDeniedBootAuthority — denied-home authority handoff", () => {
     // Interrupted BEFORE the marker step: nothing records that the OPFS side is deferred, so refuse.
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta("unobservable-delete", "deleting");
-    metaIdb.seedPgliteDb("unobservable-delete");
+    metaIdb.seedPgwasmDb("unobservable-delete");
     // oxlint-disable-next-line typescript/await-thenable -- bun-types gap: .rejects returns a promise typed as void
     await expect(
       resolveDeniedBootAuthority("unobservable-delete", {
@@ -601,7 +601,7 @@ describe("resolveDeniedBootAuthority — denied-home authority handoff", () => {
     const storePath = "unobservable-delete-pending";
     const metaIdb = new FakeMetaIdb();
     metaIdb.seedMeta(storePath, "deleting");
-    metaIdb.seedPgliteDb(storePath);
+    metaIdb.seedPgwasmDb(storePath);
     seedPendingMarker(metaIdb, storePath);
 
     expect(
@@ -870,7 +870,7 @@ describe("pending OPFS deletion — destroy where OPFS cannot be opened", () => 
     const storePath = "pending-destroy-idb";
     const metaIdb = new FakeMetaIdb();
     // A no-OPFS boot mints a RECORDLESS idb store (the denied boot writes no meta record).
-    metaIdb.seedPgliteDb(storePath);
+    metaIdb.seedPgwasmDb(storePath);
 
     await runStoreDestruction(createStoreDestructionEffects(storePath, destructionDeps(opfsUnopenable(), metaIdb)));
 
@@ -956,7 +956,7 @@ describe("pending OPFS deletion — the OPFS-capable destroy path is unchanged",
     const metaIdb = new FakeMetaIdb();
     const root = new FakeDir();
     metaIdb.seedMeta(storePath, "opfs-committed");
-    metaIdb.seedPgliteDb(storePath);
+    metaIdb.seedPgwasmDb(storePath);
     await seedStoreDir(root, storePath);
     await seedSentinel(root, storePath);
     const lockNames: string[] = [];

@@ -79,7 +79,7 @@ Run from the repo root. Every step here is **filesystem-only** — nothing reads
 3. **Format, validate, drift-check:**
    ```bash
    bun run format:write           # drizzle emits snapshot.json in its own style; oxfmt owns formatting
-   bun run validate               # filesystem-only: PGlite-backed unit tests, never a server DB
+   bun run validate               # filesystem-only: pgwasm-backed unit tests, never a server DB
    bun run sync:function:check    # asserts the committed sync-fn migrations match the registries
    ```
 4. **Commit** the regenerated migration folders in the same changeset as the source edit.

@@ -10,8 +10,8 @@ import { ICU_DATA_PATH, INITDB_EXE_PATH, LOCALE_LIST_PATH, PGDATA, POSTGRES_EXE_
 
 /** Postgres' error longjmp, intercepted by the host: keep in sync with pglitec.c's POSTGRES_MAIN_LONGJMP. */
 const POSTGRES_MAIN_LONGJMP = 100;
-/** The exit status single-user mode reports when it started and stays alive. */
-const PGLITE_EXIT_ALIVE = 99;
+/** The exit status single-user mode reports when it started and stays alive: the C build's `PGLITE_EXIT_ALIVE`. */
+const PGWASM_EXIT_ALIVE = 99;
 const INITIAL_MEMORY_PAGES = 2048;
 const MAXIMUM_MEMORY_PAGES = 32768;
 
@@ -362,7 +362,7 @@ export class PostgresInstance {
     mod._pgl_setPGliteActive(1);
     this.callMain([...startParams, "-D", PGDATA, mod.ENV["PGDATABASE"] ?? "postgres"]);
     const exitStatus = mod._pgl_setPGliteExitStatus(-3);
-    if (exitStatus !== PGLITE_EXIT_ALIVE) {
+    if (exitStatus !== PGWASM_EXIT_ALIVE) {
       const output = this.#stderr.join("\n").trim();
       throw new Error(
         `Postgres failed to start (single-user mode exit status ${exitStatus})${output ? `:\n${output}` : ""}`,

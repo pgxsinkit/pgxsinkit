@@ -184,7 +184,7 @@ async function deleteIndexedDbStores(surfaces: WipeSurfaces): Promise<DeletionRe
       ];
     }
     if (names.length === 0) {
-      return [{ target: "IndexedDB (PGlite stores)", ok: true, detail: "no stores found" }];
+      return [{ target: "IndexedDB (pgwasm stores)", ok: true, detail: "no stores found" }];
     }
     // No outer withDeletionTimeout: deleteIdbDatabase owns its deadline so a blocked event shapes the message.
     return Promise.all(names.map((name) => deleteIdbDatabase(factory, name)));
@@ -195,7 +195,7 @@ async function deleteIndexedDbStores(surfaces: WipeSurfaces): Promise<DeletionRe
   if (fallbackNames.length === 0) {
     return [
       {
-        target: "IndexedDB (PGlite stores)",
+        target: "IndexedDB (pgwasm stores)",
         ok: true,
         detail: "indexedDB.databases() unavailable and no known bindings — nothing to delete",
       },
@@ -304,7 +304,7 @@ async function retainFailedStorePaths(surfaces: WipeSurfaces, paths: string[]): 
 
 /**
  * Delete ALL local board data on this browser profile: every registry-known store's FULL artifact set (OPFS
- * included), any stray PGlite IndexedDB databases the registry does not know (the prefix sweep — idb-only
+ * included), any stray pgwasm IndexedDB databases the registry does not know (the prefix sweep — idb-only
  * strays by construction), and the board's localStorage bindings. Returns a per-target result set and `allOk`
  * — deliberately does NOT reload (the caller reloads only on a fully-clean wipe, and shows the partial-failure
  * detail otherwise). Order matters: known stores first, then the stray sweep, then the bindings (both earlier

@@ -1,7 +1,7 @@
 # Local store seam — apps/board
 
-The board's local store is normally the toolkit's own: `createClientPGlite`, i.e.
-PGlite, opened by whichever engine home the browser gives us (the per-store
+The board's local store is normally the toolkit's own: `createPgwasmClient`, i.e.
+pgwasm, opened by whichever engine home the browser gives us (the per-store
 SharedWorker of [ADR-0032](../../../docs/adr/0032-sync-engine-in-shared-worker.md), or
 the in-process fallback where `SharedWorker` is missing).
 
@@ -35,20 +35,20 @@ is byte-identical to what it was before the seam existed.
 ## The contract
 
 `VITE_BOARD_STORE_FACTORY` holds an **absolute module URL**. The board `import()`s it
-and takes its **default export**, or failing that a named **`createPglite`**:
+and takes its **default export**, or failing that a named **`createStore`**:
 
 ```ts
-export default function createPglite(storePath: string, backendOverride?: "memory"): Promise<ClientPGlite>;
+export default function createStore(storePath: string, backendOverride?: "memory"): Promise<PgwasmClient>;
 ```
 
-That is the toolkit's own `createPglite` option ([ADR-0036](../../../docs/adr/0036-store-path-contract.md)),
+That is the toolkit's own `createStore` option ([ADR-0036](../../../docs/adr/0036-store-path-contract.md)),
 unchanged and unextended — one function, no options bag.
 
 - `storePath` is a plain store **name**, never a storage URL.
 - `backendOverride` is the internal memory selection a test lane can ask for.
-- The resolved handle is used exactly as a `createClientPGlite` one is, so it must
-  carry the whole `ClientPGlite` surface the engine touches — **`live` included**
-  (the worker's live-query manager subscribes through `pglite.live`).
+- The resolved handle is used exactly as a `createPgwasmClient` one is, so it must
+  carry the whole `PgwasmClient` surface the engine touches — **`live` included**
+  (the worker's live-query manager subscribes through `pgwasm.live`).
 
 The module owns everything the seam does not pass:
 
@@ -123,10 +123,10 @@ bypassed:
   pre-login) and the boot create alike, in both worker scopes the entry runs in: the
   SharedWorker itself, and the elected dedicated engine worker that runs the same module
   under [ADR-0049](../../../docs/adr/0049-capability-driven-engine-placement.md)
-  placement. The build-time variable is passed as the `createPglite` option beneath it.
+  placement. The build-time variable is passed as the `createStore` option beneath it.
 - `src/board/store-registry-default.ts` — the in-process fallback's tab-side store,
   which resolves the same declaration with the toolkit's own generic loader
-  (`createStoreEngineResolver`) and falls through to the variable, then to PGlite. It
+  (`createStoreEngineResolver`) and falls through to the variable, then to pgwasm. It
   passes the store path and nothing else: the main-thread refusal a threaded engine owes
   belongs to the **module**, not to the board.
 
@@ -141,7 +141,7 @@ The variable is read from Vite's env, so it is **baked at build time** (or at
 dev-server start), never per request. The preference is read from `localStorage` on
 every declaration the tab sends. Either way the module is imported lazily, on the first
 mint, and memoized — and both ways of getting it wrong fail **loudly**, because a silent
-fallback to PGlite would report a green board for an engine that never ran:
+fallback to pgwasm would report a green board for an engine that never ran:
 
 - the URL will not import → `… could not be imported…` (with the underlying failure as
   `cause`);
@@ -152,7 +152,7 @@ A failed load stays failed: every later mint reports the same error.
 The preference is honoured even where the drop-in is no longer OFFERED — a preference
 set on an isolated build and reopened on a plain one still declares its engine, and the
 module's own refusal ("this page is not cross-origin isolated") is the error you get.
-Quietly reading it back as `Built-in` would be worse: PGlite would be pointed at a
+Quietly reading it back as `Built-in` would be worse: pgwasm would be pointed at a
 datadir it did not write. The login screen keeps the control visible whenever a
 preference is persisted, labelled with the module's file name, so switching back is
 always one Apply away.
@@ -182,7 +182,7 @@ factory module itself: if it is served from **another origin** it needs CORS _an
 `Cross-Origin-Resource-Policy: cross-origin`. Serving it same-origin (e.g. under
 `apps/board/public/`) sidesteps that entirely.
 
-The default board is PGlite, single-threaded, and neither needs nor wants these
+The default board is pgwasm, single-threaded, and neither needs nor wants these
 headers — so unset, nothing is served and nothing changes.
 
 ## Running it

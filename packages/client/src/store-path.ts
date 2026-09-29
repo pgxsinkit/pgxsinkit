@@ -188,10 +188,10 @@ function assertPlainStorePath(storePath: string): void {
  * contract fails loudly at the boundary, never silently re-interpreted. The returned URL is
  * internal plumbing; do not surface it to consumers as something to imitate.
  *
- * CRITICAL (ADR-0036 decision 5, probed on PGlite 0.5.4): memory selection is ALWAYS the scheme-selected
- * `memory://` form, NEVER pgwasm's explicit `fs: new MemoryFS()` option — `dumpDataDir` from an explicit-`fs`
- * instance silently omits relation files created after initdb, so a restored clone raises "relation does not
- * exist". Callers that need a memory store must route through this function, never construct `MemoryFS`.
+ * CRITICAL (ADR-0036 decision 5, probed before the pgwasm switch — ADR-0062): memory selection is ALWAYS the
+ * scheme-selected `memory://` form, NEVER pgwasm's explicit `fs: new MemoryFS()` option — `dumpDataDir` from an
+ * explicit-`fs` instance silently omits relation files created after initdb, so a restored clone raises "relation
+ * does not exist". Callers that need a memory store must route through this function, never construct `MemoryFS`.
  *
  * ADR-0049 (D1) adds the `opfs://<storePath>` form: when the placement probe granted a sync-access handle in
  * the executing scope (`env.hasOpfsSyncAccess`), the browser store lives on `opfs-repacked`. Precedence:

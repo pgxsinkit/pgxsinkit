@@ -240,7 +240,7 @@ const openInstances: PgwasmClient[] = [];
  * storage the gate keys on — the only proof an adopted instance carries — and registers the recording strict
  * sync the commitment barrier drives.
  */
-async function makeAdoptedPglite(options: {
+async function makeAdoptedPgwasm(options: {
   branded: boolean;
   log?: string[];
   strictSyncFails?: boolean;
@@ -320,7 +320,7 @@ describe("adopted boot commitment barrier — createSyncClient's adopt paths (in
     metaIdb.seedMeta(storePath, "opfs-candidate");
     installBrowserGlobals(root, metaIdb);
 
-    client = await bootAdopting(storePath, await makeAdoptedPglite({ branded: true, log }));
+    client = await bootAdopting(storePath, await makeAdoptedPgwasm({ branded: true, log }));
     log.push("expose");
 
     const identity = storeIdentityComponent(storePath);
@@ -344,7 +344,7 @@ describe("adopted boot commitment barrier — createSyncClient's adopt paths (in
     const root = new FakeDir(log);
     installBrowserGlobals(root, metaIdb);
 
-    client = await bootAdopting(storePath, await makeAdoptedPglite({ branded: true, log }));
+    client = await bootAdopting(storePath, await makeAdoptedPgwasm({ branded: true, log }));
 
     expect(log).toContain("strictSync");
     expect(sentinelPresent(root, storePath)).toBe(true);
@@ -359,7 +359,7 @@ describe("adopted boot commitment barrier — createSyncClient's adopt paths (in
     metaIdb.seedMeta(storePath, "opfs-committed");
     installBrowserGlobals(root, metaIdb);
 
-    client = await bootAdopting(storePath, await makeAdoptedPglite({ branded: true, log }));
+    client = await bootAdopting(storePath, await makeAdoptedPgwasm({ branded: true, log }));
 
     // No strictSync, no sentinel publish, no record write — a committed store owes nothing.
     expect(log).not.toContain("strictSync");
@@ -375,7 +375,7 @@ describe("adopted boot commitment barrier — createSyncClient's adopt paths (in
     const root = new FakeDir(log);
     installBrowserGlobals(root, metaIdb);
 
-    client = await bootAdopting(storePath, await makeAdoptedPglite({ branded: false, log }));
+    client = await bootAdopting(storePath, await makeAdoptedPgwasm({ branded: false, log }));
 
     // An idb/file BYO instance has no opfs commitment machinery: the gate never even reads the meta store.
     expect(metaIdb.opens).toBe(0);
@@ -393,7 +393,7 @@ describe("adopted boot commitment barrier — createSyncClient's adopt paths (in
 
     const rejection = await bootAdopting(
       storePath,
-      await makeAdoptedPglite({ branded: true, log, strictSyncFails: true }),
+      await makeAdoptedPgwasm({ branded: true, log, strictSyncFails: true }),
     ).then(
       () => null,
       (error: unknown) => error,

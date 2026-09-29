@@ -28,7 +28,7 @@ function initials(name: string): string {
 }
 
 function formatTime(createdAtUs: bigint | string): string {
-  // Microseconds since epoch → ms. Declared `bigint` (column mode), returned as a string by PGlite;
+  // Microseconds since epoch → ms. Declared `bigint` (column mode), returned as a string at runtime;
   // `Number(...)` handles both.
   return new Date(Number(createdAtUs) / 1000).toLocaleString(undefined, {
     month: "short",

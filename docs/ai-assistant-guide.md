@@ -42,7 +42,7 @@ Read these files first:
 
 ## Recommended next milestones
 
-- persist PGlite subscription metadata between browser sessions
+- persist pgwasm subscription metadata between browser sessions
 - add network interruption and resume tests
 - add write conflict and idempotency cases
 - add migration smoke tests across PostgreSQL versions

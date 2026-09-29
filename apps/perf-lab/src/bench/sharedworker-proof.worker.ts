@@ -1,6 +1,6 @@
 // SharedWorker-direct proof — the SharedWorker body (bench phase 0, ADR-0048 open item).
 //
-// The one open engine-capability question is EXISTENCE: can a full repacked PGlite boot, persist, and
+// The one open engine-capability question is EXISTENCE: can a full repacked pgwasm boot, persist, and
 // reopen INSIDE SharedWorker scope? WebKit reportedly grants `createSyncAccessHandle` here (real-device
 // probes, 2026-07-18); Chromium/Firefox are known to refuse. This worker runs the staged proof and
 // reports each stage verbatim so the JSON envelope says exactly which stage an engine objects to —

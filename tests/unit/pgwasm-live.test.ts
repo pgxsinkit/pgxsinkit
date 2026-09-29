@@ -232,24 +232,24 @@ describe("live.query", () => {
     const db = await liveDb();
     await db.exec(`
       CREATE TABLE IF NOT EXISTS testTable (id SERIAL PRIMARY KEY, statement VARCHAR(100));
-      INSERT INTO testTable (statement) VALUES ('i love pglite!');
+      INSERT INTO testTable (statement) VALUES ('i love pgwasm!');
     `);
     const recorder = new Recorder<Results<{ id: number; statement: string }>>();
     const { initialResults, unsubscribe } = await db.live.query<{ id: number; statement: string }>(
-      "SELECT id, statement FROM testTable WHERE statement ILIKE '%pglite%' ORDER BY id;",
+      "SELECT id, statement FROM testTable WHERE statement ILIKE '%pgwasm%' ORDER BY id;",
       [],
       recorder.callback,
     );
-    expect(initialResults.rows).toEqual([{ id: 1, statement: "i love pglite!" }]);
+    expect(initialResults.rows).toEqual([{ id: 1, statement: "i love pgwasm!" }]);
     const next = recorder.next();
     await db.exec(`INSERT INTO testTable (statement) VALUES ('This should not be in the results!');`);
-    await db.exec(`INSERT INTO testTable (statement) VALUES ('PGlite is da best!');`);
+    await db.exec(`INSERT INTO testTable (statement) VALUES ('pgwasm is da best!');`);
     await next;
     await quietFor(50);
     await unsubscribe();
     expect(recorder.latest?.rows).toEqual([
-      { id: 1, statement: "i love pglite!" },
-      { id: 3, statement: "PGlite is da best!" },
+      { id: 1, statement: "i love pgwasm!" },
+      { id: 3, statement: "pgwasm is da best!" },
     ]);
   });
 

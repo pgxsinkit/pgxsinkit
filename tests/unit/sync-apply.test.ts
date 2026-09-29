@@ -78,7 +78,7 @@ describe("sync apply", () => {
   let pg: Pgwasm;
 
   beforeAll(async () => {
-    pg = await measureTiming("suite:PGlite.create", () => createFreshTestPgwasm());
+    pg = await measureTiming("suite:createPgwasm", () => createFreshTestPgwasm());
     await measureTiming("suite:createTablesFromSchema", () =>
       createTablesFromSchema(pg, { authors, todos, readState }),
     );

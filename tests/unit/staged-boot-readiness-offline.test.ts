@@ -67,7 +67,7 @@ function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> 
   ]);
 }
 
-describe("ADR-0041 staged boot readiness (stage 1) — real PGlite", () => {
+describe("ADR-0041 staged boot readiness (stage 1) — real pgwasm", () => {
   it("offline warm boot: localReadReady + writeReady resolve with zero network, cached read works, ready stays pending", async () => {
     const storePath = await freshStoreDir("offline");
 

@@ -3,8 +3,8 @@ import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-// PGlite datadir width probe: verifies the ADR claim that a Postgres datadir is
-// roughly 970 files. Creates a PGlite instance backed by a `file://` dataDir under
+// pgwasm datadir width probe: verifies the ADR claim that a Postgres datadir is
+// roughly 970 files. Creates a pgwasm instance backed by a `file://` dataDir under
 // the repo's gitignored tmp/ tree, runs initdb + one trivial query + close, then
 // recursively counts the regular files in the datadir. Cleans up afterward.
 //
@@ -44,10 +44,10 @@ export async function countDatadirFiles(): Promise<DatadirCountResult> {
   mkdirSync(scratchBase, { recursive: true });
   let dir: string;
   try {
-    dir = mkdtempSync(path.join(scratchBase, "pglite-datadir-"));
+    dir = mkdtempSync(path.join(scratchBase, "pgwasm-datadir-"));
   } catch {
     // Fall back to the OS temp dir only if the repo scratch dir is unavailable.
-    dir = mkdtempSync(path.join(tmpdir(), "pglite-datadir-"));
+    dir = mkdtempSync(path.join(tmpdir(), "pgwasm-datadir-"));
   }
   try {
     const pg = await createPgwasm({ build: cBuild, dataDir: `file://${dir}` });

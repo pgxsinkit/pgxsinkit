@@ -141,7 +141,7 @@ describe("client local schema generation", () => {
   // registry also emits the reconcile trigger/function — whose name was built by suffixing the
   // already-qualified table name (`"s"."t"_reconcile_on_sync`), invalid SQL no string assertion
   // caught. Generated DDL must be *executed*, not just pattern-matched.
-  it("executes a non-public writable registry's generated schema (trigger/function/views) in PGlite", async () => {
+  it("executes a non-public writable registry's generated schema (trigger/function/views) in pgwasm", async () => {
     const schemaName = buildSyntheticRegistrySchemaName({ tableCount: 1, extraColumnCount: 4 });
     const { registry } = buildSyntheticRegistry({ tableCount: 1, extraColumnCount: 4, schemaName });
 

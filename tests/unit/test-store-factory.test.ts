@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 describe("test store factory resolution", () => {
-  it("resolves to the default PGlite path when the variable is unset", () => {
+  it("resolves to the default pgwasm path when the variable is unset", () => {
     delete process.env[TEST_STORE_FACTORY_ENV];
     expect(resolveTestStoreFactory()).toBeUndefined();
   });

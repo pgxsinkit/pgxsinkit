@@ -530,7 +530,7 @@ describe("guarded one-shot reads over the worker bridge (ADR-0032 decision 4)", 
     expect(workerClient.isSynced("archive")).toBe(true);
   });
 
-  it("13. client.drizzle.transaction() rejects — no tab-local PGlite for a read transaction", async () => {
+  it("13. client.drizzle.transaction() rejects — no tab-local store for a read transaction", async () => {
     const host = await makeHost(false);
     const client = await attach(host);
     await client.ready;

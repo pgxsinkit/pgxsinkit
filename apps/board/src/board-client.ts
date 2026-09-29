@@ -35,7 +35,7 @@ import { supabase } from "./lib/supabase";
 const BOARD_BRIDGE_SILENCE_MS = 20_000;
 
 // One set of registry-typed hooks for the whole app (board ADR-0001 read path). Components read the
-// local PGlite store reactively via `useLiveRows` / `useLiveDrizzleRows`; the live data is whatever
+// local pgwasm store reactively via `useLiveRows` / `useLiveDrizzleRows`; the live data is whatever
 // `board-sync` has streamed in for the signed-in identity.
 export const { SyncClientProvider, useSyncClient, useLiveRows, useLiveDrizzleRows, useMutationSummary } =
   createSyncClientHooks<typeof boardSyncRegistry>();
@@ -155,10 +155,10 @@ export async function createBoardSyncClient(
   const role = isAdmin ? "admin" : "member";
 
   // Resolve this identity's store binding (board optimisation B): a returning user's mapped store, the
-  // claimed login-screen spare, or a fresh one. In WORKER mode the returned `pglite` is a placeholder —
+  // claimed login-screen spare, or a fresh one. In WORKER mode the returned `pgwasm` is a placeholder —
   // the raw store lives in the worker, which the same call has just constructed + `provision`ed (initdb
   // running inside it); we attach to that same worker by store name below. In the in-process fallback the
-  // returned `pglite` is the real precreated instance the library adopts.
+  // returned `pgwasm` is the real precreated instance the library adopts.
   const store = await boardStoreRegistry.openUserStore(userId);
 
   // ── Worker mode (ADR-0032 shared worker): the engine lives off the tab; attach a thin tab client via the

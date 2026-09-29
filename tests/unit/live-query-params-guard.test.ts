@@ -1,6 +1,6 @@
-// Unit coverage for the live-query params guard — the defensive boundary against PGlite upstream bug
+// Unit coverage for the live-query params guard — the defensive boundary against upstream bug
 // electric-sql/pglite#1055 (see live-query-params-guard.ts for the full mechanics). The guard only ever
-// throws for the input shapes pgwasm's broken `%NL` inlining silently corrupts (out-of-order / repeated /
+// throws for the input shapes the inherited `%NL` inlining silently corrupts (out-of-order / repeated /
 // skipped placeholders, or a placeholder-count vs params-length mismatch); the ONE still-correct shape —
 // strictly ascending `$1..$n`, each used once, n = params.length — must pass untouched, as must any query
 // with zero params (pgwasm skips `formatQuery` entirely there).
@@ -10,7 +10,7 @@ import { describe, expect, it } from "bun:test";
 import { assertLiveQueryParamsSafe } from "../../packages/client/src/worker/live-query-params-guard";
 
 describe("assertLiveQueryParamsSafe", () => {
-  it("accepts empty params with arbitrary SQL, even weird $ tokens (PGlite skips formatQuery there)", () => {
+  it("accepts empty params with arbitrary SQL, even weird $ tokens (pgwasm skips formatQuery there)", () => {
     // params.length === 0 → pgwasm never calls formatQuery, so placeholders are Postgres's problem, not ours.
     expect(() => assertLiveQueryParamsSafe("select * from t where c = $1", [])).not.toThrow();
     expect(() => assertLiveQueryParamsSafe("select '$5 literal $2' as note", [])).not.toThrow();

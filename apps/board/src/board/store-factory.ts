@@ -7,7 +7,7 @@ import type { PgwasmClient } from "@pgxsinkit/client";
 //   * unset `VITE_BOARD_STORE_FACTORY` (the default — every lane, every dev run, the hosted demo):
 //     the toolkit's own `createPgwasmClient`, exactly as before. Nothing on this path changes: the
 //     option below is not even passed, so the engine keeps the factory it has always built (declared
-//     durability, the placement decision's OPFS grant, PGlite's own boot assets).
+//     durability, the placement decision's OPFS grant, pgwasm's own boot assets).
 //   * `VITE_BOARD_STORE_FACTORY=<absolute module URL>`: THAT module mints the stores instead, so the
 //     same board app can drive another PostgreSQL-shaped engine — one that lives OUTSIDE this repo —
 //     without a line of engine-specific code in it. Nothing here knows or names any particular engine.
@@ -18,7 +18,7 @@ import type { PgwasmClient } from "@pgxsinkit/client";
 // never a storage URL; `backendOverride` is the internal memory selection a test lane can ask for. The
 // resolved handle is used exactly as a `createPgwasmClient` one is, so it must carry the whole
 // `PgwasmClient` surface the engine touches — `live` included (the worker's live-query manager
-// subscribes through `pglite.live`).
+// subscribes through `pgwasm.live`).
 //
 // What the module owns, because the seam deliberately passes nothing else:
 //
@@ -37,7 +37,7 @@ import type { PgwasmClient } from "@pgxsinkit/client";
 // per request. Loading is DEFERRED to the first mint and memoized: a worker chunk must not top-level
 // await, and a board that never opens a store never imports the module. A load that fails stays failed
 // — the memo keeps the rejection, so every later mint reports the same loud error rather than silently
-// falling back to PGlite (the whole point of setting the variable is to run on the other engine).
+// falling back to pgwasm (the whole point of setting the variable is to run on the other engine).
 //
 // Keep this module free of `import.meta.env`, DOM globals and computed `import()`s: it is imported by a
 // unit test that typechecks under the ROOT tsconfig (no vite/DOM types) and is fingerprinted by the

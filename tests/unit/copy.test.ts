@@ -131,7 +131,7 @@ describe("COPY TEXT serializer", () => {
       expect(new TextDecoder().decode(statement.blob)).toBe('1\t{"a":[1,2]}');
     });
 
-    it("loads its own bytes through a real PGlite COPY", async () => {
+    it("loads its own bytes through a real pgwasm COPY", async () => {
       const pg = await createFreshTestPgwasm();
       await pg.exec(`CREATE TABLE definition_cache (id int primary key, entry jsonb not null);`);
       const statement = buildCopyFromBlobStatement({
@@ -171,7 +171,7 @@ describe("COPY TEXT serializer", () => {
 
   // The strongest guarantee: feed the generated stream straight into a real
   // Postgres COPY and confirm every value round-trips.
-  describe("round-trips through PGlite COPY FROM", () => {
+  describe("round-trips through pgwasm COPY FROM", () => {
     async function roundTrip(
       columnsDdl: string,
       columns: string[],
@@ -227,7 +227,7 @@ describe("COPY TEXT serializer", () => {
         ["id", "flag", "n", "big", "amount", "note"],
         rows,
       );
-      // pglite returns int8 as bigint only when outside the safe-integer range,
+      // pgwasm returns int8 as bigint only when outside the safe-integer range,
       // otherwise as a number.
       expect(out).toEqual([
         {
@@ -306,7 +306,7 @@ describe("COPY TEXT serializer", () => {
         },
       ];
       const out = await roundTrip("id int, ts timestamp, uid uuid", ["id", "ts", "uid"], rows);
-      // pglite parses timestamps into Date objects; avoid asserting an exact
+      // pgwasm parses timestamps into Date objects; avoid asserting an exact
       // instant here since timestamp-without-tz parsing is locale dependent.
       expect(out[0]!["uid"]).toBe("00000000-0000-0000-0000-000000000001");
       expect(out[0]!["ts"]).toBeInstanceOf(Date);

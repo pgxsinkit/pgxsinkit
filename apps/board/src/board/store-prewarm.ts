@@ -5,7 +5,7 @@ import { boardStoreRegistry } from "./store-registry-default";
 
 // Bootstrap prewarm (board cold-boot optimisation B, RELOAD path). On a signed-in reload there is no
 // login-screen think-time to hide the store open behind, and the open otherwise doesn't START until the
-// board provider mounts — so PGlite's ~1.9s initdb sits fully on the critical path, and begins late.
+// board provider mounts — so the store's ~1.9s initdb sits fully on the critical path, and begins late.
 //
 // This kicks the signed-in user's MAPPED store open at app bootstrap (within ~100ms of JS load), in
 // parallel with React mount / auth restore / route transition, instead of at provider mount. It reads

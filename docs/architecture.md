@@ -22,16 +22,16 @@ The only transport dependency is `@durable-streams/client` (pinned `0.2.6`, `pac
 
 1. The write API validates a request with Zod.
 2. The web client optionally attaches Authorization headers from demo identity tokens (`none`, `user`, `admin`).
-3. Browser creates are written first into a local overlay table and a durable mutation journal in PGlite.
+3. Browser creates are written first into a local overlay table and a durable mutation journal in pgwasm.
 4. The browser may enqueue mutations one at a time or atomically stage a local batch into the same overlay and journal tables.
 5. The browser flushes journal entries through the write API.
 6. When RLS is enabled, the write API verifies JWT claims and passes them to PostgreSQL via `resolveAuthClaims`.
 7. The API writes to PostgreSQL through the in-database apply function `pgxsinkit_apply_mutations` (`POST /api/mutations`).
 8. The Circuits engine ingests logical replication and materialises each shape into a durable-streams log.
 9. The read path has two server surfaces: the **control plane** (`POST /sync/v1/subscribe`, `POST /sync/v1/refresh`, `GET /sync/v1/barrier`) authorizes a subject, compiles its predicate, creates shapes on the engine, and mints a short-lived stream token; the **stream edge** (`createStreamGate`, mounted at `/v1/stream`) verifies that token, checks entitlement, and proxies durable-streams bytes with no per-read filtering. The edge belongs on its own origin (ADR-0055 decision 8).
-10. PGlite subscribes through the client's read-path reader (`packages/client/src/circuits`), which applies through `packages/client/src/sync`.
+10. The client subscribes through its read-path reader (`packages/client/src/circuits`), which applies into pgwasm through `packages/client/src/sync`.
 11. Acked overlay rows are cleared only after the synced echo reaches the acknowledged server `updated_at_us` value.
-12. The integration tests assert eventual convergence inside local PGlite.
+12. The integration tests assert eventual convergence inside local pgwasm.
 
 ## The write path
 
@@ -85,7 +85,7 @@ The read path and the write path share **one** token lifecycle (see [adr/0013](a
 ## Local schema prerequisite hook
 
 - Client initialization now supports a pre-schema hook: `prepareLocalDbBeforeSchema`.
-- This hook runs after PGlite creation and before local schema SQL execution when `createSyncClient` creates the database instance.
+- This hook runs after pgwasm creation and before local schema SQL execution when `createSyncClient` creates the database instance.
 - Use this hook to provision prerequisite local objects required by generated schema SQL.
 - `prepareLocalDbAfterSchema` runs after generated local schema execution for app objects that depend
   on the registry tables.
