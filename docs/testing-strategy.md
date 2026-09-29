@@ -464,8 +464,13 @@ up-to-date batch, which the read-silence watchdog above relies on. What changed:
 - **The token thunk is asked for every request, including after a recovery.** The package's `onError` merged the
   re-minted header over the thunk, so after an opening re-mint it sent that token, unrefreshed, for the rest of the
   session.
-- **Strict backpressure.** The next request goes out only after `onBatch` settles; the package fetched one response
-  ahead while the subscriber worked.
+- **A non-live read goes to the tail.** With `live: false` the package fetched ONE response and stopped, whether or
+  not it had reached the tail, so a read of a stream longer than one response was cut short without an error. The
+  reader keeps asking until a response is up to date.
+- **Backpressure is one response ahead, as the package's was.** The request for the next response goes out when a
+  batch is handed to `onBatch`, and the one after that only once `onBatch` has settled. The reader first waited for
+  the apply before asking at all; measured on a 40-response catch-up with 20 to 80 ms of latency per request and of
+  apply per batch, that took up to 1.9 times as long as the package did, so the read-ahead was restored.
 - **Protocol violations fail the read** instead of re-requesting forever: no `Stream-Next-Offset` (the shape of a
   cross-origin mount that does not expose the stream headers), a body that is not a JSON array (the package wrapped a
   lone value), and an empty response that neither advances nor reaches the tail. The package did not check the

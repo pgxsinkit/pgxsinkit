@@ -122,9 +122,12 @@ export interface ReadInternals {
  * inside `onBatch` already holds it.
  *
  * Every successful response is one batch, an empty one included (a long poll that timed out delivers
- * the empty up-to-date batch at the same offset). **Backpressure:** the next request is not sent until
- * `onBatch` has settled, so a slow apply throttles the read. One request is in flight at a time,
- * which is one connection per stream while it long-polls.
+ * the empty up-to-date batch at the same offset). **Backpressure, one response ahead:** the request
+ * for the next response is sent when a batch is handed to `onBatch`, and the request after that not
+ * until `onBatch` has settled. So the network wait and the apply overlap instead of adding up, which
+ * is worth up to half the time of a catch-up that spans many responses, and a slow apply still
+ * throttles the read: at most one response is ever held beyond the one being applied. One request is
+ * in flight at a time, which is one connection per stream while it long-polls.
  *
  * **Failures, per request:**
  * - 401/403: one immediate retry with a token from `onTokenRejected` ({@link createTokenRecovery}); a
@@ -262,26 +265,41 @@ export function readShapeStreamWith(
     }
   })();
 
-  /** Deliver, then fetch the next batch, until the read ends. Resolves with what `onEnd` reports. */
+  /**
+   * Deliver each batch while the next response is fetched, until the read ends. Resolves with what
+   * `onEnd` reports.
+   */
   async function deliver(): Promise<Error | null> {
     let response = first!;
     try {
       for (;;) {
         if (signal.aborted) return null;
-        await onBatch({ envelopes: response.envelopes, offset: response.offset, upToDate: response.upToDate });
-        if (response.closed || (!live && response.upToDate)) return null;
+        const last = response.closed || (!live && response.upToDate);
 
-        position = {
-          offset: response.offset,
-          cursor: response.cursor ?? position.cursor,
-          longPoll: live && response.upToDate,
-        };
-        const next = await request(position);
+        // One response ahead: asked for now, awaited once this batch is applied. Its failure belongs
+        // after this batch in the order of events, so it is held until then rather than thrown here.
+        let ahead: Promise<ReadResponse | null> | null = null;
+        if (!last) {
+          position = {
+            offset: response.offset,
+            cursor: response.cursor ?? position.cursor,
+            longPoll: live && response.upToDate,
+          };
+          ahead = request(position);
+          ahead.catch(() => {});
+        }
+
+        await onBatch({ envelopes: response.envelopes, offset: response.offset, upToDate: response.upToDate });
+        if (ahead === null) return null;
+
+        const next = await ahead;
         if (next === null) return null;
         response = next;
       }
     } catch (error) {
       if (signal.aborted) return null;
+      // A failed apply leaves the request that was sent ahead of it in flight; end it.
+      stop.abort();
       return error instanceof Error ? error : new Error(String(error));
     }
   }

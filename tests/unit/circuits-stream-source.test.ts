@@ -257,7 +257,9 @@ describe("readShapeStream opening", () => {
     await drain();
 
     expect(events).toEqual(["batch:A"]);
-    expect(edge.requests).toHaveLength(1);
+    // The long poll that was sent ahead of the batch is the only other request, and the close ended it.
+    expect(edge.requests).toHaveLength(2);
+    expect(edge.requests[1]!.signal?.aborted).toBe(true);
   });
 
   it("an already-aborted signal rejects the call", async () => {
@@ -524,25 +526,67 @@ describe("readShapeStream retries", () => {
 // ─── 5. Backpressure ─────────────────────────────────────────────────────────────────────────────────
 
 describe("readShapeStream backpressure", () => {
-  it("sends the next request only once onBatch has settled", async () => {
+  it("fetches one response ahead of the apply, and no further until it has settled", async () => {
     const applied = Promise.withResolvers<void>();
     const delivered = Promise.withResolvers<void>();
-    const edge = scriptedEdge([data([envelope("w1")], { offset: "A", upToDate: true })]);
+    const edge = scriptedEdge([
+      data([envelope("w1")], { offset: "A" }),
+      data([envelope("w2")], { offset: "B" }),
+      data([envelope("w3")], { offset: "C", upToDate: true }),
+    ]);
+    const seen: string[] = [];
     const { opened } = read(edge, {
-      onBatch: () => {
+      onBatch: (batch) => {
+        seen.push(batch.offset);
         delivered.resolve();
-        return applied.promise;
+        return seen.length === 1 ? applied.promise : undefined;
       },
     });
 
     const subscription = await opened;
     await delivered.promise;
+    // The first batch is still being applied: the response after it has been asked for, so the
+    // network wait overlaps the apply, and nothing beyond that one.
+    await edge.requested(2);
     await drain();
-    expect(edge.requests).toHaveLength(1);
+    expect(edge.requests).toHaveLength(2);
+    expect(seen).toEqual(["A"]);
 
     applied.resolve();
-    await edge.requested(2);
+    await edge.requested(3);
     subscription.close();
+  });
+
+  it("a read-ahead that fails is reported after the batch before it, not instead of it", async () => {
+    const applied = Promise.withResolvers<void>();
+    const edge = scriptedEdge([data([envelope("w1")], { offset: "A" }), status(404)]);
+    const { opened, batches, ended } = read(edge, { onBatch: () => applied.promise });
+
+    await opened;
+    await edge.requested(2);
+    await drain();
+    // The 404 has already come back, and the read has not ended: its batch is still being applied.
+    expect(batches).toHaveLength(1);
+
+    applied.resolve();
+    const error = await ended;
+    expect((error as { status?: number } | null)?.status).toBe(404);
+  });
+
+  it("a failed apply ends the request that was sent ahead of it", async () => {
+    // The second request finds no answer in the script, so it hangs until the reader aborts it.
+    const edge = scriptedEdge([data([envelope("w1")], { offset: "A" })]);
+    const { opened, ended } = read(edge, {
+      onBatch: async () => {
+        await edge.requested(2);
+        throw new Error("apply failed");
+      },
+    });
+
+    await opened;
+    const error = await ended;
+    expect(error?.message).toBe("apply failed");
+    expect(edge.requests[1]!.signal?.aborted).toBe(true);
   });
 });
 
@@ -692,7 +736,9 @@ describe("readShapeStream end", () => {
     await opened;
     expect(await ended).toMatchObject({ message: "apply failed" });
     await drain();
-    expect(edge.requests).toHaveLength(1);
+    // The long poll that was sent ahead of the batch is the only other request, and the failure ended it.
+    expect(edge.requests).toHaveLength(2);
+    expect(edge.requests[1]!.signal?.aborted).toBe(true);
   });
 
   it("the caller's own close() aborts the long poll and reports nothing", async () => {
