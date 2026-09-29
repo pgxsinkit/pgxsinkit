@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 
 import { publicPackages, type PublicPackage } from "../../scripts/build-public-packages";
+import { builtinSpecifiers, unstubbedBuiltins } from "./support/node-builtins";
 
 // The published-bundle artifact contract (ADR-0037 §2 for react, generalized to every public
 // package by ADR-0038): every static import in a published bundle is declared in that package's
@@ -134,6 +135,23 @@ for (const pkg of publicPackages) {
         // The canary for an inlined dependency implementation: drizzle's entity machinery carries
         // this Symbol.for key in every copy.
         expect(bundle).not.toContain("drizzle:entityKind");
+      });
+    });
+
+    // A bundle reaches a Node builtin only behind a runtime check (a `file://` store, the Node file
+    // port), but a browser bundler sees the specifier all the same and externalises an unstubbed one
+    // with a warning in the consuming app's build.
+    it("names only Node builtins its manifest's browser field stubs, prefixed and unprefixed", () => {
+      const manifest = JSON.parse(readFileSync(join(repoRoot, pkg.packageDir, "package.json"), "utf8")) as {
+        browser?: Record<string, unknown>;
+      };
+
+      bundles.forEach((bundle, index) => {
+        const path = paths[index] ?? "";
+        expect({ bundle: path, unstubbed: unstubbedBuiltins(builtinSpecifiers(bundle), manifest.browser) }).toEqual({
+          bundle: path,
+          unstubbed: [],
+        });
       });
     });
 

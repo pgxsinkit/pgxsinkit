@@ -17,6 +17,10 @@
   ],
   "type": "module",
   "main": "./dist/index.js",
+  "browser": {
+    "fs": false,
+    "node:fs": false
+  },
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
