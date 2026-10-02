@@ -3,7 +3,7 @@
 Status: accepted (2026-09-29). Extends [ADR-0028](0028-own-the-sync-engine-outright.md)'s anti-goal
 and [ADR-0062](0062-absorb-pglite-as-pgwasm.md)'s ownership from the client to the server side of the
 read path. Amends [ADR-0055](0055-circuits-native-sync-core.md) decision 10: the read transport
-becomes pgxsinkit's own code. Implemented except for steps 2 and 4 of decision 8; see the status notes.
+becomes pgxsinkit's own code. Implemented; see the status notes.
 
 Status note (2026-09-29): decision 6 is implemented in pgxsinkit, commit `b893af7`. The reader is
 `packages/client/src/circuits/long-poll.ts` (one catch-up or long-poll request and what its answer means)
@@ -19,8 +19,16 @@ commit. Step 1 of decision 8 (the move and the rename) is its commit `4c6da35`; 
 adapter's removal) was brought forward, since nothing about it depends on Rust 1.99, and is its commits
 `2f30abf`, `3267490` and `b45a592`. The removal took more than `GET /v1/shape`: the fleet health route
 `/v1/health`, every `ELECTRIC_*` setting and the StatsD exporter were Electric compatibility too. One
-setting the native path needs was renamed instead of removed: `CIRCUITS_PG_POOL_SIZE`. pgxsinkit pins the
-pair at `sha-9bfd480`, which is the first image without any of it. Steps 2 and 4 are not done.
+setting the native path needs was renamed instead of removed: `CIRCUITS_PG_POOL_SIZE`. pgxsinkit initially
+pinned the pair at `sha-9bfd480`, which is the first image without any of it. Step 2 remained at that point;
+step 4 (the tooling standard) was in place by circuits commit `11ac7c4`.
+
+Status note (2026-10-02): all four steps of decision 8 are implemented. Step 2 lands with the pair pinned
+at `sha-4c48e83`, circuits commit `4c48e8301c9cbd878279a45f0efb06124198e15e`: Rust 1.99.0 stable, dbsp
+0.357.0 and the dependency updates prepared on its beta. Both build stages and runtimes use Debian 13
+(Trixie), with the engine running as uid 10001 and the log server as uid 65532. The image workflow builds
+amd64 only and uses Docker's official `amd64/rust:1.99.0-trixie` builder. The repository's full gate and
+pgxsinkit's five integration lanes passed against the locally built pair before publication.
 
 Status note (2026-09-29): the consequence about the engine fork's `compat-branch` is settled, and nothing
 was brought over. The branch was the earlier design, built for the adapter: real LSNs on changes and a

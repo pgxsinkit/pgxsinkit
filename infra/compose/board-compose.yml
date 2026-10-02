@@ -198,7 +198,7 @@ services:
   # from the same commit as the engine's and pinned by the same sha tag — never `dev` or `latest`,
   # which move. Override with PGXSINKIT_DS_IMAGE to run a different build.
   ds:
-    image: ${PGXSINKIT_DS_IMAGE:-ghcr.io/pgxsinkit/circuits/durable-streams:sha-9bfd480}
+    image: ${PGXSINKIT_DS_IMAGE:-ghcr.io/pgxsinkit/circuits/durable-streams:sha-4c48e83}
     container_name: board-ds
     # FLAGS, not environment. This binary reads no env vars at all — `DS_PORT`/`DS_DATA_DIR`/`DS_MEMORY`
     # were invented here and silently ignored, leaving it on its own default (4437) while the engine
@@ -238,7 +238,7 @@ services:
   # localhost/circuits-engine:dev .`) and point PGXSINKIT_CIRCUITS_ENGINE_IMAGE at the tag.
   engine:
     container_name: board-engine
-    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/circuits/engine:sha-9bfd480}
+    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/circuits/engine:sha-4c48e83}
     environment:
       CIRCUITS_DS_URL: http://ds:8791
       CIRCUITS_PG_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}

@@ -30,7 +30,7 @@ services:
   # from the same commit as the engine's and pinned by the same sha tag — never `dev` or `latest`,
   # which move. Override with PGXSINKIT_DS_IMAGE to run a different build.
   ds:
-    image: ${PGXSINKIT_DS_IMAGE:-ghcr.io/pgxsinkit/circuits/durable-streams:sha-9bfd480}
+    image: ${PGXSINKIT_DS_IMAGE:-ghcr.io/pgxsinkit/circuits/durable-streams:sha-4c48e83}
     # FLAGS, not environment. This binary reads no env vars at all — `DS_PORT`/`DS_DATA_DIR`/`DS_MEMORY`
     # were invented here and silently ignored, leaving it on its own default (4437) while the engine
     # dialled ds:8791 and got ECONNREFUSED. Nothing caught it: podman's rootlessport accepts the HOST
@@ -77,7 +77,7 @@ services:
   # The EDGE is deliberately absent: it is TypeScript in `packages/server` (ADR-0055 decision 8), so
   # the lane runs it in-process, which is also what lets a test revoke an entitlement between polls.
   engine:
-    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/circuits/engine:sha-9bfd480}
+    image: ${PGXSINKIT_CIRCUITS_ENGINE_IMAGE:-ghcr.io/pgxsinkit/circuits/engine:sha-4c48e83}
     environment:
       CIRCUITS_DS_URL: http://ds:8791
       CIRCUITS_PG_URL: postgres://${PGXSINKIT_INTEGRATION_POSTGRES_USER:-supabase_admin}:${PGXSINKIT_INTEGRATION_POSTGRES_PASSWORD:-your-super-secret-and-long-postgres-password}@postgres:5432/${PGXSINKIT_INTEGRATION_POSTGRES_DB:-postgres}
