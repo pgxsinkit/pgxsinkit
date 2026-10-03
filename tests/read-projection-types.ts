@@ -1,6 +1,6 @@
 import { bigint, uuid, varchar } from "drizzle-orm/pg-core";
 
-import { getReadModelView, getSyncedLocalTable } from "@pgxsinkit/client";
+import { getOverlayTable, getReadModelView, getSyncedLocalTable } from "@pgxsinkit/client";
 import { defineReadProjection, defineSyncRegistry, defineSyncTable } from "@pgxsinkit/contracts";
 
 // Type-level coverage for `defineReadProjection` (ADR-0027): a projection entry's `getSyncedLocalTable` /
@@ -35,6 +35,17 @@ const summary = defineReadProjection(owner, {
 
 const projectionRegistry = defineSyncRegistry({ papers: owner, papersSummary: summary });
 
+// Both projected local tables are freshly constructed tables, not SQL aliases. Keep the literal
+// discrimination introduced by Drizzle rc5, rather than widening it to boolean.
+const ownerIsAlias: false = ({} as typeof owner.localTable._).isAlias;
+const summaryIsAlias: false = ({} as typeof summary.localTable._).isAlias;
+const ownerViewConfig: { isAlias: false; existing: true; schema: undefined } = {} as typeof owner.view._;
+const ownerOverlay = getOverlayTable(projectionRegistry, "papers");
+const ownerOverlayIsAlias: false = ({} as typeof ownerOverlay._).isAlias;
+const overlayTitle: string = ({} as typeof ownerOverlay.$inferSelect).title;
+// @ts-expect-error the overlay must retain the owner's omitted-column projection
+const overlayOmittedLastOpId = ({} as typeof ownerOverlay.$inferSelect).lastOpId;
+
 // --- The synced local table carries the owner's real per-column types for the KEPT keys. ---
 const summarySynced = getSyncedLocalTable(projectionRegistry, "papersSummary");
 type SummarySyncedRow = typeof summarySynced.$inferSelect;
@@ -52,6 +63,8 @@ const omittedOwnerId = ({} as SummarySyncedRow).ownerId;
 // --- The read-model view preserves the same typed subset (plus the fixed overlay columns). ---
 const summaryReadModel = getReadModelView(projectionRegistry, "papersSummary");
 type SummaryReadModelRow = typeof summaryReadModel.$inferSelect;
+const summaryViewIsAlias: false = ({} as typeof summaryReadModel._).isAlias;
+const summaryViewExisting: true = ({} as typeof summaryReadModel._).existing;
 
 const viewTitle: string = ({} as SummaryReadModelRow).title;
 // @ts-expect-error `body` is omitted from the projection subset — absent from the read-model view too
@@ -104,6 +117,14 @@ const redactBadOptOut = defineReadProjection(owner, {
 });
 
 void keptTitle;
+void ownerIsAlias;
+void summaryIsAlias;
+void ownerViewConfig;
+void ownerOverlayIsAlias;
+void overlayTitle;
+void overlayOmittedLastOpId;
+void summaryViewIsAlias;
+void summaryViewExisting;
 void keptUpdatedAt;
 void omittedBody;
 void omittedOwnerId;

@@ -171,8 +171,8 @@ preserve long-lived-host behavior, so you only set it for serverless):
 ```ts
 createSyncServer({
   deployment: {
-    startupVerification: "in-process" | "deploy-time", // default "in-process": governs ONLY the RLS auth-helper verify
-    operationsLog: "probe" | "enabled" | "disabled", // default "probe": ensure-then-warn-disable
+    startupVerification: "in-process", // default; use "deploy-time" to skip the RLS auth-helper verify
+    operationsLog: "probe", // default; use "enabled" or "disabled" to avoid the startup probe
   },
 });
 ```

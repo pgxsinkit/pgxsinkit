@@ -200,6 +200,7 @@ export type OverlayTable<TEntry = SyncTableEntry> = PgTableWithColumns<{
   schema: string | undefined;
   columns: EntryColumns<TEntry> & OverlayFixedColumns;
   dialect: "pg";
+  isAlias: false;
 }>;
 
 /**
@@ -207,11 +208,13 @@ export type OverlayTable<TEntry = SyncTableEntry> = PgTableWithColumns<{
  * property keys plus the two fixed overlay columns (`overlay_kind`, `local_updated_at_us`). Read
  * through a live query, so `local_updated_at_us` is an int8 `mode: "bigint"` column.
  */
-export type ReadModelView<TEntry = SyncTableEntry> = PgViewWithSelection<
-  string,
-  true,
-  EntryColumns<TEntry> & ReadModelFixedColumns
->;
+export type ReadModelView<TEntry = SyncTableEntry> = PgViewWithSelection<{
+  name: string;
+  schema: string | undefined;
+  existing: true;
+  isAlias: false;
+  selectedFields: EntryColumns<TEntry> & ReadModelFixedColumns;
+}>;
 
 /**
  * The projected SYNCED read-cache table — the entry's projected local table (or `AnyPgTable` fallback).

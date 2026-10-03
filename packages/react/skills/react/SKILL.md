@@ -59,9 +59,12 @@ at mount) are unaffected: `hydrating` clears at the first snapshot with no extra
 state only when `!loading && !hydrating` — zero rows before that means "not loaded yet", not "empty":
 
 ```tsx
-const { rows, loading, hydrating } = useLiveDrizzleRows((c) => c.drizzle.select().from(c.views.todos), []);
-if (loading || hydrating) return <Spinner />;
-if (rows.length === 0) return <EmptyState />;
+function TodoList() {
+  const { rows, loading, hydrating } = useLiveDrizzleRows((c) => c.drizzle.select().from(c.views.todos), []);
+  if (loading || hydrating) return <Spinner />;
+  if (rows.length === 0) return <EmptyState />;
+  return <Todos rows={rows} />;
+}
 ```
 
 ## Gate authenticated lazy groups until the session exists

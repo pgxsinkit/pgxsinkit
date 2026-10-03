@@ -46,7 +46,7 @@
     "@pgxsinkit/pgwasm-pg-dump": "workspace:*"
   },
   "peerDependencies": {
-    "drizzle-orm": "1.0.0-rc.4",
+    "drizzle-orm": "rc5",
     "zod": "^4.6.5"
   }
 }

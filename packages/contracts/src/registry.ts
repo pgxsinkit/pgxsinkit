@@ -257,6 +257,7 @@ type ProjectedLocalTable<
   schema: string | undefined;
   columns: PgBuildColumns<TName, ProjectedColumnsShape<TColumns, TOmittedColumns>>;
   dialect: "pg";
+  isAlias: false;
 }>;
 
 /**
@@ -283,23 +284,26 @@ type ProjectionLocalTable<
   schema: string | undefined;
   columns: Pick<TableColumnsShape<TOwnerTable>, TKeptKey & keyof TableColumnsShape<TOwnerTable>>;
   dialect: "pg";
+  isAlias: false;
 }>;
 
 type ReadModelView<
   TName extends string,
   TColumns extends Record<string, ColumnBuilderBase>,
   TOmittedColumns extends readonly ColumnKeys<TColumns>[],
-> = PgViewWithSelection<
-  `${TName}_read_model`,
-  true,
-  PgBuildColumns<
+> = PgViewWithSelection<{
+  name: `${TName}_read_model`;
+  schema: undefined;
+  existing: true;
+  isAlias: false;
+  selectedFields: PgBuildColumns<
     `${TName}_read_model`,
     ProjectedColumnsShape<TColumns, TOmittedColumns> & {
       overlay_kind: SetNotNull<PgVarcharBuilder<[string, ...string[]]>>;
       local_updated_at_us: SetNotNull<PgBigInt64Builder>;
     }
-  >
->;
+  >;
+}>;
 
 /** Governance spec for `defineSyncTable` — columns are typed from `makeColumns`. */
 export type SyncTableInputGovernance<TColumns extends Record<string, ColumnBuilderBase>> = Omit<

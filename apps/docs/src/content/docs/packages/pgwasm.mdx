@@ -126,6 +126,8 @@ Firefox.
 `createOpfsPgwasm` is the only supported construction path:
 
 ```ts
+/// <reference lib="webworker" />
+
 import { createOpfsPgwasm, strictSync } from "@pgxsinkit/pgwasm/opfs";
 import { live } from "@pgxsinkit/pgwasm/live";
 import { cBuild } from "@pgxsinkit/pgwasm-c";

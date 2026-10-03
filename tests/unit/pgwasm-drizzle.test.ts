@@ -3,24 +3,33 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { defineRelations, eq, sql } from "drizzle-orm";
 import { Cache } from "drizzle-orm/cache/core/cache";
 import type { MutationOption } from "drizzle-orm/cache/core/cache";
+import { CodecsCollection } from "drizzle-orm/codecs";
 import {
   bigint,
+  bigserial,
   boolean,
   bytea,
   date,
+  geometry,
+  halfvec,
   integer,
   interval,
   jsonb,
   numeric,
   pgTable,
   serial,
+  sparsevec,
   text,
   timestamp,
+  vector,
 } from "drizzle-orm/pg-core";
 import type { PgDialect } from "drizzle-orm/pg-core/dialect";
+import { seed } from "drizzle-seed";
 
 import { drizzle, type PgwasmDatabase, UnsupportedDrizzleConfigError } from "../../packages/pgwasm/src/drizzle";
+import { drizzleParsers, pgwasmCodecs } from "../../packages/pgwasm/src/drizzle/codecs";
 import { jitMappersUsable } from "../../packages/pgwasm/src/drizzle/driver";
+import { createTablesFromSchema } from "../support/drizzle";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { rejectionOf } from "./support/rejection";
 
@@ -58,6 +67,156 @@ async function database() {
 }
 
 describe("the pgwasm Drizzle driver", () => {
+  it("keeps array dimensions separate from vector and sparse-vector text delimiters", () => {
+    const arrays = pgTable("codec_arrays", {
+      vectors: vector("vectors", { dimensions: 2 }).array(),
+      halves: halfvec("halves", { dimensions: 2 }).array("[][]"),
+      sparse: sparsevec("sparse", { dimensions: 3 }).array("[][]"),
+    });
+    const codecs = new CodecsCollection((type) => type, pgwasmCodecs);
+    expect(codecs.apply(arrays.vectors, "normalizeParamArray", ["[1,2]", "[3,4]"])).toBe('{"[1,2]","[3,4]"}');
+    expect(codecs.apply(arrays.halves, "normalizeParamArray", [["[1,2]", "[3,4]"]])).toBe('{{"[1,2]","[3,4]"}}');
+    const sparse = [["{1:0.5}/3", "{2:0.25}/3"]];
+    const sparseText = '{{"{1:0.5}/3","{2:0.25}/3"}}';
+    expect(codecs.apply(arrays.sparse, "normalizeParamArray", sparse)).toBe(sparseText);
+    expect(codecs.apply(arrays.sparse, "normalizeArray", sparseText)).toEqual(sparse);
+  });
+
+  it("uses the PostGIS colon array delimiter for both geometry modes and nested arrays", () => {
+    const arrays = pgTable("geometry_codec_arrays", {
+      points: geometry("points", { mode: "xy" }).array(),
+      tuples: geometry("tuples").array("[][]"),
+    });
+    const codecs = new CodecsCollection((type) => type, pgwasmCodecs);
+    expect(codecs.apply(arrays.points, "normalizeParamArray", ["point(1 2)", "point(3 4)"])).toBe(
+      '{"point(1 2)":"point(3 4)"}',
+    );
+    expect(codecs.apply(arrays.tuples, "normalizeParamArray", [["point(1 2)", "point(3 4)"]])).toBe(
+      '{{"point(1 2)":"point(3 4)"}}',
+    );
+    const point12 = "0101000000000000000000F03F0000000000000040";
+    const point34 = "010100000000000000000008400000000000001040";
+    expect(codecs.apply(arrays.points, "normalizeArray", `{${point12}:${point34}}`)).toEqual([
+      { x: 1, y: 2 },
+      { x: 3, y: 4 },
+    ]);
+    expect(codecs.apply(arrays.tuples, "normalizeArray", `{{${point12}:${point34}}}`)).toEqual([
+      [
+        [1, 2],
+        [3, 4],
+      ],
+    ]);
+  });
+
+  it("maps rc5 numeric modes and nullable nested arrays through the real text protocol", async () => {
+    const columns = pgTable("codec_values", {
+      bigNumber: bigint("big_number", { mode: "number" }),
+      serialNumber: bigserial("serial_number", { mode: "number" }),
+      bigNumbers: bigint("big_numbers", { mode: "number" }).$type<number | null>().array(),
+      amountNumber: numeric("amount_number", { mode: "number" }),
+      amountBig: numeric("amount_big", { mode: "bigint" }),
+      amounts: numeric("amounts").$type<string | null>().array(),
+      amountNumbers: numeric("amount_numbers", { mode: "number" }).$type<number | null>().array(),
+      amountBigs: numeric("amount_bigs", { mode: "bigint" }).$type<bigint | null>().array(),
+      days: date("days", { mode: "date" }).$type<Date | null>().array(),
+      dayStrings: date("day_strings", { mode: "string" }).$type<string | null>().array(),
+      ats: timestamp("ats").$type<Date | null>().array(),
+      atTzs: timestamp("at_tzs", { withTimezone: true }).$type<Date | null>().array(),
+      spans: interval("spans").$type<string | null>().array(),
+    });
+    const client = await createTestPgwasm();
+    await createTablesFromSchema(client, { codecValues: columns });
+    const db = drizzle(client);
+    await seed(db, { codecValues: columns }, { count: 1 }).refine((f) => ({
+      codecValues: {
+        columns: {
+          bigNumber: f.valuesFromArray({ values: [1] }),
+          serialNumber: f.valuesFromArray({ values: [2] }),
+          bigNumbers: f.default({ defaultValue: [1, null, 2, 3] }),
+          amountNumber: f.valuesFromArray({ values: [1.25] }),
+          amountBig: f.valuesFromArray({ values: [9007199254740993n] }),
+          amounts: f.default({ defaultValue: ["9007199254740993.125", null, "1.50", "2.25"] }),
+          amountNumbers: f.default({ defaultValue: [1.5, null, 2.25, 3] }),
+          amountBigs: f.default({ defaultValue: [9007199254740993n, null] }),
+          days: f.default({ defaultValue: [new Date("2024-03-01T00:00:00.000Z"), null] }),
+          dayStrings: f.default({ defaultValue: ["2024-03-01", null] }),
+          ats: f.default({ defaultValue: [new Date("2024-03-01T10:20:30.000Z"), null] }),
+          atTzs: f.default({ defaultValue: [new Date("2024-03-01T02:20:30.000Z"), null] }),
+          spans: f.default({ defaultValue: ["1 day", null] }),
+        },
+      },
+    }));
+    const [row] = await db.select().from(columns);
+    expect(row).toEqual({
+      bigNumber: 1,
+      serialNumber: 2,
+      bigNumbers: [1, null, 2, 3],
+      amountNumber: 1.25,
+      amountBig: 9007199254740993n,
+      amounts: ["9007199254740993.125", null, "1.50", "2.25"],
+      amountNumbers: [1.5, null, 2.25, 3],
+      amountBigs: [9007199254740993n, null],
+      days: [new Date("2024-03-01T00:00:00.000Z"), null],
+      dayStrings: ["2024-03-01", null],
+      ats: [new Date("2024-03-01T10:20:30.000Z"), null],
+      atTzs: [new Date("2024-03-01T02:20:30.000Z"), null],
+      spans: ["1 day", null],
+    });
+    // ARRAY constructors need typed SQL interpolation; Drizzle has no object operator for them.
+    // Nest the supported one-dimensional seeded arrays without another write or a seed bypass.
+    const query = drizzle
+      .mock({ codecs: {} })
+      .select({
+        days: sql`ARRAY[${columns.days}, ${columns.days}]`.as("days"),
+        ats: sql`ARRAY[${columns.ats}, ${columns.ats}]`.as("ats"),
+        at_tzs: sql`ARRAY[${columns.atTzs}, ${columns.atTzs}]`.as("at_tzs"),
+        spans: sql`ARRAY[${columns.spans}, ${columns.spans}]`.as("spans"),
+      })
+      .from(columns)
+      .toSQL();
+    const raw = await client.query(query.sql, query.params, {
+      parsers: drizzleParsers,
+    });
+    expect(raw.rows).toEqual([
+      {
+        days: [
+          ["2024-03-01", null],
+          ["2024-03-01", null],
+        ],
+        ats: [
+          ["2024-03-01 10:20:30", null],
+          ["2024-03-01 10:20:30", null],
+        ],
+        at_tzs: [
+          ["2024-03-01 02:20:30+00", null],
+          ["2024-03-01 02:20:30+00", null],
+        ],
+        spans: [
+          ["1 day", null],
+          ["1 day", null],
+        ],
+      },
+    ]);
+    const nested = pgTable("nested_codec_values", {
+      days: date("days", { mode: "date" }).array("[][]"),
+      ats: timestamp("ats").array("[][]"),
+      atTzs: timestamp("at_tzs", { withTimezone: true }).array("[][]"),
+    });
+    const codecs = new CodecsCollection((type) => type, pgwasmCodecs);
+    expect(codecs.apply(nested.days, "normalizeArray", raw.rows[0]?.["days"])).toEqual([
+      [new Date("2024-03-01T00:00:00.000Z"), null],
+      [new Date("2024-03-01T00:00:00.000Z"), null],
+    ]);
+    expect(codecs.apply(nested.ats, "normalizeArray", raw.rows[0]?.["ats"])).toEqual([
+      [new Date("2024-03-01T10:20:30.000Z"), null],
+      [new Date("2024-03-01T10:20:30.000Z"), null],
+    ]);
+    expect(codecs.apply(nested.atTzs, "normalizeArray", raw.rows[0]?.["at_tzs"])).toEqual([
+      [new Date("2024-03-01T02:20:30.000Z"), null],
+      [new Date("2024-03-01T02:20:30.000Z"), null],
+    ]);
+  });
+
   it("inserts, selects, updates and deletes", async () => {
     const { db } = await database();
     const inserted = await db

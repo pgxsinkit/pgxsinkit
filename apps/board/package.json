@@ -17,13 +17,13 @@
     "@pgxsinkit/pgwasm-repl": "workspace:*",
     "@pgxsinkit/react": "workspace:*",
     "@supabase/supabase-js": "2.117.2",
-    "@tanstack/react-router": "1.170.40",
+    "@tanstack/react-router": "1.170.41",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "uuid": "14.0.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "6.1.1",
-    "vite": "8.3.1"
+    "vite": "8.3.2"
   }
 }

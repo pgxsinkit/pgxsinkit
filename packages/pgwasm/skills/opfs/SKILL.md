@@ -28,6 +28,8 @@ shutdown.
 Create one otherwise-empty OPFS directory per database and pass its handle to the factory with the build:
 
 ```ts
+/// <reference lib="webworker" />
+
 import { createOpfsPgwasm, strictSync } from "@pgxsinkit/pgwasm/opfs";
 import { live } from "@pgxsinkit/pgwasm/live";
 import { cBuild } from "@pgxsinkit/pgwasm-c";

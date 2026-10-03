@@ -36,7 +36,7 @@ from it, so getting it right is what keeps read and write authorization from dri
    because a silent last-write-wins is exactly the data loss the choice exists to surface.
 
 ```ts
-widgets: defineSyncTable({
+const widgets = defineSyncTable({
   tableName: "widgets",
   mode: "readwrite",
   makeColumns: () => ({
@@ -53,7 +53,7 @@ widgets: defineSyncTable({
       { column: "ownerId", applyOn: ["create"], strategy: "authClaim", claimPath: ["sub"] },
     ],
   },
-}),
+});
 ```
 
 **Column types don't constrain sync.** The read-path backfill picks a bulk-insert tier (COPY / JSON / per-row
