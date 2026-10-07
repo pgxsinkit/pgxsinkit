@@ -88,6 +88,7 @@ describe("dedup × hydration over the worker bridge (ADR-0040 Slice 3)", () => {
       ...realPgwasm,
       createPgwasm: async () => ({
         exec: async () => undefined,
+        refreshArrayTypes: async () => undefined,
         close: async () => undefined,
         query: async () => ({ rows: [] }),
         live: fakeLive,

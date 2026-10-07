@@ -2650,6 +2650,9 @@ export async function createSyncClient<const TRegistry extends SyncTableRegistry
           hadStored: storedFingerprint != null,
         });
         await pgwasm.exec(generateDurableLocalSchemaSql(options.registry));
+        // pgwasm discovers array OIDs before the registry DDL creates its enum types. Refresh after
+        // replay so enum-array reads are JS arrays on this boot, rather than Postgres array text.
+        await pgwasm.refreshArrayTypes();
         await writeStoredLocalSchemaFingerprint(pgwasm, options.registry, currentFingerprint);
         bootReportBuilder.setSchemaFastPath({ skipped: false, fingerprintMatch: false });
       }

@@ -38,6 +38,8 @@ const fakeWarmBuild = {
 };
 let capturedMutationOptions: Record<string, unknown> | undefined;
 let capturedSyncOptions: Record<string, unknown> | undefined;
+let storedSchemaFingerprint: string | null = null;
+const refreshArrayTypesMock = mock(async () => undefined);
 
 const startCircuitsSyncMock = mock(async (_pg: unknown, options: Record<string, unknown>) => {
   capturedSyncOptions = options;
@@ -62,6 +64,7 @@ describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
           // A worker's created store is checked against the declared build on its own `pg.build` (ADR-0063).
           build: fakeWarmBuild.identity,
           exec: async () => undefined,
+          refreshArrayTypes: refreshArrayTypesMock,
           close: async () => undefined,
         };
       },
@@ -95,7 +98,7 @@ describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
       readActivatedLazyGroups: async () => new Set<string>(),
       writeLazyGroupActivation: async () => undefined,
       clearLazyGroupActivation: async () => undefined,
-      readStoredLocalSchemaFingerprint: async () => null,
+      readStoredLocalSchemaFingerprint: async () => storedSchemaFingerprint,
       writeStoredLocalSchemaFingerprint: async () => undefined,
     }));
     await mock.module("../../packages/client/src/mutation", () => ({
@@ -161,6 +164,8 @@ describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
     capturedMutationOptions = undefined;
     capturedSyncOptions = undefined;
     startCircuitsSyncMock.mockClear();
+    storedSchemaFingerprint = null;
+    refreshArrayTypesMock.mockClear();
   });
 
   async function makeClient(extra: Record<string, unknown>) {
@@ -191,6 +196,18 @@ describe("createSyncClient boot options (build + writeRequestHeaders)", () => {
     expect(assets?.["fsBundle"]).toBe(fsBundle);
     // The extensions are still wired alongside the pre-warmed build.
     expect(capturedCreateOptions?.["extensions"]).toBeDefined();
+  });
+
+  it("refreshes array types after schema replay but skips refresh on a fingerprint match", async () => {
+    const cold = await makeClient({});
+    expect(refreshArrayTypesMock).toHaveBeenCalledTimes(1);
+    await cold.stop();
+
+    storedSchemaFingerprint = "lsf1:mock";
+    refreshArrayTypesMock.mockClear();
+    const warm = await makeClient({});
+    expect(refreshArrayTypesMock).not.toHaveBeenCalled();
+    await warm.stop();
   });
 
   it("boots when the caller's build carries a REJECTED warm — the build gets the rejection, never the boot", async () => {

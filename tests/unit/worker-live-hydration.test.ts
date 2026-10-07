@@ -95,6 +95,7 @@ describe("worker-bridge live-rows hydration across eager + lazy groups (ADR-0021
       ...realPgwasm,
       createPgwasm: async () => ({
         exec: async () => undefined,
+        refreshArrayTypes: async () => undefined,
         close: async () => undefined,
         query: async () => ({ rows: [] }),
         live: fakeLive,

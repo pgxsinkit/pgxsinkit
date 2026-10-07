@@ -107,6 +107,7 @@ describe("worker live-query lifecycle races (ADR-0040 fix round)", () => {
       ...realPgwasm,
       createPgwasm: async () => ({
         exec: async () => undefined,
+        refreshArrayTypes: async () => undefined,
         close: async () => undefined,
         query: async () => ({ rows: [] }),
         live: fakeLive,

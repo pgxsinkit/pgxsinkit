@@ -95,7 +95,11 @@ describe("anonymous-activation diagnostic (ADR-0039)", () => {
     const realPgwasm = await import("@pgxsinkit/pgwasm");
     await mock.module("@pgxsinkit/pgwasm", () => ({
       ...realPgwasm,
-      createPgwasm: async () => ({ exec: async () => undefined, close: async () => undefined }),
+      createPgwasm: async () => ({
+        exec: async () => undefined,
+        refreshArrayTypes: async () => undefined,
+        close: async () => undefined,
+      }),
     }));
     await mock.module("@pgxsinkit/pgwasm/live", () => ({ live: {} }));
     const realDrizzle = await import("@pgxsinkit/pgwasm/drizzle");

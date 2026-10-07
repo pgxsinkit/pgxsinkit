@@ -60,6 +60,7 @@ describe("createSyncClient subscription reset", () => {
       ...realPgwasm,
       createPgwasm: async () => ({
         exec: execMock,
+        refreshArrayTypes: async () => undefined,
         close: async () => undefined,
       }),
     }));

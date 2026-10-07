@@ -111,6 +111,7 @@ describe("ADR-0041 staged boot readiness (stage 1) — in-process core", () => {
       ...realPgwasm,
       createPgwasm: async () => ({
         exec: async () => undefined,
+        refreshArrayTypes: async () => undefined,
         close: async () => undefined,
         query: async () => ({ rows: [] }),
         live: fakeLive,

@@ -95,6 +95,7 @@ describe("createSyncClient lazy-relation facade (ADR-0021)", () => {
       ...realPgwasm,
       createPgwasm: async () => ({
         exec: async () => undefined,
+        refreshArrayTypes: async () => undefined,
         close: async () => undefined,
       }),
     }));

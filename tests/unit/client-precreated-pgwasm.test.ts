@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 
-import { eq } from "drizzle-orm";
-import { integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { eq, sql } from "drizzle-orm";
+import { integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
-import type { SyncTableRegistry } from "@pgxsinkit/contracts";
+import { defineSyncRegistry, defineSyncTable, type SyncTableRegistry } from "@pgxsinkit/contracts";
 import type { Pgwasm } from "@pgxsinkit/pgwasm";
 
 import {
@@ -90,6 +90,33 @@ async function assertProvisioned(active: SyncClient<SyncTableRegistry>): Promise
 }
 
 describe("createSyncClient precreatedPgwasm", () => {
+  it("decodes registry-created enum arrays on the first boot without reopening the store", async () => {
+    const role = pgEnum("meeting_role", ["teaching", "review", "assessment"]);
+    const entry = defineSyncTable({
+      tableName: "meeting",
+      makeColumns: () => ({ id: integer("id").primaryKey(), roles: role("roles").array().notNull() }),
+    });
+    const registry = defineSyncRegistry({ meeting: entry });
+    client = await createSyncClient<SyncTableRegistry>({
+      registry,
+      syncEnabled: false,
+      controlPlaneUrl: "http://127.0.0.1:3101",
+      streamBaseUrl: "http://127.0.0.1:3101/v1/stream",
+      batchWriteUrl: "http://127.0.0.1:3101/api/mutations",
+      ...memoryStoreForTests("first-boot-enum-array"),
+    });
+    await client.ready;
+    const db = drizzleOver(client.pgwasm as unknown as Pgwasm);
+    // Construct the stored array in SQL so a missing parameter serializer cannot mask the read bug.
+    await db.insert(entry.table).values({
+      id: 1,
+      roles: sql`ARRAY[${"teaching"}, ${"review"}]::${sql.identifier(role.enumName)}[]`,
+    });
+    // Read through the actual client/pgwasm decoder, before Drizzle can convert array text itself.
+    const query = db.select({ roles: entry.table.roles }).from(entry.table).toSQL();
+    expect((await client.rawQuery(query.sql, query.params)).rows).toEqual([{ roles: ["teaching", "review"] }]);
+  });
+
   it("applies schema + stamps the store version on a caller-precreated instance", async () => {
     const precreated = createPgwasmClient(memoryStoreForTests("precreated-success"));
     client = await createSyncClient({
