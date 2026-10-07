@@ -16,7 +16,7 @@ predicates:
 - **member-of-team** — `<col> IN (SELECT board_member_team_ids())`, where the
   helper is a `SECURITY DEFINER` function that reads `team_member` with RLS
   bypassed. It must **not** be inlined as `... IN (SELECT team_id FROM team_member
-WHERE user_id = sub)`: that read re-enters `team_member`'s own RLS while the
+  WHERE user_id = sub)`: that read re-enters `team_member`'s own RLS while the
   policy is being evaluated and Postgres aborts with `42P17 infinite recursion`
   (see below).
 - **channel-visibility** — the Channel is `global`, or its Team is one of mine.

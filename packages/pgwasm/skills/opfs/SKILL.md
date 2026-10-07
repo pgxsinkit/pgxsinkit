@@ -30,9 +30,9 @@ Create one otherwise-empty OPFS directory per database and pass its handle to th
 ```ts
 /// <reference lib="webworker" />
 
-import { createOpfsPgwasm, strictSync } from "@pgxsinkit/pgwasm/opfs";
-import { live } from "@pgxsinkit/pgwasm/live";
 import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { live } from "@pgxsinkit/pgwasm/live";
+import { createOpfsPgwasm, strictSync } from "@pgxsinkit/pgwasm/opfs";
 
 const root = await navigator.storage.getDirectory();
 const directory = await root.getDirectoryHandle("app-database", { create: true });

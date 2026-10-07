@@ -36,7 +36,7 @@ One commit.
   and `mapColumns` options from `ShapeToTableOptions`, `SyncShapeToTableOptions`, and their
   consumers (`sync/index.ts`, `apply.ts`, `subscription-state.ts`, `tags.ts`).
 - Derive every table-scoped fact from the entry: identity via `getSyncedLocalTable(registry,
-tableKey)` (bare rendering for ephemeral lifecycles — fixes the `makeTable` qualification bug),
+  tableKey)` (bare rendering for ephemeral lifecycles — fixes the `makeTable` qualification bug),
   PKs from the entry table's columns, strategy from `classifyTableApplyStrategy(entry)`.
 - Delete `apply-tables.ts` and `catalog-tables.ts` and the three `information_schema` probes
   (`resolveJsonRecordsetColumns`, `resolveCopyColumnUdts`, `recordsetColumnCasts`); author the

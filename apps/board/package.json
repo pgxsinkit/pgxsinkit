@@ -8,8 +8,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@mantine/core": "9.6.3",
-    "@mantine/hooks": "9.6.3",
+    "@mantine/core": "9.7.1",
+    "@mantine/hooks": "9.7.1",
     "@pgxsinkit/board-schema": "workspace:*",
     "@pgxsinkit/client": "workspace:*",
     "@pgxsinkit/contracts": "workspace:*",
@@ -23,7 +23,7 @@
     "uuid": "14.0.2"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "6.1.1",
-    "vite": "8.3.2"
+    "@vitejs/plugin-react": "6.1.2",
+    "vite": "8.3.3"
   }
 }

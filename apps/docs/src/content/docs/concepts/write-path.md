@@ -159,7 +159,7 @@ directions:
 - **Function-level (ACL): `permission denied for function pgxsinkit_apply_mutations`, on _every_ write.**
   Nothing about the row or the actor's claims is involved — the database role your **server** connects as
   simply may not execute the applier. Fix it by regenerating the migration with `--grant-execute-to <that
-role>` (see [Deploying the server](/start/deploying-the-server/)), never by granting it by hand.
+  role>` (see [Deploying the server](/start/deploying-the-server/)), never by granting it by hand.
 
 "Some writes are denied" versus "all writes are denied" is the whole discriminator.
 

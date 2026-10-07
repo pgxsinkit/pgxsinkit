@@ -156,14 +156,14 @@ the reads — driver kept at `tmp/agents/cdp-eval.ts`), reading each boot's
 `__boardBootReport`.
 
 - **Default (`opfs`) preference**: `mode: "worker"`, `engineHome:
-"elected-worker"` — the placement probe refuses sync-access handles in the
+  "elected-worker"` — the placement probe refuses sync-access handles in the
   SharedWorker scope and elects a tab-spawned dedicated worker, exactly as on
   desktop Chromium. The opfs-repacked VFS verifiably engaged: the store directory
   under `pgxsinkit/stores/` carries the ADR-0048 whole-directory layout
   (`arena.bin`, `metadata-a/b.bin`, `activation.bin`), and the only IndexedDB
   database is the store-meta binding.
 - **Forced `idbfs` preference**: `storageBackend: "idbfs"`, `engineHome:
-"shared-worker"` — the forced engine runs in the SharedWorker with no
+  "shared-worker"` — the forced engine runs in the SharedWorker with no
   probe/election, as declared. Applied and reverted through the login page's real
   Apply-&-reload flow, which behaved correctly both ways.
 - **Item 2 verdict**: the login copy is already truthful ("…probe for an Origin

@@ -109,7 +109,7 @@ Built in dependency order, each phase its own `validate:full`-green commit on `d
   enqueue path stamps a chain head's base = the synced Server version at enqueue (captured BEFORE the
   optimistic record overwrites it); a chained write stamps NULL and resolves at flush in
   `readPendingBatchRows` via `COALESCE(base_server_version, MAX acked-predecessor
-server_updated_at_us, current synced version)`; a create gets none. The resolved base is re-stamped
+  server_updated_at_us, current synced version)`; a create gets none. The resolved base is re-stamped
   into the journal at mark-as-sending and carried on the envelope.
 - **P3 — server detection (the crux, the only migration-touching part).** `buildTableBranch` emits
   per-policy SQL: reject-if-stale carries `b bigint, m uuid` in the `json_to_recordset`, collects
@@ -123,7 +123,7 @@ server_updated_at_us, current synced version)`; a create gets none. The resolved
   `sending -> conflicted`). The flush ack loop routes a `conflicted` ack to the terminal state KEEPING
   the overlay (reconcile only clears acked, so the optimistic value stays); surfaced via the new
   `onConflict` callback and the sync-state view's `conflict_state` (now scoped to `status =
-'conflicted'`). `discardConflict(table, entityKey)` clears the kept overlay + conflicted entry.
+  'conflicted'`). `discardConflict(table, entityKey)` clears the kept overlay + conflicted entry.
   Resolution is an ordinary new mutation (its base resolves to the caught-up synced version).
 - **P5 — proofs.** Unit (PGlite, real-execution): `conflict-base-capture.test.ts` (no-self-conflict),
   the detection block in `plpgsql-apply.test.ts` (both policies, update + delete, no-base, non-stale),

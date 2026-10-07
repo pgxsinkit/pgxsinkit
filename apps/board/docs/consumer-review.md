@@ -204,11 +204,11 @@ the LWW message append consumed cleanly once the create path worked.
 
 16. **The optimistic overlay never stamped an `authUid` create-managed field → NOT NULL
     violation on the very first create.** A `message.create` supplies only `{ id, channelId,
-body }` — `authorId` is an `authUid` managed field, so it is stripped from the create
+    body }` — `authorId` is an `authUid` managed field, so it is stripped from the create
     input type and the server stamps it from `auth.uid()`. But the optimistic overlay row
     (which the local thread renders this frame) is INSERTed with every projected column, and
     `author_id` is `NOT NULL`, so the create threw `null value in column "author_id" of
-relation "message_overlay" violates not-null constraint`. The convention/governance fill
+    relation "message_overlay" violates not-null constraint`. The convention/governance fill
     only covered `nowMicroseconds` timestamps, not `authUid`. → **ergonomics** (fixed
     upstream, `packages/client/src/mutation.ts`): the optimistic record now stamps `authUid`
     create-managed fields from the decoded JWT `sub` (the same value the server stamps), so

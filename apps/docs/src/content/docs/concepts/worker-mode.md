@@ -38,6 +38,7 @@ never gate writes yourself. `ready` and per-group `groupReady` keep their catch-
 ```ts
 // sync.worker.ts — bundled as a worker; imports the registry as code
 import { defineSyncWorker } from "@pgxsinkit/client";
+
 import { registry } from "./registry";
 
 defineSyncWorker({
@@ -55,6 +56,7 @@ defineSyncWorker({
 ```ts
 // tab code
 import { attachSyncClient } from "@pgxsinkit/client";
+
 import { registry } from "./registry";
 
 const storePath = "my-app-store";

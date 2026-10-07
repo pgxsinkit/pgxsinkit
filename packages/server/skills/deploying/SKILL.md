@@ -142,11 +142,11 @@ bun run pgxsinkit-generate --registry ./sync-registry.ts --export registry \
   `createSyncServer({ applyFunctionGrantExecuteTo: ["app_writer"] })`.
 - **The revokes are re-emitted on every install** — the artifact begins with `DROP FUNCTION`, so a fresh
   creation re-inherits Postgres's PUBLIC default and Supabase's `ALTER DEFAULT PRIVILEGES … TO anon,
-authenticated, service_role`. A hand-hardened function would silently un-harden itself; this converges.
+  authenticated, service_role`. A hand-hardened function would silently un-harden itself; this converges.
 - **Grantees the toolkit cannot name are revoked too.** After the named revokes, the artifact enumerates
   the installed function's real grantees (`aclexplode(pg_proc.proacl)`) and revokes `EXECUTE` from every
   one that is neither the owner nor on the grant list. Your OWN `ALTER DEFAULT PRIVILEGES … GRANT ALL ON
-FUNCTIONS TO <role>` re-grants at the `CREATE` inside every install exactly like Supabase's does, so
+  FUNCTIONS TO <role>` re-grants at the `CREATE` inside every install exactly like Supabase's does, so
   without the enumeration such a role would survive every regenerate. End state: owner + your list.
 - **Everyone regenerates once.** The ACL moved the fingerprint, so upgrading `@pgxsinkit/server` means
   re-running the generate command (and `--utilities`, which hardens `pgxsinkit_clock_us()` the same way,

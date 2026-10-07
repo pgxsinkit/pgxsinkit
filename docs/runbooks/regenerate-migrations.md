@@ -123,7 +123,7 @@ place. The order, and why:
 3. **schema** (generated, `db:board:generate`) — enums, the 6 tables, all RLS policies (current
    helper-based form), and `ENABLE ROW LEVEL SECURITY`.
 4. **`*_board_grants_trigger`** (custom) — `GRANT`s to `authenticated` and `CREATE TRIGGER
-issue_block_cross_team_move` (both need the tables, so they follow the schema).
+   issue_block_cross_team_move` (both need the tables, so they follow the schema).
 5. **`*_board_sync_artifact`** (generated, `db:board:sync-fn`) — the `pgxsinkit_apply_mutations` apply
    function. Standalone `DROP … ; CREATE OR REPLACE`, ordered last.
 6. **`*_board_event_lane`** (generated, `db:board:events`) — `CREATE EXTENSION IF NOT EXISTS pgmq` plus one

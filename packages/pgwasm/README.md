@@ -11,8 +11,8 @@ bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c
 
 ```ts
 import { createPgwasm } from "@pgxsinkit/pgwasm";
-import { live } from "@pgxsinkit/pgwasm/live";
 import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { live } from "@pgxsinkit/pgwasm/live";
 
 const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app", extensions: { live } });
 await pg.exec("CREATE TABLE IF NOT EXISTS todo (id serial PRIMARY KEY, title text)");

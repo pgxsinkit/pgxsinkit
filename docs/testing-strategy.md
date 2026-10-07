@@ -381,7 +381,7 @@ server, its filesystem bundle, its glue and amcheck are new. Drift the lanes rec
   (`PgwasmFailedError: … TypeError: resolved is not a function`): the conversion module's import of a server
   symbol was never exported.
 - **version() names the build.** It reads `PostgreSQL 18.3 (pgwasm-postgres 18.3.0) on
-wasm32-unknown-emscripten, …`, and `C_BUILD_IDENTITY.release` is the same name (asserted).
+  wasm32-unknown-emscripten, …`, and `C_BUILD_IDENTITY.release` is the same name (asserted).
 - **The prepopulated data directory** is made by the release's own initdb, deterministically, and is still
   unmarked. Its modes are 0750/0640 (the previous backup's were 0777/0666); a restore does not carry modes
   into the data directory, and restoring it into memory and `file://` storage, rewriting the catalogs and

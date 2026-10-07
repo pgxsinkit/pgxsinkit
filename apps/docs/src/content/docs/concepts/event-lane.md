@@ -30,8 +30,9 @@ consumer-side handling. It is registered on the sync registry you already have â
 stream name:
 
 ```ts
-import { defineEventStream, defineSyncRegistry } from "@pgxsinkit/contracts";
 import { z } from "zod";
+
+import { defineEventStream, defineSyncRegistry } from "@pgxsinkit/contracts";
 
 export const registry = defineSyncRegistry({
   tables: { issue },
