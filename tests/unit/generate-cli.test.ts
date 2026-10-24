@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { uuid, varchar } from "drizzle-orm/pg-core";
@@ -16,6 +16,37 @@ import {
 } from "../../packages/server/src/cli/generate";
 import { findMigrationCarrying } from "../../packages/server/src/cli/generate";
 import { eventLaneDdlFingerprint, renderEventLaneMigration } from "../../packages/server/src/events/ddl";
+
+describe("pgxsinkit-generate --utilities snapshot compatibility", () => {
+  const parent = join(process.cwd(), "tmp", "agents");
+  mkdirSync(parent, { recursive: true });
+  const out = mkdtempSync(join(parent, "utilities-cli-"));
+  afterAll(() => rmSync(out, { recursive: true, force: true }));
+
+  it("creates a baseline accepted by the installed kit and preserves it when re-emitting SQL", () => {
+    const args = [
+      "bun",
+      "packages/server/src/cli/generate.ts",
+      "--utilities",
+      "--out",
+      out,
+      "--name",
+      "20260101000000_pgxsinkit_utilities",
+    ];
+    const first = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+    expect(first.exitCode, first.stderr.toString()).toBe(0);
+    const snapshot = join(out, "20260101000000_pgxsinkit_utilities", "snapshot.json");
+    const before = readFileSync(snapshot, "utf8");
+    const checked = Bun.spawnSync(
+      ["bun", "--bun", "drizzle-kit", "check", "--dialect", "postgresql", "--out", out, "--output", "json"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(checked.exitCode, checked.stdout.toString() + checked.stderr.toString()).toBe(0);
+    const second = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+    expect(second.exitCode, second.stderr.toString()).toBe(0);
+    expect(readFileSync(snapshot, "utf8")).toBe(before);
+  });
+});
 
 describe("pgxsinkit-generate registry loading", () => {
   it("loads the conventional named registry export used by the getting-started guide", () => {

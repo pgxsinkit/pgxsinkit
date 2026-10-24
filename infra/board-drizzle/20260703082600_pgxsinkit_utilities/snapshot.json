@@ -1,8 +1,9 @@
 {
+  "type": "base",
+  "version": "9",
+  "dialect": "postgres",
   "id": "2ffd9bf8-f6a5-46ca-98e6-9ce011194076",
   "prevIds": ["00000000-0000-0000-0000-000000000000"],
-  "version": "8",
-  "dialect": "postgres",
-  "ddl": [],
-  "renames": []
+  "footprints": [],
+  "ddl": []
 }

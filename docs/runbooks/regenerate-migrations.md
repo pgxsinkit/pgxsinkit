@@ -44,6 +44,21 @@ a rewritten history ships by dispatching that workflow (never by hand-reconcilin
   per registered Event stream, fingerprinted over that stream set — and `sync:function:check` runs its
   `--events --check` leg for both registries (a registry with no Event streams passes trivially).
 
+## After upgrading Drizzle Kit
+
+Upgrade both histories with the installed tool when it reports an older snapshot format:
+
+```bash
+bun --bun drizzle-kit up --config=infra/drizzle.config.ts
+bun --bun drizzle-kit up --config=infra/board-drizzle.config.ts
+bun run format:write
+```
+
+Review and commit the converted snapshots. `up` preserves migration identities and SQL; it does
+not apply migrations to a database. `bun run db:migrations:check` checks both histories without
+a database. Both validation gates run that check through the content cache, invalidated by
+changes to the histories, configs, package manifest or lockfile.
+
 ## Procedure (all of it is the agent's; none of it needs a database)
 
 Run from the repo root. Every step here is **filesystem-only** — nothing reads or writes a server DB.

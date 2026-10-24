@@ -39,6 +39,13 @@ The first published contract is intentionally narrow, and focused tests pin its 
   `tests/unit/plpgsql-apply.test.ts` (candidate lists + a pgwasm apply that leaves the stored value
   untouched) and `tests/unit/update-managed-field-guard.test.ts` (the three request-path guards).
 
+## Migration snapshot compatibility
+
+Both validation gates run the installed Drizzle Kit's `check` against the reference and board
+histories through the content cache. Snapshot-format changes are caught before release integration
+tries to migrate. `generate-cli` exercises fresh utilities generation and checks the result with
+Drizzle Kit, then verifies that re-emitting the SQL preserves the snapshot identity and contents.
+
 ## Release metadata: Agent Skill version pins (2026-09-28)
 
 Skill pins (`metadata.library_version` in `packages/*/skills/**/SKILL.md`) are tag-derived like

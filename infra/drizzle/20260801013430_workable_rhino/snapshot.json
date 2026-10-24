@@ -1,1338 +1,2144 @@
 {
-  "version": "8",
+  "type": "diff",
+  "version": "9",
   "dialect": "postgres",
   "id": "46d24af4-a624-493d-8a83-b800a0adec6f",
   "prevIds": ["d300f26a-30fd-414c-b4c6-cffc486865aa"],
-  "ddl": [
-    {
-      "values": ["low", "medium", "high"],
-      "name": "todo_priority",
-      "entityType": "enums",
-      "schema": "public"
-    },
-    {
-      "values": ["todo", "in_progress", "done"],
-      "name": "todo_status",
-      "entityType": "enums",
-      "schema": "public"
-    },
-    {
-      "values": ["open", "resolved"],
-      "name": "work_item_status",
-      "entityType": "enums",
-      "schema": "public"
-    },
-    {
-      "values": ["member", "manager"],
-      "name": "workspace_member_role",
-      "entityType": "enums",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": true,
-      "name": "authors",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": true,
-      "name": "todos",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "fk_children",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "fk_parents",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "projects",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": true,
-      "name": "rls_todos",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": true,
-      "name": "work_items",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "workspace_members",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "workspaces",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "operations_log",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "authors"
-    },
-    {
-      "type": "varchar(120)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "name",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "authors"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "owner_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "authors"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "modified_by",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "authors"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "created_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "authors"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "updated_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "authors"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "varchar(120)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "title",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "varchar(4000)",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "description",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "author_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "owner_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "modified_by",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "todo_status",
-      "typeSchema": "public",
-      "notNull": true,
-      "dimensions": 0,
-      "default": "'todo'",
-      "generated": null,
-      "identity": null,
-      "name": "status",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "todo_priority",
-      "typeSchema": "public",
-      "notNull": true,
-      "dimensions": 0,
-      "default": "'medium'",
-      "generated": null,
-      "identity": null,
-      "name": "priority",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "created_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "updated_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "todos"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "fk_children"
-    },
-    {
-      "type": "varchar(120)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "name",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "fk_children"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "parent_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "fk_children"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "updated_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "fk_children"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "fk_parents"
-    },
-    {
-      "type": "varchar(120)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "name",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "fk_parents"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "updated_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "fk_parents"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "projects"
-    },
-    {
-      "type": "varchar(120)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "name",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "projects"
-    },
-    {
-      "type": "timestamp with time zone",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "scheduled_at",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "projects"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "created_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "projects"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "updated_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "projects"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "rls_todos"
-    },
-    {
-      "type": "varchar(120)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "title",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "rls_todos"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": "auth.uid()",
-      "generated": null,
-      "identity": null,
-      "name": "owner_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "rls_todos"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "updated_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "rls_todos"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "workspace_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "owner_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "varchar(4000)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "body",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "boolean",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "false",
-      "generated": null,
-      "identity": null,
-      "name": "hidden",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "work_item_status",
-      "typeSchema": "public",
-      "notNull": true,
-      "dimensions": 0,
-      "default": "'open'",
-      "generated": null,
-      "identity": null,
-      "name": "status",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "created_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "updated_at_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "work_items"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspace_members"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "workspace_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspace_members"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "member_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspace_members"
-    },
-    {
-      "type": "workspace_member_role",
-      "typeSchema": "public",
-      "notNull": true,
-      "dimensions": 0,
-      "default": "'member'",
-      "generated": null,
-      "identity": null,
-      "name": "role",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspace_members"
-    },
-    {
-      "type": "boolean",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "false",
-      "generated": null,
-      "identity": null,
-      "name": "muted",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspace_members"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspaces"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "owner_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspaces"
-    },
-    {
-      "type": "varchar(120)",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "name",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspaces"
-    },
-    {
-      "type": "boolean",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "false",
-      "generated": null,
-      "identity": null,
-      "name": "locked",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "workspaces"
-    },
-    {
-      "type": "bigserial",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "varchar(255)",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "table_name",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "varchar(24)",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "operation_kind",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "uuid",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "user_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "jsonb",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "entity_key_json",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "jsonb",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "payload_json",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "varchar(32)",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "status",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "error_message",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "integer",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "http_status",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "mutation_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "integer",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "mutation_seq",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "client_timestamp_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "request_path",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "bigint",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "public.pgxsinkit_clock_us()",
-      "generated": null,
-      "identity": null,
-      "name": "server_timestamp_us",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "type": "timestamp with time zone",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "now()",
-      "generated": null,
-      "identity": null,
-      "name": "created_at",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "operations_log"
-    },
-    {
-      "nameExplicit": true,
-      "columns": [
-        {
-          "value": "created_at",
-          "isExpression": false,
-          "asc": false,
-          "nullsFirst": false,
-          "opclass": null
-        }
+  "footprints": [
+    {
+      "statementType": "create_enum",
+      "statementTarget": ["enum", "public", "todo_priority"],
+      "writes": [
+        "s|enum|public.todo_priority",
+        "n|enum|public.todo_priority",
+        "e|enum|public.todo_priority",
+        "n|type|public.todo_priority"
       ],
-      "isUnique": false,
-      "where": null,
-      "with": "",
-      "method": "btree",
-      "concurrently": false,
-      "name": "operations_log_created_at_idx",
-      "entityType": "indexes",
-      "schema": "public",
-      "table": "operations_log"
+      "reads": ["n|sch|public"]
     },
     {
-      "nameExplicit": true,
-      "columns": [
-        {
-          "value": "table_name",
-          "isExpression": false,
-          "asc": true,
-          "nullsFirst": false,
-          "opclass": null
-        }
+      "statementType": "create_enum",
+      "statementTarget": ["enum", "public", "todo_status"],
+      "writes": [
+        "s|enum|public.todo_status",
+        "n|enum|public.todo_status",
+        "e|enum|public.todo_status",
+        "n|type|public.todo_status"
       ],
-      "isUnique": false,
-      "where": null,
-      "with": "",
-      "method": "btree",
-      "concurrently": false,
-      "name": "operations_log_table_name_idx",
-      "entityType": "indexes",
-      "schema": "public",
-      "table": "operations_log"
+      "reads": ["n|sch|public"]
     },
     {
-      "nameExplicit": true,
-      "columns": [
-        {
-          "value": "user_id",
-          "isExpression": false,
-          "asc": true,
-          "nullsFirst": false,
-          "opclass": null
-        }
+      "statementType": "create_enum",
+      "statementTarget": ["enum", "public", "work_item_status"],
+      "writes": [
+        "s|enum|public.work_item_status",
+        "n|enum|public.work_item_status",
+        "e|enum|public.work_item_status",
+        "n|type|public.work_item_status"
       ],
-      "isUnique": false,
-      "where": null,
-      "with": "",
-      "method": "btree",
-      "concurrently": false,
-      "name": "operations_log_user_id_idx",
-      "entityType": "indexes",
-      "schema": "public",
-      "table": "operations_log"
+      "reads": ["n|sch|public"]
     },
     {
-      "nameExplicit": true,
-      "columns": [
-        {
-          "value": "status",
-          "isExpression": false,
-          "asc": true,
-          "nullsFirst": false,
-          "opclass": null
-        }
+      "statementType": "create_enum",
+      "statementTarget": ["enum", "public", "workspace_member_role"],
+      "writes": [
+        "s|enum|public.workspace_member_role",
+        "n|enum|public.workspace_member_role",
+        "e|enum|public.workspace_member_role",
+        "n|type|public.workspace_member_role"
       ],
-      "isUnique": false,
-      "where": null,
-      "with": "",
-      "method": "btree",
-      "concurrently": false,
-      "name": "operations_log_status_idx",
-      "entityType": "indexes",
-      "schema": "public",
-      "table": "operations_log"
+      "reads": ["n|sch|public"]
     },
     {
-      "nameExplicit": true,
-      "columns": [
-        {
-          "value": "mutation_id",
-          "isExpression": false,
-          "asc": true,
-          "nullsFirst": false,
-          "opclass": null
-        }
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "authors"],
+      "writes": [
+        "s|tbl|public.authors",
+        "n|tbl|public.authors",
+        "e|tbl|public.authors",
+        "n|rel|public.authors",
+        "n|type|public.authors",
+        "n|rel|public.authors_pkey"
       ],
-      "isUnique": false,
-      "where": null,
-      "with": "",
-      "method": "btree",
-      "concurrently": false,
-      "name": "operations_log_mutation_id_idx",
-      "entityType": "indexes",
-      "schema": "public",
-      "table": "operations_log"
+      "reads": ["n|sch|public"]
     },
     {
-      "nameExplicit": false,
-      "columns": ["author_id"],
-      "schemaTo": "public",
-      "tableTo": "authors",
-      "columnsTo": ["id"],
-      "onUpdate": "NO ACTION",
-      "onDelete": "NO ACTION",
-      "name": "todos_author_id_authors_id_fkey",
-      "entityType": "fks",
-      "schema": "public",
-      "table": "todos"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "todos"],
+      "writes": [
+        "s|tbl|public.todos",
+        "n|tbl|public.todos",
+        "e|tbl|public.todos",
+        "n|rel|public.todos",
+        "n|type|public.todos",
+        "n|rel|public.todos_pkey"
+      ],
+      "reads": ["n|sch|public", "n|enum|public.todo_status", "n|enum|public.todo_priority"]
     },
     {
-      "nameExplicit": true,
-      "columns": ["parent_id"],
-      "schemaTo": "public",
-      "tableTo": "fk_parents",
-      "columnsTo": ["id"],
-      "onUpdate": "NO ACTION",
-      "onDelete": "NO ACTION",
-      "name": "fk_children_parent_fk",
-      "entityType": "fks",
-      "schema": "public",
-      "table": "fk_children"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "fk_children"],
+      "writes": [
+        "s|tbl|public.fk_children",
+        "n|tbl|public.fk_children",
+        "e|tbl|public.fk_children",
+        "n|rel|public.fk_children",
+        "n|type|public.fk_children",
+        "n|rel|public.fk_children_pkey"
+      ],
+      "reads": ["n|sch|public"]
     },
     {
-      "nameExplicit": false,
-      "columns": ["workspace_id"],
-      "schemaTo": "public",
-      "tableTo": "workspaces",
-      "columnsTo": ["id"],
-      "onUpdate": "NO ACTION",
-      "onDelete": "NO ACTION",
-      "name": "work_items_workspace_id_workspaces_id_fkey",
-      "entityType": "fks",
-      "schema": "public",
-      "table": "work_items"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "fk_parents"],
+      "writes": [
+        "s|tbl|public.fk_parents",
+        "n|tbl|public.fk_parents",
+        "e|tbl|public.fk_parents",
+        "n|rel|public.fk_parents",
+        "n|type|public.fk_parents",
+        "n|rel|public.fk_parents_pkey"
+      ],
+      "reads": ["n|sch|public"]
     },
     {
-      "nameExplicit": false,
-      "columns": ["workspace_id"],
-      "schemaTo": "public",
-      "tableTo": "workspaces",
-      "columnsTo": ["id"],
-      "onUpdate": "NO ACTION",
-      "onDelete": "NO ACTION",
-      "name": "workspace_members_workspace_id_workspaces_id_fkey",
-      "entityType": "fks",
-      "schema": "public",
-      "table": "workspace_members"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "projects"],
+      "writes": [
+        "s|tbl|public.projects",
+        "n|tbl|public.projects",
+        "e|tbl|public.projects",
+        "n|rel|public.projects",
+        "n|type|public.projects",
+        "n|rel|public.projects_pkey"
+      ],
+      "reads": ["n|sch|public"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "authors_pkey",
-      "schema": "public",
-      "table": "authors",
-      "entityType": "pks"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "rls_todos"],
+      "writes": [
+        "s|tbl|public.rls_todos",
+        "n|tbl|public.rls_todos",
+        "e|tbl|public.rls_todos",
+        "n|rel|public.rls_todos",
+        "n|type|public.rls_todos",
+        "n|rel|public.rls_todos_pkey"
+      ],
+      "reads": ["n|sch|public"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "todos_pkey",
-      "schema": "public",
-      "table": "todos",
-      "entityType": "pks"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "work_items"],
+      "writes": [
+        "s|tbl|public.work_items",
+        "n|tbl|public.work_items",
+        "e|tbl|public.work_items",
+        "n|rel|public.work_items",
+        "n|type|public.work_items",
+        "n|rel|public.work_items_pkey"
+      ],
+      "reads": ["n|sch|public", "n|enum|public.work_item_status"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "fk_children_pkey",
-      "schema": "public",
-      "table": "fk_children",
-      "entityType": "pks"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "workspace_members"],
+      "writes": [
+        "s|tbl|public.workspace_members",
+        "n|tbl|public.workspace_members",
+        "e|tbl|public.workspace_members",
+        "n|rel|public.workspace_members",
+        "n|type|public.workspace_members",
+        "n|rel|public.workspace_members_pkey"
+      ],
+      "reads": ["n|sch|public", "n|enum|public.workspace_member_role"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "fk_parents_pkey",
-      "schema": "public",
-      "table": "fk_parents",
-      "entityType": "pks"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "workspaces"],
+      "writes": [
+        "s|tbl|public.workspaces",
+        "n|tbl|public.workspaces",
+        "e|tbl|public.workspaces",
+        "n|rel|public.workspaces",
+        "n|type|public.workspaces",
+        "n|rel|public.workspaces_pkey"
+      ],
+      "reads": ["n|sch|public"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "projects_pkey",
-      "schema": "public",
-      "table": "projects",
-      "entityType": "pks"
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "operations_log"],
+      "writes": [
+        "s|tbl|public.operations_log",
+        "n|tbl|public.operations_log",
+        "e|tbl|public.operations_log",
+        "n|rel|public.operations_log",
+        "n|type|public.operations_log",
+        "n|rel|public.operations_log_pkey"
+      ],
+      "reads": ["n|sch|public"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "rls_todos_pkey",
-      "schema": "public",
-      "table": "rls_todos",
-      "entityType": "pks"
+      "statementType": "create_index",
+      "statementTarget": ["index", "public", "operations_log", "operations_log_created_at_idx"],
+      "writes": [
+        "s|idx|public.operations_log_created_at_idx",
+        "n|idx|public.operations_log_created_at_idx",
+        "e|idx|public.operations_log_created_at_idx",
+        "n|rel|public.operations_log_created_at_idx"
+      ],
+      "reads": ["n|tbl|public.operations_log", "n|sch|public", "n|col|public.operations_log.created_at"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "work_items_pkey",
-      "schema": "public",
-      "table": "work_items",
-      "entityType": "pks"
+      "statementType": "create_index",
+      "statementTarget": ["index", "public", "operations_log", "operations_log_table_name_idx"],
+      "writes": [
+        "s|idx|public.operations_log_table_name_idx",
+        "n|idx|public.operations_log_table_name_idx",
+        "e|idx|public.operations_log_table_name_idx",
+        "n|rel|public.operations_log_table_name_idx"
+      ],
+      "reads": ["n|tbl|public.operations_log", "n|sch|public", "n|col|public.operations_log.table_name"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "workspace_members_pkey",
-      "schema": "public",
-      "table": "workspace_members",
-      "entityType": "pks"
+      "statementType": "create_index",
+      "statementTarget": ["index", "public", "operations_log", "operations_log_user_id_idx"],
+      "writes": [
+        "s|idx|public.operations_log_user_id_idx",
+        "n|idx|public.operations_log_user_id_idx",
+        "e|idx|public.operations_log_user_id_idx",
+        "n|rel|public.operations_log_user_id_idx"
+      ],
+      "reads": ["n|tbl|public.operations_log", "n|sch|public", "n|col|public.operations_log.user_id"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "workspaces_pkey",
-      "schema": "public",
-      "table": "workspaces",
-      "entityType": "pks"
+      "statementType": "create_index",
+      "statementTarget": ["index", "public", "operations_log", "operations_log_status_idx"],
+      "writes": [
+        "s|idx|public.operations_log_status_idx",
+        "n|idx|public.operations_log_status_idx",
+        "e|idx|public.operations_log_status_idx",
+        "n|rel|public.operations_log_status_idx"
+      ],
+      "reads": ["n|tbl|public.operations_log", "n|sch|public", "n|col|public.operations_log.status"]
     },
     {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "operations_log_pkey",
-      "schema": "public",
-      "table": "operations_log",
-      "entityType": "pks"
+      "statementType": "create_index",
+      "statementTarget": ["index", "public", "operations_log", "operations_log_mutation_id_idx"],
+      "writes": [
+        "s|idx|public.operations_log_mutation_id_idx",
+        "n|idx|public.operations_log_mutation_id_idx",
+        "e|idx|public.operations_log_mutation_id_idx",
+        "n|rel|public.operations_log_mutation_id_idx"
+      ],
+      "reads": ["n|tbl|public.operations_log", "n|sch|public", "n|col|public.operations_log.mutation_id"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "SELECT",
-      "roles": ["authenticated"],
-      "using": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": null,
-      "name": "authors_select_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "authors"
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "todos"],
+      "writes": [
+        "s|fk|public.todos.todos_author_id_authors_id_fkey",
+        "n|fk|public.todos.todos_author_id_authors_id_fkey",
+        "e|fk|public.todos.todos_author_id_authors_id_fkey",
+        "n|con|public.todos.todos_author_id_authors_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.todos",
+        "n|sch|public",
+        "n|tbl|public.authors",
+        "n|sch|public",
+        "n|col|public.todos.author_id",
+        "n|col|public.authors.id",
+        "e|uniqueness|public.authors.id"
+      ]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "INSERT",
-      "roles": ["authenticated"],
-      "using": null,
-      "withCheck": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "name": "authors_insert_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "authors"
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "fk_children"],
+      "writes": [
+        "s|fk|public.fk_children.fk_children_parent_fk",
+        "n|fk|public.fk_children.fk_children_parent_fk",
+        "e|fk|public.fk_children.fk_children_parent_fk",
+        "n|con|public.fk_children.fk_children_parent_fk"
+      ],
+      "reads": [
+        "n|tbl|public.fk_children",
+        "n|sch|public",
+        "n|tbl|public.fk_parents",
+        "n|sch|public",
+        "n|col|public.fk_children.parent_id",
+        "n|col|public.fk_parents.id",
+        "e|uniqueness|public.fk_parents.id"
+      ]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "UPDATE",
-      "roles": ["authenticated"],
-      "using": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "name": "authors_update_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "authors"
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "work_items"],
+      "writes": [
+        "s|fk|public.work_items.work_items_workspace_id_workspaces_id_fkey",
+        "n|fk|public.work_items.work_items_workspace_id_workspaces_id_fkey",
+        "e|fk|public.work_items.work_items_workspace_id_workspaces_id_fkey",
+        "n|con|public.work_items.work_items_workspace_id_workspaces_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.work_items",
+        "n|sch|public",
+        "n|tbl|public.workspaces",
+        "n|sch|public",
+        "n|col|public.work_items.workspace_id",
+        "n|col|public.workspaces.id",
+        "e|uniqueness|public.workspaces.id"
+      ]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "DELETE",
-      "roles": ["authenticated"],
-      "using": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": null,
-      "name": "authors_delete_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "authors"
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "workspace_members"],
+      "writes": [
+        "s|fk|public.workspace_members.workspace_members_workspace_id_workspaces_id_fkey",
+        "n|fk|public.workspace_members.workspace_members_workspace_id_workspaces_id_fkey",
+        "e|fk|public.workspace_members.workspace_members_workspace_id_workspaces_id_fkey",
+        "n|con|public.workspace_members.workspace_members_workspace_id_workspaces_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.workspace_members",
+        "n|sch|public",
+        "n|tbl|public.workspaces",
+        "n|sch|public",
+        "n|col|public.workspace_members.workspace_id",
+        "n|col|public.workspaces.id",
+        "e|uniqueness|public.workspaces.id"
+      ]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "SELECT",
-      "roles": ["authenticated"],
-      "using": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": null,
-      "name": "todos_select_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "authors"],
+      "writes": [
+        "s|pol|public.authors.authors_select_owner_or_admin",
+        "n|pol|public.authors.authors_select_owner_or_admin",
+        "e|pol|public.authors.authors_select_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.authors", "n|sch|public", "n|role|authenticated", "e|rls|public.authors"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "INSERT",
-      "roles": ["authenticated"],
-      "using": null,
-      "withCheck": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "name": "todos_insert_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "authors"],
+      "writes": [
+        "s|pol|public.authors.authors_insert_owner_or_admin",
+        "n|pol|public.authors.authors_insert_owner_or_admin",
+        "e|pol|public.authors.authors_insert_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.authors", "n|sch|public", "n|role|authenticated", "e|rls|public.authors"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "UPDATE",
-      "roles": ["authenticated"],
-      "using": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "name": "todos_update_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "authors"],
+      "writes": [
+        "s|pol|public.authors.authors_update_owner_or_admin",
+        "n|pol|public.authors.authors_update_owner_or_admin",
+        "e|pol|public.authors.authors_update_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.authors", "n|sch|public", "n|role|authenticated", "e|rls|public.authors"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "DELETE",
-      "roles": ["authenticated"],
-      "using": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": null,
-      "name": "todos_delete_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "authors"],
+      "writes": [
+        "s|pol|public.authors.authors_delete_owner_or_admin",
+        "n|pol|public.authors.authors_delete_owner_or_admin",
+        "e|pol|public.authors.authors_delete_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.authors", "n|sch|public", "n|role|authenticated", "e|rls|public.authors"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "SELECT",
-      "roles": ["authenticated"],
-      "using": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": null,
-      "name": "rls_todos_select_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "rls_todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "todos"],
+      "writes": [
+        "s|pol|public.todos.todos_select_owner_or_admin",
+        "n|pol|public.todos.todos_select_owner_or_admin",
+        "e|pol|public.todos.todos_select_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.todos", "n|sch|public", "n|role|authenticated", "e|rls|public.todos"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "INSERT",
-      "roles": ["authenticated"],
-      "using": null,
-      "withCheck": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "name": "rls_todos_insert_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "rls_todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "todos"],
+      "writes": [
+        "s|pol|public.todos.todos_insert_owner_or_admin",
+        "n|pol|public.todos.todos_insert_owner_or_admin",
+        "e|pol|public.todos.todos_insert_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.todos", "n|sch|public", "n|role|authenticated", "e|rls|public.todos"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "UPDATE",
-      "roles": ["authenticated"],
-      "using": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "name": "rls_todos_update_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "rls_todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "todos"],
+      "writes": [
+        "s|pol|public.todos.todos_update_owner_or_admin",
+        "n|pol|public.todos.todos_update_owner_or_admin",
+        "e|pol|public.todos.todos_update_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.todos", "n|sch|public", "n|role|authenticated", "e|rls|public.todos"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "DELETE",
-      "roles": ["authenticated"],
-      "using": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
-      "withCheck": null,
-      "name": "rls_todos_delete_owner_or_admin",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "rls_todos"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "todos"],
+      "writes": [
+        "s|pol|public.todos.todos_delete_owner_or_admin",
+        "n|pol|public.todos.todos_delete_owner_or_admin",
+        "e|pol|public.todos.todos_delete_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.todos", "n|sch|public", "n|role|authenticated", "e|rls|public.todos"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "SELECT",
-      "roles": ["authenticated"],
-      "using": "\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where \"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)))",
-      "withCheck": null,
-      "name": "work_items_select_membership",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "work_items"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "rls_todos"],
+      "writes": [
+        "s|pol|public.rls_todos.rls_todos_select_owner_or_admin",
+        "n|pol|public.rls_todos.rls_todos_select_owner_or_admin",
+        "e|pol|public.rls_todos.rls_todos_select_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.rls_todos", "n|sch|public", "n|role|authenticated", "e|rls|public.rls_todos"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "INSERT",
-      "roles": ["authenticated"],
-      "using": null,
-      "withCheck": "((((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where \"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)))))) and (((((\"work_items\".\"workspace_id\" = any(array(select \"workspaces\".\"id\" from \"workspaces\" where \"workspaces\".\"locked\" = false))) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"muted\" = false))))))))",
-      "name": "work_items_insert_membership",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "work_items"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "rls_todos"],
+      "writes": [
+        "s|pol|public.rls_todos.rls_todos_insert_owner_or_admin",
+        "n|pol|public.rls_todos.rls_todos_insert_owner_or_admin",
+        "e|pol|public.rls_todos.rls_todos_insert_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.rls_todos", "n|sch|public", "n|role|authenticated", "e|rls|public.rls_todos"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "UPDATE",
-      "roles": ["authenticated"],
-      "using": "((((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (((((\"work_items\".\"workspace_id\" = any(array(select \"workspaces\".\"id\" from \"workspaces\" where \"workspaces\".\"locked\" = false))) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"muted\" = false))))))))",
-      "withCheck": "((((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (((((\"work_items\".\"workspace_id\" = any(array(select \"workspaces\".\"id\" from \"workspaces\" where \"workspaces\".\"locked\" = false))) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"muted\" = false))))))))",
-      "name": "work_items_update_membership",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "work_items"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "rls_todos"],
+      "writes": [
+        "s|pol|public.rls_todos.rls_todos_update_owner_or_admin",
+        "n|pol|public.rls_todos.rls_todos_update_owner_or_admin",
+        "e|pol|public.rls_todos.rls_todos_update_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.rls_todos", "n|sch|public", "n|role|authenticated", "e|rls|public.rls_todos"]
     },
     {
-      "as": "PERMISSIVE",
-      "for": "DELETE",
-      "roles": ["authenticated"],
-      "using": "((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))",
-      "withCheck": null,
-      "name": "work_items_delete_membership",
-      "entityType": "policies",
-      "schema": "public",
-      "table": "work_items"
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "rls_todos"],
+      "writes": [
+        "s|pol|public.rls_todos.rls_todos_delete_owner_or_admin",
+        "n|pol|public.rls_todos.rls_todos_delete_owner_or_admin",
+        "e|pol|public.rls_todos.rls_todos_delete_owner_or_admin"
+      ],
+      "reads": ["n|tbl|public.rls_todos", "n|sch|public", "n|role|authenticated", "e|rls|public.rls_todos"]
+    },
+    {
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "work_items"],
+      "writes": [
+        "s|pol|public.work_items.work_items_select_membership",
+        "n|pol|public.work_items.work_items_select_membership",
+        "e|pol|public.work_items.work_items_select_membership"
+      ],
+      "reads": ["n|tbl|public.work_items", "n|sch|public", "n|role|authenticated", "e|rls|public.work_items"]
+    },
+    {
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "work_items"],
+      "writes": [
+        "s|pol|public.work_items.work_items_insert_membership",
+        "n|pol|public.work_items.work_items_insert_membership",
+        "e|pol|public.work_items.work_items_insert_membership"
+      ],
+      "reads": ["n|tbl|public.work_items", "n|sch|public", "n|role|authenticated", "e|rls|public.work_items"]
+    },
+    {
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "work_items"],
+      "writes": [
+        "s|pol|public.work_items.work_items_update_membership",
+        "n|pol|public.work_items.work_items_update_membership",
+        "e|pol|public.work_items.work_items_update_membership"
+      ],
+      "reads": ["n|tbl|public.work_items", "n|sch|public", "n|role|authenticated", "e|rls|public.work_items"]
+    },
+    {
+      "statementType": "create_policy",
+      "statementTarget": ["table", "public", "work_items"],
+      "writes": [
+        "s|pol|public.work_items.work_items_delete_membership",
+        "n|pol|public.work_items.work_items_delete_membership",
+        "e|pol|public.work_items.work_items_delete_membership"
+      ],
+      "reads": ["n|tbl|public.work_items", "n|sch|public", "n|role|authenticated", "e|rls|public.work_items"]
     }
   ],
-  "renames": []
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "authors",
+        "isRlsEnabled": true,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "todos",
+        "isRlsEnabled": true,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "fk_children",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "fk_parents",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "projects",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "rls_todos",
+        "isRlsEnabled": true,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "work_items",
+        "isRlsEnabled": true,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "workspace_members",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "workspaces",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "operations_log",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "todo_priority",
+        "values": ["low", "medium", "high"],
+        "entityType": "enums"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "todo_status",
+        "values": ["todo", "in_progress", "done"],
+        "entityType": "enums"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "work_item_status",
+        "values": ["open", "resolved"],
+        "entityType": "enums"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "workspace_member_role",
+        "values": ["member", "manager"],
+        "entityType": "enums"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "name",
+        "type": "varchar(120)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "owner_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "modified_by",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "created_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "updated_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "title",
+        "type": "varchar(120)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "description",
+        "type": "varchar(4000)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "author_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "owner_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "modified_by",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "status",
+        "type": "todo_status",
+        "typeSchema": "public",
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'todo'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "priority",
+        "type": "todo_priority",
+        "typeSchema": "public",
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'medium'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "created_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "updated_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_children",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_children",
+        "name": "name",
+        "type": "varchar(120)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_children",
+        "name": "parent_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_children",
+        "name": "updated_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_parents",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_parents",
+        "name": "name",
+        "type": "varchar(120)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_parents",
+        "name": "updated_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "projects",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "projects",
+        "name": "name",
+        "type": "varchar(120)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "projects",
+        "name": "scheduled_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "projects",
+        "name": "created_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "projects",
+        "name": "updated_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "title",
+        "type": "varchar(120)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "owner_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": "auth.uid()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "updated_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "workspace_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "owner_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "body",
+        "type": "varchar(4000)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "hidden",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "false",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "status",
+        "type": "work_item_status",
+        "typeSchema": "public",
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'open'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "created_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "updated_at_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "member_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "role",
+        "type": "workspace_member_role",
+        "typeSchema": "public",
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'member'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "muted",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "false",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspaces",
+        "name": "id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspaces",
+        "name": "owner_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspaces",
+        "name": "name",
+        "type": "varchar(120)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspaces",
+        "name": "locked",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "false",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "id",
+        "type": "bigserial",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "table_name",
+        "type": "varchar(255)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "operation_kind",
+        "type": "varchar(24)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "user_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "entity_key_json",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "payload_json",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "status",
+        "type": "varchar(32)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "error_message",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "http_status",
+        "type": "integer",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "mutation_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "mutation_seq",
+        "type": "integer",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "client_timestamp_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "request_path",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "server_timestamp_us",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "public.pgxsinkit_clock_us()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "now()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "operations_log_created_at_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "created_at",
+            "isExpression": false,
+            "asc": false,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "operations_log_table_name_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "table_name",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "operations_log_user_id_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "user_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "operations_log_status_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "status",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "operations_log_mutation_id_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "mutation_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "todos_author_id_authors_id_fkey",
+        "nameExplicit": false,
+        "columns": ["author_id"],
+        "schemaTo": "public",
+        "tableTo": "authors",
+        "columnsTo": ["id"],
+        "onUpdate": "NO ACTION",
+        "onDelete": "NO ACTION",
+        "entityType": "fks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_children",
+        "name": "fk_children_parent_fk",
+        "nameExplicit": true,
+        "columns": ["parent_id"],
+        "schemaTo": "public",
+        "tableTo": "fk_parents",
+        "columnsTo": ["id"],
+        "onUpdate": "NO ACTION",
+        "onDelete": "NO ACTION",
+        "entityType": "fks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "work_items_workspace_id_workspaces_id_fkey",
+        "nameExplicit": false,
+        "columns": ["workspace_id"],
+        "schemaTo": "public",
+        "tableTo": "workspaces",
+        "columnsTo": ["id"],
+        "onUpdate": "NO ACTION",
+        "onDelete": "NO ACTION",
+        "entityType": "fks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_members_workspace_id_workspaces_id_fkey",
+        "nameExplicit": false,
+        "columns": ["workspace_id"],
+        "schemaTo": "public",
+        "tableTo": "workspaces",
+        "columnsTo": ["id"],
+        "onUpdate": "NO ACTION",
+        "onDelete": "NO ACTION",
+        "entityType": "fks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "authors_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "todos_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_children",
+        "name": "fk_children_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "fk_parents",
+        "name": "fk_parents_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "projects",
+        "name": "projects_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "rls_todos_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "work_items_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_members_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "workspaces",
+        "name": "workspaces_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "operations_log",
+        "name": "operations_log_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "authors_select_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "SELECT",
+        "roles": ["authenticated"],
+        "using": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "authors_insert_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "INSERT",
+        "roles": ["authenticated"],
+        "using": null,
+        "withCheck": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "authors_update_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "UPDATE",
+        "roles": ["authenticated"],
+        "using": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "authors",
+        "name": "authors_delete_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "DELETE",
+        "roles": ["authenticated"],
+        "using": "((\"authors\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "todos_select_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "SELECT",
+        "roles": ["authenticated"],
+        "using": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "todos_insert_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "INSERT",
+        "roles": ["authenticated"],
+        "using": null,
+        "withCheck": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "todos_update_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "UPDATE",
+        "roles": ["authenticated"],
+        "using": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "todos",
+        "name": "todos_delete_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "DELETE",
+        "roles": ["authenticated"],
+        "using": "((\"todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "rls_todos_select_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "SELECT",
+        "roles": ["authenticated"],
+        "using": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "rls_todos_insert_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "INSERT",
+        "roles": ["authenticated"],
+        "using": null,
+        "withCheck": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "rls_todos_update_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "UPDATE",
+        "roles": ["authenticated"],
+        "using": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "rls_todos",
+        "name": "rls_todos_delete_owner_or_admin",
+        "as": "PERMISSIVE",
+        "for": "DELETE",
+        "roles": ["authenticated"],
+        "using": "((\"rls_todos\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements_text(\n      case jsonb_typeof((\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        )) when 'array' then (\n          coalesce(\n            nullif(current_setting('request.jwt.claim', true), ''),\n            nullif(current_setting('request.jwt.claims', true), '')\n          )::jsonb -> 'app_metadata' -> 'roles'\n        ) else '[]'::jsonb end\n    ) AS assigned_role(role_name_value)\n    WHERE assigned_role.role_name_value = 'admin'\n  )))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "work_items_select_membership",
+        "as": "PERMISSIVE",
+        "for": "SELECT",
+        "roles": ["authenticated"],
+        "using": "\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where \"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "work_items_insert_membership",
+        "as": "PERMISSIVE",
+        "for": "INSERT",
+        "roles": ["authenticated"],
+        "using": null,
+        "withCheck": "((((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where \"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)))))) and (((((\"work_items\".\"workspace_id\" = any(array(select \"workspaces\".\"id\" from \"workspaces\" where \"workspaces\".\"locked\" = false))) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"muted\" = false))))))))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "work_items_update_membership",
+        "as": "PERMISSIVE",
+        "for": "UPDATE",
+        "roles": ["authenticated"],
+        "using": "((((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (((((\"work_items\".\"workspace_id\" = any(array(select \"workspaces\".\"id\" from \"workspaces\" where \"workspaces\".\"locked\" = false))) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"muted\" = false))))))))",
+        "withCheck": "((((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (((((\"work_items\".\"workspace_id\" = any(array(select \"workspaces\".\"id\" from \"workspaces\" where \"workspaces\".\"locked\" = false))) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))) and (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"muted\" = false))))))))",
+        "entityType": "policies"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "work_items",
+        "name": "work_items_delete_membership",
+        "as": "PERMISSIVE",
+        "for": "DELETE",
+        "roles": ["authenticated"],
+        "using": "((\"work_items\".\"owner_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) or (\"work_items\".\"workspace_id\" = any(array(select \"workspace_members\".\"workspace_id\" from \"workspace_members\" where ((\"workspace_members\".\"member_id\" = (select coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid)) and (\"workspace_members\".\"role\" = 'manager'))))))",
+        "withCheck": null,
+        "entityType": "policies"
+      }
+    }
+  ]
 }

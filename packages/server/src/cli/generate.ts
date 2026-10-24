@@ -16,8 +16,17 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -155,10 +164,11 @@ async function importRegistry(registryPath: string, exportName?: string): Promis
   return selectRegistryExport(moduleExports, exportName);
 }
 
-function runDrizzleGenerate(projectDir: string, name: string, drizzleConfig?: string): void {
-  const cwd = join(process.cwd(), projectDir);
+function runDrizzleGenerate(projectDir: string, name: string, drizzleConfig?: string, extraArgs: string[] = []): void {
+  const cwd = resolve(projectDir);
   const args = ["run", "drizzle-kit", "generate", "--custom", "--name", name];
   if (drizzleConfig) args.push("--config", drizzleConfig);
+  args.push(...extraArgs);
   const result = spawnSync("bun", args, {
     cwd,
     stdio: "inherit",
@@ -310,20 +320,14 @@ export function findMigrationCarrying(drizzleDir: string, marker: string): strin
   return null;
 }
 
-/** The drizzle-kit "no previous migration" root id (an all-zero UUID), used by a chain's first folder. */
-const ZERO_MIGRATION_ID = "00000000-0000-0000-0000-000000000000";
-
 /** A committed migration carries the utilities function when its DDL declares this signature. */
 const UTILITIES_SIGNATURE = "CREATE OR REPLACE FUNCTION public.pgxsinkit_clock_us()";
 
 /**
- * Writes the utilities migration as a NON-KIT folder (a hand-authored pre-baseline, mirroring the
- * board-prereqs pattern): an empty-`ddl` snapshot rooted at the zero id, so it sorts and applies
- * FIRST. Unlike the artifact path this does NOT invoke `drizzle-kit generate` — that stamps the
- * current time and would sort the folder LAST, after the schema and artifact it must precede — so the
- * caller supplies the full, early-sorting folder name via `--name` (e.g. 20260101000000_pgxsinkit_utilities).
+ * Writes the utilities first, using a kit-generated empty baseline snapshot. The caller supplies
+ * the early-sorting folder name: these functions must precede schema defaults that call them.
  */
-function writeUtilitiesMigration(drizzleDir: string, folderName: string): string {
+function writeUtilitiesMigration(projectDir: string, drizzleDir: string, folderName: string): string {
   const dir = join(drizzleDir, folderName);
   mkdirSync(dir, { recursive: true });
 
@@ -333,25 +337,36 @@ function writeUtilitiesMigration(drizzleDir: string, folderName: string): string
   const migrationFile = join(dir, "migration.sql");
   writeFileSync(migrationFile, header + renderPgxsinkitUtilitiesMigration() + "\n");
 
-  // The snapshot mirrors a hand-authored pre-baseline (see board-drizzle/*_board_prereqs): the function
-  // is not part of drizzle-kit's tracked DDL model, so the snapshot's `ddl` is empty and it roots the
-  // chain at the zero id. `version`/`dialect` match the kit's postgres snapshot format.
-  //
   // RE-EMIT KEEPS THE EXISTING IDENTITY. The next folder in the chain records this snapshot's `id` in
   // its own `prevIds`, so minting a fresh UUID on every run would BREAK the chain of any consumer who
   // re-emits this folder in place (which ADR-0054 asks them to do, to pick up the clock function's
   // hardened ACL). Only the SQL is re-rendered; the snapshot is left byte-identical where one exists.
   const snapshotFile = join(dir, "snapshot.json");
   if (!existsSync(snapshotFile)) {
-    const snapshot = {
-      id: randomUUID(),
-      prevIds: [ZERO_MIGRATION_ID],
-      version: "8",
-      dialect: "postgres",
-      ddl: [] as unknown[],
-      renames: [] as unknown[],
-    };
-    writeFileSync(snapshotFile, `${JSON.stringify(snapshot, null, 2)}\n`);
+    // Let the consumer's installed kit own its snapshot format. Generate against an empty
+    // schema in an isolated runtime directory, then copy the unchanged baseline into the
+    // caller's first folder. No current-time folder is added to their actual history.
+    const scratch = mkdtempSync(join(tmpdir(), "pgxsinkit-utilities-"));
+    try {
+      const schema = join(scratch, "schema.ts");
+      const out = join(scratch, "migrations");
+      writeFileSync(schema, "export {};\n");
+      runDrizzleGenerate(projectDir, "utilities", undefined, [
+        "--dialect",
+        "postgresql",
+        "--schema",
+        schema,
+        "--out",
+        out,
+        "--output",
+        "json",
+      ]);
+      const folders = readdirSync(out, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+      if (folders.length !== 1) throw new Error("Drizzle Kit did not generate one utilities baseline");
+      copyFileSync(join(out, folders[0]!.name, "snapshot.json"), snapshotFile);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   }
 
   return migrationFile;
@@ -398,7 +413,7 @@ async function runUtilities(options: {
     return;
   }
 
-  const migrationFile = writeUtilitiesMigration(drizzleDir, options.migrationName);
+  const migrationFile = writeUtilitiesMigration(options.projectDir, drizzleDir, options.migrationName);
   console.log(`Wrote pgxsinkit_clock_us() utilities migration to ${migrationFile}`);
 }
 

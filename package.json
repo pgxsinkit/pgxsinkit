@@ -32,6 +32,7 @@
     "db:generate": "drizzle-kit generate --config=infra/drizzle.config.ts",
     "db:generate:governance": "bun scripts/generate-governance-migration.ts",
     "db:migrate": "bun --bun drizzle-kit migrate --config=infra/drizzle.config.ts",
+    "db:migrations:check": "bun --bun drizzle-kit check --config=infra/drizzle.config.ts && bun --bun drizzle-kit check --config=infra/board-drizzle.config.ts",
     "db:push": "bun --bun drizzle-kit push --config=infra/drizzle.config.ts",
     "demo:build": "cd apps/board && BOARD_DEMO_BASE=/demo/ BOARD_DEMO_OUTDIR=../docs/dist/demo VITE_BOARD_HASH_ROUTING=1 bun run build",
     "dev:api": "cd apps/write-api && bun run dev",
@@ -91,8 +92,8 @@
     "test:unit": "bun scripts/select-unit-tests.ts",
     "test:unit:nocache": "PGXSINKIT_NO_CACHE=1 bun scripts/select-unit-tests.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p apps/board/tsconfig.json && tsc --noEmit -p apps/perf-lab/tsconfig.json && tsc --noEmit -p tests/e2e/tsconfig.json && tsc --noEmit -p packages/client/tsconfig.type-tests.json && tsc --noEmit -p packages/pgwasm-repl/tsconfig.json",
-    "validate": "bun run guard:tmp-files && bun run skills:pins:check && bun run format && bun run check:fast",
-    "validate:full": "bun run guard:tmp-files && bun run skills:pins:check && bun run format && bun run check",
+    "validate": "bun run guard:tmp-files && bun run skills:pins:check && bun scripts/run-if-changed.ts migrations --inputs 'infra/drizzle/**' 'infra/board-drizzle/**' 'infra/*drizzle.config.ts' package.json bun.lock -- bun run db:migrations:check && bun run format && bun run check:fast",
+    "validate:full": "bun run guard:tmp-files && bun run skills:pins:check && bun scripts/run-if-changed.ts migrations --inputs 'infra/drizzle/**' 'infra/board-drizzle/**' 'infra/*drizzle.config.ts' package.json bun.lock -- bun run db:migrations:check && bun run format && bun run check",
     "validate:refresh": "PGXSINKIT_FORCE=1 bun run validate:full"
   },
   "dependencies": {
