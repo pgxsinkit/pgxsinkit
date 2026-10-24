@@ -105,6 +105,22 @@ describe("write api implementation integration", () => {
     expect(rows).toEqual([]);
   });
 
+  it("preserves bigint values beyond the safe-integer range in returning and select", async () => {
+    const id = "01963227-d4c7-72db-b858-f89f6af8f919";
+    const createdAtUs = 9_007_199_254_740_993n;
+    const updatedAtUs = 9_223_372_036_854_775_807n;
+    const [inserted] = await server.drizzle
+      .insert(authorsTable)
+      .values({ id, name: "Exact integer", createdAtUs, updatedAtUs })
+      .returning();
+    expect(inserted?.createdAtUs).toBe(createdAtUs);
+    expect(inserted?.updatedAtUs).toBe(updatedAtUs);
+
+    const [selected] = await server.drizzle.select().from(authorsTable).where(eq(authorsTable.id, id));
+    expect(selected?.createdAtUs).toBe(createdAtUs);
+    expect(selected?.updatedAtUs).toBe(updatedAtUs);
+  });
+
   it("creates via /api/mutations and verifies via direct DB query", async () => {
     const authorId = "01963227-d4c7-72db-b858-f89f6af8f920";
     const createResponse = await postBatchMutations(server, [

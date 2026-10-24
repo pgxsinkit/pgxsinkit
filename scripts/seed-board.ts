@@ -328,7 +328,7 @@ async function seedIdentities(): Promise<Map<string, string>> {
 }
 
 async function main(): Promise<void> {
-  const db = drizzle({ connection: DATABASE_URL });
+  const db = drizzle({ connection: { url: DATABASE_URL, bigint: true } });
 
   // 1. Identities (GoTrue) → email/key → auth id.
   const idByKey = await seedIdentities();

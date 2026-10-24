@@ -57,7 +57,7 @@ const ENUMS = [issueStatusEnum, issuePriorityEnum, channelKindEnum];
 const FUNCTIONS = ["board_member_team_ids", "board_block_cross_team_move", "pgxsinkit_apply_mutations"];
 
 async function main(): Promise<void> {
-  const db = drizzle({ connection: DATABASE_URL });
+  const db = drizzle({ connection: { url: DATABASE_URL, bigint: true } });
 
   for (const table of TABLES) {
     await db.execute(sql`DROP TABLE IF EXISTS ${table} CASCADE`);

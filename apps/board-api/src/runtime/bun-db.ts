@@ -8,5 +8,5 @@ const schema = buildRegistrySchema(boardSyncRegistry);
 const relations = defineRelations(schema);
 
 export function createBunBoardDb(connection: string) {
-  return drizzle({ connection, relations });
+  return drizzle({ connection: { url: connection, bigint: true }, relations });
 }

@@ -103,7 +103,7 @@ const durableStreamsUrl = process.env["DURABLE_STREAMS_URL"] ?? PERF_LAB_DURABLE
 const host = process.env["WRITE_API_HOST"] ?? PERF_LAB_HOST;
 const port = readPort(process.env["WRITE_API_PORT"], PERF_LAB_WRITE_API_PORT);
 
-const adminDb = drizzle({ connection: databaseUrl });
+const adminDb = drizzle({ connection: { url: databaseUrl, bigint: true } });
 const app = new Hono();
 
 const preparedRegistries = new Map<string, PreparedPerfRegistry>();

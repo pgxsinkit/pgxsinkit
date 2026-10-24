@@ -322,7 +322,7 @@ async function cron(env: Record<string, string>): Promise<void> {
   const command = boardEventsDrainCronCommand(drainUrl, secret);
 
   console.log(`\n$ psql (direct) → cron.schedule('${BOARD_EVENTS_DRAIN_JOB}', '${BOARD_EVENTS_DRAIN_SCHEDULE}', …)`);
-  const db = drizzle({ connection: env["BOARD_DATABASE_URL"]! });
+  const db = drizzle({ connection: { url: env["BOARD_DATABASE_URL"]!, bigint: true } });
   try {
     // Tier ③ throughout: extension enablement, a schema grant, and a pg_cron call have no Drizzle form.
     await db.execute(sql`create extension if not exists pg_cron`);

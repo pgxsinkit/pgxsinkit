@@ -16,7 +16,7 @@ import { composeCredentials } from "../infra/compose-credentials";
 const databaseUrl = process.env["DATABASE_URL"] ?? composeCredentials.DEFAULT_DATABASE_URL;
 
 async function main(): Promise<void> {
-  const db = drizzle({ connection: databaseUrl });
+  const db = drizzle({ connection: { url: databaseUrl, bigint: true } });
 
   // Reset (children first for the FK), then seed.
   await db.delete(workItemsTable);

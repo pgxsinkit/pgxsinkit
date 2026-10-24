@@ -44,7 +44,7 @@ console.log("Starting write-api...", {
 
 const schema = buildRegistrySchema(demoMembershipSyncRegistry);
 const relations = defineRelations(schema);
-const db = drizzle({ connection: databaseUrl, relations });
+const db = drizzle({ connection: { url: databaseUrl, bigint: true }, relations });
 
 // One server owns both ingress paths: the write route (POST /api/mutations) and the native
 // read path's control plane (subscribe / re-mint / barrier), both resolving identity through

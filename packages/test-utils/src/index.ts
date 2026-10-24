@@ -10,7 +10,7 @@ export function createServerDb<TRegistry extends SyncTableRegistry>(
 ): { db: ReturnType<typeof drizzle<RegistryRelations<TRegistry>>>; close: () => Promise<void> } {
   const schema = buildRegistrySchema(registry);
   const relations = defineRelations(schema) as RegistryRelations<TRegistry>;
-  const db = drizzle({ connection: databaseUrl, relations });
+  const db = drizzle({ connection: { url: databaseUrl, bigint: true }, relations });
   return {
     db: db as ReturnType<typeof drizzle<RegistryRelations<TRegistry>>>,
     close: () => db.$client.close(),

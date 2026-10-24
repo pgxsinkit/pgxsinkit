@@ -46,6 +46,13 @@ histories through the content cache. Snapshot-format changes are caught before r
 tries to migrate. `generate-cli` exercises fresh utilities generation and checks the result with
 Drizzle Kit, then verifies that re-emitting the SQL preserves the snapshot identity and contents.
 
+## Bun SQL integer decoding
+
+Bun connections explicitly set `bigint: true` at construction. The Drizzle RC's Bun driver
+relies on native bigint decoding; mutating `client.options.bigint` after construction does not
+enable it. The write-API integration lane checks that managed bigint timestamps read back as
+bigints, and that values beyond JavaScript's safe-integer range retain their exact value.
+
 ## Release metadata: Agent Skill version pins (2026-09-28)
 
 Skill pins (`metadata.library_version` in `packages/*/skills/**/SKILL.md`) are tag-derived like

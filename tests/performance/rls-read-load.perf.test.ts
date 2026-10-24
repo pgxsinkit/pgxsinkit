@@ -21,7 +21,7 @@ describe("performance: RLS read load", () => {
     async () => {
       const config = readRlsReadConfig();
       const startedAt = new Date().toISOString();
-      const db = drizzle({ connection: env.databaseUrl });
+      const db = drizzle({ connection: { url: env.databaseUrl, bigint: true } });
 
       try {
         const { scenarios } = await runRlsReadLoad(db, config);
