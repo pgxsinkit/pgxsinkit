@@ -271,7 +271,7 @@ export class Parser {
     bytes: ArrayBufferLike,
   ): ParameterDescriptionMessage {
     this.#setBuffer(offset, bytes);
-    const parameterCount = this.#reader.int16();
+    const parameterCount = this.#reader.uint16();
     const dataTypeIDs: number[] = [];
     for (let i = 0; i < parameterCount; i++) {
       dataTypeIDs.push(this.#reader.int32());

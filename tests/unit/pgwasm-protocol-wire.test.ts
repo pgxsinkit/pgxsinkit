@@ -5,7 +5,11 @@
 import { describe, expect, it } from "bun:test";
 
 import { Parser, serialize } from "../../packages/pgwasm/src/protocol/wire";
-import type { BackendMessage, DataRowMessage } from "../../packages/pgwasm/src/protocol/wire/messages";
+import type {
+  BackendMessage,
+  DataRowMessage,
+  ParameterDescriptionMessage,
+} from "../../packages/pgwasm/src/protocol/wire/messages";
 import { byteLengthUtf8 } from "../../packages/pgwasm/src/protocol/wire/string-utils";
 import { Modes } from "../../packages/pgwasm/src/protocol/wire/types";
 import { BufferList, buffers } from "./support/pg-wire-buffers";
@@ -146,6 +150,31 @@ describe("the backend message parser", () => {
       parameterCount: 2,
       dataTypeIDs: [2222, 3333],
     });
+  });
+
+  for (const count of [32_767, 32_768, 65_535]) {
+    it(`preserves all ${count} parameter type OIDs`, () => {
+      const packet = new Uint8Array(7 + 4 * count);
+      const view = new DataView(packet.buffer);
+      packet[0] = 0x74;
+      view.setUint32(1, packet.byteLength - 1, false);
+      view.setUint16(5, count, false);
+      for (let index = 0; index < count; index++) view.setInt32(7 + 4 * index, 23 + index, false);
+
+      const [description, ready] = parseAll([concat([packet, buffers.readyForQuery()])]);
+      const parameters = description as ParameterDescriptionMessage;
+      expect(parameters.name).toBe("parameterDescription");
+      expect(parameters.parameterCount).toBe(count);
+      expect(parameters.dataTypeIDs.length).toBe(count);
+      expect(parameters.dataTypeIDs[0]).toBe(23);
+      expect(parameters.dataTypeIDs.at(-1)).toBe(23 + count - 1);
+      expect(ready?.name).toBe("readyForQuery");
+    });
+  }
+
+  it("retains signed variable-length type sizes and modifiers", () => {
+    const textField = { ...field("value", 0), dataTypeID: 25, dataTypeSize: -1, dataTypeModifier: -1 };
+    expectMessage(buffers.rowDescription([textField]), { fields: [textField] });
   });
 
   it("parses data rows", () => {
@@ -307,6 +336,15 @@ describe("the frontend message serializer", () => {
     expect(() => serialize.parse({ name: "x".repeat(64), text: "select 1" })).toThrow(RangeError);
   });
 
+  it("rejects too many parameter type OIDs before writing a parse message", () => {
+    expect(() => serialize.parse({ text: "SELECT 1", types: Array<number>(65_536).fill(23) })).toThrow(
+      /at most 65535 parameters/,
+    );
+    expect(serialize.parse({ text: "SELECT 1", types: [23] })).toEqual(
+      new BufferList().addCString("").addCString("SELECT 1").addInt16(1).addInt32(23).join(true, "P"),
+    );
+  });
+
   it("builds bind messages", () => {
     expect(serialize.bind()).toEqual(
       new BufferList().addCString("").addCString("").addInt16(0).addInt16(0).addInt16(0).join(true, "B"),
@@ -330,6 +368,35 @@ describe("the frontend message serializer", () => {
         .add(new TextEncoder().encode("zing"))
         .addInt16(0)
         .join(true, "B"),
+    );
+  });
+
+  for (const count of [32_767, 32_768, 65_535]) {
+    it(`encodes ${count} parse parameter type OIDs`, () => {
+      const packet = serialize.parse({ text: "", types: Array<number>(count).fill(23) });
+      const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+      expect(view.getUint32(1, false)).toBe(packet.byteLength - 1);
+      expect(view.getUint16(7, false)).toBe(count);
+      expect(view.getInt32(9 + 4 * (count - 1), false)).toBe(23);
+    });
+
+    it(`encodes ${count} bind parameter formats and values`, () => {
+      const packet = serialize.bind({ values: Array<null>(count).fill(null) });
+      const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+      expect(packet[0]).toBe(0x42);
+      expect(view.getUint32(1, false)).toBe(packet.byteLength - 1);
+      expect(view.getUint16(7, false)).toBe(count);
+      expect(view.getUint16(9 + 2 * count, false)).toBe(count);
+      expect(view.getInt32(11 + 2 * count, false)).toBe(-1);
+      expect(view.getInt32(11 + 2 * count + 4 * (count - 1), false)).toBe(-1);
+      expect(view.getUint16(packet.byteLength - 2, false)).toBe(0);
+    });
+  }
+
+  it("rejects too many bind parameters before writing either message buffer", () => {
+    expect(() => serialize.bind({ values: Array<null>(65_536).fill(null) })).toThrow(/at most 65535 parameters/);
+    expect(serialize.bind()).toEqual(
+      new BufferList().addCString("").addCString("").addInt16(0).addInt16(0).addInt16(0).join(true, "B"),
     );
   });
 

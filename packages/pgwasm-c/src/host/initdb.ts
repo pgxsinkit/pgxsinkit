@@ -120,6 +120,8 @@ export async function runInitdb({
           env["HOME"] = "/home/postgres";
           env["USER"] = "postgres";
           env["LOGNAME"] = "postgres";
+          // initdb writes the cluster's timezone defaults; match the backend even on a non-UTC host.
+          env["TZ"] = "UTC";
           env["ICU_DATA"] = ICU_DATA_PATH;
         },
         (module) => {

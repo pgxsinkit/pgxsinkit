@@ -70,6 +70,53 @@ async function expectFollowsNumbers(
 }
 
 describe("live.query", () => {
+  it("releases both windowed statements on final unsubscribe without disturbing other queries", async () => {
+    const db = await liveDb();
+    await withNumbers(db);
+    const preparedNames = async () =>
+      (
+        await db.query<{ name: string }>(
+          "SELECT name FROM pg_prepared_statements WHERE name LIKE 'live_query_%' ORDER BY name",
+        )
+      ).rows.map(({ name }) => name);
+
+    const retained = await db.live.query<NumberRow>("SELECT * FROM testTable ORDER BY number");
+    const retainedNames = await preparedNames();
+    expect(retainedNames).toHaveLength(1);
+
+    for (const limit of [0, 2, 0]) {
+      const first = new Recorder<Results<NumberRow>>();
+      const second = new Recorder<Results<NumberRow>>();
+      const window = await db.live.query<NumberRow>({
+        query: "SELECT * FROM testTable ORDER BY number",
+        offset: 0,
+        limit,
+        callback: first.callback,
+      });
+      window.subscribe(second.callback);
+      expect(window.initialResults.rows).toEqual(fiveRows.slice(0, limit));
+      expect(window.initialResults.totalCount).toBe(5);
+      expect(await preparedNames()).toHaveLength(3);
+
+      await window.unsubscribe(first.callback);
+      expect(await preparedNames()).toHaveLength(3);
+      await window.refresh();
+      expect(second.latest?.rows).toEqual(fiveRows.slice(0, limit));
+
+      await window.unsubscribe(second.callback);
+      expect(await preparedNames()).toEqual(retainedNames);
+      await window.unsubscribe();
+      expect(await preparedNames()).toEqual(retainedNames);
+    }
+
+    const retainedRows = new Recorder<Results<NumberRow>>();
+    retained.subscribe(retainedRows.callback);
+    await retained.refresh();
+    expect(retainedRows.latest?.rows).toEqual(fiveRows);
+    await retained.unsubscribe();
+    expect(await preparedNames()).toEqual([]);
+  });
+
   it("follows inserts, deletes and updates until unsubscribed", async () => {
     const db = await liveDb();
     await withNumbers(db);

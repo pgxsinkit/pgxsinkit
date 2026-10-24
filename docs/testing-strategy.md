@@ -464,6 +464,28 @@ the host sees:
   decision): apps refresh them. No test covers opening one; a `dumpDataDir()` backup names its members
   relative to the data directory and restores across.
 
+## Host correctness fixes from the October 2026 PGlite audit
+
+- **Fresh initdb uses UTC independently of the host timezone.** The backend already
+  sets `TZ` and `PGTZ` to UTC; initdb now sets `TZ` too. `pgwasm-c-initdb` creates
+  a fresh real-Wasm store under `America/New_York`, checks the timezone written to
+  `postgresql.conf` through `pg_file_settings` (backend overrides can mask it in
+  `SHOW`), and verifies winter and summer offset-free timestamps. Existing stores
+  retain their configuration.
+- **Parameter counts use the unsigned 16-bit wire range.** `pgwasm-protocol-wire`
+  checks Parse/Bind and ParameterDescription at 32,767, 32,768 and 65,535 parameters,
+  rejection above 65,535 before a shared message buffer is modified, and the next
+  valid message after a rejection. Signed type sizes and modifiers remain signed.
+- **The last windowed live-query subscriber releases both prepared statements.**
+  `pgwasm-live` checks `pg_prepared_statements` after repeated subscription teardown,
+  including zero limit/offset, while another subscriber and another query remain
+  usable. Non-windowed queries own only their main statement.
+
+These host fixes apply independently of the PostgreSQL major. The backend's
+extended-query error-recovery fix is qualified separately in `pgwasm-postgres`
+on its PG18 and PG19 branches; changing this host does not replace its pinned C
+artefacts or adopt the PG19 ABI/data format.
+
 ## The read transport is pgxsinkit's own (ADR-0065 decision 6, 2026-09-29)
 
 `@durable-streams/client` 0.2.7 is gone from `@pgxsinkit/client`. The reader is ours: `circuits/long-poll.ts`

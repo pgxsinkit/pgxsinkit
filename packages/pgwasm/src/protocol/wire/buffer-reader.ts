@@ -25,6 +25,12 @@ export class BufferReader {
     return result;
   }
 
+  uint16(): number {
+    const result = this.#bufferView.getUint16(this.#offset, false);
+    this.#offset += 2;
+    return result;
+  }
+
   byte(): number {
     const result = this.#bufferView.getUint8(this.#offset);
     this.#offset++;

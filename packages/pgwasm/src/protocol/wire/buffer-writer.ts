@@ -46,6 +46,13 @@ export class Writer {
     return this;
   }
 
+  addUint16(num: number): Writer {
+    this.#ensure(2);
+    this.#bufferView.setUint16(this.#offset, num, false);
+    this.#offset += 2;
+    return this;
+  }
+
   addCString(string: string): Writer {
     if (string) {
       this.addString(string);

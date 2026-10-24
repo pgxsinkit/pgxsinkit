@@ -11,6 +11,44 @@ import { MemoryVfs } from "./support/pgwasm-memory-vfs";
 afterEach(closeTestPgwasms);
 
 describe("creating a data directory", () => {
+  it("writes UTC defaults when the host timezone observes daylight saving", async () => {
+    const previousTimezone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      // Exercise initdb with a genuinely non-UTC host, rather than relying on the runner's timezone.
+      expect(new Date("2026-01-15T12:00:00Z").getTimezoneOffset()).toBe(300);
+      expect(new Date("2026-07-15T12:00:00Z").getTimezoneOffset()).toBe(240);
+
+      const pg = await createTestPgwasm({ fresh: true });
+      try {
+        // The backend already sets PGTZ=UTC. Inspect the file too: SHOW alone would hide an
+        // initdb-written fixed-offset timezone and let the initialization bug pass unnoticed.
+        expect(
+          (
+            await pg.query<{ setting: string }>(
+              "SELECT setting FROM pg_file_settings WHERE lower(name) = 'timezone' AND applied",
+            )
+          ).rows,
+        ).toEqual([{ setting: "UTC" }]);
+        expect((await pg.query<{ TimeZone: string }>("SHOW TimeZone")).rows).toEqual([{ TimeZone: "UTC" }]);
+        expect(
+          (
+            await pg.query<{ winter_utc: boolean; summer_utc: boolean }>(`
+            SELECT
+              '2026-01-15 12:00:00'::timestamptz = '2026-01-15 12:00:00+00'::timestamptz AS winter_utc,
+              '2026-07-15 12:00:00'::timestamptz = '2026-07-15 12:00:00+00'::timestamptz AS summer_utc
+          `)
+          ).rows,
+        ).toEqual([{ winter_utc: true, summer_utc: true }]);
+      } finally {
+        await pg.close();
+      }
+    } finally {
+      if (previousTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTimezone;
+    }
+  });
+
   it("runs initdb on its own scratch instance, never on the storage it fills", async () => {
     // A filesystem holding exclusive resources (an OPFS store's handles) must be initialised once.
     const fs = new MemoryVfs();

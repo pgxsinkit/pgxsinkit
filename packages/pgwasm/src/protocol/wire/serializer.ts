@@ -73,15 +73,20 @@ export interface ParseOpts {
 
 const emptyValueArray: LegalValue[] = [];
 
+function assertParameterCount(count: number): void {
+  if (count > 65_535) {
+    throw new RangeError(`Postgres messages support at most 65535 parameters (received ${count})`);
+  }
+}
+
 function parse(opts: ParseOpts): Uint8Array<ArrayBuffer> {
   const name = opts.name ?? "";
   if (name.length > 63) {
     throw new RangeError(`Postgres statement names are at most 63 characters: "${name}" (${name.length})`);
   }
-  const buffer = writer
-    .addCString(name)
-    .addCString(opts.text)
-    .addInt16(opts.types?.length ?? 0);
+  const typeCount = opts.types?.length ?? 0;
+  assertParameterCount(typeCount);
+  const buffer = writer.addCString(name).addCString(opts.text).addUint16(typeCount);
   opts.types?.forEach((type) => buffer.addInt32(type));
   return writer.flush(code.parse);
 }
@@ -128,11 +133,12 @@ function bind(config: BindOpts = {}): Uint8Array<ArrayBuffer> {
   const binary = config.binary ?? false;
   const values = config.values ?? emptyValueArray;
   const len = values.length;
+  assertParameterCount(len);
 
   writer.addCString(portal).addCString(statement);
-  writer.addInt16(len);
+  writer.addUint16(len);
   writeValues(values, config.valueMapper);
-  writer.addInt16(len);
+  writer.addUint16(len);
   writer.add(paramWriter.flush());
   // result format code
   writer.addInt16(binary ? ParamType.BINARY : ParamType.STRING);
