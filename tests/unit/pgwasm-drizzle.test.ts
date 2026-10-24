@@ -342,6 +342,36 @@ describe("the pgwasm Drizzle driver", () => {
     expect(await db.$cache.invalidate({ tables: "users" })).toBeUndefined();
   });
 
+  it.each([undefined, false, true])("honours paramsInErrors=%s when a query fails", async (paramsInErrors) => {
+    const { client } = await database();
+    const db = drizzle(client, { paramsInErrors });
+    const value = "private-bound-value";
+    const error = await rejectionOf(
+      db
+        .select()
+        .from(users)
+        .where(eq(users.id, sql`${value}::integer`)),
+    );
+    expect(error).toHaveProperty("params", paramsInErrors ? [value] : undefined);
+    expect(error.message.includes(value)).toBe(paramsInErrors === true);
+  });
+
+  it("preserves paramsInErrors in transaction sessions", async () => {
+    const { client } = await database();
+    const db = drizzle(client, { paramsInErrors: true });
+    const value = "transaction-bound-value";
+    const error = await rejectionOf(
+      db.transaction((tx) =>
+        tx
+          .select()
+          .from(users)
+          .where(eq(users.id, sql`${value}::integer`)),
+      ),
+    );
+    expect(error).toHaveProperty("params", [value]);
+    expect(error.message).toContain(value);
+  });
+
   describe("drizzle's object form, drizzle({ client, ...config })", () => {
     const mappers = (db: object) => (db as { dialect: PgDialect }).dialect.mapperGenerators.rows.name;
 

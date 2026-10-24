@@ -8,22 +8,22 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@mantine/core": "9.7.1",
-    "@mantine/hooks": "9.7.1",
+    "@mantine/core": "9.7.3",
+    "@mantine/hooks": "9.7.3",
     "@pgxsinkit/board-schema": "workspace:*",
     "@pgxsinkit/client": "workspace:*",
     "@pgxsinkit/contracts": "workspace:*",
     "@pgxsinkit/pgwasm-c": "workspace:*",
     "@pgxsinkit/pgwasm-repl": "workspace:*",
     "@pgxsinkit/react": "workspace:*",
-    "@supabase/supabase-js": "2.117.2",
-    "@tanstack/react-router": "1.170.41",
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "uuid": "14.0.2"
+    "@supabase/supabase-js": "2.118.0",
+    "@tanstack/react-router": "1.170.46",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "uuid": "14.0.3"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "6.1.2",
-    "vite": "8.3.3"
+    "vite": "8.3.5"
   }
 }

@@ -96,33 +96,32 @@
     "validate:refresh": "PGXSINKIT_FORCE=1 bun run validate:full"
   },
   "dependencies": {
-    "jose": "6.2.12"
+    "jose": "6.2.13"
   },
   "devDependencies": {
     "@pgxsinkit/board-schema": "workspace:*",
-    "@playwright/test": "^1.63.0",
-    "@tanstack/intent": "0.5.4",
-    "@types/node": "26.6.4",
+    "@playwright/test": "^1.64.1",
+    "@tanstack/intent": "^0.5.6",
+    "@types/node": "26.6.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
-    "bun-types": "^1.4.2",
-    "drizzle-kit": "rc5",
-    "drizzle-orm": "rc5",
-    "drizzle-seed": "rc5",
+    "bun-types": "^1.4.4",
+    "drizzle-kit": "rc",
+    "drizzle-orm": "rc",
+    "drizzle-seed": "rc",
     "hono": "4.13.13",
-    "oxfmt": "0.72.0",
-    "oxlint": "1.87.0",
-    "oxlint-tsgolint": "7.0.2003",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
+    "oxlint-tsgolint": "7.0.2005",
     "postgres": "3.4.9",
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "tsx": "4.23.15",
     "typescript": "^7.0.2",
-    "vite": "8.3.3",
-    "zod": "4.6.5"
+    "vite": "8.3.5",
+    "zod": "4.6.7"
   },
-  "packageManager": "bun@1.4.2",
-  "// @tanstack/intent": "Exact pin approved by the maintainer: 0.5.x introduced skill-example checking through the legacy TypeScript compiler API, which crashes on TypeScript 7.0.2 at ts.ScriptTarget.ESNext. 0.4.0 validates skills without that incompatible checker. Keep the project compiler on TypeScript 7; restore latest once Intent supports its API. Latest verified as 0.5.2 with bun info. Upstream: https://github.com/TanStack/intent/issues/307.",
+  "packageManager": "bun@1.4.4",
   "// @types/node": "Use the newest Node 26 release (mise.toml): the registry's latest tag points to 22.20.2, whose MessagePort declarations lack onmessage and typed message events required by Bun tests. Verified 26.5.1 via bun info @types/node@26 version."
 }

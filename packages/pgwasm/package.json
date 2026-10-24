@@ -59,7 +59,7 @@
     "build": "bun --cwd ../.. run build:public-packages"
   },
   "peerDependencies": {
-    "drizzle-orm": "rc5"
+    "drizzle-orm": "rc"
   },
   "peerDependenciesMeta": {
     "drizzle-orm": {

@@ -194,6 +194,11 @@ their own. Where the code came from, file by file, is in
   rollback path ends once the fork is no longer a dependency; `pgwasm-public-surface` pins every entry point's runtime exports.
   `pgwasm-protocol` also proves `/protocol`'s exclusive session: a query, a transaction and a backup
   wait for it, and it waits for a running transaction's COMMIT.
+- **Drizzle driver** (`pgwasm-drizzle`): exercises the public driver against the real pgwasm
+  database, including cache invalidation and transaction sessions. The Drizzle RC driver uses
+  upstream `QueryMetadata` (table names are collected lazily) and forwards `paramsInErrors` to
+  prepared queries. Bound parameters are omitted from Drizzle's error message and `params` field
+  by default or when explicitly disabled; opting in includes them, including inside transactions.
 - **pg_dump** (`pgwasm-pg-dump`, `pgwasm-pg-dump-session`, `pgwasm-pg-dump-framing`): the fork's
   pg_dump cases, a round trip of many column types (sequences and a view included) through `exec()`, a
   row holding lines that look like psql's `\restrict`, a thousand tables (pg_dump's catalogue queries

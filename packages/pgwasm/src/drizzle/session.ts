@@ -4,7 +4,7 @@
 
 import type { Cache } from "drizzle-orm/cache/core/cache";
 import { NoopCache } from "drizzle-orm/cache/core/cache";
-import type { WithCacheConfig } from "drizzle-orm/cache/core/types";
+import type { QueryMetadata, WithCacheConfig } from "drizzle-orm/cache/core/types";
 import { entityKind } from "drizzle-orm/entity";
 import { NoopLogger, type Logger } from "drizzle-orm/logger";
 import { PgAsyncPreparedQuery, PgAsyncSession, PgAsyncTransaction } from "drizzle-orm/pg-core/async/session";
@@ -23,13 +23,12 @@ export type PgwasmSessionClient = Pick<Pgwasm, "query"> & Partial<Pick<Pgwasm, "
 export interface PgwasmSessionOptions {
   logger?: Logger;
   cache?: Cache;
+  paramsInErrors?: boolean;
 }
 
 export interface PgwasmQueryResultHKT extends PgQueryResultHKT {
   type: Results<Assume<this["row"], Row>>;
 }
-
-type QueryMetadata = { type: "select" | "update" | "delete" | "insert"; tables: string[] };
 
 export class PgwasmSession<TRelations extends AnyRelations> extends PgAsyncSession<PgwasmQueryResultHKT, TRelations> {
   static override readonly [entityKind]: string = "PgwasmSession";
@@ -77,6 +76,7 @@ export class PgwasmSession<TRelations extends AnyRelations> extends PgAsyncSessi
       this.#cache,
       queryMetadata,
       cacheConfig,
+      this.#options.paramsInErrors,
     );
   }
 

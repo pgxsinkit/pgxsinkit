@@ -35,6 +35,6 @@
     "@pgxsinkit/contracts": "workspace:*"
   },
   "peerDependencies": {
-    "drizzle-orm": "rc5"
+    "drizzle-orm": "rc"
   }
 }

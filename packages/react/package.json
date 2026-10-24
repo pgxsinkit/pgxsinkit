@@ -33,7 +33,7 @@
     "@pgxsinkit/pgwasm": "workspace:*"
   },
   "peerDependencies": {
-    "drizzle-orm": "rc5",
-    "react": ">=19.3.0"
+    "drizzle-orm": "rc",
+    "react": ">=19.3.1"
   }
 }

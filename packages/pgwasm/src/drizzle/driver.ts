@@ -52,6 +52,7 @@ function construct<TRelations extends AnyRelations, TClient extends PgwasmSessio
   const session = new PgwasmSession<TRelations>(client, dialect, relations, {
     ...(logger ? { logger } : {}),
     ...(config.cache ? { cache: config.cache } : {}),
+    ...(config.paramsInErrors !== undefined ? { paramsInErrors: config.paramsInErrors } : {}),
   });
   const db = new PgwasmDatabase<TRelations>(dialect, session, relations);
   // `db.$cache.invalidate` is the cache's own invalidation; with no cache it stays the no-op it starts as.
