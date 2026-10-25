@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { pgDump } from "../../packages/pgwasm-pg-dump/src";
+import { ARTEFACT_RELEASE } from "../../packages/pgwasm-pg-dump/src/artefact-pins";
 import { closeTestPgwasms, createTestPgwasm, scratchDir } from "./support/pgwasm";
 
 // pg_dump's WebAssembly, run by `pgDump` over a pgwasm database on the C build.
@@ -26,7 +27,12 @@ describe("pgDump", () => {
     expect(dump.type).toStartWith("text/plain");
     const content = await dump.text();
     expect(content).toContain("PostgreSQL database dump");
-    expect(content).toContain("Dumped by pg_dump version 18.6");
+    const upstreamVersion = ARTEFACT_RELEASE.upstream.tag
+      .replace(/^REL_/, "")
+      .replace("_RC", "rc")
+      .replace("_BETA", "beta")
+      .replaceAll("_", ".");
+    expect(content).toContain(`Dumped by pg_dump version ${upstreamVersion}`);
   });
 
   it("dumps the same database again and again", async () => {

@@ -9,7 +9,9 @@ import {
   maxCore,
   nextPatch,
   pinSiblingDeps,
+  publicationDistTag,
   readStagedSkills,
+  resolveVersionContext,
   skillPinViolations,
   stampSkillPins,
   targetVersion,
@@ -28,6 +30,59 @@ const releaseCtx: VersionContext = {
   devBaseFloor: null,
   devPreId: "ignored",
 };
+
+const rcCtx: VersionContext = { ...releaseCtx, refName: "0.6.0-rc.1" };
+
+describe("publication channels", () => {
+  test("RC versions remain exact and use rc while stable and dev retain their channels", () => {
+    expect(targetVersion("0.0.0", rcCtx)).toBe("0.6.0-rc.1");
+    expect(publicationDistTag(rcCtx)).toBe("rc");
+    expect(publicationDistTag(releaseCtx)).toBe("latest");
+    expect(publicationDistTag(devCtx)).toBe("dev");
+  });
+
+  function refContext(refType: string, refName: string): VersionContext {
+    const previousType = process.env["GITHUB_REF_TYPE"];
+    const previousName = process.env["GITHUB_REF_NAME"];
+    process.env["GITHUB_REF_TYPE"] = refType;
+    process.env["GITHUB_REF_NAME"] = refName;
+    try {
+      return resolveVersionContext();
+    } finally {
+      if (previousType === undefined) delete process.env["GITHUB_REF_TYPE"];
+      else process.env["GITHUB_REF_TYPE"] = previousType;
+      if (previousName === undefined) delete process.env["GITHUB_REF_NAME"];
+      else process.env["GITHUB_REF_NAME"] = previousName;
+    }
+  }
+
+  test("tag ref context preserves an RC and never treats an unsupported tag as dev", () => {
+    expect(publicationDistTag(refContext("tag", "0.6.0-rc.1"))).toBe("rc");
+    expect(publicationDistTag(refContext("tag", "0.6.0"))).toBe("latest");
+    for (const tag of ["0.6.0-beta.1", "v0.6.0", "0.6.0-rc.01", "0.6.0+build.1", "bad-tag"]) {
+      expect(() => refContext("tag", tag)).toThrow("Unsupported release tag");
+    }
+  });
+
+  test("manual experimental branches cannot move the dev dist-tag", () => {
+    expect(() => refContext("branch", "port-19")).toThrow("only develop publishes @dev");
+    expect(() => refContext("branch", "main")).toThrow("only develop publishes @dev");
+    expect(publicationDistTag(refContext("branch", "develop"))).toBe("dev");
+  });
+
+  test("RC peers and runtime dependencies resolve the same RC sibling version", () => {
+    const pkg: Manifest = {
+      dependencies: { "@pgxsinkit/pgwasm-c": "workspace:*" },
+      peerDependencies: { "@pgxsinkit/pgwasm": ">=0.5.5", react: ">=19" },
+    };
+    const version = targetVersion("0.0.0", rcCtx);
+    pinSiblingDeps(pkg, "@pgxsinkit/", version);
+    expect(pkg["dependencies"]).toEqual({ "@pgxsinkit/pgwasm-c": version });
+    expect(pkg["peerDependencies"]).toEqual({ "@pgxsinkit/pgwasm": version, react: ">=19" });
+    expect(Bun.semver.satisfies(version, version)).toBe(true);
+    expect(Bun.semver.satisfies("0.5.5", version)).toBe(false);
+  });
+});
 
 describe("targetVersion", () => {
   test("release-parity uses the tag verbatim", () => {
@@ -147,6 +202,7 @@ describe("skill pin stamping and the pre-publish assertion", () => {
 
   for (const [channel, ctx] of [
     ["release parity (tag build)", releaseCtx],
+    ["release candidate (RC tag build)", rcCtx],
     ["dev channel (develop / dispatch)", devCtx],
   ] as const) {
     describe(channel, () => {

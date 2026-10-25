@@ -25,41 +25,42 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds two files: assets of the pgwasm-postgres release 18.6.1
-(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.6.1), the release that also holds `@pgxsinkit/pgwasm-c`'s server, republished
+`artefacts/` holds two files: assets of the pgwasm-postgres release 19.0.0-rc.1
+(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/19.0.0-rc.1), the release that also holds `@pgxsinkit/pgwasm-c`'s server, republished
 byte-identical (each file's size and sha256 are pinned in `src/artefact-pins.ts`, from
 the release's manifest.json checked against its SHA256SUMS):
 
-  - `pg_dump.wasm`: pg_dump from PostgreSQL 18.6 (it reports
-    `pg_dump (PostgreSQL) 18.6`), compiled to WebAssembly;
+  - `pg_dump.wasm`: pg_dump from PostgreSQL 19rc1 (it reports
+    `pg_dump (PostgreSQL) 19rc1`), compiled to WebAssembly;
   - `pg_dump.js`, its Emscripten-generated loader.
 
 pgxsinkit/pgwasm-postgres (https://github.com/pgxsinkit/pgwasm-postgres) builds them
-from PostgreSQL 18.6 (the upstream tag REL_18_6, commit
-724edf9bde9d356724ad384a2e196edc3c9f80f7) plus a patch series and an overlay derived
+from PostgreSQL 19rc1 (the upstream tag REL_19_RC1, commit
+0b8bff042a997fe50fcd1c4c83b9ef1cc9ed8a89) plus a patch series and an overlay derived
 from ElectricSQL's PGlite fork of PostgreSQL
 (https://github.com/electric-sql/postgres-pglite at
 b133782cd759f08b3aeb263b80a963b39c7b7af1; PostgreSQL License, Copyright (c)
-ElectricSQL and contributors). Release 18.6.1 is pgwasm-postgres commit
-28f0c1551db8c7f5df143ef1e424c641af93072d, built inside the builder image
-ghcr.io/pgxsinkit/pgwasm-builder@sha256:0c4d5255c5f1824216d1eb347cc231a6f881574c3d5b8172796a8cbe5f9f63c8
+ElectricSQL and contributors). Release 19.0.0-rc.1 is pgwasm-postgres commit
+df4458a4fd3c0a546af29eb399bdfaa54eee70dd, built inside the builder image
+ghcr.io/pgxsinkit/pgwasm-builder@sha256:cbb378a50de43cd2fbd8718b72ce4c7595ffe421148a3c32435906f096bc5130
 (whose recipe is that repository's `builder/Containerfile`); its manifest.json records
 every file's size and sha256, and the release was published only because a rebuild of
 the tag gave the gated build's manifest. pg_dump is built with the server, in the same run.
 
-What is compiled in comes from the build (`build-pglite.sh`,
+What is compiled in comes from the build (`build-pgwasm.sh`,
 `src/bin/pg_dump/Makefile`) and from the binary itself:
 
   - pg_dump is linked from its own objects, libpq and PostgreSQL's frontend
-    libraries (fe_utils, pgcommon, pgport), with ElectricSQL's `pglitec.c`, the host
-    shims that route libpq's socket calls to the loader's callbacks;
+    libraries (fe_utils, pgcommon, pgport), with pgwasm-postgres's `pgwasmc.c`
+    (derived from ElectricSQL's `pglitec.c`), the host shims that route libpq's
+    socket calls to the loader's callbacks;
   - the configure line (--with-zlib --with-libxml --with-icu --with-openssl=no
     --without-llvm) puts -lz and -lxml2 on every program's link line. zlib is
     compiled in: its inflate messages are in pg_dump.wasm. No code from libxml2 or
     ICU is: none of their messages or names are in the binary (pg_dump calls none of
     them, and the link keeps only what is called), so their notices are not
     reproduced here (`@pgxsinkit/pgwasm-c`'s NOTICE has them);
-  - Emscripten 6.0.10 (the builder image's) provides the loader's runtime and the
+  - Emscripten 6.0.13 (the builder image's) provides the loader's runtime and the
     system libraries: musl libc and LLVM's compiler-rt. pg_dump is C, and no C++
     runtime (libc++, libc++abi) is in the binary.
 
@@ -70,7 +71,7 @@ Snowball), which pg_dump does not contain.
 Each component's notice follows, copied from the file named with it.
 
 ------------------------------------------------------------------------------
-PostgreSQL 18.6, with changes derived from ElectricSQL's for PGlite (pg_dump.wasm)
+PostgreSQL 19rc1, with changes derived from ElectricSQL's for PGlite (pg_dump.wasm)
 ------------------------------------------------------------------------------
 
 Source: https://github.com/electric-sql/postgres-pglite at b133782cd759f08b3aeb263b80a963b39c7b7af1,
@@ -657,10 +658,10 @@ Source: https://raw.githubusercontent.com/madler/zlib/v1.3.2/LICENSE
       jloup@gzip.org          madler@alumni.caltech.edu
 
 ------------------------------------------------------------------------------
-Emscripten 6.0.10 (the runtime in pg_dump.js, and its system libraries in pg_dump.wasm)
+Emscripten 6.0.13 (the runtime in pg_dump.js, and its system libraries in pg_dump.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/LICENSE
+Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/LICENSE
 
     Emscripten is available under 2 licenses, the MIT license and the
     University of Illinois/NCSA Open Source License.
@@ -765,10 +766,10 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/LICE
     flag will run closure compiler from third_party/).
 
 ------------------------------------------------------------------------------
-musl libc, as bundled in Emscripten 6.0.10 (pg_dump.wasm)
+musl libc, as bundled in Emscripten 6.0.13 (pg_dump.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libc/musl/COPYRIGHT
+Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/system/lib/libc/musl/COPYRIGHT
 
     musl as a whole is licensed under the following standard MIT license:
 
@@ -965,10 +966,10 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/syst
     obstacle to adoption, that text has been removed.
 
 ------------------------------------------------------------------------------
-compiler-rt, as bundled in Emscripten 6.0.10 (pg_dump.wasm)
+compiler-rt, as bundled in Emscripten 6.0.13 (pg_dump.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/compiler-rt/LICENSE.TXT
+Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/system/lib/compiler-rt/LICENSE.TXT
 
 It is under the Apache License v2.0 with LLVM Exceptions. Its object code is
 embedded in pg_dump.wasm, which the exception covers:

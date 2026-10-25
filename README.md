@@ -35,6 +35,10 @@ token-gated stream edge. Both images are built in
 
 ## Install
 
+The experimental PG19 channel is `@rc` (`0.6.0-rc.1`), with matching toolkit package versions.
+It uses fresh stores under separate names; existing PG18 stores and physical backups are refused.
+Stable installations continue to use the default `latest` channel.
+
 ```bash
 bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
 # React bindings (optional): bun add @pgxsinkit/react

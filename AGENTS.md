@@ -38,8 +38,10 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 - **Versions are tag-derived, never hand-edited.** Every publishable `package.json` carries
   `"version": "0.0.0"` as a placeholder — the most recent semver tag is the _only_ version input,
   and CI derives the real dev/release version at publish time. There is no version-bump script.
-- **Publishing.** A push to `main` publishes a `@dev` build to GitHub Packages; a semver tag
-  publishes release-parity at `@latest` (both gated on validation). The public npm mirror is a
+- **Publishing.** A push to `develop` publishes a `@dev` build to GitHub Packages; a final semver tag
+  publishes release-parity at `@latest`, and an exact `N.N.N-rc.N` tag publishes at `@rc`
+  (all gated on validation; tags also require integration and the pgwasm browser contracts).
+  A `port-*` branch publishes neither `dev` nor `latest`. The public npm mirror is a
   separate, human-gated step on your machine: `bun run release:npm <tag>`.
 
 # Project Constraints & Rules

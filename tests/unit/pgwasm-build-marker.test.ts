@@ -23,12 +23,13 @@ async function recordedBuild(db: Pgwasm): Promise<{ build: string; dataFormat: n
 }
 
 const foreign = foreignIdentityBuild(cBuild, { name: "foreign" });
+const currentMarker = { build: "c", dataFormat: cBuild.identity.dataFormat };
 
 describe("the build marker on the C build", () => {
   it("marks a new data directory, and a restored unmarked one", async () => {
-    expect(await recordedBuild(await createTestPgwasm({ fresh: true }))).toEqual({ build: "c", dataFormat: 1 });
+    expect(await recordedBuild(await createTestPgwasm({ fresh: true }))).toEqual(currentMarker);
     // The seed is an unmarked data directory from before builds were recorded.
-    expect(await recordedBuild(await createTestPgwasm())).toEqual({ build: "c", dataFormat: 1 });
+    expect(await recordedBuild(await createTestPgwasm())).toEqual(currentMarker);
   });
 
   it("opens an existing unmarked directory, and leaves it unmarked", async () => {
@@ -68,11 +69,11 @@ describe("the build marker on the C build", () => {
       const intoForeign = await rejectionOf(createTestPgwasm({ dataDir: foreignDir }));
       expect(intoForeign).toBeInstanceOf(BuildMismatchError);
       expect((intoForeign as BuildMismatchError).found).toEqual({ build: "foreign", dataFormat: 1 });
-      expect((intoForeign as BuildMismatchError).expected).toEqual({ build: "c", dataFormat: 1 });
+      expect((intoForeign as BuildMismatchError).expected).toEqual(currentMarker);
 
       const intoC = await rejectionOf(createTestPgwasm({ dataDir: cDir, build: foreign }));
       expect(intoC).toBeInstanceOf(BuildMismatchError);
-      expect((intoC as BuildMismatchError).found).toEqual({ build: "c", dataFormat: 1 });
+      expect((intoC as BuildMismatchError).found).toEqual(currentMarker);
 
       // Nothing was written: each directory still opens with its own build.
       expect((await (await createTestPgwasm({ dataDir: cDir })).query("SELECT 1 AS one")).rows).toEqual([{ one: 1 }]);
@@ -88,10 +89,14 @@ describe("the build marker on the C build", () => {
     try {
       const dataDir = `file://${dir.path}/db`;
       await (await createTestPgwasm({ dataDir })).close();
-      const nextFormat = foreignIdentityBuild(cBuild, { name: "c", dataFormat: 2, claimsUnmarkedDirectories: true });
+      const nextFormat = foreignIdentityBuild(cBuild, {
+        name: "c",
+        dataFormat: cBuild.identity.dataFormat + 1,
+        claimsUnmarkedDirectories: true,
+      });
       const refusal = await rejectionOf(createTestPgwasm({ dataDir, build: nextFormat }));
       expect(refusal).toBeInstanceOf(DataFormatMismatchError);
-      expect((refusal as DataFormatMismatchError).found).toBe(1);
+      expect((refusal as DataFormatMismatchError).found).toBe(cBuild.identity.dataFormat);
     } finally {
       dir.cleanup();
     }

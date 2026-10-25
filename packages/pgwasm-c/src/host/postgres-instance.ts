@@ -8,9 +8,9 @@ import type { EmscriptenStream, ModuleOverrides, PostgresModule } from "./emscri
 import { preservingExitCode } from "./exit-code";
 import { ICU_DATA_PATH, INITDB_EXE_PATH, LOCALE_LIST_PATH, PGDATA, POSTGRES_EXE_PATH } from "./paths";
 
-/** Postgres' error longjmp, intercepted by the host: keep in sync with pglitec.c's POSTGRES_MAIN_LONGJMP. */
+/** Postgres' error longjmp, intercepted by the host: keep in sync with pgwasmc.c's POSTGRES_MAIN_LONGJMP. */
 const POSTGRES_MAIN_LONGJMP = 100;
-/** The exit status single-user mode reports when it started and stays alive: the C build's `PGLITE_EXIT_ALIVE`. */
+/** The exit status single-user mode reports when it started and stays alive: the C build's `PGWASM_EXIT_ALIVE`. */
 const PGWASM_EXIT_ALIVE = 99;
 const INITIAL_MEMORY_PAGES = 2048;
 const MAXIMUM_MEMORY_PAGES = 32768;
@@ -42,7 +42,7 @@ export const DEFAULT_START_PARAMS: readonly string[] = [
 /**
  * Whether `error` is one of the exceptions the Emscripten runtime throws on purpose to unwind the wasm
  * stack back to the main loop, which handles them:
- * - `'unwind'` from emscripten_exit_with_live_runtime(): how pgl_longjmp (pglitec.c) delivers Postgres'
+ * - `'unwind'` from emscripten_exit_with_live_runtime(): how pgwasm_longjmp (pgwasmc.c) delivers Postgres'
  *   siglongjmp to its main-loop error handler, and how a Terminate message ends the loop;
  * - what an emscripten-mode longjmp throws, should one pass every invoke_* frame: an instance of the
  *   glue's (unexported) `EmscriptenSjLj` class on Emscripten 6.0.10 (pgwasm-postgres 18.6.1 onwards), a
@@ -264,19 +264,19 @@ export class PostgresInstance {
   #onRuntimeInitialized(): void {
     const mod = this.module;
     // system() never runs a command: it is logged and fails.
-    mod._pgl_set_system_fn(
+    mod._pgwasm_set_system_fn(
       this.#addFunction((command: number) => {
         this.#log(`Postgres tried to execute ${mod.UTF8ToString(command)}, returning 1.`);
         return 1;
       }, "pi"),
     );
-    mod._pgl_set_popen_fn(
+    mod._pgwasm_set_popen_fn(
       this.#addFunction((command: number, mode: number) => {
         this.#externalCommandStream = this.#handleExternalCommand(mod.UTF8ToString(command), mod.UTF8ToString(mode));
         return this.#externalCommandStream;
       }, "ppp"),
     );
-    mod._pgl_set_pclose_fn(
+    mod._pgwasm_set_pclose_fn(
       this.#addFunction((stream: number) => {
         if (stream !== this.#externalCommandStream) throw new Error(`Unhandled pclose ${stream}`);
         mod._fclose(stream);
@@ -295,7 +295,7 @@ export class PostgresInstance {
       this.#readOffset += length;
       return length;
     }, "iii");
-    mod._pgl_set_rw_cbs(read, write);
+    mod._pgwasm_set_rw_cbs(read, write);
   }
 
   #handleExternalCommand(command: string, mode: string): number {
@@ -359,16 +359,16 @@ export class PostgresInstance {
   /** Start Postgres in single-user mode on the data directory. */
   startSingleMode(startParams: readonly string[]): void {
     const mod = this.module;
-    mod._pgl_setPGliteActive(1);
+    mod._pgwasm_setPostgresActive(1);
     this.callMain([...startParams, "-D", PGDATA, mod.ENV["PGDATABASE"] ?? "postgres"]);
-    const exitStatus = mod._pgl_setPGliteExitStatus(-3);
+    const exitStatus = mod._pgwasm_setPostgresExitStatus(-3);
     if (exitStatus !== PGWASM_EXIT_ALIVE) {
       const output = this.#stderr.join("\n").trim();
       throw new Error(
         `Postgres failed to start (single-user mode exit status ${exitStatus})${output ? `:\n${output}` : ""}`,
       );
     }
-    mod._pgl_startPGlite();
+    mod._pgwasm_startPostgres();
   }
 
   /**
@@ -422,11 +422,11 @@ export class PostgresInstance {
 
   #processStartupPacket(): void {
     const mod = this.module;
-    const result = this.#call(() => mod._ProcessStartupPacket(mod._pgl_getMyProcPort(), true, true));
+    const result = this.#call(() => mod._ProcessStartupPacket(mod._pgwasm_getMyProcPort()));
     if (result !== 0) throw new Error("Cannot process the startup packet");
     this.#call(() => {
-      mod._pgl_sendConnData();
-      mod._pgl_pq_flush();
+      mod._pgwasm_sendConnData();
+      mod._pgwasm_pq_flush();
     });
   }
 
@@ -443,7 +443,7 @@ export class PostgresInstance {
           // every frame it abandoned (see ShadowStack).
           this.#stack.restore(stack);
           if (!isEmscriptenUnwind(error)) throw error;
-          if (mod._pgl_setPGliteExitStatus(-2) === POSTGRES_MAIN_LONGJMP) {
+          if (mod._pgwasm_setPostgresExitStatus(-2) === POSTGRES_MAIN_LONGJMP) {
             // Postgres raised an error: its siglongjmp into main was intercepted, and its error handling
             // runs here before the loop resumes with the rest of the batch.
             this.#call(() => mod._PostgresMainLongJmp());
@@ -452,7 +452,7 @@ export class PostgresInstance {
       }
       this.#call(() => {
         mod._PostgresSendReadyForQueryIfNecessary();
-        mod._pgl_pq_flush();
+        mod._pgwasm_pq_flush();
       });
     } catch (error) {
       this.#failed = true;
@@ -465,8 +465,8 @@ export class PostgresInstance {
     const mod = this.module;
     try {
       preservingExitCode(() => {
-        mod._pgl_setPGliteActive(0);
-        this.#call(() => mod._pgl_run_atexit_funcs());
+        mod._pgwasm_setPostgresActive(0);
+        this.#call(() => mod._pgwasm_run_atexit_funcs());
       });
     } catch (error) {
       const exit = error as { name?: unknown; status?: unknown };

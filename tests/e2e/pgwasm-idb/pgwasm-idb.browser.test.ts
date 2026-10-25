@@ -111,6 +111,28 @@ test.describe("an idb:// database", () => {
 });
 
 test.describe("IndexedDB storage correctness", () => {
+  for (const marked of [true, false]) {
+    test(`refuses ${marked ? "a marked" : "an unmarked"} PG18 store and opens a separate PG19 store`, async ({
+      page,
+    }) => {
+      await openHarness(page);
+      const result = await page.evaluate(({ name, hasMarker }) => window.pgwasmIdb.pg18StoreRefusal(name, hasMarker), {
+        name: `pg18-refusal-${marked}`,
+        hasMarker: marked,
+      });
+      expect(result.refusal).not.toBeNull();
+      if (marked) expect(result.refusal?.name).toBe("DataFormatMismatchError");
+      else expect(result.refusal?.message).toContain("18");
+      expect(result.oldFiles).toEqual({
+        version: "18\n",
+        marker: marked ? '{"pgwasm":1,"build":"c","dataFormat":1}\n' : null,
+        sentinel: "keep this PG18 store",
+      });
+      expect(result.freshVersion).toMatch(/^19/);
+      expect(result.blocked).toBe(false);
+    });
+  }
+
   test("refuses a second open of a store and releases it on close", async ({ page }) => {
     await openHarness(page);
     const result = await page.evaluate(() => window.pgwasmIdb.secondOwner("ownership"));
@@ -237,9 +259,8 @@ test.describe("pg_dump and the REPL", () => {
 });
 
 test.describe("an idb:// store an earlier build wrote", () => {
-  const BUILD_MARKER = '{"pgwasm":1,"build":"c","dataFormat":1}\n';
-
-  for (const { tag } of CONTINUITY_BUILDS) {
+  for (const { tag, dataFormat } of CONTINUITY_BUILDS) {
+    const BUILD_MARKER = `${JSON.stringify({ pgwasm: 1, build: "c", dataFormat })}\n`;
     for (const marker of ["marked", "unmarked"] as const) {
       test(`opens with the current build, reads back and writes: pgwasm-postgres ${tag}, ${marker}`, async ({
         page,

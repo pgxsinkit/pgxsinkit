@@ -185,6 +185,59 @@ const harness = {
     base = await createPgwasm({ build: cBuild, dataDir: idb(name) });
   },
 
+  /** Synthetic PG18 metadata proves refusal without needing an old backend in the current host. */
+  async pg18StoreRefusal(name: string, marked: boolean) {
+    const old = capturingBuild();
+    const db = await createPgwasm({ build: old.build, dataDir: idb(name) });
+    const fs = old.module().FS;
+    fs.writeFile(`${PGDATA}/PG_VERSION`, new TextEncoder().encode("18\n"));
+    if (marked) {
+      fs.writeFile(BUILD_MARKER, new TextEncoder().encode('{"pgwasm":1,"build":"c","dataFormat":1}\n'));
+    } else fs.unlink(BUILD_MARKER);
+    fs.writeFile(`${PGDATA}/refusal-sentinel`, new TextEncoder().encode("keep this PG18 store"));
+    await db.close();
+
+    let unexpected: Pgwasm | undefined;
+    const refusal = await errorOf(async () => {
+      unexpected = await createPgwasm({ build: cBuild, dataDir: idb(name) });
+    });
+    await unexpected?.close();
+
+    // Mount without starting Postgres: check the stored bytes and that refusal released ownership.
+    const observed = capturingBuild();
+    const mounted = await observed.build.boot({
+      storage: { kind: "idb", name },
+      extensions: [],
+      user: "postgres",
+      database: "postgres",
+      debug: 0,
+    });
+    let oldFiles;
+    try {
+      const raw = observed.module().FS;
+      const text = (path: string) => new TextDecoder().decode(raw.readFile(`${PGDATA}/${path}`));
+      oldFiles = {
+        version: text("PG_VERSION"),
+        marker: readMarker(observed.module()),
+        sentinel: text("refusal-sentinel"),
+      };
+    } finally {
+      await mounted.release();
+    }
+
+    const freshName = `${name}-pg19`;
+    const fresh = await createPgwasm({ build: cBuild, dataDir: idb(freshName) });
+    let freshVersion;
+    try {
+      freshVersion = (await fresh.query<{ server_version: string }>("SHOW server_version")).rows[0]?.server_version;
+    } finally {
+      await fresh.close();
+    }
+    await deleteStore(freshName, "report");
+    const { blocked } = await deleteStore(name, "report");
+    return { refusal, oldFiles, freshVersion, blocked };
+  },
+
   async query(sql: string, params?: unknown[]): Promise<QueryShape> {
     return shapeOf(await openBase().query(sql, params));
   },
@@ -553,8 +606,8 @@ const harness = {
                 if (!populate) finalPersistRequested = true;
                 original(populate, callback);
               });
-              const runExitHooks = mod._pgl_run_atexit_funcs.bind(mod);
-              mod._pgl_run_atexit_funcs = () => {
+              const runExitHooks = mod._pgwasm_run_atexit_funcs.bind(mod);
+              mod._pgwasm_run_atexit_funcs = () => {
                 exitHooksRan = true;
                 runExitHooks();
               };

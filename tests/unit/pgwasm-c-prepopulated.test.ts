@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { cBuild } from "../../packages/pgwasm-c/src";
 import { ARTEFACT_FILES } from "../../packages/pgwasm-c/src/artefact-pins";
+import { C_POSTGRES_MAJOR } from "../../packages/pgwasm-c/src/postgres-version";
 import { prepopulatedDataDir } from "../../packages/pgwasm-c/src/prepopulated";
 import type { DataDirEntry } from "../../packages/pgwasm/src/build";
 import { readDataDirArchive } from "../../packages/pgwasm/src/core/data-dir-archive";
@@ -25,9 +27,9 @@ describe("the prepopulated data directory", () => {
     expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(pin.sha256);
   });
 
-  it("is an unmarked PostgreSQL 18 data directory, with the lock file of the database it was taken from", async () => {
+  it("is an unmarked data directory of the pinned PostgreSQL major, with its original lock file", async () => {
     const entries = await readDataDirArchive(await prepopulatedDataDir());
-    expect(decode(entryAt(entries, "/PG_VERSION")?.data ?? new Uint8Array())).toBe("18\n");
+    expect(decode(entryAt(entries, "/PG_VERSION")?.data ?? new Uint8Array())).toBe(`${C_POSTGRES_MAJOR}\n`);
     expect(entryAt(entries, "/PGWASM_BUILD")).toBeUndefined();
     const lockFile = decode(entryAt(entries, "/postmaster.pid")?.data ?? new Uint8Array()).split("\n");
     // A standalone backend records its process id negated; Emscripten's getpid() is 42.
@@ -73,7 +75,10 @@ describe("the prepopulated data directory", () => {
   it("creates databases marked as the C build's", async () => {
     const pg = await createTestPgwasm({ loadDataDir: await prepopulatedDataDir() });
     const marker = entryAt(await readDataDirArchive(await pg.dumpDataDir("none")), "/PGWASM_BUILD");
-    expect(marker === undefined ? "unmarked" : decodeBuildMarker(marker.data)).toEqual({ build: "c", dataFormat: 1 });
+    expect(marker === undefined ? "unmarked" : decodeBuildMarker(marker.data)).toEqual({
+      build: "c",
+      dataFormat: cBuild.identity.dataFormat,
+    });
   });
 
   it("starts although it holds a lock file, which the engine then writes afresh", async () => {

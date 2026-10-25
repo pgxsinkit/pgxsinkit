@@ -676,8 +676,8 @@ function buildLocalIndexStatements(
  * `ANALYZE` does not fix it either, it is what CAUSES it (a never-analysed overlay gets the 10-page floor
  * and plans as a hash anti join).
  *
- * `NOT IN` takes the choice away: the subquery is uncorrelated, so Postgres evaluates it ONCE into a
- * hashed SubPlan and each synced row is a hash probe — measured ~95-215 ms in that same pathological state
+ * `(key NOT IN (...)) IS TRUE` keeps this choice local: the subquery is uncorrelated, so Postgres evaluates
+ * it ONCE into a hashed SubPlan and each synced row is a hash probe — measured ~95-215 ms in that same pathological state
  * (roughly half the nested loop, machine-load dependent), 106 ms with no statistics at all, and 60 ms (vs
  * 196 ms) for a composite key. The one cost is the tail:
  * above roughly `hash_mem / (pk width + 24)` rows — order 150k pending overlay rows at the default 4 MB —
@@ -685,6 +685,11 @@ function buildLocalIndexStatements(
  * taken deliberately: the overlay holds only rows with an unflushed local mutation, so tens of thousands
  * is already an app in trouble, while "empty and analysed" is the steady state of every read-mostly table.
  * (`EXPLAIN` tells the two apart: `hashed SubPlan` vs a bare `SubPlan`.)
+ *
+ * PG19 can turn a bare `NOT IN` back into the same anti join when it proves both keys non-null.
+ * `IS TRUE` leaves the WHERE result unchanged but puts the SubLink below a BooleanTest, outside
+ * `pull_up_sublinks`' top-level NOT/AND traversal. The later SubPlan still hashes the uncorrelated
+ * membership set. An OFFSET inside the subquery does not stop that ANY-to-anti conversion.
  *
  * The NULL trap that normally disqualifies `NOT IN` cannot fire here: both sides are PRIMARY KEY columns
  * of tables this generator emits (the overlay carries the same key as the synced table), so neither side
@@ -696,10 +701,10 @@ function buildOverlayNonMembershipTest(primaryKeyColumns: string[], overlayTable
       ? `t.${primaryKeyColumns[0]}`
       : `(${primaryKeyColumns.map((column) => `t.${column}`).join(", ")})`;
   return [
-    `WHERE ${key} NOT IN (`,
+    `WHERE (${key} NOT IN (`,
     `  SELECT ${primaryKeyColumns.map((column) => `o.${column}`).join(", ")}`,
     `  FROM ${overlayTable} AS o`,
-    ")",
+    ")) IS TRUE",
   ];
 }
 

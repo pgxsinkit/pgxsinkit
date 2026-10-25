@@ -124,27 +124,27 @@ export interface EmscriptenModuleBase {
   stringToUTF8OnStack(value: string): number;
   _fopen(path: number, mode: number): number;
   _fclose(stream: number): number;
-  _pgl_set_system_fn(fn: number): void;
-  _pgl_set_popen_fn(fn: number): void;
-  _pgl_set_pclose_fn(fn: number): void;
-  _pgl_freopen(path: number, mode: number, stream: number): number;
+  _pgwasm_set_system_fn(fn: number): void;
+  _pgwasm_set_popen_fn(fn: number): void;
+  _pgwasm_set_pclose_fn(fn: number): void;
+  _pgwasm_freopen(path: number, mode: number, stream: number): number;
 }
 
 /** The Postgres module (`postgres.js`). */
 export interface PostgresModule extends EmscriptenModuleBase {
   readonly PROXYFS: EmscriptenFilesystemType;
-  _pgl_set_rw_cbs(readCallback: number, writeCallback: number): void;
-  _pgl_pq_flush(): void;
-  _pgl_setPGliteActive(value: number): number;
-  _pgl_startPGlite(): void;
-  _pgl_getMyProcPort(): number;
-  _pgl_sendConnData(): void;
-  _pgl_run_atexit_funcs(): void;
-  _pgl_setPGliteExitStatus(status: number): number;
+  _pgwasm_set_rw_cbs(readCallback: number, writeCallback: number): void;
+  _pgwasm_pq_flush(): void;
+  _pgwasm_setPostgresActive(value: number): number;
+  _pgwasm_startPostgres(): void;
+  _pgwasm_getMyProcPort(): number;
+  _pgwasm_sendConnData(): void;
+  _pgwasm_run_atexit_funcs(): void;
+  _pgwasm_setPostgresExitStatus(status: number): number;
   _PostgresMainLoopOnce(): void;
   _PostgresMainLongJmp(): void;
   _PostgresSendReadyForQueryIfNecessary(): void;
-  _ProcessStartupPacket(port: number, sslDone: boolean, gssDone: boolean): number;
+  _ProcessStartupPacket(port: number): number;
   _pq_buffer_remaining_data(): number;
   _emscripten_force_exit(status: number): void;
 }

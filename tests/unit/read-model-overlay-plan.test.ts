@@ -18,10 +18,10 @@ import { createFreshTestPgwasm } from "../support/pgwasm-store";
 // cheapest, so the executor rescans the empty overlay once per synced row. A consumer measured 224 ms
 // of a 270 ms selection in that node; the numbers this test logs are the same effect in miniature.
 //
-// The shipped shape is a `NOT IN` over the overlay's primary key: uncorrelated, so it is evaluated
-// ONCE into a hashed SubPlan and each synced row is a hash probe. This test asserts that shape holds
-// in the pathological statistics state, and keeps the rejected `NOT EXISTS` form alongside as a live
-// demonstration (not folklore) of why it was rejected.
+// The shipped shape wraps `NOT IN` over the overlay's primary key in `IS TRUE`: PG19 otherwise converts
+// the non-null key comparison to an anti join too. The wrapper keeps an uncorrelated hashed SubPlan,
+// so the overlay is read ONCE and each synced row is a hash probe. The unfenced `NOT IN` and
+// `NOT EXISTS` controls demonstrate the rejected plan on the same tables and statistics.
 
 const ROW_COUNT = 100_000;
 
@@ -75,6 +75,15 @@ function executionMs(plan: string): number {
   return match ? Number(match[1]) : Number.NaN;
 }
 
+function expectSingleHashedOverlayScan(plan: string, table: string): void {
+  expect(plan).toContain("hashed SubPlan");
+  expect(plan).not.toContain("Nested Loop Anti Join");
+  // The union's first branch scans the overlay too, but only the membership subquery uses alias o.
+  const membershipScan = plan.split("\n").find((line) => line.includes(` on ${table} o `));
+  expect(membershipScan).toBeDefined();
+  expect(membershipScan).toMatch(/\bloops=1\)/);
+}
+
 describe("read model overlay non-membership plan", () => {
   let pg: Pgwasm;
 
@@ -103,10 +112,17 @@ describe("read model overlay non-membership plan", () => {
 
   it("reads the whole read model without a per-row rescan of the empty overlay", async () => {
     const shipped = await explain(pg, `SELECT * FROM plan_cards_read_model`);
-    expect(shipped).not.toContain("Nested Loop Anti Join");
     // Uncorrelated: evaluated once, then probed. A bare `SubPlan` here (no `hashed`) would mean the
     // overlay grew past `hash_mem` and the probe became a per-row rescan.
-    expect(shipped).toContain("hashed SubPlan");
+    expectSingleHashedOverlayScan(shipped, "plan_cards_overlay");
+
+    // PG19's non-null proof converts bare NOT IN to an anti join, undoing the older plan protection.
+    const unfenced = await explain(
+      pg,
+      `SELECT t.id, t.title, t.due_at, t.updated_at_us FROM plan_cards AS t
+       WHERE t.id NOT IN (SELECT o.id FROM plan_cards_overlay AS o)`,
+    );
+    expect(unfenced).toContain("Nested Loop Anti Join");
 
     // The rejected form, on the same tables and the same statistics.
     await pg.exec(`
@@ -120,7 +136,8 @@ describe("read model overlay non-membership plan", () => {
 
     console.log(
       `[read model] ${ROW_COUNT.toLocaleString("en")} synced rows, empty analysed overlay — ` +
-        `NOT IN (shipped): ${executionMs(shipped).toFixed(1)} ms; ` +
+        `NOT IN IS TRUE (shipped): ${executionMs(shipped).toFixed(1)} ms; ` +
+        `bare NOT IN (rejected): ${executionMs(unfenced).toFixed(1)} ms; ` +
         `NOT EXISTS (rejected): ${executionMs(rejected).toFixed(1)} ms`,
     );
   });
@@ -142,8 +159,7 @@ describe("read model overlay non-membership plan", () => {
     expect(overlaid.rows[0]?.n).toBe(500);
 
     const plan = await explain(pg, `SELECT * FROM plan_cards_read_model`);
-    expect(plan).toContain("hashed SubPlan");
-    expect(plan).not.toContain("Nested Loop Anti Join");
+    expectSingleHashedOverlayScan(plan, "plan_cards_overlay");
 
     await pg.exec(`DELETE FROM plan_cards_overlay;`);
   });
@@ -166,6 +182,7 @@ describe("read model overlay non-membership plan", () => {
       { person_id: "bbbbbbbb-0000-4000-8000-000000000001", role: "admin", overlay_kind: "pending_update" },
       { person_id: "bbbbbbbb-0000-4000-8000-000000000002", role: "learner", overlay_kind: "synced" },
     ]);
+    expectSingleHashedOverlayScan(await explain(pg, "SELECT * FROM plan_seats_read_model"), "plan_seats_overlay");
   });
 
   it("renders the declared local index and uses it for a due-window read", async () => {

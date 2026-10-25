@@ -7,7 +7,9 @@
  * `packages/pgwasm-c/src/artefact-pins.ts` and `packages/pgwasm-pg-dump/src/artefact-pins.ts` from that
  * one release: pg_dump always ships with its server, since it refuses a newer one. The C build's identity
  * (`C_BUILD_IDENTITY`) takes its `release` ("pgwasm-postgres <tag>") and `dataFormat` from the C build's
- * pins, so the pin carries both. It refuses a release whose data format differs from the current one.
+ * pins, so the pin carries both. It refuses a release whose data format differs from the current one,
+ * except for an explicit RC adoption with `--fresh-stores <current>:<new>`. That opt-in requires separate
+ * fresh stores; it neither migrates nor makes existing stores compatible.
  *
  * It only writes the pins; the root `postinstall` (`scripts/pgwasm-artefacts.ts`) then fetches and
  * verifies the files. There is no cross-repository automation: adopting a release is this command, the
@@ -55,6 +57,39 @@ export interface CheckedRelease {
 
 const HEX_SHA256 = /^[0-9a-f]{64}$/;
 const HEX_COMMIT = /^[0-9a-f]{40}$/;
+const RELEASE_TAG = /^[1-9]\d*\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+const RC_TAG = /^([1-9]\d*)\.0\.0-rc\.([1-9]\d*)$/;
+const USAGE =
+  "usage: bun run pgwasm:pin <tag> [--fresh-stores <current>:<new>] " +
+  "(a final release or upstream RC, e.g. 18.6.0 or 19.0.0-rc.1; fresh stores are RC-only)";
+
+function assertReleaseTag(tag: string): void {
+  if (!RELEASE_TAG.test(tag) && !RC_TAG.test(tag)) {
+    throw new Error(`unsupported release tag ${JSON.stringify(tag)}: expected N.N.N or N.0.0-rc.N`);
+  }
+}
+
+export interface FreshStores {
+  readonly from: number;
+  readonly to: number;
+}
+
+/** The explicit RC-only format transition acknowledges that old stores remain incompatible. */
+export function parsePinArguments(args: readonly string[]): { tag: string; freshStores?: FreshStores } {
+  const tag = args[0];
+  if (tag === undefined) throw new Error(USAGE);
+  assertReleaseTag(tag);
+  if (args.length === 1) return { tag };
+  const transition = args[2];
+  const parsed = transition === undefined ? null : /^([1-9]\d*):([1-9]\d*)$/.exec(transition);
+  if (args.length !== 3 || args[1] !== "--fresh-stores" || parsed === null || !RC_TAG.test(tag)) {
+    throw new Error(USAGE);
+  }
+  const from = Number(parsed[1]);
+  const to = Number(parsed[2]);
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to <= from) throw new Error(USAGE);
+  return { tag, freshStores: { from, to } };
+}
 
 /** `SHA256SUMS` (`sha256sum` output: `<hex>  <name>` per line), by name. */
 export function parseSha256Sums(text: string): Map<string, string> {
@@ -90,6 +125,7 @@ const isPositiveInteger = (value: unknown): value is number => Number.isSafeInte
  * SHA256SUMS holds the manifest's own digest, and the release has every asset a build package pins.
  */
 export function checkRelease(tag: string, manifestBytes: Uint8Array, sumsText: string): CheckedRelease {
+  assertReleaseTag(tag);
   const sums = parseSha256Sums(sumsText);
   const manifestSha256 = sha256(manifestBytes);
   if (sums.get("manifest.json") !== manifestSha256) {
@@ -107,6 +143,11 @@ export function checkRelease(tag: string, manifestBytes: Uint8Array, sumsText: s
   const version = field(root["version"], "version", isString);
   if (version !== tag) throw new Error(`manifest.json is for release ${version}, not ${tag}`);
   const upstream = field(root["upstream"], "upstream", isRecord);
+  const upstreamTag = field(upstream["tag"], "upstream.tag", isString);
+  const rc = RC_TAG.exec(tag);
+  if (rc !== null && upstreamTag !== `REL_${rc[1]}_RC${rc[2]}`) {
+    throw new Error(`manifest.json upstream.tag ${upstreamTag} does not match RC release ${tag}`);
+  }
   const builder = field(root["builder"], "builder", isRecord);
   const dataFormat = field(root["dataFormat"], "dataFormat", isPositiveInteger);
 
@@ -140,7 +181,7 @@ export function checkRelease(tag: string, manifestBytes: Uint8Array, sumsText: s
       name: `pgwasm-postgres ${tag}`,
       commit: field(root["commit"], "commit", matching(HEX_COMMIT)),
       upstream: {
-        tag: field(upstream["tag"], "upstream.tag", isString),
+        tag: upstreamTag,
         commit: field(upstream["commit"], "upstream.commit", matching(HEX_COMMIT)),
       },
       dataFormat,
@@ -162,8 +203,28 @@ export function assertSameDataFormat(release: PinnedRelease, currentDataFormat: 
       `${currentDataFormat}. Every existing store was written in dataFormat ${currentDataFormat} and would no ` +
       `longer open. Crossing a data format is ADR-0064's open question (destroy and re-sync gated on a drained ` +
       `Outbox, or an in-browser dump/restore that loads both builds once); it must be decided, and implemented, ` +
-      `before a release of another data format can be pinned.`,
+      `before existing stores can cross formats. An experimental RC can instead be pinned with ` +
+      `--fresh-stores ${currentDataFormat}:${release.dataFormat}, requiring separate fresh stores and leaving ` +
+      `existing stores incompatible.`,
   );
+}
+
+function assertFreshStores(release: PinnedRelease, currentDataFormat: number, transition: FreshStores): void {
+  if (
+    !RC_TAG.test(release.tag) ||
+    !Number.isSafeInteger(transition.from) ||
+    !Number.isSafeInteger(transition.to) ||
+    transition.from !== currentDataFormat ||
+    transition.to !== release.dataFormat ||
+    transition.from < 1 ||
+    transition.to <= transition.from
+  ) {
+    throw new Error(
+      `fresh-store transition ${transition.from}:${transition.to} must advance the current dataFormat ` +
+        `${currentDataFormat} to RC release ${release.tag}'s dataFormat ${release.dataFormat}. ` +
+        `Existing stores remain incompatible; this option never migrates or deletes them.`,
+    );
+  }
 }
 
 const HEADERS: Readonly<Record<string, string>> = {
@@ -247,6 +308,8 @@ export interface PinOptions {
   readonly download?: (url: string) => Promise<Uint8Array>;
   /** The current data format: the C build's identity's unless given. */
   readonly currentDataFormat?: number;
+  /** Explicit RC-only adoption for separate fresh stores, retaining runtime rejection of old stores. */
+  readonly freshStores?: FreshStores;
   /** Write one pins file: to the repository unless given. */
   readonly write?: (packageDir: string, text: string) => Promise<void>;
 }
@@ -265,15 +328,18 @@ export async function pinRelease(
   {
     download = downloadReleaseFile,
     currentDataFormat = CURRENT_RELEASE.dataFormat,
+    freshStores,
     write = (packageDir, text) =>
       Bun.write(path.join(repoRoot, packageDir, "src/artefact-pins.ts"), text).then(() => {}),
   }: PinOptions = {},
 ): Promise<CheckedRelease> {
+  assertReleaseTag(tag);
   const location = { repository: RELEASE_REPOSITORY, tag };
   const manifest = await download(releaseAssetUrl(location, "manifest.json"));
   const sums = new TextDecoder().decode(await download(releaseAssetUrl(location, "SHA256SUMS")));
   const checked = checkRelease(tag, manifest, sums);
-  assertSameDataFormat(checked.release, currentDataFormat);
+  if (freshStores === undefined) assertSameDataFormat(checked.release, currentDataFormat);
+  else assertFreshStores(checked.release, currentDataFormat, freshStores);
   const rendered = Object.keys(PINNED_ASSETS).map(
     (packageDir) => [packageDir, renderPins(packageDir, checked)] as const,
   );
@@ -282,17 +348,19 @@ export async function pinRelease(
 }
 
 if (import.meta.main) {
-  const [tag, ...rest] = process.argv.slice(2);
-  if (tag === undefined || rest.length > 0 || !/^\d+\.\d+\.\d+$/.test(tag)) {
-    console.error("usage: bun run pgwasm:pin <tag>   (a pgxsinkit/pgwasm-postgres release, e.g. 18.6.0)");
-    process.exit(2);
-  }
   try {
-    const { release } = await pinRelease(tag);
+    const { tag, freshStores } = parsePinArguments(process.argv.slice(2));
+    const { release } = await pinRelease(tag, freshStores === undefined ? {} : { freshStores });
     console.log(
       `pgwasm:pin: pinned packages/pgwasm-c and packages/pgwasm-pg-dump to ${release.name} ` +
         `(PostgreSQL ${release.upstream.tag}, dataFormat ${release.dataFormat}). Run \`bun run postinstall\` to fetch.`,
     );
+    if (freshStores !== undefined) {
+      console.log(
+        `pgwasm:pin: use separate fresh dataFormat ${freshStores.to} stores. Existing dataFormat ` +
+          `${freshStores.from} stores remain rejected; no stores were migrated or deleted.`,
+      );
+    }
   } catch (error) {
     console.error(`pgwasm:pin: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);

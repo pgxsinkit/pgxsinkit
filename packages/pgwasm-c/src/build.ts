@@ -24,16 +24,18 @@ import { fetchExtensionBundle, installExtensionFiles } from "./host/extensions";
 import { runInitdb } from "./host/initdb";
 import { mountFor, type StorageMount } from "./host/mounts";
 import { DEFAULT_START_PARAMS, PostgresInstance } from "./host/postgres-instance";
+import { checkPostgresVersion } from "./postgres-version";
 
 /**
  * The C build's identity, recorded in every data directory it creates (ADR-0063). Its release and data
  * format are the pinned pgwasm-postgres release's (`bun run pgwasm:pin` writes both; ADR-0064): the
- * release is the build's name in version(), and `pgwasm:pin` refuses a release of another data format.
+ * release is the build's name in version(). Changing formats is an explicit fresh-store adoption;
+ * existing directories and backups still have to match this build's format and PostgreSQL major.
  */
 export const C_BUILD_IDENTITY: BuildIdentity = {
   name: "c",
   dataFormat: ARTEFACT_RELEASE.dataFormat,
-  // Every data directory made before builds were recorded was made by this build.
+  // Unmarked directories are the C build's only when their PG_VERSION also matches (checked below).
   claimsUnmarkedDirectories: true,
   release: ARTEFACT_RELEASE.name,
 };
@@ -158,7 +160,13 @@ class CMountedDataDirectory implements MountedDataDirectory {
   }
 
   async readFile(path: string): Promise<Uint8Array | undefined> {
-    return readDataDirFile(this.#FS, path);
+    const bytes = readDataDirFile(this.#FS, path);
+    // Shared boot checks a marked directory's build/format itself. Old unmarked directories have no
+    // such guard, so refuse another PostgreSQL major before they can reach startup or any write.
+    if (path === "/PG_VERSION" && bytes !== undefined && readDataDirFile(this.#FS, "/PGWASM_BUILD") === undefined) {
+      checkPostgresVersion(bytes);
+    }
+    return bytes;
   }
 
   async createCluster(): Promise<void> {
@@ -191,6 +199,11 @@ class CMountedDataDirectory implements MountedDataDirectory {
   }
 
   async writeEntries(entries: readonly DataDirEntry[]): Promise<void> {
+    // A legacy backup can have no build marker. Check its PostgreSQL version before writing even its
+    // first member: NODEFS writes immediately, and a later startup refusal cannot undo a partial restore.
+    const versions = entries.filter((entry) => entry.path === "/PG_VERSION" && entry.type === "file");
+    if (versions.length === 0) checkPostgresVersion(undefined);
+    for (const version of versions) checkPostgresVersion(version.data);
     writeDataDirEntries(this.#FS, entries);
   }
 
@@ -203,6 +216,7 @@ class CMountedDataDirectory implements MountedDataDirectory {
   }
 
   async start(options: StartOptions): Promise<RunningPostgres> {
+    checkPostgresVersion(readDataDirFile(this.#FS, "/PG_VERSION"));
     const log = (...args: unknown[]) => {
       if (this.#request.debug > 0) console.log(...args);
     };
@@ -235,9 +249,9 @@ export function createCBuild(options: CBuildOptions = {}): PostgresBuild {
 /**
  * @internal A C build on the given artefacts, recording the given identity: what {@link createCBuild}
  * builds on the pinned release's. Not exported from the package; the IndexedDB browser lane reaches it
- * from source to boot an earlier release's glue and files, so the stores that release wrote can be opened
- * by the current build (tests/e2e/pgwasm-idb/continuity-builds.ts). That list starts empty at 18.6.2: its
- * filesystem root changed, so no earlier release's stores open under it; 18.6.2 is the first entry.
+ * from source to boot earlier compatible releases' glue and files, then checks that the current build
+ * can reopen their stores (tests/e2e/pgwasm-idb/continuity-builds.ts). PG19's format-2 list starts empty:
+ * format-1 PG18 stores are explicitly refused, and future entries must preserve the PG19 host ABI too.
  */
 export function createCBuildFrom(
   identity: BuildIdentity,

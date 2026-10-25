@@ -287,10 +287,10 @@ describe("queries", () => {
     expect((await db.query("SHOW application_name;")).rows).toEqual([{ application_name: "my awesome app" }]);
   });
 
-  it("reports PostgreSQL 18 on wasm", async () => {
+  it("reports PostgreSQL 19 on wasm", async () => {
     const db = await createTestPgwasm();
     const version = (await db.query<{ version: string }>("select version();")).rows[0]?.version ?? "";
-    expect(version).toMatch(/^PostgreSQL 18\.\d+ .*wasm32/);
+    expect(version).toMatch(/^PostgreSQL 19(?:rc\d+|\.\d+) .*wasm32/);
   });
 
   it("parses NULL array elements as null, never the string 'NULL'", async () => {

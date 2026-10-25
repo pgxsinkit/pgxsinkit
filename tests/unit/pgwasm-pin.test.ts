@@ -14,6 +14,7 @@ import { sha256 } from "../../scripts/pgwasm-artefacts";
 import {
   PINNED_ASSETS,
   checkRelease,
+  parsePinArguments,
   parseSha256Sums,
   pinRelease,
   renderPins,
@@ -34,10 +35,11 @@ function release(tag: string, edit: (manifest: Record<string, unknown>) => void 
   const files = Object.values(PINNED_ASSETS)
     .flat()
     .map((name, index) => ({ name, bytes: index + 1, sha256: hex(String(index % 10)) }));
+  const rc = /^(\d+)\.0\.0-rc\.(\d+)$/.exec(tag);
   const manifest: Record<string, unknown> = {
     version: tag,
     commit: "a".repeat(40),
-    upstream: { tag: "REL_18_3", commit: "b".repeat(40) },
+    upstream: { tag: rc === null ? "REL_18_3" : `REL_${rc[1]}_RC${rc[2]}`, commit: "b".repeat(40) },
     dataFormat: 1,
     builder: { image: "ghcr.io/pgxsinkit/pgwasm-builder@sha256:" + hex("c") },
     files,
@@ -121,6 +123,122 @@ describe("pgwasm:pin", () => {
     expect(failure.message).toContain("declares dataFormat 2, but the C build's identity is dataFormat 1");
     expect(failure.message).toContain("ADR-0064's open question");
     expect(written).toEqual([]);
+  });
+
+  it("requires a fresh-store acknowledgement before adopting an RC with another format", async () => {
+    const served = release("19.0.0-rc.1", (manifest) => void (manifest["dataFormat"] = 2));
+    const written = new Map<string, string>();
+    const options = {
+      download: download(served),
+      currentDataFormat: 1,
+      write: async (packageDir: string, text: string) => void written.set(packageDir, text),
+    };
+    const failure = await rejectionOf(pinRelease("19.0.0-rc.1", options));
+    expect(failure.message).toContain("--fresh-stores 1:2");
+    expect(written.size).toBe(0);
+
+    const { release: pinned } = await pinRelease("19.0.0-rc.1", {
+      ...options,
+      freshStores: { from: 1, to: 2 },
+    });
+    expect(pinned.dataFormat).toBe(2);
+    expect(pinned.upstream.tag).toBe("REL_19_RC1");
+    expect([...written.keys()].sort()).toEqual(Object.keys(PINNED_ASSETS).sort());
+    for (const text of written.values()) {
+      expect(text).toContain('tag: "19.0.0-rc.1",');
+      expect(text).toContain("dataFormat: 2,");
+    }
+  });
+
+  it("refuses a mismatched, non-advancing or final-release fresh-store transition before writing", async () => {
+    for (const [tag, from, to] of [
+      ["19.0.0-rc.1", 2, 3],
+      ["19.0.0-rc.1", 1, 3],
+      ["19.0.0-rc.1", 0, 2],
+      ["19.0.0-rc.1", 1.5, 2],
+      ["19.0.0-rc.1", 2, 1],
+      ["19.0.0", 1, 2],
+    ] as const) {
+      const served = release(tag, (manifest) => void (manifest["dataFormat"] = 2));
+      const written: string[] = [];
+      const failure = await rejectionOf(
+        pinRelease(tag, {
+          download: download(served),
+          currentDataFormat: 1,
+          freshStores: { from, to },
+          write: async (packageDir) => void written.push(packageDir),
+        }),
+      );
+      expect(failure.message).toContain("must advance the current dataFormat 1");
+      expect(written).toEqual([]);
+    }
+    const served = release("19.0.0-rc.1", (manifest) => void (manifest["dataFormat"] = 2));
+    const failure = await rejectionOf(
+      pinRelease("19.0.0-rc.1", {
+        download: download(served),
+        currentDataFormat: 2,
+        freshStores: { from: 2, to: 2 },
+        write: async () => {
+          throw new Error("must not write");
+        },
+      }),
+    );
+    expect(failure.message).toContain("must advance the current dataFormat 2");
+  });
+
+  it("accepts only exact RC tags and requires the manifest's upstream RC to agree", async () => {
+    for (const upstreamTag of ["REL_18_RC1", "REL_19_RC2", "REL_19_BETA1", "REL_19_0"]) {
+      const served = release("19.0.0-rc.1", (manifest) => {
+        manifest["upstream"] = { tag: upstreamTag, commit: "b".repeat(40) };
+      });
+      const written: string[] = [];
+      const failure = await rejectionOf(
+        pinRelease("19.0.0-rc.1", {
+          download: download(served),
+          currentDataFormat: 1,
+          write: async (packageDir) => void written.push(packageDir),
+        }),
+      );
+      expect(failure.message).toContain(`upstream.tag ${upstreamTag} does not match RC release 19.0.0-rc.1`);
+      expect(written).toEqual([]);
+    }
+    for (const tag of ["19.0.0-beta.1", "19.1.0-rc.1", "19.0.0-rc.0", "19.0.0-rc.01", "019.0.0-rc.1", "v19.0.0-rc.1"]) {
+      let downloads = 0;
+      const failure = await rejectionOf(
+        pinRelease(tag, {
+          download: async () => {
+            downloads++;
+            throw new Error("must not download");
+          },
+          write: async () => {
+            throw new Error("must not write");
+          },
+        }),
+      );
+      expect(failure.message).toContain("unsupported release tag");
+      expect(downloads).toBe(0);
+    }
+  });
+
+  it("parses the RC-only fresh-store option without accepting ambiguous or malformed transitions", () => {
+    expect(parsePinArguments(["18.6.2"])).toEqual({ tag: "18.6.2" });
+    expect(parsePinArguments(["19.0.0-rc.1"])).toEqual({ tag: "19.0.0-rc.1" });
+    expect(parsePinArguments(["19.0.0-rc.1", "--fresh-stores", "1:2"])).toEqual({
+      tag: "19.0.0-rc.1",
+      freshStores: { from: 1, to: 2 },
+    });
+    for (const args of [
+      [],
+      ["19.0.0-rc.1", "--fresh-stores"],
+      ["19.0.0-rc.1", "--fresh-stores", "2:2"],
+      ["19.0.0-rc.1", "--fresh-stores", "2:1"],
+      ["19.0.0-rc.1", "--fresh-stores", "01:2"],
+      ["19.0.0-rc.1", "--fresh-stores", "1:9007199254740992"],
+      ["19.0.0-rc.1", "--fresh-stores", "1:2", "extra"],
+      ["19.0.0", "--fresh-stores", "1:2"],
+    ]) {
+      expect(() => parsePinArguments(args)).toThrow(/usage:/);
+    }
   });
 
   it("refuses a manifest and SHA256SUMS that disagree", () => {

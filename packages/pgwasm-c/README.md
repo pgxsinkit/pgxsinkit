@@ -1,19 +1,26 @@
 # @pgxsinkit/pgwasm-c
 
 The C Postgres build for [`@pgxsinkit/pgwasm`](https://www.npmjs.com/package/@pgxsinkit/pgwasm):
-PostgreSQL 18 compiled to WebAssembly with Emscripten, single-threaded, with the memory,
+PostgreSQL 19 RC1 compiled to WebAssembly with Emscripten, single-threaded, with the memory,
 IndexedDB (`idb://`) and file (`file://`, Bun) filesystems.
 
+This is the experimental PG19 release-candidate channel. Install matching `@rc` packages:
+
 ```bash
-bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c
+bun add @pgxsinkit/pgwasm@rc @pgxsinkit/pgwasm-c@rc
 ```
 
 ```ts
 import { createPgwasm } from "@pgxsinkit/pgwasm";
 import { cBuild } from "@pgxsinkit/pgwasm-c";
 
-const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app" });
+const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app-pg19-rc1" });
 ```
+
+Use a fresh store with a separate name for PG19. This build uses data format 2 and refuses PG18
+format-1 stores and backups, including unmarked PG18 directories. It does not migrate or delete an
+existing store. Keep the PG18 packages and store available while evaluating the RC; the stable
+`@latest` channel remains separate.
 
 The package ships its WebAssembly module, filesystem bundle and initdb as files next to its code,
 referenced as `new URL("…", import.meta.url)`, so bundlers copy and fingerprint them.

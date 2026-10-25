@@ -126,13 +126,13 @@ export async function runInitdb({
         },
         (module) => {
           module.onRuntimeInitialized = () => {
-            module._pgl_set_system_fn(
+            module._pgwasm_set_system_fn(
               module.addFunction((command: number) => {
                 postgresArgs = commandArgs(module, command);
                 return callPgMain(postgresArgs);
               }, "pi"),
             );
-            module._pgl_set_popen_fn(
+            module._pgwasm_set_popen_fn(
               module.addFunction((command: number, mode: number) => {
                 const openMode = module.UTF8ToString(mode);
                 postgresArgs = commandArgs(module, command);
@@ -147,7 +147,7 @@ export async function runInitdb({
                 throw new Error(`Unexpected popen mode ${openMode}`);
               }, "ppi"),
             );
-            module._pgl_set_pclose_fn(
+            module._pgwasm_set_pclose_fn(
               module.addFunction((stream: number) => {
                 if (stream === initdbStdinFd || stream === initdbStdoutFd) {
                   // A popen in "w" mode runs postgres' main once initdb has written its input.
@@ -161,8 +161,8 @@ export async function runInitdb({
               }, "pi"),
             );
             // The backend reads initdb's output and writes initdb's input through two files.
-            pg._pgl_freopen(pg.stringToUTF8OnStack(PG_STDIN_PATH), pg.stringToUTF8OnStack("r"), 0);
-            pg._pgl_freopen(pg.stringToUTF8OnStack(PG_STDOUT_PATH), pg.stringToUTF8OnStack("w"), 1);
+            pg._pgwasm_freopen(pg.stringToUTF8OnStack(PG_STDIN_PATH), pg.stringToUTF8OnStack("r"), 0);
+            pg._pgwasm_freopen(pg.stringToUTF8OnStack(PG_STDOUT_PATH), pg.stringToUTF8OnStack("w"), 1);
             initdbStdinFd = module._fopen(module.stringToUTF8OnStack(PG_STDOUT_PATH), module.stringToUTF8OnStack("r"));
             initdbStdoutFd = module._fopen(module.stringToUTF8OnStack(PG_STDIN_PATH), module.stringToUTF8OnStack("w"));
           };

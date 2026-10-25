@@ -123,7 +123,7 @@ async function runPgDump(wire: PgwasmProtocol, wasm: WebAssembly.Module, args: r
     (pointer, maxLength) => replies.read(module.HEAPU8.subarray(pointer, pointer + maxLength)),
     "iii",
   );
-  module._pgl_set_rw_cbs(read, write);
+  module._pgwasm_set_rw_cbs(read, write);
 
   let exitCode: number | null;
   let crash: unknown;

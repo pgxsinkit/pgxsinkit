@@ -24,8 +24,8 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds seven files: the assets of the pgwasm-postgres release 18.6.1
-(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/18.6.1), republished byte-identical (each file's size and sha256 are pinned in
+`artefacts/` holds seven files: the assets of the pgwasm-postgres release 19.0.0-rc.1
+(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/19.0.0-rc.1), republished byte-identical (each file's size and sha256 are pinned in
 `src/artefact-pins.ts`, from the release's manifest.json checked against its
 SHA256SUMS): `postgres.wasm` (the Postgres server), `postgres.data` (its filesystem
 bundle: share files, loadable modules, time zone data, ICU data), `postgres.js` and
@@ -34,14 +34,14 @@ bundle: share files, loadable modules, time zone data, ICU data), `postgres.js` 
 the release's own initdb created, so it holds only what PostgreSQL itself wrote).
 
 pgxsinkit/pgwasm-postgres (https://github.com/pgxsinkit/pgwasm-postgres) builds them
-from PostgreSQL 18.6 (the upstream tag REL_18_6, commit
-724edf9bde9d356724ad384a2e196edc3c9f80f7) plus a patch series and an overlay derived
+from PostgreSQL 19rc1 (the upstream tag REL_19_RC1, commit
+0b8bff042a997fe50fcd1c4c83b9ef1cc9ed8a89) plus a patch series and an overlay derived
 from ElectricSQL's PGlite fork of PostgreSQL
 (https://github.com/electric-sql/postgres-pglite at
 b133782cd759f08b3aeb263b80a963b39c7b7af1; PostgreSQL License, Copyright (c)
-ElectricSQL and contributors). Release 18.6.1 is pgwasm-postgres commit
-28f0c1551db8c7f5df143ef1e424c641af93072d, built inside the builder image
-ghcr.io/pgxsinkit/pgwasm-builder@sha256:0c4d5255c5f1824216d1eb347cc231a6f881574c3d5b8172796a8cbe5f9f63c8
+ElectricSQL and contributors). Release 19.0.0-rc.1 is pgwasm-postgres commit
+df4458a4fd3c0a546af29eb399bdfaa54eee70dd, built inside the builder image
+ghcr.io/pgxsinkit/pgwasm-builder@sha256:cbb378a50de43cd2fbd8718b72ce4c7595ffe421148a3c32435906f096bc5130
 (whose recipe is that repository's `builder/Containerfile`); its manifest.json records
 every file's size and sha256, and the release was published only because a rebuild of
 the tag gave the gated build's manifest.
@@ -50,9 +50,9 @@ The components below, and their versions, come from:
 
   - the configure line: --with-icu --with-zlib --with-libxml --with-openssl=no
     --without-llvm, and the server's link line (-lxml2 -lz, and ICU through ICU_LIBS);
-  - the builder recipe: Emscripten 6.0.10, zlib 1.3.2, libxml2 2.15.4, ICU 76.1. The
-    binaries confirm Emscripten 6.0.10 (in the server's version string) and ICU 76
-    (its data package, icudt76l);
+  - the builder recipe: Emscripten 6.0.13, zlib 1.3.2, libxml2 2.15.4, ICU 79.1. The
+    binaries confirm Emscripten 6.0.13 (in the server's version string) and ICU 79
+    (its data package, icudt79l);
   - the files of postgres.data (dict_snowball.so, the time zone data, the ICU data and
     its LICENSE).
 
@@ -64,7 +64,7 @@ libraries are in it.
 Each component's notice follows, copied from the file named with it.
 
 ------------------------------------------------------------------------------
-PostgreSQL 18.6, with changes derived from ElectricSQL's for PGlite (postgres.wasm, initdb.wasm, postgres.data, amcheck.tar.gz)
+PostgreSQL 19rc1, with changes derived from ElectricSQL's for PGlite (postgres.wasm, initdb.wasm, postgres.data, amcheck.tar.gz)
 ------------------------------------------------------------------------------
 
 Source: https://github.com/electric-sql/postgres-pglite at b133782cd759f08b3aeb263b80a963b39c7b7af1,
@@ -854,10 +854,10 @@ Source: https://raw.githubusercontent.com/snowballstem/snowball/d19326ac6c1b9a41
     SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ------------------------------------------------------------------------------
-ICU 76.1 (postgres.wasm, initdb.wasm, and its data in postgres.data)
+ICU 79.1 (postgres.wasm, initdb.wasm, and its data in postgres.data)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/unicode-org/icu/release-76-1/LICENSE
+Source: https://raw.githubusercontent.com/unicode-org/icu/release-79.1/LICENSE
 The same file travels inside postgres.data at /pgwasm/icu/LICENSE (byte-identical).
 PostgreSQL's own Unicode tables are generated from the Unicode Character Database,
 whose terms are the Unicode License v3 at the start of this file.
@@ -866,7 +866,7 @@ whose terms are the Unicode License v3 at the start of this file.
 
     COPYRIGHT AND PERMISSION NOTICE
 
-    Copyright © 2016-2024 Unicode, Inc.
+    Copyright © 1991-2026 Unicode, Inc.
 
     NOTICE TO USER: Carefully read the following legal agreement. BY
     DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
@@ -1405,6 +1405,32 @@ whose terms are the Unicode License v3 at the start of this file.
     suitability of this software for any purpose.  It is provided "as is"
     without express or implied warranty.
 
+    ----------------------------------------------------------------------
+
+    File: sorttable.js (only for ICU4J)
+
+    The MIT Licence, for code from kryogenix.org
+
+    Code downloaded from the Browser Experiments section of kryogenix.org is
+    licenced under the so-called MIT licence. The licence is below.
+
+    Copyright (c) 1997-date Stuart Langridge
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
 ------------------------------------------------------------------------------
 libxml2 2.15.4 (postgres.wasm)
 ------------------------------------------------------------------------------
@@ -1466,10 +1492,10 @@ Source: https://raw.githubusercontent.com/madler/zlib/v1.3.2/LICENSE
       jloup@gzip.org          madler@alumni.caltech.edu
 
 ------------------------------------------------------------------------------
-Emscripten 6.0.10 (the runtime in postgres.js and initdb.js, and its system libraries in postgres.wasm and initdb.wasm)
+Emscripten 6.0.13 (the runtime in postgres.js and initdb.js, and its system libraries in postgres.wasm and initdb.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/LICENSE
+Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/LICENSE
 
     Emscripten is available under 2 licenses, the MIT license and the
     University of Illinois/NCSA Open Source License.
@@ -1574,10 +1600,10 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/LICE
     flag will run closure compiler from third_party/).
 
 ------------------------------------------------------------------------------
-musl libc, as bundled in Emscripten 6.0.10 (postgres.wasm, initdb.wasm)
+musl libc, as bundled in Emscripten 6.0.13 (postgres.wasm, initdb.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libc/musl/COPYRIGHT
+Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/system/lib/libc/musl/COPYRIGHT
 
     musl as a whole is licensed under the following standard MIT license:
 
@@ -1774,7 +1800,7 @@ Source: https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/syst
     obstacle to adoption, that text has been removed.
 
 ------------------------------------------------------------------------------
-LLVM runtime libraries, as bundled in Emscripten 6.0.10 (compiler-rt, libc++, libc++abi; postgres.wasm, initdb.wasm)
+LLVM runtime libraries, as bundled in Emscripten 6.0.13 (compiler-rt, libc++, libc++abi; postgres.wasm, initdb.wasm)
 ------------------------------------------------------------------------------
 
 These are under the Apache License v2.0 with LLVM Exceptions. Their object code is
@@ -1799,7 +1825,7 @@ library's LICENSE.TXT, where it is identical):
 
 Each library's LICENSE.TXT also carries the legacy LLVM licence:
 
-  compiler-rt — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/compiler-rt/LICENSE.TXT
+  compiler-rt — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/system/lib/compiler-rt/LICENSE.TXT
   Legacy licence (dual NCSA / MIT; the MIT notice is reproduced):
 
     The compiler_rt library is dual licensed under both the University of Illinois
@@ -1829,7 +1855,7 @@ Each library's LICENSE.TXT also carries the legacy LLVM licence:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 
-  libc++ — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libcxx/LICENSE.TXT
+  libc++ — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/system/lib/libcxx/LICENSE.TXT
   Legacy licence (dual NCSA / MIT; the MIT notice is reproduced):
 
     The libc++ library is dual licensed under both the University of Illinois
@@ -1859,7 +1885,7 @@ Each library's LICENSE.TXT also carries the legacy LLVM licence:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 
-  libc++abi — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.10/system/lib/libcxxabi/LICENSE.TXT
+  libc++abi — https://raw.githubusercontent.com/emscripten-core/emscripten/6.0.13/system/lib/libcxxabi/LICENSE.TXT
   Legacy licence (dual NCSA / MIT; the MIT notice is reproduced):
 
     The libc++abi library is dual licensed under both the University of Illinois

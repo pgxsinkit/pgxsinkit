@@ -9,10 +9,10 @@
  * own release-asset fetch and verification (`scripts/pgwasm-artefacts.ts`); they are never committed.
  * Adding a build is one entry here: the lane's Vite config and the test iterate over this list.
  *
- * The list is empty by design at pgwasm-postgres 18.6.2: that release moved the filesystem root and the
- * IndexedDB database names to `/pgwasm`, so no earlier release's stores open under the current build
- * (those stores are left behind; local sync stores re-sync). 18.6.2 becomes the first entry once a later
- * release is pinned. The lane's machinery stays, so adding it is still one entry.
+ * The list starts empty again at PG19: its data format is 2, while every published PG18 build used
+ * format 1. PG18 stores must be refused, not opened by this host. The browser lane separately checks
+ * marked and unmarked PG18 refusal and that their files remain intact. Add earlier PG19 builds here
+ * only when their store format and host ABI are compatible with the current build.
  */
 
 /** A pinned file: the release asset of the same name, byte for byte (`scripts/pgwasm-artefacts.ts`' pin). */

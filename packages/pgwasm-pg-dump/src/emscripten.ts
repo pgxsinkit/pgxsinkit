@@ -22,8 +22,8 @@ export interface PgDumpModule {
   addFunction(fn: (pointer: number, length: number) => number, signature: string): number;
   /** Run pg_dump's `main`; returns its exit status. */
   callMain(args: string[]): number;
-  /** Route libpq's socket reads and writes to two functions from `addFunction` (pglitec.c). */
-  _pgl_set_rw_cbs(readCallback: number, writeCallback: number): void;
+  /** Route libpq's socket reads and writes to two functions from `addFunction` (pgwasmc.c). */
+  _pgwasm_set_rw_cbs(readCallback: number, writeCallback: number): void;
 }
 
 /** What the module factory accepts; the members this package sets. */

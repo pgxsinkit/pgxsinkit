@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 
+import { cBuild } from "../../packages/pgwasm-c/src";
 import { BackupFormatError, DataDirExistsError } from "../../packages/pgwasm/src";
 import { readDataDirArchive } from "../../packages/pgwasm/src/core/data-dir-archive";
 import { decodeBuildMarker } from "../../packages/pgwasm/src/core/marker";
@@ -83,7 +84,10 @@ describe("Store backups", () => {
     expect(paths).toContain("/PG_VERSION");
     expect(paths.indexOf("/base")).toBeLessThan(paths.findIndex((entry) => entry.startsWith("/base/")));
     const marker = entries.find((entry) => entry.path === "/PGWASM_BUILD");
-    expect(decodeBuildMarker(marker?.data ?? new Uint8Array())).toEqual({ build: "c", dataFormat: 1 });
+    expect(decodeBuildMarker(marker?.data ?? new Uint8Array())).toEqual({
+      build: "c",
+      dataFormat: cBuild.identity.dataFormat,
+    });
   });
 
   it("refuses to restore into a data directory that holds a database", async () => {

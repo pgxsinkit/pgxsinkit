@@ -10,6 +10,7 @@ name: GitHub Packages
 #
 #   push to develop -> dev channel:    <version>-dev.<shortSha>  @ dist-tag `dev`
 #   semver tag      -> release parity: the tagged version        @ dist-tag `latest`
+#   semver RC tag   -> release candidate: the tagged version     @ dist-tag `rc`
 #
 # `develop` is freely rewritable (force-pushes re-publish the new tip); `main` is stable, never
 # rewritten, and publishes nothing on push (ADR-0001 amendment, 2026-07-27).
@@ -20,7 +21,7 @@ name: GitHub Packages
 on:
   push:
     branches: [develop]
-    tags: ["[0-9]*.[0-9]*.[0-9]*"]
+    tags: ["[0-9]+.[0-9]+.[0-9]+", "[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"]
   workflow_dispatch:
 
 concurrency:
@@ -93,6 +94,14 @@ jobs:
       - name: Integration tests (release only)
         if: github.ref_type == 'tag'
         run: bun run test:integration
+      # These storage/dump browser contracts are separate from the container integration scripts.
+      # Qualify both Chromium and WebKit before any RC or stable package publication.
+      - name: IndexedDB and dump browser contracts (release only)
+        if: github.ref_type == 'tag'
+        run: bun run test:browser:pgwasm-idb
+      - name: OPFS browser contracts (release only)
+        if: github.ref_type == 'tag'
+        run: bun run test:browser:pgwasm-opfs
       # Same rationale as ci.yml's browser-lane: the Playwright traces retained on failure are the only
       # way to diagnose a runner-only failure, and they die with the runner unless uploaded.
       - name: Upload Playwright traces on failure (release only)
@@ -103,11 +112,15 @@ jobs:
           path: |
             test-results/
             playwright-report/
+            tmp/pgwasm-idb-browser-results/
+            tmp/pgwasm-opfs-browser-results/
           if-no-files-found: ignore
           retention-days: 7
 
   publish:
     needs: validate
+    # Manual dispatch may validate an experimental branch, but only develop publishes @dev.
+    if: github.ref_type == 'tag' || github.ref_name == 'develop'
     runs-on: ubuntu-26.04
     permissions:
       contents: read

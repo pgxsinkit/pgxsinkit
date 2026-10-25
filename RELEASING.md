@@ -3,8 +3,8 @@
 > Implements the Cross-repo TypeScript release & versioning standard — see
 > [docs/adr/0001](docs/adr/0001-unified-ts-release-versioning-tooling-standard.md).
 
-pgxsinkit publishes its public packages (`@pgxsinkit/client`, `contracts`, `react`,
-`server`) to **two** registries:
+pgxsinkit publishes all eight public `@pgxsinkit/*` packages, including the pgwasm
+server and dump packages, to **two** registries:
 
 | Registry                                   | Role                                                                                                      | How it's published                                                              |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
@@ -16,9 +16,11 @@ pgxsinkit publishes its public packages (`@pgxsinkit/client`, `contracts`, `reac
 Every publishable `package.json` carries `"version": "0.0.0"` as a **placeholder you never edit**.
 The real version is derived at publish time from the most recent semver tag:
 
-- **push to `main`** → `<nextPatch(latestTag)>-dev.<unixSeconds>.<shortSha>` at dist-tag `dev` (always
+- **push to `develop`** → `<nextPatch(latestStableTag)>-dev.<unixSeconds>.<shortSha>` at dist-tag `dev` (always
   sorts above the latest release; successive dev builds sort chronologically).
 - **semver tag** (e.g. `0.2.1`) → the exact `<tag>` at dist-tag `latest` (release parity).
+- **RC tag** (e.g. `0.6.0-rc.1`) → the exact `<tag>` at dist-tag `rc`. RC tags never advance stable
+  version derivation or move `latest`. Other prerelease forms are refused.
 
 There is no version-bump step and no release commit. Sibling deps are `workspace:*`, resolved to the
 derived version at pack/publish time.
@@ -50,6 +52,11 @@ byte-identical to npm — no rebuild. Be logged in to npm (`bun pm whoami`); Git
 `gh auth token` (needs `read:packages`). Preview with `DRY_RUN=1 bun run release:npm 0.2.1`.
 
 ## Gotchas
+
+For an experimental PG19 release from `port-19`, follow
+[the RC runbook](docs/runbooks/pg19-rc-release.md). RC publication also requires the IndexedDB/dump
+and OPFS browser contracts in Chromium and WebKit. PG19 uses fresh, separately named format-2 stores;
+its package release does not migrate or replace PG18 stores.
 
 1. **Push release tags one at a time.** GitHub will not create workflow events for tags _"when more
    than three tags are pushed at once"_ — a bulk `git push --tags` silently skips the publish.

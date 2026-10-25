@@ -262,8 +262,10 @@ their own. Where the code came from, file by file, is in
   is `/pgwasm/<name>` and `idbLockName` `pgwasm-idbfs:/pgwasm/<name>`, and no earlier build's
   IndexedDB store (under the old root's names, as PGlite's own) opens under the current one, by design
   (the maintainer's decision for that release: local stores are refreshed, with no migration). The
-  machinery stays; 18.6.2 becomes the first entry when a later release is pinned. Adding a build is one
-  entry in the pins list.
+  machinery stays. The PG19 RC starts a new format-2 continuity line; PG18 format-1 stores are refused.
+  The browser lane checks both marked and unmarked PG18 metadata, verifies refusal leaves their bytes
+  intact and releases the IndexedDB lock, then opens a fresh PG19 store under a separate name. Only
+  earlier builds with the same store format and compatible host ABI belong in the continuity list.
 - **Packed install** (`bun run fixture:smoke`): the fixture installs the packed packages, boots pgwasm
   on the C build from the install (live, amcheck, Drizzle, `/protocol`, a Store backup restored, the
   `opfs-ahp://` refusal, a database from the prepopulated entry dumped with pg_dump, the REPL rendered
@@ -701,6 +703,42 @@ The canonical scenarios are:
 - repeated polling without fixed sleeps
 
 ## Upgrade gates
+
+### PG19 release candidate
+
+The experimental `port-19` line adopts the published C release
+[`19.0.0-rc.1`](https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/19.0.0-rc.1)
+for both the server and pg_dump. The toolkit RC is independently versioned as `0.6.0-rc.1` and uses
+the `rc` registry channel; it does not advance `latest` or the stable-tag input to dev versions.
+The [release runbook](runbooks/pg19-rc-release.md) records its gates and publication procedure.
+
+- **Host ABI:** the C and dump hosts call the PG19 `_pgwasm_*` exports and the single-argument
+  `ProcessStartupPacket`. Server and dump version assertions follow their pinned upstream release.
+  PG19 removed the MULE_INTERNAL conversions; the real conversion test now checks all 98 remaining
+  default conversions, rather than retaining PG18's count assumption.
+- **Store safety:** format-1 markers still produce `DataFormatMismatchError`. The C host also checks
+  `PG_VERSION` for unmarked directories, before any archive member is restored and before startup.
+  Real historical PGlite PG18 fixtures are refused with every original file preserved. Synthetic
+  marked/unmarked and falsely format-2-marked PG18 cases also verify that a failed restore writes no
+  members, including when an archive repeats `PG_VERSION`. Fresh format-2 stores use separate names.
+- **Read-model cost:** PG19 can rewrite bare `NOT IN` over non-null primary keys into an anti join,
+  bringing back the empty-overlay nested-loop rescan. The local predicate now uses
+  `(key NOT IN (...)) IS TRUE`, preserving filtering semantics while retaining a hashed SubPlan.
+  The real 100,000-row plan test retains its no-nested-loop checks, requires one membership scan,
+  and checks populated overlays and composite keys. An unfenced `NOT IN` control demonstrates the
+  PG19 regression on the same tables and statistics. No global planner settings are changed.
+- **Qualification:** cached `validate:full` passed with 1,329 tests actually run and zero failures;
+  unaffected cached passes were reused. Browser qualification covers IndexedDB persistence and
+  ownership, PG18 refusal without mutation, fresh PG19 stores, pg_dump SQL round-trips, and OPFS
+  crash/reopen behavior in Chromium and WebKit. The release workflow requires these browser lanes
+  and the existing container integration lanes before any packages are published.
+  Local qualification passed all 40 IndexedDB/dump cases (36 in the full run, followed by the four
+  new refusal cases after a harness-column correction), all 12 OPFS cases, the 16 isolated client/server
+  contract tests, and the packed downstream fixture's type, runtime and Vite asset checks.
+
+The C release's native PostgreSQL baseline is separate from these toolkit contracts. Its known gaps
+and their workload-specific implications remain documented in
+[`pgwasm-postgres/docs/pgwasm-remaining-gaps.md`](https://github.com/pgxsinkit/pgwasm-postgres/blob/19.0.0-rc.1/docs/pgwasm-remaining-gaps.md).
 
 When changing PostgreSQL, the Circuits engine, durable-streams, pgwasm, or the internalized read path (the reader in `packages/client/src/circuits`, the applier in `packages/client/src/sync`), add at least one regression test for any newly observed drift.
 

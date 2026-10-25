@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { C_BUILD_IDENTITY } from "../../packages/pgwasm-c/src";
+import { ARTEFACT_RELEASE } from "../../packages/pgwasm-c/src/artefact-pins";
 import type { Pgwasm } from "../../packages/pgwasm/src";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
 import { rejectionOf } from "./support/rejection";
@@ -207,7 +208,9 @@ describe("encoding conversions", () => {
                                             pg_encoding_to_char(contoencoding)) = 'a'::bytea)::int AS converted
         FROM pg_conversion WHERE condefault
     `);
-    expect(rows[0]?.total).toBeGreaterThan(100);
+    // PG19's catalog has 98 default conversions after removing MULE_INTERNAL conversions. Guard the
+    // complete set, rather than allowing an accidentally omitted conversion to lower this count.
+    expect(rows[0]?.total).toBe(98);
     expect(rows[0]?.converted).toBe(rows[0]?.total);
     expect(await one(db, "SELECT 1 AS value")).toBe(1);
   });
@@ -223,6 +226,13 @@ describe("the release", () => {
   it("is named in version(), as the build identity names it", async () => {
     const db = await createTestPgwasm();
     const version = String(await one(db, "SELECT version() AS value"));
-    expect(version).toStartWith(`PostgreSQL 18.6 (${C_BUILD_IDENTITY.release}) on wasm32-unknown-emscripten`);
+    const upstreamVersion = ARTEFACT_RELEASE.upstream.tag
+      .replace(/^REL_/, "")
+      .replace("_RC", "rc")
+      .replace("_BETA", "beta")
+      .replaceAll("_", ".");
+    expect(version).toStartWith(
+      `PostgreSQL ${upstreamVersion} (${C_BUILD_IDENTITY.release}) on wasm32-unknown-emscripten`,
+    );
   });
 });

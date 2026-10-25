@@ -4,11 +4,12 @@
  *
  * This is the INTERNAL mirror: GitHub Packages requires authentication even to *install*, so it is
  * meant for authenticated consumers in the same org (e.g. the emergent app), not the general
- * public. npmjs.com stays the public-facing registry — that is published by `scripts/release.ts`.
+ * public. npmjs.com stays the public-facing registry — that is published by `scripts/release-to-npm.ts`.
  *
  * Mode is chosen from the git ref the workflow runs on:
  *   - tag push (bare semver, e.g. `0.2.1`)  -> "release parity": publish that exact version at the
  *     `latest` dist-tag.
+ *   - RC tag (e.g. `0.6.0-rc.1`)             -> that exact version at the `rc` dist-tag.
  *   - branch push / manual dispatch          -> "dev channel": publish `<version>-dev.<shortSha>` at
  *     the `dev` dist-tag, so consumers can track the bleeding edge via `@dev` without a release.
  *
@@ -27,12 +28,11 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
+import { isStableReleaseTag, releaseDistTag } from "./lib/release-channel";
 import { findSkillFiles, readLibraryVersion, stampLibraryVersion } from "./lib/skill-pins";
 
 const ROOT = join(import.meta.dir, "..");
 const REGISTRY = "https://npm.pkg.github.com";
-
-const SEMVER_TAG_RE = /^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._+-]+)?$/;
 
 export interface Manifest {
   name?: string;
@@ -76,8 +76,6 @@ function findPublishablePackages(): { dir: string; pkgPath: string; pkg: Manifes
 // published release (`0.2.0`) under SemVer, so `@dev` would look older than `@latest`. To keep the
 // dev channel strictly ahead, anchor its base to the greater of (package.json version, latest
 // release tag + 1 patch). Reading tags requires the workflow to check out with `fetch-depth: 0`.
-const RELEASE_TAG_RE = /^[0-9]+\.[0-9]+\.[0-9]+$/;
-
 export function parseSemverCore(v: string): [number, number, number] {
   const parts = v.split(".");
   return [
@@ -115,13 +113,13 @@ function latestReleaseTag(): string | null {
   const tags = out
     .split("\n")
     .map((t) => t.trim())
-    .filter((t) => RELEASE_TAG_RE.test(t));
+    .filter(isStableReleaseTag);
   if (tags.length === 0) return null;
   return tags.reduce((hi, t) => (compareSemverCore(t, hi) > 0 ? t : hi));
 }
 
 export interface VersionContext {
-  /** Release-parity mode (a bare semver tag push); otherwise the dev channel. */
+  /** Stable or RC tag publication; otherwise the dev channel. */
   isReleaseTag: boolean;
   /** The exact version to publish when in release-parity mode (the tag name). */
   refName: string;
@@ -133,11 +131,15 @@ export interface VersionContext {
 
 // Derive the run context from the GitHub Actions environment + git tags. Does git I/O, so it is only
 // called from the executable entrypoint, never at import time.
-function resolveVersionContext(): VersionContext {
+export function resolveVersionContext(): VersionContext {
   const refType = process.env["GITHUB_REF_TYPE"] ?? "branch";
   const refName = process.env["GITHUB_REF_NAME"] ?? "";
   const shortSha = (process.env["GITHUB_SHA"] ?? "").slice(0, 7);
-  const isReleaseTag = refType === "tag" && SEMVER_TAG_RE.test(refName);
+  const isReleaseTag = refType === "tag";
+  if (isReleaseTag) releaseDistTag(refName);
+  else if (refName !== "develop") {
+    throw new Error(`Refusing dev publication from ${JSON.stringify(refName)}: only develop publishes @dev.`);
+  }
   // Computed once so every package in this run shares the same dev version (siblings must match for
   // cross-deps to resolve). The pre-release id leads with a unix-seconds stamp (a numeric SemVer
   // identifier => chronological ordering between dev builds) and keeps the short sha for traceability.
@@ -152,9 +154,16 @@ function resolveVersionContext(): VersionContext {
 // Release-parity uses the tag verbatim; the dev channel anchors above the latest release (so `@dev`
 // always sorts above `@latest`) and stamps the shared pre-release id.
 export function targetVersion(baseVersion: string, ctx: VersionContext): string {
-  if (ctx.isReleaseTag) return ctx.refName;
+  if (ctx.isReleaseTag) {
+    releaseDistTag(ctx.refName);
+    return ctx.refName;
+  }
   const base = ctx.devBaseFloor ? maxCore(baseVersion, ctx.devBaseFloor) : baseVersion;
   return `${base}-dev.${ctx.devPreId}`;
+}
+
+export function publicationDistTag(ctx: VersionContext): "latest" | "rc" | "dev" {
+  return ctx.isReleaseTag ? releaseDistTag(ctx.refName) : "dev";
 }
 
 // Pin every same-scope (sibling) dep to the exact version being published, so a `@dev` (or
@@ -226,7 +235,7 @@ function main(): void {
   const DRY_RUN = process.env["DRY_RUN"] === "1";
   const repository = process.env["GITHUB_REPOSITORY"] ?? "";
   const ctx = resolveVersionContext();
-  const distTag = ctx.isReleaseTag ? "latest" : "dev";
+  const distTag = publicationDistTag(ctx);
 
   const publishable = findPublishablePackages();
   if (publishable.length === 0) {
