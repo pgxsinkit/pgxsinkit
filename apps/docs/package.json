@@ -6,7 +6,7 @@
     "astro": "astro",
     "build": "astro build",
     "dev": "astro dev",
-    "format": "oxfmt --config ../../.oxfmtrc.jsonc --check .",
+    "format": "bun fmt --no-script --config ../../.oxfmtrc.jsonc --check .",
     "preview": "astro preview"
   },
   "dependencies": {

@@ -6,7 +6,7 @@ import path from "node:path";
 // `bun run docs:adr:check` (run by `docs:build`) fails if any ADR is missing from — or stale on — the page.
 //
 // The check is deliberately *semantic* (the set of ADR files referenced), not a byte comparison, so it
-// stays green after oxfmt reflows the generated block.
+// stays green after bun fmt reflows the generated block.
 
 const root = process.cwd();
 const adrDir = path.join(root, "docs/adr");

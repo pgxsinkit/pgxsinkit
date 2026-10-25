@@ -254,13 +254,13 @@ const HEADERS: Readonly<Record<string, string>> = {
 /** The formatter's line width (`.oxfmtrc.jsonc`): the rendered pins are already formatted. */
 const PRINT_WIDTH = 120;
 
-/** `key: value,` at `indent`, on one line when it fits, else with the value on the next (as oxfmt breaks it). */
+/** `key: value,` at `indent`, on one line when it fits, else with the value on the next (as bun fmt breaks it). */
 function property(indent: string, key: string, value: string): string[] {
   const line = `${indent}${key}: ${value},`;
   return line.length <= PRINT_WIDTH ? [line] : [`${indent}${key}:`, `${indent}  ${value},`];
 }
 
-/** A file's pin on one line when it fits, else expanded (as oxfmt breaks it). */
+/** A file's pin on one line when it fits, else expanded (as bun fmt breaks it). */
 function filePin(name: string, pin: ArtefactPin): string[] {
   const key = JSON.stringify(name);
   const line = `  ${key}: { bytes: ${pin.bytes}, sha256: ${JSON.stringify(pin.sha256)} },`;

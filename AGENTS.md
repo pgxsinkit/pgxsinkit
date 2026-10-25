@@ -114,7 +114,7 @@ vocabulary.
 - Keep Drizzle schema authoritative for server-side PostgreSQL structure.
 - Preserve Zod v4 validation on all user-controlled payloads.
 - Type checking: use `bun run typecheck` — not a direct compiler invocation that omits projects.
-- Lint and format: use `bun run lint` and `bun run format` (both **check** only) — not `oxlint` or `oxfmt` directly. To mutate, use `bun run lint:fix` / `bun run format:write`.
+- Lint and format: use `bun run lint` and `bun run format` (both **check** only) — not `oxlint` or `bun fmt` directly. To mutate, use `bun run lint:fix` / `bun run format:write`. Bun's built-in formatter reads the existing `.oxfmtrc.jsonc`, including import sorting and the immutable `docs/adr/` exclusion. The `oxfmt` dependency remains solely for the Oxc editor extension.
 - Always prefer package scripts over direct tool invocation. Package scripts encode project-specific flags that direct invocation silently skips.
 - Pure JavaScript is forbidden for project code and ad-hoc scripts; use TypeScript with repository typecheck coverage, or use bash when TypeScript coverage cannot be made robust.
 
