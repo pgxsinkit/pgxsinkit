@@ -2,7 +2,13 @@
 
 The C Postgres build for [`@pgxsinkit/pgwasm`](https://www.npmjs.com/package/@pgxsinkit/pgwasm):
 PostgreSQL 19 RC1 compiled to WebAssembly with Emscripten, single-threaded, with the memory,
-IndexedDB (`idb://`) and file (`file://`, Bun) filesystems.
+IndexedDB (`idb://`) and file (`file://`, Bun) filesystems, plus
+[OPFS-repacked](https://pgxsinkit.github.io/packages/pgwasm/#the-opfs-repacked-store-pgxsinkitpgwasmopfs)
+through `createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`.
+
+**Release mapping:** pgxsinkit 0.5.x and earlier use PostgreSQL 18; 0.6.x and later use
+PostgreSQL 19 or later, including the 0.6 release candidates. The exact PostgreSQL release is
+recorded in `C_BUILD_IDENTITY.release`.
 
 This is the experimental PG19 release-candidate channel. Install matching `@rc` packages:
 

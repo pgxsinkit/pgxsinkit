@@ -7,13 +7,29 @@ sidebar:
 
 The local store is a real PostgreSQL database, run by [pgwasm](/packages/pgwasm/). pgwasm is the runtime;
 the compiled Postgres it runs is a separate piece of code called a **build**. The build you get by default
-is the C build, `cBuild` from `@pgxsinkit/pgwasm-c`: PostgreSQL 18 compiled to WebAssembly. A build is an
+is the C build, `cBuild` from `@pgxsinkit/pgwasm-c`: PostgreSQL compiled to WebAssembly. A build is an
 object implementing the `PostgresBuild` contract from `@pgxsinkit/pgwasm/build`, and it carries an
 identity: a `name` (`"c"` for the C build) and a `dataFormat` number.
 
 Most apps never pick a build: every client, worker and store uses `cBuild` unless told otherwise. This
 page matters when you supply a build yourself (to warm its files early, or to run another one), adopt a
 database you created, or restore a backup.
+
+## Package versions and PostgreSQL majors
+
+| pgxsinkit package release | PostgreSQL major |
+| ------------------------- | ---------------- |
+| 0.5.x and earlier         | 18               |
+| 0.6.x and later           | 19 or later      |
+
+The 0.6 release candidates already use PostgreSQL 19 RC1. Read `C_BUILD_IDENTITY.release` or run
+`SELECT version()` for the exact PostgreSQL release; a package version is not an on-disk
+compatibility guarantee.
+
+The PG19 C build uses data format 2 and refuses PG18 format-1 directories and Store backups,
+including unmarked PG18 directories. Keep the old store available, export any local-only data,
+then create a fresh store under a different path and let synced data re-sync. Opening the old
+directory with the new build does not upgrade it.
 
 ## Where the C build comes from
 
@@ -25,7 +41,7 @@ PostgreSQL release and publishes each build as a release, tagged `<Postgres majo
 `18.6.0` is the first build of PostgreSQL 18.6, `18.6.1` the second and `18.6.2` the third. `@pgxsinkit/pgwasm-c` ships one
 release's files byte for byte, and `@pgxsinkit/pgwasm-pg-dump` ships `pg_dump` from the same release.
 
-`SELECT version()` names the release a database runs:
+`SELECT version()` names the release a database runs. For example, a 0.5.x package reports:
 
 ```text
 PostgreSQL 18.6 (pgwasm-postgres 18.6.2) on wasm32-unknown-emscripten, …
@@ -53,8 +69,9 @@ the client mint a fresh store under a fresh path, and destroy the old path's art
 [Local store lifecycle](/concepts/local-store-lifecycle/)). A synced table re-syncs from the server; a
 local-only table has no server copy, so export what you need to keep before you switch.
 
-Data directories created before builds were recorded carry no marker. They were all made by the C build,
-so the C build opens them; any other build refuses them.
+Data directories created before builds were recorded carry no marker. The C build checks their
+PostgreSQL major before opening them: the PG19 build refuses unmarked PG18 directories with
+`PostgresVersionMismatchError`. Other builds refuse unmarked directories too.
 
 ## Declaring the build: `storage.build`
 
@@ -110,7 +127,7 @@ Declaring `"pgrust"` and supplying no build is a mismatch: the default is the C 
 
 ## The refusals
 
-All four are typed, carry a stable `name` that survives bundle copies and the worker bridge, and are
+These errors are typed, carry a stable `name` that survives bundle copies and the worker bridge, and are
 never retried: a store open that fails with one fails at once, because retrying cannot change the answer.
 
 ### `StorageBuildMismatchError` (`@pgxsinkit/contracts`)
@@ -141,6 +158,14 @@ read. It carries `expected`, `found` and `source`.
 
 **What to do.** Run a release of the build that reads that data format, or treat the store as one to
 replace: mint a fresh store and let it re-sync.
+
+### `PostgresVersionMismatchError` (`@pgxsinkit/pgwasm-c`)
+
+An unmarked data directory belongs to a different PostgreSQL major. The PG19 build refuses an
+unmarked PG18 directory before booting it.
+
+**What to do.** Open the old directory with its PG18 packages to export any local-only data. Use a
+fresh, separately named store for PG19 and let synced data re-sync.
 
 ### `BuildMarkerUnreadableError` (`@pgxsinkit/pgwasm`)
 

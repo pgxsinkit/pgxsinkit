@@ -7,11 +7,16 @@ sidebar:
 
 import { Aside } from "@astrojs/starlight/components";
 
-pgwasm is the Postgres runtime under every pgxsinkit client: a real PostgreSQL 18, compiled to
+pgwasm is the Postgres runtime under every pgxsinkit client: a real PostgreSQL database, compiled to
 WebAssembly, running in a page, a worker or a Bun process. `@pgxsinkit/client` depends on it and creates
 the local store with it, so an app that only syncs never imports pgwasm itself. Reach for these packages
 directly to type a local store, write raw SQL against it, run your own database next to the synced one,
 or add the REPL and `pg_dump` to a debug page.
+
+**PostgreSQL versions:** pgxsinkit 0.5.x and earlier use PostgreSQL 18; 0.6.x and later use
+PostgreSQL 19 or later, including the 0.6 release candidates. The C build currently ships PostgreSQL
+19 RC1. A PG18 data directory or Store backup cannot be opened with the PG19 build; use a fresh store
+and re-sync, exporting local-only data before switching. See [Postgres builds](/concepts/postgres-builds/).
 
 pgwasm began as a fork of [PGlite](https://pglite.dev) and is now its own runtime: it keeps PGlite's
 query, transaction and live-query model under new names, and it separates the runtime from the compiled
@@ -20,12 +25,12 @@ carries over, what changes and how its existing data opens in [Coming from PGlit
 
 ## The packages
 
-| Package                         | What it is                                                                                         |
-| ------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **`@pgxsinkit/pgwasm`**         | the runtime: `createPgwasm`, queries, transactions, live queries, a Drizzle driver, the OPFS store |
-| **`@pgxsinkit/pgwasm-c`**       | the C Postgres build (`cBuild`), its prepopulated data directory and the `amcheck` extension       |
-| **`@pgxsinkit/pgwasm-pg-dump`** | PostgreSQL 18's `pg_dump`, compiled to WebAssembly, run against a database in the same scope       |
-| **`@pgxsinkit/pgwasm-repl`**    | an interactive SQL prompt, as a React component                                                    |
+| Package                         | What it is                                                                                           |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| **`@pgxsinkit/pgwasm`**         | the runtime: `createPgwasm`, queries, transactions, live queries, a Drizzle driver, the OPFS store   |
+| **`@pgxsinkit/pgwasm-c`**       | the C Postgres build (`cBuild`), its prepopulated data directory and the `amcheck` extension         |
+| **`@pgxsinkit/pgwasm-pg-dump`** | the matching PostgreSQL `pg_dump`, compiled to WebAssembly, run against a database in the same scope |
+| **`@pgxsinkit/pgwasm-repl`**    | an interactive SQL prompt, as a React component                                                      |
 
 All four are ESM only, for Bun and browsers (pages, dedicated workers, SharedWorkers and extension pages).
 
@@ -54,8 +59,13 @@ with a scheme:
 - `idb://<name>`: IndexedDB, in a browser;
 - `file://<path>`: a directory on disk, on Bun.
 
-A build states which of these it supports. `opfs-ahp://`, PGlite's one-handle-per-file OPFS layout, is
-not supported and fails with `OpfsAhpRemovedError`; the OPFS store is `@pgxsinkit/pgwasm/opfs` (below).
+A build states which of these `dataDir` schemes it supports. **OPFS-repacked is supported** through
+`createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`, using an OPFS directory handle instead of a `dataDir`
+scheme. The C build supports it; it is the client's default browser store in a capable worker
+([construction and requirements below](#the-opfs-repacked-store-pgxsinkitpgwasmopfs)).
+
+`opfs-ahp://` refers specifically to PGlite's old one-handle-per-file layout. That layout is not
+supported and fails with `OpfsAhpRemovedError`; this restriction does not apply to OPFS-repacked.
 
 A database records the build that created it. Opening it with another build fails with
 `BuildMismatchError` before anything is written. `pg.dumpDataDir()` makes a **Store backup** (a tarball of
@@ -232,16 +242,16 @@ engine's file calls to one store through that broker. The
 
 ## `@pgxsinkit/pgwasm-c`: the C build
 
-PostgreSQL 18 compiled to WebAssembly with Emscripten, single-threaded, with the memory, IndexedDB
-(`idb://`) and file (`file://`, Bun) filesystems. `cBuild` is the build; it is the client's default. It runs
+PostgreSQL 19 RC1 compiled to WebAssembly with Emscripten, single-threaded, with the memory, IndexedDB
+(`idb://`) and file (`file://`, Bun) filesystems, plus [OPFS-repacked](#the-opfs-repacked-store-pgxsinkitpgwasmopfs).
+`cBuild` is the build; it is the client's default. It runs
 in Safari and iOS 18.4, Chrome 137, Firefox 131 and later browsers, and in Bun (see
 [Supported browsers](/concepts/postgres-builds/#supported-browsers)).
 
 The package ships the files of one [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres)
 release byte for byte. Each release is built from an upstream PostgreSQL release plus patches derived from
 ElectricSQL's [postgres-pglite](https://github.com/electric-sql/postgres-pglite), and `SELECT version()` names
-it: `PostgreSQL 18.6 (pgwasm-postgres 18.6.2) on wasm32-unknown-emscripten, …`. `C_BUILD_IDENTITY.release`
-gives the same name (`"pgwasm-postgres 18.6.2"`) in code. See
+it; `C_BUILD_IDENTITY.release` gives the build release name (`"pgwasm-postgres 19.0.0-rc.1"`) in code. See
 [Postgres builds](/concepts/postgres-builds/#where-the-c-build-comes-from).
 
 The package ships its WebAssembly module, filesystem bundle and initdb as files next to its code,
