@@ -20,14 +20,15 @@ export function assertStoreBuild(declared: StorageBuild, supplied: BuildIdentity
 
 /**
  * The typed build refusals (ADR-0063): the declared build is not the supplied one, or the data directory or
- * backup was made by another build or data format, or its marker is unreadable. Matched by `name`, which is
- * stable across bundle copies and the worker bridge. None of them is transient, so an open that failed with
- * one is never retried.
+ * backup was made by another build, data format or PostgreSQL major, or its marker is unreadable. Matched
+ * by `name`, which is stable across bundle copies and the worker bridge. None of them is transient, so an
+ * open that failed with one is never retried.
  */
 const STORE_BUILD_REFUSALS: ReadonlySet<string> = new Set([
   "StorageBuildMismatchError",
   "BuildMismatchError",
   "DataFormatMismatchError",
+  "PostgresVersionMismatchError",
   "BuildMarkerUnreadableError",
 ]);
 

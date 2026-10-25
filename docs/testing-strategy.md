@@ -721,6 +721,8 @@ The [release runbook](runbooks/pg19-rc-release.md) records its gates and publica
   Real historical PGlite PG18 fixtures are refused with every original file preserved. Synthetic
   marked/unmarked and falsely format-2-marked PG18 cases also verify that a failed restore writes no
   members, including when an archive repeats `PG_VERSION`. Fresh format-2 stores use separate names.
+  The C-specific `PostgresVersionMismatchError` is a permanent refusal: the OPFS opener attempts it
+  once, including after the worker bridge reconstructs its stable name and structured detail.
 - **Read-model cost:** PG19 can rewrite bare `NOT IN` over non-null primary keys into an anti join,
   bringing back the empty-overlay nested-loop rescan. The local predicate now uses
   `(key NOT IN (...)) IS TRUE`, preserving filtering semantics while retaining a hashed SubPlan.

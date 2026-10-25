@@ -22,6 +22,9 @@ format-1 stores and backups, including unmarked PG18 directories. It does not mi
 existing store. Keep the PG18 packages and store available while evaluating the RC; the stable
 `@latest` channel remains separate.
 
+An unmarked directory from another PostgreSQL major raises `PostgresVersionMismatchError`.
+The client treats it as a permanent refusal and does not retry the incompatible open.
+
 The package ships its WebAssembly module, filesystem bundle and initdb as files next to its code,
 referenced as `new URL("…", import.meta.url)`, so bundlers copy and fingerprint them.
 

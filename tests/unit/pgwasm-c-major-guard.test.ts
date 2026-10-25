@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 
-import { cBuild } from "../../packages/pgwasm-c/src";
+import { cBuild, PostgresVersionMismatchError } from "../../packages/pgwasm-c/src";
 import { DataFormatMismatchError } from "../../packages/pgwasm/src";
 import type { DataDirEntry } from "../../packages/pgwasm/src/build";
 import { writeDataDirArchive } from "../../packages/pgwasm/src/core/data-dir-archive";
@@ -42,6 +42,8 @@ describe("the PG19 C build's legacy-store refusal", () => {
           expect(error).toBeInstanceOf(DataFormatMismatchError);
           expect((error as DataFormatMismatchError).found).toBe(1);
         } else {
+          expect(error).toBeInstanceOf(PostgresVersionMismatchError);
+          expect((error as PostgresVersionMismatchError).detail).toEqual({ expected: "19", found: "18" });
           expect(error.message).toContain("requires PostgreSQL 19");
           expect(error.message).toContain('PG_VERSION is "18"');
         }
@@ -78,6 +80,9 @@ describe("the PG19 C build's legacy-store refusal", () => {
           expect(error).toBeInstanceOf(DataFormatMismatchError);
           expect((error as DataFormatMismatchError).source).toBe("backup");
         } else {
+          expect(error).toBeInstanceOf(PostgresVersionMismatchError);
+          expect((error as PostgresVersionMismatchError).expected).toBe("19");
+          expect((error as PostgresVersionMismatchError).found).toBe("18");
           expect(error.message).toContain("requires PostgreSQL 19");
           expect(error.message).toContain('PG_VERSION is "18"');
         }
@@ -100,6 +105,7 @@ describe("the PG19 C build's legacy-store refusal", () => {
         "none",
       );
       const error = await rejectionOf(createTestPgwasm({ dataDir: `file://${target}`, loadDataDir: backup }));
+      expect(error).toBeInstanceOf(PostgresVersionMismatchError);
       expect(error.message).toContain('PG_VERSION is "18"');
       expect(readdirSync(target)).toEqual([]);
     } finally {

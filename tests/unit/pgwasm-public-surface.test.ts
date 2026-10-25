@@ -114,7 +114,14 @@ const surfaces: [entry: string, module: object, exports: string[]][] = [
   [
     "@pgxsinkit/pgwasm-c",
     cBuildMain,
-    ["C_BUILD_IDENTITY", "cBuild", "cBuildArtefacts", "createCBuild", "idbDatabaseName"],
+    [
+      "C_BUILD_IDENTITY",
+      "PostgresVersionMismatchError",
+      "cBuild",
+      "cBuildArtefacts",
+      "createCBuild",
+      "idbDatabaseName",
+    ],
   ],
   ["@pgxsinkit/pgwasm-c/contrib/amcheck", amcheck, ["amcheck"]],
   ["@pgxsinkit/pgwasm-c/prepopulated", prepopulated, ["prepopulatedDataDir"]],

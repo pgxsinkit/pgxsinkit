@@ -10,7 +10,7 @@ import { bigint, boolean, uuid, varchar } from "drizzle-orm/pg-core";
 
 import { defineSyncRegistry, defineSyncTable, StorageBuildMismatchError } from "@pgxsinkit/contracts";
 import { BuildMismatchError, createPgwasm } from "@pgxsinkit/pgwasm";
-import { cBuild } from "@pgxsinkit/pgwasm-c";
+import { cBuild, PostgresVersionMismatchError } from "@pgxsinkit/pgwasm-c";
 import { live } from "@pgxsinkit/pgwasm/live";
 
 import {
@@ -112,6 +112,7 @@ describe("assertStoreBuild", () => {
   it("classes exactly the typed build refusals as non-retryable", () => {
     expect(isStoreBuildRefusal(new StorageBuildMismatchError("c", "foreign", "createStore"))).toBe(true);
     expect(isStoreBuildRefusal(new BuildMismatchError(cBuild.identity, "unmarked", "data-directory"))).toBe(true);
+    expect(isStoreBuildRefusal(new PostgresVersionMismatchError("19", "18"))).toBe(true);
     for (const name of ["DataFormatMismatchError", "BuildMarkerUnreadableError"]) {
       const error = new Error("refused");
       error.name = name;
@@ -229,6 +230,33 @@ describe("createPgwasmClient with a threaded declaration", () => {
     expect(transient.message).toBe("UnknownError: transient");
     expect(transientOpens.count).toBeGreaterThan(1);
   });
+
+  for (const throughWorker of [false, true]) {
+    it(`the OPFS open loop attempts a PostgreSQL-major refusal once (${throughWorker ? "worker name" : "typed C error"})`, async () => {
+      const original = new PostgresVersionMismatchError("19", "18");
+      // The bridge rebuilds an Error with the stable name and detail, without importing the C class.
+      const refused = throughWorker
+        ? Object.assign(new Error(original.message), { name: original.name, detail: original.detail })
+        : original;
+      let opens = 0;
+      const error = await rejection(
+        createPgwasmClient(`build-opfs-pg-major-${throughWorker ? "worker" : "direct"}`, {
+          hasOpfsSyncAccess: true,
+          opfsFactories: {
+            getStoreDirectoryHandle: async () => ({}),
+            retryDelayMs: 0,
+            createOpfsPgwasm: async () => {
+              opens += 1;
+              throw refused;
+            },
+          },
+        }),
+      );
+      expect(error).toBe(refused);
+      expect(isStoreBuildRefusal(error)).toBe(true);
+      expect(opens).toBe(1);
+    });
+  }
 });
 
 describe("defineSyncWorker", () => {
@@ -260,6 +288,24 @@ describe("defineSyncWorker", () => {
       supplied: "foreign",
       site: "defineSyncWorker",
     });
+  });
+
+  it("a PostgreSQL-major refusal keeps its permanent name and fields across the worker bridge", async () => {
+    let opens = 0;
+    const { port } = workerHost({
+      createStore: async () => {
+        opens += 1;
+        throw new PostgresVersionMismatchError("19", "18");
+      },
+    });
+    const error = await rejection(
+      provisionSyncWorker({ port: port as unknown as never, ...memoryStoreForTests("build-worker-pg-major") }),
+    );
+    expect(error.name).toBe("PostgresVersionMismatchError");
+    expect(error).not.toBeInstanceOf(PostgresVersionMismatchError);
+    expect((error as Error & { detail?: unknown }).detail).toEqual({ expected: "19", found: "18" });
+    expect(isStoreBuildRefusal(error)).toBe(true);
+    expect(opens).toBe(1);
   });
 
   it("a createStore result of another build is refused and closed", async () => {
