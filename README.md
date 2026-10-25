@@ -96,6 +96,10 @@ bun run validate:full    # pre-push + CI gate: adds the pgwasm-backed unit suite
 bun run test:integration # container-backed suites on isolated, ephemeral compose stacks
 ```
 
+`bun run typecheck` uses Bun's built-in checker for all six source projects. Public package builds use
+`tsrs` for declarations and declaration maps; `bun run fixture:smoke` checks those published types with
+upstream TypeScript independently. TypeDoc retains its workspace-local TypeScript 6 compiler API.
+
 Deeper references, all under `docs/`: [architecture](./docs/architecture.md) ·
 [testing strategy](./docs/testing-strategy.md) · [migrations](./docs/migrations.md) ·
 [function artifacts](./docs/function-artifacts.md) · [performance](./tests/performance/README.md).

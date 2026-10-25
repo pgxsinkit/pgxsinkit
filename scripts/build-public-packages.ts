@@ -34,7 +34,7 @@ declare const Bun: BunBuildApi;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
-const tscBinPath = resolve(repoRoot, "node_modules/.bin/tsc");
+const tsrsBinPath = resolve(repoRoot, "node_modules/.bin/tsrs");
 const viteBinPath = resolve(repoRoot, "node_modules/.bin/vite");
 
 /** Where a browser bundle comes from and goes, relative to the package; `true` is the first entry into dist/. */
@@ -168,7 +168,7 @@ export async function buildPackage(publicPackage: PublicPackage): Promise<void> 
   rmSync(outdir, { recursive: true, force: true });
 
   if (publicPackage.bundler === "vite") {
-    // The vite bin is spawned the same way as tsc below (its own runtime, not this script's);
+    // The vite bin is spawned the same way as tsrs below (its own runtime, not this script's);
     // the package's vite.config.ts carries the whole library-mode contract. NODE_ENV is pinned so
     // a caller's ambient value (e.g. `test` under `bun test`) can never flip the published
     // artifact back to the development JSX transform.
@@ -305,7 +305,7 @@ export function emitBrowserBundle(publicPackage: PublicPackage): void {
 }
 
 export function emitPackageDeclarations(packageDir: string): void {
-  execFileSync(tscBinPath, ["-p", resolve(repoRoot, packageDir, "tsconfig.dts.json")], {
+  execFileSync(tsrsBinPath, ["-p", resolve(repoRoot, packageDir, "tsconfig.dts.json")], {
     cwd: repoRoot,
     stdio: "inherit",
   });

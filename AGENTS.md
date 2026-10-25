@@ -48,7 +48,7 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 
 ## Build System
 
-- **Compiler**: standard `typescript` v7+. Type-check via package scripts (`bun run typecheck`), not `tsc` directly — the root script chains multiple tsconfig projects that a bare `tsc` would miss.
+- **Compilers**: `bun check --no-script` checks source types; `tsrs` emits published declarations. Use `bun run typecheck` — the root script checks all six tsconfig projects. Keep upstream TypeScript 7 for editor support and the independent packed-consumer check, and the docs workspace's TypeScript 6 for TypeDoc's JavaScript compiler API.
 - **Tooling**: Always use `podman` for container management. Always use `mise` for tool version management. NEVER use `docker` or `npm` for anything.
 - **Dependency Management**: Keep packages on their latest versions by default unless a compatibility or product requirement is written down explicitly.
 
@@ -113,7 +113,7 @@ vocabulary.
 - Preserve Drizzle ORM and `drizzle-kit@1.0.0-rc.*` or later for schema management.
 - Keep Drizzle schema authoritative for server-side PostgreSQL structure.
 - Preserve Zod v4 validation on all user-controlled payloads.
-- Type checking: use `bun run typecheck` — not `tsc` directly.
+- Type checking: use `bun run typecheck` — not a direct compiler invocation that omits projects.
 - Lint and format: use `bun run lint` and `bun run format` (both **check** only) — not `oxlint` or `oxfmt` directly. To mutate, use `bun run lint:fix` / `bun run format:write`.
 - Always prefer package scripts over direct tool invocation. Package scripts encode project-specific flags that direct invocation silently skips.
 - Pure JavaScript is forbidden for project code and ad-hoc scripts; use TypeScript with repository typecheck coverage, or use bash when TypeScript coverage cannot be made robust.

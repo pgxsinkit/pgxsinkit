@@ -91,7 +91,7 @@
     "test:performance:warm-boot": "bun test tests/performance/warm-boot-registry-width.perf.test.ts",
     "test:unit": "bun scripts/select-unit-tests.ts",
     "test:unit:nocache": "PGXSINKIT_NO_CACHE=1 bun scripts/select-unit-tests.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p apps/board/tsconfig.json && tsc --noEmit -p apps/perf-lab/tsconfig.json && tsc --noEmit -p tests/e2e/tsconfig.json && tsc --noEmit -p packages/client/tsconfig.type-tests.json && tsc --noEmit -p packages/pgwasm-repl/tsconfig.json",
+    "typecheck": "bun check --no-script -p tsconfig.json && bun check --no-script -p apps/board/tsconfig.json && bun check --no-script -p apps/perf-lab/tsconfig.json && bun check --no-script -p tests/e2e/tsconfig.json && bun check --no-script -p packages/client/tsconfig.type-tests.json && bun check --no-script -p packages/pgwasm-repl/tsconfig.json",
     "validate": "bun run guard:tmp-files && bun run skills:pins:check && bun scripts/run-if-changed.ts migrations --inputs 'infra/drizzle/**' 'infra/board-drizzle/**' 'infra/*drizzle.config.ts' package.json bun.lock -- bun run db:migrations:check && bun run format && bun run check:fast",
     "validate:full": "bun run guard:tmp-files && bun run skills:pins:check && bun scripts/run-if-changed.ts migrations --inputs 'infra/drizzle/**' 'infra/board-drizzle/**' 'infra/*drizzle.config.ts' package.json bun.lock -- bun run db:migrations:check && bun run format && bun run check",
     "validate:refresh": "PGXSINKIT_FORCE=1 bun run validate:full"
@@ -118,6 +118,7 @@
     "postgres": "3.4.9",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "tsx": "4.23.15",
     "typescript": "^7.0.2",
     "vite": "8.3.5",
