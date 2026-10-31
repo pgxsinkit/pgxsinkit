@@ -535,6 +535,22 @@ expected bind packets, including a following parameter. Real-WASM query coverage
 characters and that the following parameter stays intact. See
 [backlog 0021](backlog/0021-utf8-length-before-lone-low-surrogate.md).
 
+## VFS timestamps, parser maps and lazy asset URLs (2026-10-31)
+
+`pgwasm-c-vfs-times.test.ts` covers separate access/modification times, epoch zero, preservation of
+omitted attributes and the legacy combined timestamp. Its pinned-WASM restore test verifies archived
+seconds become the expected milliseconds on a custom VFS. The bridge performs no metadata read when
+both times are available and leaves times alone for unrelated attribute updates.
+
+`pgwasm-parse.test.ts` verifies the normalized instance parser map is reused without enumeration
+when no query override is provided, with copied-merge precedence retained for explicit overrides.
+This fast path does not remove the merge for Drizzle's supplied overrides.
+
+`pgwasm-c-assets.test.ts` checks that IIFE import/build creation does not construct default URLs,
+supplied modules/bundles boot without reading default URL properties, and lazy public URL values
+retain identity through the pinned asset set. Existing tests cover default loading and rejected
+warm-up fallback. Asset locations remain literal for bundler discovery.
+
 ## The read transport is pgxsinkit's own (ADR-0065 decision 6, 2026-09-29)
 
 `@durable-streams/client` 0.2.7 is gone from `@pgxsinkit/client`. The reader is ours: `circuits/long-poll.ts`

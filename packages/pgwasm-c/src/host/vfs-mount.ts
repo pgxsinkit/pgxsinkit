@@ -10,6 +10,8 @@ interface NodeAttributes {
   mode?: number;
   size?: number;
   timestamp?: number;
+  atime?: number;
+  mtime?: number;
 }
 
 /** A Uint8Array over exactly the bytes of `buffer` (Emscripten hands the heap as an Int8Array). */
@@ -99,7 +101,12 @@ export function createVfsFilesystem(module: PostgresModule, vfs: BaseFilesystem)
         () => {
           if (attr.mode !== undefined) vfs.chmod(path, attr.mode);
           if (attr.size !== undefined) vfs.truncate(path, attr.size);
-          if (attr.timestamp !== undefined) vfs.utimes(path, attr.timestamp, attr.timestamp);
+          const atime = attr.atime ?? attr.timestamp;
+          const mtime = attr.mtime ?? attr.timestamp;
+          if (atime !== undefined || mtime !== undefined) {
+            const previous = atime === undefined || mtime === undefined ? vfs.lstat(path) : undefined;
+            vfs.utimes(path, atime ?? previous!.atime, mtime ?? previous!.mtime);
+          }
         },
         "setattr",
         path,

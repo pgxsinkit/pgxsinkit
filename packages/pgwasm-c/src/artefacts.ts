@@ -12,14 +12,24 @@ import createInitdbModule from "../artefacts/initdb.js";
 import createPostgresModule from "../artefacts/postgres.js";
 import { ARTEFACT_FILES } from "./artefact-pins";
 
+let postgresWasm: URL | undefined;
+let fsBundle: URL | undefined;
+let initdbWasm: URL | undefined;
+
 /** The URLs of the files the C build loads, for fetching and compiling them ahead of a boot. */
 export const cBuildArtefacts = {
   /** The Postgres WebAssembly module. */
-  postgresWasm: new URL("../artefacts/postgres.wasm", import.meta.url),
+  get postgresWasm(): URL {
+    return (postgresWasm ??= new URL("../artefacts/postgres.wasm", import.meta.url));
+  },
   /** The filesystem bundle (share/, lib/, the ICU data) the Postgres module mounts. */
-  fsBundle: new URL("../artefacts/postgres.data", import.meta.url),
+  get fsBundle(): URL {
+    return (fsBundle ??= new URL("../artefacts/postgres.data", import.meta.url));
+  },
   /** The initdb WebAssembly module, used when a data directory is created. */
-  initdbWasm: new URL("../artefacts/initdb.wasm", import.meta.url),
+  get initdbWasm(): URL {
+    return (initdbWasm ??= new URL("../artefacts/initdb.wasm", import.meta.url));
+  },
 } as const;
 
 /**
@@ -41,6 +51,15 @@ export interface CBuildArtefactSet {
 export const pinnedCBuildArtefacts: CBuildArtefactSet = {
   createPostgresModule,
   createInitdbModule,
-  ...cBuildArtefacts,
+  // Forward lazily: spreading cBuildArtefacts would invoke its getters during import.
+  get postgresWasm() {
+    return cBuildArtefacts.postgresWasm;
+  },
+  get fsBundle() {
+    return cBuildArtefacts.fsBundle;
+  },
+  get initdbWasm() {
+    return cBuildArtefacts.initdbWasm;
+  },
   fsBundleBytes: ARTEFACT_FILES["postgres.data"].bytes,
 };

@@ -9,6 +9,7 @@ import {
   RowDescriptionMessage,
 } from "../../packages/pgwasm/src/protocol/wire/messages";
 import { Modes } from "../../packages/pgwasm/src/protocol/wire/types";
+import type { Parser } from "../../packages/pgwasm/src/types";
 
 function description(fields: readonly (readonly [string, number])[]): RowDescriptionMessage {
   return new RowDescriptionMessage(
@@ -26,6 +27,52 @@ function complete(tag: string): CommandCompleteMessage {
 }
 
 describe("query result rows", () => {
+  it("uses normalized instance parsers without enumerating or copying them when no override is supplied", () => {
+    const calls: [string, number | undefined][] = [];
+    const defaults: Readonly<Record<number | string, Parser>> = new Proxy(
+      Object.freeze({
+        "999999": (value: string, oid?: number) => {
+          calls.push([value, oid]);
+          return `instance:${value}`;
+        },
+      }),
+      {
+        ownKeys() {
+          throw new Error("The normalized instance parser map must not be enumerated for a query");
+        },
+      },
+    );
+    const messages = [
+      description([
+        ["custom", 999999],
+        ["builtin", 23],
+        ["unknown", 999998],
+        ["empty", 999999],
+      ]),
+      data(["value", "42", "raw", null]),
+      complete("SELECT 1"),
+    ];
+    expect(parseResults(messages, defaults)[0]!.rows).toEqual([
+      { custom: "instance:value", builtin: 42, unknown: "raw", empty: null },
+    ]);
+    expect(parseResults(messages, defaults, { rowMode: "array" })[0]!.rows).toEqual([
+      ["instance:value", 42, "raw", null],
+    ]);
+    expect(calls).toEqual([
+      ["value", 999999],
+      ["value", 999999],
+    ]);
+  });
+
+  it("keeps per-query overrides isolated, including an explicitly empty override", () => {
+    const defaults = Object.freeze({ 23: () => "instance" });
+    const messages = [description([["value", 23]]), data(["7"]), complete("SELECT 1")];
+    expect(parseResults(messages, defaults, { parsers: { 23: () => "query" } })[0]!.rows).toEqual([{ value: "query" }]);
+    expect(parseResults(messages, defaults, { parsers: {} })[0]!.rows).toEqual([{ value: "instance" }]);
+    expect(parseResults(messages, defaults)[0]!.rows).toEqual([{ value: "instance" }]);
+    expect(defaults[23]()).toBe("instance");
+  });
+
   for (const rowMode of ["object", "array"] as const) {
     it(`parses built-in, unknown and NULL values in ${rowMode} mode`, () => {
       const result = parseResults(

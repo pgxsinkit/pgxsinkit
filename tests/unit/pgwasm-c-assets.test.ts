@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { runInNewContext } from "node:vm";
 // pgwasm step 3 (bite B2): `createCBuild({ assets })` takes the artefacts an app warmed ahead. A resolved
 // promise stands in for the build's own loads; a rejected one is a missed warm-up, never a boot failure —
 // the build falls back to loading the artefacts itself.
 
 import { cBuildArtefacts, type CBuildAssets, createCBuild } from "../../packages/pgwasm-c/src";
+import { pinnedCBuildArtefacts, type CBuildArtefactSet } from "../../packages/pgwasm-c/src/artefacts";
+import { C_BUILD_IDENTITY, createCBuildFrom } from "../../packages/pgwasm-c/src/build";
 import { compileModule } from "../../packages/pgwasm-c/src/host/artefact-loader";
-import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
+import { closeTestPgwasms, createTestPgwasm, scratchDir } from "./support/pgwasm";
 
 afterEach(closeTestPgwasms);
 
@@ -19,6 +25,65 @@ async function warmAssets(): Promise<Required<CBuildAssets>> {
 }
 
 describe("createCBuild({ assets })", () => {
+  it("keeps the default URLs lazy through an IIFE import and supplied-asset build creation", async () => {
+    const scratch = scratchDir("pgwasm-c-iife");
+    try {
+      const output = path.join(scratch.path, "probe.js");
+      execFileSync("bun", [path.join(import.meta.dir, "support/build-pgwasm-c-iife.ts"), output]);
+      const context = {
+        URL,
+        Blob,
+        WebAssembly,
+        TextEncoder,
+        TextDecoder,
+        console,
+      } as Record<string, unknown>;
+      // IIFE output has no usable import.meta.url. The old eager defaults threw while importing.
+      runInNewContext(readFileSync(output, "utf8"), context);
+      const probe = context["pgwasmCAssetProbe"] as {
+        createCBuild: typeof createCBuild;
+        cBuildArtefacts: typeof cBuildArtefacts;
+      };
+      const module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+      const build = probe.createCBuild({ postgresWasmModule: module, initdbWasmModule: module, fsBundle: new Blob() });
+      await build.prepare!();
+      // Defaults are still resolved on demand, and consequently need a valid module URL.
+      expect(() => probe.cBuildArtefacts.postgresWasm).toThrow();
+    } finally {
+      scratch.cleanup();
+    }
+  });
+
+  it("reuses each lazily resolved public URL through the pinned asset set", () => {
+    for (const key of ["postgresWasm", "initdbWasm", "fsBundle"] as const) {
+      const first = cBuildArtefacts[key];
+      expect(first).toBeInstanceOf(URL);
+      expect(cBuildArtefacts[key]).toBe(first);
+      expect(pinnedCBuildArtefacts[key]).toBe(first);
+    }
+  });
+
+  it("boots with supplied assets without consulting any default URL", async () => {
+    const warm = await warmAssets();
+    const noDefaultUrls: CBuildArtefactSet = {
+      createPostgresModule: pinnedCBuildArtefacts.createPostgresModule,
+      createInitdbModule: pinnedCBuildArtefacts.createInitdbModule,
+      fsBundleBytes: pinnedCBuildArtefacts.fsBundleBytes,
+      get postgresWasm(): URL {
+        throw new Error("default Postgres URL accessed");
+      },
+      get initdbWasm(): URL {
+        throw new Error("default initdb URL accessed");
+      },
+      get fsBundle(): URL {
+        throw new Error("default bundle URL accessed");
+      },
+    };
+    const build = createCBuildFrom(C_BUILD_IDENTITY, noDefaultUrls, { assets: Promise.resolve(warm) });
+    const pg = await createTestPgwasm({ build, fresh: true });
+    expect((await pg.query<{ one: number }>("SELECT 1 AS one")).rows).toEqual([{ one: 1 }]);
+  });
+
   it("boots a fresh data directory on the warmed assets", async () => {
     const warm = await warmAssets();
     const read = new Set<keyof CBuildAssets>();

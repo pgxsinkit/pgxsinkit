@@ -24,7 +24,8 @@ export function parseResults(
   const resultSets: Results<unknown>[] = [];
   let current: Results<unknown> = { rows: [], fields: [] };
   let affectedRows = 0;
-  const parsers = { ...defaultParsers, ...options?.parsers };
+  // Instance parsers are already normalized; only per-query overrides need another map.
+  const parsers = options?.parsers === undefined ? defaultParsers : { ...defaultParsers, ...options.parsers };
 
   for (const message of messages) {
     if (message instanceof RowDescriptionMessage) {
