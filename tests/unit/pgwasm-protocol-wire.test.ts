@@ -296,6 +296,21 @@ describe("the backend message parser", () => {
 });
 
 describe("the frontend message serializer", () => {
+  it("writes replacement-encoded surrogate bytes without corrupting following bind values", () => {
+    const values = ["\u0800\udc00", "tail", "©\udc00", "\udc00\udc00", "\ud800\udc00", "\ud800", "last"];
+    const expected = new BufferList().addCString("").addCString("").addInt16(values.length);
+    for (let i = 0; i < values.length; i++) expected.addInt16(0);
+    expected.addInt16(values.length);
+    const encoder = new TextEncoder();
+    for (const value of values) {
+      const bytes = encoder.encode(value);
+      expected.addInt32(bytes.length).add(bytes);
+    }
+    expected.addInt16(0);
+
+    expect(serialize.bind({ values })).toEqual(expected.join(true, "B"));
+  });
+
   it("builds startup, password and ssl-request messages", () => {
     expect(serialize.startup({ user: "brian", database: "bang" })).toEqual(
       new BufferList()
@@ -501,6 +516,22 @@ describe("the frontend message serializer", () => {
 });
 
 describe("byteLengthUtf8", () => {
+  it("matches TextEncoder for short combinations across UTF-16 boundaries", () => {
+    const units = [0x61, 0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xd800, 0xdbff, 0xdc00, 0xdfff, 0xe000, 0xffff].map((code) =>
+      String.fromCharCode(code),
+    );
+    const encoder = new TextEncoder();
+    for (const first of units) {
+      expect(byteLengthUtf8(first)).toBe(encoder.encode(first).length);
+      for (const second of units) {
+        expect(byteLengthUtf8(first + second)).toBe(encoder.encode(first + second).length);
+        for (const third of units) {
+          expect(byteLengthUtf8(first + second + third)).toBe(encoder.encode(first + second + third).length);
+        }
+      }
+    }
+  });
+
   it("counts UTF-8 bytes across ASCII, the BMP, surrogate pairs and emoji", () => {
     expect(byteLengthUtf8("")).toBe(0);
     expect(byteLengthUtf8("hello")).toBe(5);

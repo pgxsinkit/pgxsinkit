@@ -38,4 +38,4 @@ Rules:
 - [0018 — The subscribe route answers 503 and drops the engine's reason](0018-subscribe-503-drops-engine-error.md) — candidate
 - [0019 — Group catch-up readiness never clears on revert](0019-group-readiness-never-clears-on-revert.md) — candidate
 - [0020 — `@pgxsinkit/pgwasm-c`'s published types import its TypeScript source](0020-pgwasm-c-types-import-its-source.md) — candidate
-- [0021 — UTF-8 length undercounts before a lone low surrogate](0021-utf8-length-before-lone-low-surrogate.md) — candidate
+- [0021 — UTF-8 length undercounts before a lone low surrogate](0021-utf8-length-before-lone-low-surrogate.md) — resolved (2026-10-31)

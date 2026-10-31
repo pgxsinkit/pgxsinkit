@@ -215,6 +215,24 @@ describe("queries", () => {
     });
   });
 
+  it("binds unpaired surrogates as replacement characters without changing the next parameter", async () => {
+    const db = await createTestPgwasm();
+    const cases = [
+      ["\u0800\udc00", "\u0800\ufffd"],
+      ["©\udc00", "©\ufffd"],
+      ["a\udc00", "a\ufffd"],
+      ["\udc00\udc00", "\ufffd\ufffd"],
+      ["\ud800", "\ufffd"],
+      ["\udc00\ud800", "\ufffd\ufffd"],
+      ["\ud800\udc00", "\ud800\udc00"],
+      ["你好😀", "你好😀"],
+    ] as const;
+    for (const [input, expected] of cases) {
+      const result = await db.query("SELECT $1::text AS value, $2::text AS tail", [input, "unchanged"]);
+      expect(result.rows).toEqual([{ value: expected, tail: "unchanged" }]);
+    }
+  });
+
   it("uses one parameter several times", async () => {
     const db = await createTestPgwasm();
     await db.exec("CREATE TABLE IF NOT EXISTS test (id SERIAL PRIMARY KEY, first_name TEXT, last_name TEXT);");

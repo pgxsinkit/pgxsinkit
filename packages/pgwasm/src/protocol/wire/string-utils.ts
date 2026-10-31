@@ -12,7 +12,11 @@ export function byteLengthUtf8(str: string): number {
     const code = str.charCodeAt(i);
     if (code > 0x7f && code <= 0x7ff) byteLength++;
     else if (code > 0x7ff && code <= 0xffff) byteLength += 2;
-    if (code >= 0xdc00 && code <= 0xdfff) i--; // trail surrogate
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      const previous = str.charCodeAt(i - 1);
+      // Only a valid pair shares four bytes; an unpaired surrogate encodes as U+FFFD.
+      if (previous >= 0xd800 && previous <= 0xdbff) i--;
+    }
   }
   return byteLength;
 }

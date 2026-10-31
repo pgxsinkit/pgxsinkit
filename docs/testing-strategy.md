@@ -524,6 +524,17 @@ Removing a duplicate UTF-8 serialization scan was tried and deferred because tin
 not establish non-regression. The existing lone-surrogate length issue is tracked separately as
 [backlog 0021](backlog/0021-utf8-length-before-lone-low-surrogate.md).
 
+## UTF-8 parameter lengths and unpaired surrogates (2026-10-31)
+
+The UTF-8 length helper skips the preceding UTF-16 code unit only for a valid surrogate pair.
+Previously, a multibyte character followed by a lone low surrogate undercounted its wire payload:
+`"\u0800\udc00"` declared four bytes for a six-byte encoding, which could truncate/overwrite parameter
+data. Unpaired surrogates now follow `TextEncoder`'s U+FFFD replacement semantics. Wire tests compare
+short combinations of representative UTF-16 code units with the encoder and independently build
+expected bind packets, including a following parameter. Real-WASM query coverage checks replacement
+characters and that the following parameter stays intact. See
+[backlog 0021](backlog/0021-utf8-length-before-lone-low-surrogate.md).
+
 ## The read transport is pgxsinkit's own (ADR-0065 decision 6, 2026-09-29)
 
 `@durable-streams/client` 0.2.7 is gone from `@pgxsinkit/client`. The reader is ours: `circuits/long-poll.ts`
