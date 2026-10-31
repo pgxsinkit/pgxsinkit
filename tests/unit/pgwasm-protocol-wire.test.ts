@@ -5,6 +5,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { Parser, serialize } from "../../packages/pgwasm/src/protocol/wire";
+import { BufferReader } from "../../packages/pgwasm/src/protocol/wire/buffer-reader";
 import type {
   BackendMessage,
   DataRowMessage,
@@ -52,6 +53,19 @@ function field(name: string, base: number) {
 }
 
 describe("the backend message parser", () => {
+  it("decodes UTF-8 at every packet split and retains strings after input reuse", () => {
+    const values = [null, "", "ASCII", "你好 © 😀", '{"key":"é"}'];
+    const full = buffers.dataRow(values);
+    for (let split = 1; split < full.byteLength; split++) {
+      const first = full.slice(0, split);
+      const second = full.slice(split);
+      const [message] = parseAll([first, second]) as DataRowMessage[];
+      first.fill(0);
+      second.fill(0);
+      expect(message?.fields).toEqual(values);
+    }
+  });
+
   it("parses authentication messages", () => {
     expectMessage(buffers.authenticationOk(), { name: "authenticationOk", length: 8 });
     expectMessage(buffers.authenticationCleartextPassword(), { name: "authenticationCleartextPassword", length: 8 });
@@ -496,5 +510,40 @@ describe("byteLengthUtf8", () => {
     expect(byteLengthUtf8("hello 你好 𝄞")).toBe(17);
     expect(byteLengthUtf8("😀")).toBe(4);
     expect(byteLengthUtf8("The quick brown 🦊 jumps over 13 lazy 🐶! 你好世界")).toBe(58);
+  });
+});
+
+describe("BufferReader string ownership and ranges", () => {
+  it("decodes bounded strings and cstrings without exposing borrowed bytes", () => {
+    const source = new Uint8Array([99, 0xe4, 0xbd, 0xa0, 0, 0xff, 0, 8, 9]);
+    const reader = new BufferReader();
+    reader.setBuffer(1, source.buffer);
+    const text = reader.cstring();
+    const replacement = reader.cstring();
+    const owned = reader.bytes(2);
+    source.fill(0);
+    expect(text).toBe("你");
+    expect(replacement).toBe("�");
+    expect(owned).toEqual(new Uint8Array([8, 9]));
+  });
+
+  it("keeps slice range behavior and offset advancement for malformed string reads", () => {
+    const source = new TextEncoder().encode("abcdef");
+    const decoder = new TextDecoder();
+    const ranges: Array<[number, number]> = [
+      [2, 100],
+      [2, -1],
+      [-2, 1],
+      [1.5, 2.5],
+      [0, NaN],
+      [0, Infinity],
+    ];
+    for (const [offset, length] of ranges) {
+      const reader = new BufferReader();
+      reader.setBuffer(offset, source.buffer);
+      expect(reader.string(length)).toBe(decoder.decode(source.buffer.slice(offset, offset + length)));
+      const nextOffset = offset + length;
+      expect(reader.string(1)).toBe(decoder.decode(source.buffer.slice(nextOffset, nextOffset + 1)));
+    }
   });
 });

@@ -54,6 +54,26 @@ describe("queries", () => {
     });
   });
 
+  it("returns prototype-related column names as ordinary own properties", async () => {
+    const db = await createTestPgwasm();
+    const result = await db.query(`
+      SELECT '{"safe":true}'::jsonb AS "__proto__", 'constructor value' AS "constructor", 'string value' AS "toString"
+    `);
+    const row = result.rows[0]!;
+
+    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    expect(Object.keys(row)).toEqual(["__proto__", "constructor", "toString"]);
+    expect(Object.getOwnPropertyDescriptor(row, "__proto__")).toEqual({
+      value: { safe: true },
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    expect(row["constructor"]).toBe("constructor value");
+    expect(row["toString"]).toBe("string value");
+    expect(row["safe"]).toBeUndefined();
+  });
+
   it("runs templated statements, parameters and identifiers apart", async () => {
     const db = await createTestPgwasm();
     const tableName = identifier`test`;

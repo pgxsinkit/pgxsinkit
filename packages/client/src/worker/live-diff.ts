@@ -65,15 +65,13 @@ export function computeLiveDiff(
   const order: string[] = [];
   const added: { key: string; row: Record<string, unknown> }[] = [];
   const changed: { key: string; row: Record<string, unknown> }[] = [];
-  const nextKeys = new Set<string>();
   const nextMap = new Map<string, Record<string, unknown>>();
 
   for (const row of nextRows) {
     const key = rowKey(row, state.pkColumns);
     // A duplicate key within one result set (composite PK not actually unique, or a keyless collision):
     // keep the first, so `order`/diff stay a faithful set. Rare; the read projections are PK-unique.
-    if (nextKeys.has(key)) continue;
-    nextKeys.add(key);
+    if (nextMap.has(key)) continue;
     nextMap.set(key, row);
     order.push(key);
 
@@ -87,7 +85,7 @@ export function computeLiveDiff(
 
   const removed: string[] = [];
   for (const key of state.previous.keys()) {
-    if (!nextKeys.has(key)) removed.push(key);
+    if (!nextMap.has(key)) removed.push(key);
   }
 
   state.previous = nextMap;
@@ -129,7 +127,12 @@ export class LiveRowsMaterializer<TRow extends Record<string, unknown> = Record<
     for (const { key, row } of diff.changed) this.byKey.set(key, row as TRow);
     // Rebuild strictly from the delivered order, reusing whatever object each key now maps to. Added/changed
     // keys already point at fresh objects (set above); every other key keeps its prior object (=== holds).
-    this.rows = diff.order.map((key) => this.byKey.get(key)!).filter((row): row is TRow => row !== undefined);
+    const rows: TRow[] = [];
+    for (const key of diff.order) {
+      const row = this.byKey.get(key);
+      if (row !== undefined) rows.push(row);
+    }
+    this.rows = rows;
     return this.rows;
   }
 

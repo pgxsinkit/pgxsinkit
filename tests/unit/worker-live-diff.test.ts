@@ -12,6 +12,27 @@ import {
 } from "../../packages/client/src/worker/live-diff";
 
 describe("computeLiveDiff (worker-side)", () => {
+  it("keeps the first duplicate and uses it as the next refresh's state", () => {
+    const state = seedLiveDiffState(
+      [
+        { id: "gone", n: 0 },
+        { id: "a", n: 1 },
+      ],
+      ["id"],
+    );
+    const first = { id: "a", n: 2 };
+    const added = { id: "b", n: 3 };
+    expect(computeLiveDiff(state, [first, { id: "a", n: 99 }, added, { id: "b", n: 99 }])).toEqual({
+      order: ["a", "b"],
+      added: [{ key: "b", row: added }],
+      changed: [{ key: "a", row: first }],
+      removed: ["gone"],
+    });
+    expect(state.previous.get("a")).toBe(first);
+    expect(computeLiveDiff(state, [first, added])).toEqual({ order: ["a", "b"], added: [], changed: [], removed: [] });
+    expect(computeLiveDiff(state, [])).toEqual({ order: [], added: [], changed: [], removed: ["a", "b"] });
+  });
+
   it("keys by a single PK column and emits only the delta, never the full set", () => {
     const state = seedLiveDiffState(
       [
@@ -64,6 +85,23 @@ describe("computeLiveDiff (worker-side)", () => {
 });
 
 describe("LiveRowsMaterializer (tab-side)", () => {
+  it("skips missing order entries while retaining repeated keys, identity and fresh arrays", () => {
+    const materializer = new LiveRowsMaterializer<{ id: string }>(["id"]);
+    const a = { id: "a" };
+    const b = { id: "b" };
+    const initial = materializer.seed([a, b]);
+    const diff = { order: ["missing", "b", "a", "b"], added: [], changed: [], removed: [] };
+    const next = materializer.apply(diff);
+    expect(next).toEqual([b, a, b]);
+    expect(next).not.toBe(initial);
+    expect(next[0]).toBe(b);
+    expect(next[1]).toBe(a);
+    expect(next[2]).toBe(b);
+    expect(materializer.apply(diff)).not.toBe(next);
+    expect(materializer.apply({ ...diff, order: [] })).toEqual([]);
+    expect(materializer.current()).toEqual([]);
+  });
+
   it("keeps object identity for unchanged rows and installs a fresh object for a changed row", () => {
     const state = seedLiveDiffState([], ["id"]);
     const materializer = new LiveRowsMaterializer<{ id: string; n: number }>(["id"]);

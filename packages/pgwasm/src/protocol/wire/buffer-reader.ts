@@ -44,6 +44,20 @@ export class BufferReader {
   }
 
   string(length: number): string {
+    const offset = this.#offset;
+    if (
+      Number.isInteger(offset) &&
+      offset >= 0 &&
+      Number.isInteger(length) &&
+      length >= 0 &&
+      length <= this.#bufferView.byteLength - offset
+    ) {
+      // Decode while the view is borrowed; only the resulting string escapes. Binary bytes() still owns its data.
+      const bytes = new Uint8Array(this.#bufferView.buffer, offset, length);
+      this.#offset += length;
+      return this.#decoder.decode(bytes);
+    }
+    // Keep slice's clipping/coercion and offset advancement for malformed input.
     return this.#decoder.decode(this.bytes(length));
   }
 

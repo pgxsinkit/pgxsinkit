@@ -488,6 +488,42 @@ extended-query error-recovery fix is qualified separately in `pgwasm-postgres`
 on its PG18 and PG19 branches; changing this host does not replace its pinned C
 artefacts or adopt the PG19 ABI/data format.
 
+## Result-row parsing (PGlite PR #1050 review, 2026-10-31)
+
+`tests/unit/pgwasm-parse.test.ts` covers the owned result parser directly. Object rows retain
+ordinary object prototypes and represent every column as an own property, including `__proto__`
+with text, JSON-object and NULL values; duplicate names retain the last column's value. The suite
+also covers array rows, per-query parser precedence and OID arguments, SQL NULL, unknown types,
+missing metadata, multi-statement metadata resets, command counts and blob attachment. Indexed
+loops remove per-row callbacks without changing these contracts. The special-name correction fixes
+an existing direct-assignment bug; the runtime had already eliminated the temporary key/value
+arrays targeted by [PGlite PR #1050](https://github.com/electric-sql/pglite/pull/1050).
+
+The actual-WASM query regression in `pgwasm-basic.test.ts` also checks prototype-related aliases
+through the public query API. A local parse-only comparison against `aabc6ec` used prebuilt
+int4/text/NULL messages, object and array rows, empty/one/1,000/10,000-row results and four or twelve
+columns, with warmup and nine rotated samples of approximately 80 ms per variant. For the
+1,000–10,000-row cases, indexed loops reduced median parsing time by 18–47% on Bun 1.4.4,
+7–14% on Chromium 156.0.8078.4 and 5–32% on WebKit 27.2. These are local parsing measurements,
+not end-to-end query or application gains. Separate field-name/type arrays were omitted: their
+small Chromium gains came with object-mode regressions on Bun/WebKit and extra tiny-result costs.
+
+## Wire text decoding and worker live-diff allocation (2026-10-31)
+
+`pgwasm-protocol-wire.test.ts` checks Unicode DataRows at every packet split and input-buffer reuse;
+direct reader cases cover cstrings, invalid UTF-8 replacement, nonzero offsets, malformed ranges
+and binary ownership. Text decoding borrows a view only during synchronous conversion; escaping
+binary values retain owning copies and malformed ranges retain the former slice behavior.
+`worker-live-diff.test.ts` additionally pins first-duplicate-wins across refreshes, missing/repeated
+order entries, empty results, fresh output arrays and unchanged row identity. Live diff membership
+uses its existing Map and materialization produces one output array.
+
+The [performance review](research/0002-pgwasm-typescript-performance-candidates.md#implementation-evidence)
+records repeated Bun/Chromium/WebKit comparisons, allocation observations and measurement limits.
+Removing a duplicate UTF-8 serialization scan was tried and deferred because tiny WebKit binds did
+not establish non-regression. The existing lone-surrogate length issue is tracked separately as
+[backlog 0021](backlog/0021-utf8-length-before-lone-low-surrogate.md).
+
 ## The read transport is pgxsinkit's own (ADR-0065 decision 6, 2026-09-29)
 
 `@durable-streams/client` 0.2.7 is gone from `@pgxsinkit/client`. The reader is ours: `circuits/long-poll.ts`

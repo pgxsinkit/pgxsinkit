@@ -31,14 +31,26 @@ export function parseResults(
       current.fields = message.fields.map((field) => ({ name: field.name, dataTypeID: field.dataTypeID }));
     } else if (message instanceof DataRowMessage) {
       const fields = current.fields;
-      const typeOf = (index: number) => fields[index]?.dataTypeID ?? 0;
+      const values = message.fields;
       if (options?.rowMode === "array") {
-        current.rows.push(message.fields.map((value, index) => parseType(value, typeOf(index), parsers)));
+        const row = new Array<unknown>(values.length);
+        for (let index = 0; index < values.length; index++) {
+          row[index] = parseType(values[index]!, fields[index]?.dataTypeID ?? 0, parsers);
+        }
+        current.rows.push(row);
       } else {
         const row: Row = {};
-        message.fields.forEach((value, index) => {
-          row[fields[index]?.name ?? String(index)] = parseType(value, typeOf(index), parsers);
-        });
+        for (let index = 0; index < values.length; index++) {
+          const field = fields[index];
+          const name = field?.name ?? String(index);
+          const value = parseType(values[index]!, field?.dataTypeID ?? 0, parsers);
+          // SQL column names are data: assigning __proto__ on {} would invoke its inherited setter.
+          if (name === "__proto__") {
+            Object.defineProperty(row, name, { value, enumerable: true, writable: true, configurable: true });
+          } else {
+            row[name] = value;
+          }
+        }
         current.rows.push(row);
       }
     } else if (message instanceof CommandCompleteMessage) {
