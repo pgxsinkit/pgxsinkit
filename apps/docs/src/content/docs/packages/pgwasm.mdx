@@ -15,7 +15,7 @@ or add the REPL and `pg_dump` to a debug page.
 
 **PostgreSQL versions:** pgxsinkit 0.5.x and earlier use PostgreSQL 18; 0.6.x and later use
 PostgreSQL 19 or later, including the 0.6 release candidates. The C build currently ships PostgreSQL
-19 RC1. A PG18 data directory or Store backup cannot be opened with the PG19 build; use a fresh store
+19 RC2. A PG18 data directory or Store backup cannot be opened with the PG19 build; use a fresh store
 and re-sync, exporting local-only data before switching. See [Postgres builds](/concepts/postgres-builds/).
 
 pgwasm began as a fork of [PGlite](https://pglite.dev) and is now its own runtime: it keeps PGlite's
@@ -242,7 +242,7 @@ engine's file calls to one store through that broker. The
 
 ## `@pgxsinkit/pgwasm-c`: the C build
 
-PostgreSQL 19 RC1 compiled to WebAssembly with Emscripten, single-threaded, with the memory, IndexedDB
+PostgreSQL 19 RC2 compiled to WebAssembly with Emscripten, single-threaded, with the memory, IndexedDB
 (`idb://`) and file (`file://`, Bun) filesystems, plus [OPFS-repacked](#the-opfs-repacked-store-pgxsinkitpgwasmopfs).
 `cBuild` is the build; it is the client's default. It runs
 in Safari and iOS 18.4, Chrome 137, Firefox 131 and later browsers, and in Bun (see
@@ -251,7 +251,7 @@ in Safari and iOS 18.4, Chrome 137, Firefox 131 and later browsers, and in Bun (
 The package ships the files of one [pgxsinkit/pgwasm-postgres](https://github.com/pgxsinkit/pgwasm-postgres)
 release byte for byte. Each release is built from an upstream PostgreSQL release plus patches derived from
 ElectricSQL's [postgres-pglite](https://github.com/electric-sql/postgres-pglite), and `SELECT version()` names
-it; `C_BUILD_IDENTITY.release` gives the build release name (`"pgwasm-postgres 19.0.0-rc.1"`) in code. See
+it; `C_BUILD_IDENTITY.release` gives the build release name (`"pgwasm-postgres 19.0.0-rc.2"`) in code. See
 [Postgres builds](/concepts/postgres-builds/#where-the-c-build-comes-from).
 
 The package ships its WebAssembly module, filesystem bundle and initdb as files next to its code,

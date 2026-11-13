@@ -767,7 +767,7 @@ The canonical scenarios are:
 
 ## Upgrade gates
 
-### PG19 release candidate
+### PG19 RC1 qualification
 
 The experimental `port-19` line adopts the published C release
 [`19.0.0-rc.1`](https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/19.0.0-rc.1)
@@ -804,6 +804,30 @@ The [release runbook](runbooks/pg19-rc-release.md) records its gates and publica
 The C release's native PostgreSQL baseline is separate from these toolkit contracts. Its known gaps
 and their workload-specific implications remain documented in
 [`pgwasm-postgres/docs/pgwasm-remaining-gaps.md`](https://github.com/pgxsinkit/pgwasm-postgres/blob/19.0.0-rc.1/docs/pgwasm-remaining-gaps.md).
+
+### PG19 RC2 adoption
+
+The next candidate adopts C release `19.0.0-rc.2` for both the server and pg_dump,
+with toolkit version `0.6.0-rc.2` on the `rc` channel. Its C adapter keeps the
+one-argument `ProcessStartupPacket` ABI despite upstream's added pending-cancel
+argument. The C repository's smoke gate exercises valid and malformed cancel keys,
+no handshake response and a subsequent successful query.
+
+`pgwasm-c-error-stack.test.ts` also sends those packets through the actual C host
+`WireSession`, with key lengths 1, 4, 256, 0 and 257. The adapter refuses them without
+ending the session. This is an internal ABI check: public `protocol(pg)` retains its
+existing policy of failing the pgwasm instance whenever an exchange throws, and
+this update adds no public cancellation support. Fresh-store/resync adoption retains
+the PG18 refusal checks; it makes no general RC1 schema-migration promise.
+
+The published C release is commit `528131bf65a410e6a533a3cf67e69abe2a122842`.
+Its local and CI engine-gate manifests are byte-identical; the release workflow
+independently rebuilt and checked the same manifest before publishing. Its native
+baseline remains separate from toolkit contracts: 243 programs, 188 passed,
+53 stable failures and two existing unstable programs, with the newly failing
+helper-dependent coverage explained in the C repository's RC2 audit.
+The toolkit's cached `validate` ran 1,561 tests with zero failures on the verified
+RC2 assets, including all five new host-ABI cases.
 
 When changing PostgreSQL, the Circuits engine, durable-streams, pgwasm, or the internalized read path (the reader in `packages/client/src/circuits`, the applier in `packages/client/src/sync`), add at least one regression test for any newly observed drift.
 

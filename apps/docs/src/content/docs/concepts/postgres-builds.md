@@ -22,7 +22,8 @@ database you created, or restore a backup.
 | 0.5.x and earlier         | 18               |
 | 0.6.x and later           | 19 or later      |
 
-The 0.6 release candidates already use PostgreSQL 19 RC1. Read `C_BUILD_IDENTITY.release` or run
+The 0.6 release candidates use PostgreSQL 19: `0.6.0-rc.1` uses RC1, and `0.6.0-rc.2` uses RC2.
+Read `C_BUILD_IDENTITY.release` or run
 `SELECT version()` for the exact PostgreSQL release; a package version is not an on-disk
 compatibility guarantee.
 

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { cBuild } from "../../packages/pgwasm-c/src";
 import { PgwasmFailedError } from "../../packages/pgwasm/src";
+import type { PostgresBuild, WireSession } from "../../packages/pgwasm/src/build";
 import type { BackendMessage } from "../../packages/pgwasm/src/protocol";
 import { protocol, serialize } from "../../packages/pgwasm/src/protocol";
 import { closeTestPgwasms, createTestPgwasm } from "./support/pgwasm";
@@ -55,6 +57,50 @@ describe("the C build's shadow stack across Postgres errors", () => {
     expect(firstWrongError([reply], DIVISION_BY_ZERO)).toBeUndefined();
     expect((await pg.query<{ ok: number }>("SELECT 1 AS ok")).rows).toEqual([{ ok: 1 }]);
   });
+});
+
+describe("the C build's one-argument startup entry point", () => {
+  it.each([1, 4, 256, 0, 257])(
+    "refuses a cancel packet with a %i-byte key without ending its embedded session",
+    async (keyBytes) => {
+      let session: WireSession | undefined;
+      const build: PostgresBuild = {
+        ...cBuild,
+        async boot(request) {
+          const mounted = await cBuild.boot(request);
+          const start = mounted.start.bind(mounted);
+          mounted.start = async (options) => {
+            const running = await start(options);
+            const openSession = running.openSession.bind(running);
+            running.openSession = async () => {
+              session = await openSession();
+              return session;
+            };
+            return running;
+          };
+          return mounted;
+        },
+      };
+      const pg = await createTestPgwasm({ build });
+      if (session === undefined) throw new Error("The C build did not open its wire session");
+      const channel = session;
+
+      const packet = new Uint8Array(12 + keyBytes).fill(0xa5);
+      const header = new DataView(packet.buffer);
+      header.setInt32(0, packet.length);
+      header.setInt32(4, 0x04d2162e); // CancelRequest code, with a variable-length protocol 3.2 key.
+      header.setInt32(8, 0x7fffffff);
+      const output: Uint8Array[] = [];
+      // Call the real C host channel directly: protocol(pg) deliberately latches any thrown exchange
+      // as a failed pgwasm instance. This tests the adapter's ABI, not public cancellation support.
+      expect(() => channel.exchange(packet, (chunk) => output.push(chunk.slice()))).toThrow(
+        "Cannot process the startup packet",
+      );
+      expect(output).toEqual([]);
+      expect((await pg.query<{ ok: number }>("SELECT 1 AS ok")).rows).toEqual([{ ok: 1 }]);
+      expect(pg.ready).toBe(true);
+    },
+  );
 });
 
 // A FATAL error exits the backend (proc_exit), whose exit callbacks tear the session down (they even write

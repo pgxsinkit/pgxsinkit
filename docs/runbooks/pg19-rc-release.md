@@ -1,8 +1,8 @@
 # PG19 toolkit release candidates
 
 The C release and the toolkit release have independent versions. The C build
-`pgwasm-postgres 19.0.0-rc.1` supplies the PostgreSQL server, initdb and pg_dump
-assets. The toolkit candidate `0.6.0-rc.1` publishes the coordinated TypeScript
+`pgwasm-postgres 19.0.0-rc.2` supplies the PostgreSQL server, initdb and pg_dump
+assets. The toolkit candidate `0.6.0-rc.2` publishes the coordinated TypeScript
 packages that consume those assets. Source `package.json` versions remain
 `0.0.0`; the release tag supplies the published version.
 
@@ -41,8 +41,8 @@ versions and leading-zero numeric components are refused before package staging.
 After adopting and qualifying the PG19 assets, inspect both publication plans:
 
 ```bash
-DRY_RUN=1 GITHUB_REPOSITORY=pgxsinkit/pgxsinkit GITHUB_REF_TYPE=tag GITHUB_REF_NAME=0.6.0-rc.1 bun run publish:github-packages
-DRY_RUN=1 bun run release:npm 0.6.0-rc.1
+DRY_RUN=1 GITHUB_REPOSITORY=pgxsinkit/pgxsinkit GITHUB_REF_TYPE=tag GITHUB_REF_NAME=0.6.0-rc.2 bun run publish:github-packages
+DRY_RUN=1 bun run release:npm 0.6.0-rc.2
 ```
 
 Dry runs do not rewrite package manifests or skills, require credentials, fetch
@@ -55,7 +55,7 @@ GitHub Packages workflow builds and publishes the candidate under `rc` after
 its gates pass. Wait for that job to finish before mirroring to public npm:
 
 ```bash
-bun run release:npm 0.6.0-rc.1
+bun run release:npm 0.6.0-rc.2
 ```
 
 The mirror downloads the exact GitHub Packages tarball for each package and

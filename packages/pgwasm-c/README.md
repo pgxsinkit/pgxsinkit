@@ -1,7 +1,7 @@
 # @pgxsinkit/pgwasm-c
 
 The C Postgres build for [`@pgxsinkit/pgwasm`](https://www.npmjs.com/package/@pgxsinkit/pgwasm):
-PostgreSQL 19 RC1 compiled to WebAssembly with Emscripten, single-threaded, with the memory,
+PostgreSQL 19 RC2 compiled to WebAssembly with Emscripten, single-threaded, with the memory,
 IndexedDB (`idb://`) and file (`file://`, Bun) filesystems, plus
 [OPFS-repacked](https://pgxsinkit.github.io/packages/pgwasm/#the-opfs-repacked-store-pgxsinkitpgwasmopfs)
 through `createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`.
