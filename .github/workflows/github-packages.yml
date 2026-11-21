@@ -111,6 +111,7 @@ jobs:
           name: browser-lane-traces
           path: |
             test-results/
+            tmp/playwright/board-worker/
             playwright-report/
             tmp/pgwasm-idb-browser-results/
             tmp/pgwasm-opfs-browser-results/

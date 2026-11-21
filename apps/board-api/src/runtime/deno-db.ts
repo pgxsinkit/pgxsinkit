@@ -11,7 +11,11 @@ const relations = defineRelations(schema);
 export function createDenoBoardDb(connectionString: string) {
   const url = new URL(connectionString);
   console.log("[pgxsinkit-timing]", JSON.stringify({ route: "db-connect", host: url.hostname, port: url.port }));
-  const client = postgres(connectionString, { prepare: false });
+  const client = postgres(connectionString, {
+    prepare: false,
+    // The pinned Edge runtime does not implement the Node socket user-buffer API used by onread.
+    onread: false,
+  });
 
   const t0 = performance.now();
   void client`select 1`

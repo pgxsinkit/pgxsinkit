@@ -1120,7 +1120,9 @@ export function buildCreateValidationSchema(entry: SyncTableEntry) {
  * 400-rejected by {@link findManagedFieldViolations}; omitting them keeps the schema an accurate
  * statement of what an update may carry.
  */
-export function buildUpdateValidationSchema(entry: SyncTableEntry) {
+export function buildUpdateValidationSchema(
+  entry: SyncTableEntry,
+): ReturnType<ReturnType<typeof createMutationInsertSchema<AnyPgTable>>["partial"]> {
   const updateSchema = createMutationInsertSchema(entry.table as AnyPgTable).partial();
   const managedKeys = getGuardedManagedFields(entry, "update").map((field) => field.propertyKey);
   if (managedKeys.length === 0) {

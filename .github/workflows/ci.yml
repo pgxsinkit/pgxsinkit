@@ -119,7 +119,7 @@ jobs:
         with:
           name: browser-lane-traces
           path: |
-            test-results/
+            tmp/playwright/board-worker/
             playwright-report/
           if-no-files-found: ignore
           retention-days: 7

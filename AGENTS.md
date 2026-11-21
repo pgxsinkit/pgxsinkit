@@ -22,10 +22,13 @@ agent guide, `~/.claude/CLAUDE.md`; full rationale in
 
 - **Scripts are check-default.** `bun run format` / `bun run lint` **check** (non-mutating); use
   `format:write` / `lint:fix` to change files. `bun run validate` (the skill-pin placeholder check first, then format,
-  typecheck, lint, and the unit suite) is the **pre-commit** gate, auto-installed via the `prepare`
-  script. It stays quick through a content-addressed cache (`.buildcache/`): each stage is skipped when
+  typecheck, lint, public-package builds with declarations, and the unit suite) is the **pre-commit**
+  gate, auto-installed via the `prepare` script. It stays quick through a content-addressed cache
+  (`.buildcache/`): each stage is skipped when
   its inputs are unchanged since it last passed, and the unit stage runs only the tests a change can
-  affect (import-graph selection; anything ungraphable always runs) — see ADR-0051. `bun run validate:full`
+  affect (import-graph selection; anything ungraphable always runs) — see ADR-0051. Both validation gates
+  share `check:public-packages`, whose `CODE` inputs cover source, manifests, dependency pins, compiler
+  settings and build scripts. Publishing runs `build:public-packages` directly. `bun run validate:full`
   is the **pre-push** gate and what CI runs; it adds the doc/sync-artifact checks and is cached the same
   way. `bun run validate:refresh` (= `PGXSINKIT_FORCE=1 bun run validate:full`) ignores the cache, runs
   everything, and refreshes the baseline — it runs **only on the maintainer's explicit, per-run
@@ -120,7 +123,7 @@ vocabulary.
 
 ## Definition of done
 
-- `bun run validate` (the pre-commit gate: the skill-pin placeholder check, format, lint, typecheck, and the affected unit tests) must pass before any commit; it is cached and selection-scoped, so unchanged work re-runs almost nothing.
+- `bun run validate` (the pre-commit gate: the skill-pin placeholder check, format, lint, typecheck, public-package builds with declarations, and the affected unit tests) must pass before any commit; it is cached and selection-scoped, so unchanged work re-runs almost nothing.
 - The hand-back gates are `bun run validate` (pre-commit) and `bun run validate:full` (pre-push / CI-parity, cached the same way). Those two are the whole contract — a green cached run IS a green run. `bun run validate:refresh` and `bun run test:unit:nocache` are NOT part of any hand-back: they run only when the maintainer explicitly asks for that specific run (see the ⛔ HARD STOP section above).
 
 Integration suites must run through the package scripts that launch isolated compose projects (`test:integration:contract`, `test:integration:implementation`, or `test:integration`). Do not rely on shared long-running infra for integration verification.
