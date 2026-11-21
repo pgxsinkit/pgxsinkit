@@ -22,14 +22,15 @@ database you created, or restore a backup.
 | 0.5.x and earlier         | 18               |
 | 0.6.x and later           | 19 or later      |
 
-The 0.6 release candidates use PostgreSQL 19: `0.6.0-rc.1` uses RC1, and `0.6.0-rc.2` uses RC2.
+The stable 0.6 release uses PostgreSQL 19.0. Its release candidates `0.6.0-rc.1` and `0.6.0-rc.2`
+used RC1 and RC2 respectively.
 Read `C_BUILD_IDENTITY.release` or run
 `SELECT version()` for the exact PostgreSQL release; a package version is not an on-disk
 compatibility guarantee.
 
 The PG19 C build uses data format 2 and refuses PG18 format-1 directories and Store backups,
-including unmarked PG18 directories. Keep the old store available, export any local-only data,
-then create a fresh store under a different path and let synced data re-sync. Opening the old
+including unmarked PG18 directories. Flush pending writes and export any local-only data with the old
+application, then recreate the local store and let synced data re-sync. Opening the old
 directory with the new build does not upgrade it.
 
 ## Where the C build comes from

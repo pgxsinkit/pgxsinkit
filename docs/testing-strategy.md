@@ -830,6 +830,14 @@ helper-dependent coverage explained in the C repository's RC2 audit.
 The toolkit's cached `validate` ran 1,561 tests with zero failures on the verified
 RC2 assets, including all five new host-ABI cases.
 
+### PostgreSQL 19.0 adoption
+
+Toolkit `0.6.0` pins the server and pg_dump from C release `19.0.0` (commit
+`77228df75b0b80e633c6153cbc17db69ca3a7f6e`). The final release retains the PG19
+host ABI and data format 2. Chromium and WebKit passed all 40 IndexedDB and dump
+cases, including PG18 store refusal, and all 12 OPFS cases. The C build and regression results are
+recorded in the [PG19 qualification report](https://github.com/pgxsinkit/pgwasm-postgres/blob/77228df75b0b80e633c6153cbc17db69ca3a7f6e/docs/pg19-ga-release.md).
+
 When changing PostgreSQL, the Circuits engine, durable-streams, pgwasm, or the internalized read path (the reader in `packages/client/src/circuits`, the applier in `packages/client/src/sync`), add at least one regression test for any newly observed drift.
 
 Recorded apply-semantics drift (read-path engine):

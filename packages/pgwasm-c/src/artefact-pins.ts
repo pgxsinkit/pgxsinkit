@@ -12,25 +12,25 @@
 /** The release the files are assets of. */
 export const ARTEFACT_RELEASE = {
   repository: "pgxsinkit/pgwasm-postgres",
-  tag: "19.0.0-rc.2",
-  name: "pgwasm-postgres 19.0.0-rc.2",
-  commit: "528131bf65a410e6a533a3cf67e69abe2a122842",
-  upstream: { tag: "REL_19_RC2", commit: "dffcca2e3c81178c64d4c1f44543a3507d0b7508" },
+  tag: "19.0.0",
+  name: "pgwasm-postgres 19.0.0",
+  commit: "77228df75b0b80e633c6153cbc17db69ca3a7f6e",
+  upstream: { tag: "REL_19_0", commit: "5c839a2a08b9b87a349be97371fac6c5a2873b10" },
   dataFormat: 2,
   builderImage:
     "ghcr.io/pgxsinkit/pgwasm-builder@sha256:cbb378a50de43cd2fbd8718b72ce4c7595ffe421148a3c32435906f096bc5130",
-  manifestSha256: "aa13280c998ac707210025f77fdf0c1afd9f7970d6f11b03d70757cbf9006d3b",
+  manifestSha256: "89e117f0eea51612a5b917466158047c8ce540b5ba226c60e6c1828986524c49",
 } as const;
 
 /** Every pinned file, by its name in `artefacts/` (the release asset of the same name). */
 export const ARTEFACT_FILES = {
-  "amcheck.tar.gz": { bytes: 21906, sha256: "1af3d942e088a8a8317d46861b56603dd6fe38e5d9d7ae26e809efdf1f784f5d" },
+  "amcheck.tar.gz": { bytes: 21901, sha256: "1d01e05449f16f259ac9f123bde6a3cedf5df63976eb6e12f8111a9636e068e2" },
   "initdb.js": { bytes: 105130, sha256: "cf3fff4109879f3be1ba321f19b126c4f8d518d9909846927d3104b1ec0a8129" },
-  "initdb.wasm": { bytes: 308968, sha256: "2c9bb1c3ad3267b4ae5d21c1bc9ebfaf608ecfbb2e14e671ad4ed0a24657edb3" },
-  "postgres.data": { bytes: 6332734, sha256: "eaa28b912167539490fedb7f37ccecfd4d569919b16da7708b2aad62442bde98" },
-  "postgres.js": { bytes: 337357, sha256: "6c6c65b7fcbc3651f8bb38a4536216b186eb8cd57bca5fca1ce712a1fcc83009" },
-  "postgres.wasm": { bytes: 9483613, sha256: "9d3b5b288cd1e0dc5d7adcb4b7a17de0d6dd6f5545c1fa350b98f67f3ed15306" },
-  "prepopulated.tar.gz": { bytes: 4474382, sha256: "7f0c6af78341f4bbbd80030e2131a86ee19791864f192a82f5d4ad49ee7d969f" },
+  "initdb.wasm": { bytes: 308968, sha256: "ca82d1ee91e260001f813de6076f2c3a87fb2e856362cb51b5d4059fbead9c76" },
+  "postgres.data": { bytes: 6332724, sha256: "59b01bd0a90fcbdc7fea17c9aae06bfdc53036f8ca0d7cffcaa8adabf4c42624" },
+  "postgres.js": { bytes: 337355, sha256: "e3ce8a5d2b123b6e0cab190c987695e065d9eade671b53a7f0a828a68f3db399" },
+  "postgres.wasm": { bytes: 9484304, sha256: "5934afc02711178271207d4f21430d82f2737a7433b5db2e69e1112538bcf317" },
+  "prepopulated.tar.gz": { bytes: 4474260, sha256: "c522e15dd0b53aa41b7e1822b61397ed87c1fd991985abad8b1d9892597ab1be" },
 } as const;
 
 export type ArtefactName = keyof typeof ARTEFACT_FILES;

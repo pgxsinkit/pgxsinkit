@@ -116,24 +116,16 @@ worker) fails with `StorageInUseError`.
 
 ## Existing data
 
-**Existing stores are not carried over.** Stores created by PGlite or by an earlier pgxsinkit release
-are not supported by this release: refresh them. pgxsinkit's local sync stores are refreshed by destroying
+**PG18 stores require recreation.** The C build runs PostgreSQL 19.0. Stores created by PGlite's PG18
+build or pgxsinkit 0.5.x require recreation. pgxsinkit's local sync stores are refreshed by destroying
 the local store ([`client.destroy()`](/concepts/local-store-lifecycle/)) and letting it re-sync from the
-server. An `idb://<name>` store needs nothing: pgwasm names its IndexedDB database `/pgwasm/<name>` where
-PGlite and earlier pgxsinkit releases used `/pglite/<name>`, so the same `idb://<name>` opens a new, empty
-store. Data held only in the old store does not come across: writes that had not synced when the app
-upgraded stay behind. Let pending writes flush before upgrading, or take a `dumpDataDir()` backup.
+server. Flush pending writes and export local-only data with the old application first. Deletion loses
+data held only in the old store, including writes that had not synced when the app upgraded.
 
-**A backup carries a database across.** Take a `dumpDataDir()` backup with the old version and pass it as
-`loadDataDir` when creating the pgwasm database: the data directory format is unchanged. A PGlite 0.5
-backup restores too: PGlite 0.5 runs PostgreSQL 18.3, and the C build runs a later PostgreSQL 18 release,
-which reads the same data directory. A data directory PGlite wrote carries no build record, and the C build
-claims it (see [A store belongs to its build](/concepts/postgres-builds/#a-store-belongs-to-its-build)).
-
-```ts
-const backup = await oldPg.dumpDataDir(); // on PGlite 0.5, or an earlier pgxsinkit release
-const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app", loadDataDir: backup });
-```
+**PG18 physical backups are refused.** `dumpDataDir()` preserves the old data directory format.
+The PG19 build rejects marked PG18 stores and backups with `DataFormatMismatchError`; unmarked PG18
+directories raise `PostgresVersionMismatchError`. These permanent refusals reach the client without
+retrying. Recreate the store and re-sync (see [Postgres builds](/concepts/postgres-builds/#the-refusals)).
 
 **The old databases stay until you delete them.** pgwasm never deletes `/pglite/*` IndexedDB databases:
 PGlite uses the same names, and another app on the same origin may own them. Once an app's own old stores
@@ -144,8 +136,8 @@ browser supports it:
 indexedDB.deleteDatabase("/pglite/my-app"); // the store that was idb://my-app
 ```
 
-**Earlier PGlite versions need a dump and restore.** PGlite 0.2 runs PostgreSQL 16 and PGlite 0.3 and 0.4
-run PostgreSQL 17; PostgreSQL 18 does not open their data directories. Dump with PGlite's `pg_dump` and run
+**Standalone data can be exported as SQL.** PG19 does not open PG16, PG17 or PG18 data directories.
+For a standalone database, dump application data with PGlite's `pg_dump` and run
 the SQL into a new pgwasm database:
 
 ```ts
@@ -158,17 +150,16 @@ await pg.exec(await dump.text());
 
 A plain dump leaves the restoring session's `search_path` empty; set it back if the session relies on it.
 
-**`opfs-ahp://` stores need a backup.** pgwasm does not read PGlite's one-handle-per-file OPFS layout:
-`opfs-ahp://` fails with `OpfsAhpRemovedError`. Take a `dumpDataDir()` backup on PGlite 0.5 (a SQL dump on
-earlier versions) and pass it as `loadDataDir` when creating the pgwasm database. pgwasm's OPFS store is
+**`opfs-ahp://` stores require recreation.** pgwasm does not read PGlite's one-handle-per-file OPFS layout:
+`opfs-ahp://` fails with `OpfsAhpRemovedError`. Flush pending writes and export local-only data with
+the old application, then create a fresh store. pgwasm's OPFS store is
 `createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`, which runs in a worker and keeps a data directory in four
 files (see [the OPFS-repacked store](/packages/pgwasm/#the-opfs-repacked-store-pgxsinkitpgwasmopfs)):
 
 ```ts
 import { createOpfsPgwasm } from "@pgxsinkit/pgwasm/opfs";
 
-const backup = await oldPg.dumpDataDir(); // on PGlite 0.5
-const pg = await createOpfsPgwasm({ build: cBuild, directory, pgwasm: { loadDataDir: backup } });
+const pg = await createOpfsPgwasm({ build: cBuild, directory });
 ```
 
 ## Where pgwasm does not fit

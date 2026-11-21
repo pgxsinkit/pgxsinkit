@@ -1,14 +1,14 @@
 # @pgxsinkit/pgwasm-pg-dump
 
 [pg_dump](https://www.postgresql.org/docs/19/app-pgdump.html) for
-[`@pgxsinkit/pgwasm`](https://www.npmjs.com/package/@pgxsinkit/pgwasm) databases: PostgreSQL 19 RC2's
+[`@pgxsinkit/pgwasm`](https://www.npmjs.com/package/@pgxsinkit/pgwasm) databases: PostgreSQL 19.0's
 pg_dump compiled to WebAssembly, run against a database in the same page, worker or Bun process.
 
-This is the experimental PG19 release-candidate channel. Install the same toolkit version of all
-three packages; the server and dumper use the matching pgwasm-postgres `19.0.0-rc.2` assets:
+Install the same toolkit version of all three packages; the server and dumper use the matching
+pgwasm-postgres `19.0.0` assets:
 
 ```bash
-bun add @pgxsinkit/pgwasm@rc @pgxsinkit/pgwasm-c@rc @pgxsinkit/pgwasm-pg-dump@rc
+bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c @pgxsinkit/pgwasm-pg-dump
 ```
 
 Use fresh, separately named PG19 stores. PG19's format-2 data directories and Store backups do not

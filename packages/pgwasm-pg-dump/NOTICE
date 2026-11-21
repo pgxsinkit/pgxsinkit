@@ -25,23 +25,23 @@ PostgreSQL License text is in LICENSE.
 The artefacts, and what is compiled into them
 ------------------------------------------------------------------------------
 
-`artefacts/` holds two files: assets of the pgwasm-postgres release 19.0.0-rc.2
-(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/19.0.0-rc.2), the release that also holds `@pgxsinkit/pgwasm-c`'s server, republished
+`artefacts/` holds two files: assets of the pgwasm-postgres release 19.0.0
+(https://github.com/pgxsinkit/pgwasm-postgres/releases/tag/19.0.0), the release that also holds `@pgxsinkit/pgwasm-c`'s server, republished
 byte-identical (each file's size and sha256 are pinned in `src/artefact-pins.ts`, from
 the release's manifest.json checked against its SHA256SUMS):
 
-  - `pg_dump.wasm`: pg_dump from PostgreSQL 19rc2 (it reports
-    `pg_dump (PostgreSQL) 19rc2`), compiled to WebAssembly;
+  - `pg_dump.wasm`: pg_dump from PostgreSQL 19.0 (it reports
+    `pg_dump (PostgreSQL) 19.0`), compiled to WebAssembly;
   - `pg_dump.js`, its Emscripten-generated loader.
 
 pgxsinkit/pgwasm-postgres (https://github.com/pgxsinkit/pgwasm-postgres) builds them
-from PostgreSQL 19rc2 (the upstream tag REL_19_RC2, commit
-dffcca2e3c81178c64d4c1f44543a3507d0b7508) plus a patch series and an overlay derived
+from PostgreSQL 19.0 (the upstream tag REL_19_0, commit
+5c839a2a08b9b87a349be97371fac6c5a2873b10) plus a patch series and an overlay derived
 from ElectricSQL's PGlite fork of PostgreSQL
 (https://github.com/electric-sql/postgres-pglite at
 b133782cd759f08b3aeb263b80a963b39c7b7af1; PostgreSQL License, Copyright (c)
-ElectricSQL and contributors). Release 19.0.0-rc.2 is pgwasm-postgres commit
-528131bf65a410e6a533a3cf67e69abe2a122842, built inside the builder image
+ElectricSQL and contributors). Release 19.0.0 is pgwasm-postgres commit
+77228df75b0b80e633c6153cbc17db69ca3a7f6e, built inside the builder image
 ghcr.io/pgxsinkit/pgwasm-builder@sha256:cbb378a50de43cd2fbd8718b72ce4c7595ffe421148a3c32435906f096bc5130
 (whose recipe is that repository's `builder/Containerfile`); its manifest.json records
 every file's size and sha256, and the release was published only because a rebuild of
@@ -71,10 +71,10 @@ Snowball), which pg_dump does not contain.
 Each component's notice follows, copied from the file named with it.
 
 ------------------------------------------------------------------------------
-PostgreSQL 19rc2, with changes derived from ElectricSQL's for PGlite (pg_dump.wasm)
+PostgreSQL 19.0, with changes derived from ElectricSQL's for PGlite (pg_dump.wasm)
 ------------------------------------------------------------------------------
 
-Source: https://github.com/postgres/postgres at dffcca2e3c81178c64d4c1f44543a3507d0b7508,
+Source: https://github.com/postgres/postgres at 5c839a2a08b9b87a349be97371fac6c5a2873b10,
 file COPYRIGHT. The derived ElectricSQL changes are distributed under the same license.
 
     PostgreSQL Database Management System

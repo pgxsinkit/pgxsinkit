@@ -1,7 +1,7 @@
 # @pgxsinkit/pgwasm-c
 
 The C Postgres build for [`@pgxsinkit/pgwasm`](https://www.npmjs.com/package/@pgxsinkit/pgwasm):
-PostgreSQL 19 RC2 compiled to WebAssembly with Emscripten, single-threaded, with the memory,
+PostgreSQL 19.0 compiled to WebAssembly with Emscripten, single-threaded, with the memory,
 IndexedDB (`idb://`) and file (`file://`, Bun) filesystems, plus
 [OPFS-repacked](https://pgxsinkit.github.io/packages/pgwasm/#the-opfs-repacked-store-pgxsinkitpgwasmopfs)
 through `createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`.
@@ -10,23 +10,23 @@ through `createOpfsPgwasm` from `@pgxsinkit/pgwasm/opfs`.
 PostgreSQL 19 or later, including the 0.6 release candidates. The exact PostgreSQL release is
 recorded in `C_BUILD_IDENTITY.release`.
 
-This is the experimental PG19 release-candidate channel. Install matching `@rc` packages:
+Install matching toolkit package versions:
 
 ```bash
-bun add @pgxsinkit/pgwasm@rc @pgxsinkit/pgwasm-c@rc
+bun add @pgxsinkit/pgwasm @pgxsinkit/pgwasm-c
 ```
 
 ```ts
 import { createPgwasm } from "@pgxsinkit/pgwasm";
 import { cBuild } from "@pgxsinkit/pgwasm-c";
 
-const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app-pg19-rc1" });
+const pg = await createPgwasm({ build: cBuild, dataDir: "idb://my-app-pg19" });
 ```
 
-Use a fresh store with a separate name for PG19. This build uses data format 2 and refuses PG18
+When upgrading from PG18, start with a fresh store. This build uses data format 2 and refuses PG18
 format-1 stores and backups, including unmarked PG18 directories. It does not migrate or delete an
-existing store. Keep the PG18 packages and store available while evaluating the RC; the stable
-`@latest` channel remains separate.
+existing store. Flush pending writes and export local-only data with the old application before
+recreating the local store and re-syncing.
 
 An unmarked directory from another PostgreSQL major raises `PostgresVersionMismatchError`.
 The client treats it as a permanent refusal and does not retry the incompatible open.

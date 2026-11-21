@@ -35,9 +35,9 @@ token-gated stream edge. Both images are built in
 
 ## Install
 
-The experimental PG19 channel is `@rc` (`0.6.0-rc.1`), with matching toolkit package versions.
-It uses fresh stores under separate names; existing PG18 stores and physical backups are refused.
-Stable installations continue to use the default `latest` channel.
+The stable 0.6 release uses PostgreSQL 19.0 for the local database. Install matching toolkit package
+versions. Upgrading from PG18 requires recreating the local store and re-syncing; existing PG18
+stores and physical backups are refused. Flush pending writes and export local-only data first.
 
 ```bash
 bun add @pgxsinkit/client @pgxsinkit/server @pgxsinkit/contracts
