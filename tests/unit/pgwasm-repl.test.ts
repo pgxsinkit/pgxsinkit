@@ -61,7 +61,7 @@ describe("runQuery", () => {
     const response = await runQuery("\\d no_such_table", pg);
     expect(response.results).toBeUndefined();
     expect(response.text).toBe('Did not find any relation named "no_such_table".');
-    expect((await runQuery("\\nope", pg)).text).toContain("unsupported command");
+    expect((await runQuery("\\nope", pg)).text).toBe("invalid command \\nope");
   });
 });
 
