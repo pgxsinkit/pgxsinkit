@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { defineRelations, eq, sql } from "drizzle-orm";
-import { Cache } from "drizzle-orm/cache/core/cache";
-import type { MutationOption } from "drizzle-orm/cache/core/cache";
 import { CodecsCollection } from "drizzle-orm/codecs";
 import {
   bigint,
@@ -45,6 +43,7 @@ const values = pgTable("typed_values", {
   id: serial("id").primaryKey(),
   big: bigint("big", { mode: "bigint" }),
   bytes: bytea("bytes"),
+  byteArrays: bytea("byte_arrays").$type<Buffer | null>().array(),
   day: date("day"),
   at: timestamp("at"),
   atTz: timestamp("at_tz", { withTimezone: true }),
@@ -59,7 +58,7 @@ async function database() {
   await client.exec(`
     CREATE TABLE users (id serial PRIMARY KEY, name text NOT NULL, active boolean NOT NULL DEFAULT true);
     CREATE TABLE typed_values (
-      id serial PRIMARY KEY, big bigint, bytes bytea, day date, at timestamp, at_tz timestamptz, span interval,
+      id serial PRIMARY KEY, big bigint, bytes bytea, byte_arrays bytea[], day date, at timestamp, at_tz timestamptz, span interval,
       doc jsonb, amounts numeric[], counts integer[]
     );
   `);
@@ -108,9 +107,10 @@ describe("the pgwasm Drizzle driver", () => {
     ]);
   });
 
-  it("maps rc5 numeric modes and nullable nested arrays through the real text protocol", async () => {
+  it("maps numeric modes and nullable nested arrays through the real text protocol", async () => {
     const columns = pgTable("codec_values", {
       bigNumber: bigint("big_number", { mode: "number" }),
+      bigString: bigint("big_string", { mode: "string" }),
       serialNumber: bigserial("serial_number", { mode: "number" }),
       bigNumbers: bigint("big_numbers", { mode: "number" }).$type<number | null>().array(),
       amountNumber: numeric("amount_number", { mode: "number" }),
@@ -131,6 +131,7 @@ describe("the pgwasm Drizzle driver", () => {
       codecValues: {
         columns: {
           bigNumber: f.valuesFromArray({ values: [1] }),
+          bigString: f.valuesFromArray({ values: ["9007199254740993"] }),
           serialNumber: f.valuesFromArray({ values: [2] }),
           bigNumbers: f.default({ defaultValue: [1, null, 2, 3] }),
           amountNumber: f.valuesFromArray({ values: [1.25] }),
@@ -149,6 +150,7 @@ describe("the pgwasm Drizzle driver", () => {
     const [row] = await db.select().from(columns);
     expect(row).toEqual({
       bigNumber: 1,
+      bigString: "9007199254740993",
       serialNumber: 2,
       bigNumbers: [1, null, 2, 3],
       amountNumber: 1.25,
@@ -270,11 +272,12 @@ describe("the pgwasm Drizzle driver", () => {
   });
 
   it("round-trips values through its codecs", async () => {
-    const { db } = await database();
+    const { client, db } = await database();
     const at = new Date("2024-03-01T10:20:30.000Z");
     await db.insert(values).values({
       big: 9223372036854775807n,
       bytes: Buffer.from([1, 2, 3]),
+      byteArrays: [Buffer.from([0, 128, 255]), null],
       day: "2024-03-01",
       at,
       atTz: at,
@@ -286,6 +289,7 @@ describe("the pgwasm Drizzle driver", () => {
     const [row] = await db.select().from(values);
     expect(row?.big).toBe(9223372036854775807n);
     expect([...(row?.bytes ?? [])]).toEqual([1, 2, 3]);
+    expect(row?.byteArrays).toEqual([Buffer.from([0, 128, 255]), null]);
     expect(row?.day).toBe("2024-03-01");
     expect(row?.at?.toISOString()).toBe(at.toISOString());
     expect(row?.atTz?.toISOString()).toBe(at.toISOString());
@@ -293,6 +297,8 @@ describe("the pgwasm Drizzle driver", () => {
     expect(row?.doc).toEqual({ nested: [1, "two"] });
     expect(row?.amounts).toEqual(["1.50", "2.25"]);
     expect(row?.counts).toEqual([1, 2, 3]);
+    const relational = drizzle(client, { relations: defineRelations({ values }) });
+    expect(await relational.query.values.findFirst()).toEqual(row);
   });
 
   it("builds SQL without a database through drizzle.mock", () => {
@@ -307,39 +313,6 @@ describe("the pgwasm Drizzle driver", () => {
   it("exposes the pgwasm database as $client", async () => {
     const { client, db } = await database();
     expect(db.$client).toBe(client);
-  });
-
-  it("invalidates through the configured cache: $cache.invalidate and every mutation", async () => {
-    const mutations: MutationOption[] = [];
-    // A real cache (drizzle skips a NoopCache and its subclasses) that records invalidations.
-    class RecordingCache extends Cache {
-      strategy(): "all" {
-        return "all";
-      }
-      async get(): Promise<undefined> {
-        return undefined;
-      }
-      async put(): Promise<void> {}
-      async onMutate(params: MutationOption): Promise<void> {
-        mutations.push(params);
-      }
-    }
-    const client = await createTestPgwasm();
-    await client.exec(
-      "CREATE TABLE users (id serial PRIMARY KEY, name text NOT NULL, active boolean NOT NULL DEFAULT true)",
-    );
-    const cache = new RecordingCache();
-    const db = drizzle(client, { cache });
-    await db.$cache.invalidate({ tables: "users" });
-    await db.insert(users).values({ name: "ada" });
-    expect(mutations).toEqual([{ tables: "users" }, { tables: ["users"] }]);
-    // The caller's cache object is not changed.
-    expect(Object.keys(cache)).toEqual([]);
-  });
-
-  it("keeps a callable no-op $cache.invalidate when no cache is configured", async () => {
-    const db = drizzle(await createTestPgwasm());
-    expect(await db.$cache.invalidate({ tables: "users" })).toBeUndefined();
   });
 
   it.each([undefined, false, true])("honours paramsInErrors=%s when a query fails", async (paramsInErrors) => {

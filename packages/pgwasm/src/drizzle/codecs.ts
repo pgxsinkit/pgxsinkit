@@ -6,8 +6,6 @@ import type { NormalizeCodec } from "drizzle-orm/codecs";
 import { makePgArray, parsePgArray } from "drizzle-orm/pg-core/array";
 import {
   arrayCompatNormalize,
-  castToText,
-  castToTextArr,
   genericPgCodecs,
   makeGeometryArray,
   parseGeometryArrayAndNormalize,
@@ -18,7 +16,7 @@ import {
   textToDateWithTz,
   type PgCodecs,
 } from "drizzle-orm/pg-core/codecs";
-import { base64ToUint8Array } from "drizzle-orm/utils";
+import { pgHexToUint8Array } from "drizzle-orm/utils";
 
 import { arrayParser, DATE, INTERVAL, TIMESTAMP, TIMESTAMPTZ, type Parser } from "../types";
 
@@ -46,27 +44,19 @@ const normalizeNullableArray = (normalize: NormalizeCodec) =>
 /** drizzle's codecs for pgwasm's value formats (the text protocol, pgwasm's default parsers). */
 export const pgwasmCodecs: PgCodecs = refineGenericPgCodecs({
   bigint: {
-    cast: castToText,
-    castArray: castToTextArr,
     normalize: BigInt,
     normalizeArray: normalizeNullableArray(BigInt),
   },
-  "bigint:string": { cast: castToText, castArray: castToTextArr },
+  "bigint:string": { normalize: String, normalizeArray: normalizeNullableArray(String) },
   "bigint:number": {
-    cast: castToText,
-    castArray: castToTextArr,
     normalize: Number,
     normalizeArray: normalizeNullableArray(Number),
   },
   bigserial: {
     normalize: BigInt,
     normalizeArray: normalizeNullableArray(BigInt),
-    cast: castToText,
-    castArray: castToTextArr,
   },
   "bigserial:number": {
-    cast: castToText,
-    castArray: castToTextArr,
     normalize: Number,
     normalizeArray: normalizeNullableArray(Number),
   },
@@ -80,20 +70,15 @@ export const pgwasmCodecs: PgCodecs = refineGenericPgCodecs({
         normalizeArray: normalizeNullableArray((value: Uint8Array) => Buffer.from(value)),
       }
     : {
-        normalizeInJson: base64ToUint8Array,
-        normalizeArrayInJson: arrayCompatNormalize(base64ToUint8Array),
+        normalizeInJson: pgHexToUint8Array,
+        normalizeArrayInJson: arrayCompatNormalize(pgHexToUint8Array),
       },
-  interval: { castArray: castToTextArr },
-  date: { castArray: castToTextArr, normalize: textToDate, normalizeArray: normalizeNullableArray(textToDate) },
-  "date:string": { castArray: castToTextArr },
+  date: { normalize: textToDate, normalizeArray: normalizeNullableArray(textToDate) },
   timestamp: {
-    castArray: castToTextArr,
     normalize: textToDateWithTz,
     normalizeArray: normalizeNullableArray(textToDateWithTz),
   },
-  timestamptz: { castArray: castToTextArr, normalize: textToDate, normalizeArray: normalizeNullableArray(textToDate) },
-  "timestamp:string": { castArray: castToTextArr },
-  "timestamptz:string": { castArray: castToTextArr },
+  timestamptz: { normalize: textToDate, normalizeArray: normalizeNullableArray(textToDate) },
   json: { normalizeParam: (value: unknown) => (typeof value === "object" ? value : JSON.stringify(value)) },
   jsonb: { normalizeParam: (value: unknown) => (typeof value === "object" ? value : JSON.stringify(value)) },
   "geometry(point)": {

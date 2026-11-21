@@ -2,9 +2,6 @@
 // and contributors — see NOTICE). Changes: rebound from PGlite to pgwasm; the driver never constructs its
 // own database. Owned outright (ADR-0062).
 
-import type { Cache } from "drizzle-orm/cache/core/cache";
-import { NoopCache } from "drizzle-orm/cache/core/cache";
-import type { QueryMetadata, WithCacheConfig } from "drizzle-orm/cache/core/types";
 import { entityKind } from "drizzle-orm/entity";
 import { NoopLogger, type Logger } from "drizzle-orm/logger";
 import { PgAsyncPreparedQuery, PgAsyncSession, PgAsyncTransaction } from "drizzle-orm/pg-core/async/session";
@@ -22,7 +19,6 @@ export type PgwasmSessionClient = Pick<Pgwasm, "query"> & Partial<Pick<Pgwasm, "
 
 export interface PgwasmSessionOptions {
   logger?: Logger;
-  cache?: Cache;
   paramsInErrors?: boolean;
 }
 
@@ -36,7 +32,6 @@ export class PgwasmSession<TRelations extends AnyRelations> extends PgAsyncSessi
   readonly #relations: TRelations;
   readonly #options: PgwasmSessionOptions;
   readonly #logger: Logger;
-  readonly #cache: Cache;
 
   constructor(
     client: PgwasmSessionClient,
@@ -49,35 +44,22 @@ export class PgwasmSession<TRelations extends AnyRelations> extends PgAsyncSessi
     this.#relations = relations;
     this.#options = options;
     this.#logger = options.logger ?? new NoopLogger();
-    this.#cache = options.cache ?? new NoopCache();
   }
 
   prepareQuery<T extends PreparedQueryConfig = PreparedQueryConfig>(
     query: Query,
-    mode: "arrays" | "objects" | "raw",
+    mode: "arrays" | "objects" | "raw" | "call",
     _name: string | boolean,
     mapper: ((rows: unknown[]) => unknown) | undefined,
-    queryMetadata?: QueryMetadata,
-    cacheConfig?: WithCacheConfig,
   ): PgAsyncPreparedQuery<T> {
     const executor = async (params?: unknown[]) => {
       const result = await this.#client.query(query.sql, params, {
         rowMode: mode === "arrays" ? "array" : "object",
-        parsers: drizzleParsers,
+        ...(mode === "call" ? {} : { parsers: drizzleParsers }),
       });
       return mode === "raw" ? result : result.rows;
     };
-    return new PgAsyncPreparedQuery<T>(
-      executor,
-      query,
-      mapper,
-      mode,
-      this.#logger,
-      this.#cache,
-      queryMetadata,
-      cacheConfig,
-      this.#options.paramsInErrors,
-    );
+    return new PgAsyncPreparedQuery<T>(executor, query, mapper, mode, this.#logger, this.#options.paramsInErrors);
   }
 
   async transaction<T>(

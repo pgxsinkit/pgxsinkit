@@ -209,9 +209,10 @@ their own. Where the code came from, file by file, is in
   `pgwasm-protocol` also proves `/protocol`'s exclusive session: a query, a transaction and a backup
   wait for it, and it waits for a running transaction's COMMIT.
 - **Drizzle driver** (`pgwasm-drizzle`): exercises the public driver against the real pgwasm
-  database, including cache invalidation and transaction sessions. The Drizzle RC driver uses
-  upstream `QueryMetadata` (table names are collected lazily) and forwards `paramsInErrors` to
-  prepared queries. Bound parameters are omitted from Drizzle's error message and `params` field
+  database, including numeric modes, nullable nested arrays, relational bytea decoding and
+  transaction sessions. The Drizzle RC6 driver follows the upstream removal of the query-cache
+  API and forwards `paramsInErrors` to prepared queries. Bound parameters are omitted from Drizzle's
+  error message and `params` field
   by default or when explicitly disabled; opting in includes them, including inside transactions.
 - **pg_dump** (`pgwasm-pg-dump`, `pgwasm-pg-dump-session`, `pgwasm-pg-dump-framing`): the fork's
   pg_dump cases, a round trip of many column types (sequences and a view included) through `exec()`, a

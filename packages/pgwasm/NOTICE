@@ -96,7 +96,7 @@ began as a copy of drizzle-orm's PGlite driver (`src/pglite/driver.ts`,
 
 Changes: the session, transaction and database classes are rebound from PGlite to
 pgwasm; the driver never constructs its own database; it has its own JIT capability
-probe; `$cache.invalidate` is bound without changing the caller's cache. The Apache-2.0 terms are
+probe; its codecs and prepared-query session follow Drizzle RC6. The Apache-2.0 terms are
 permanent. A copy of the Apache License 2.0 ships with this package in
 LICENSE-APACHE-2.0 (from https://www.apache.org/licenses/LICENSE-2.0.txt).
 

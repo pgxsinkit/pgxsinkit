@@ -1,7 +1,6 @@
 // Began as a copy of drizzle-orm's PGlite driver (`src/pglite/*.ts` at 1.0.0-rc.4; Apache-2.0, © Drizzle Team
 // and contributors — see NOTICE). Changes: rebound from PGlite to pgwasm; the driver never constructs its
-// own database; its own JIT capability probe; `$cache.invalidate` bound without changing the caller's
-// cache object. Owned outright (ADR-0062).
+// own database; its own JIT capability probe. Owned outright (ADR-0062).
 
 import { entityKind } from "drizzle-orm/entity";
 import { DefaultLogger, type Logger } from "drizzle-orm/logger";
@@ -51,13 +50,9 @@ function construct<TRelations extends AnyRelations, TClient extends PgwasmSessio
   const relations = (config.relations ?? {}) as TRelations;
   const session = new PgwasmSession<TRelations>(client, dialect, relations, {
     ...(logger ? { logger } : {}),
-    ...(config.cache ? { cache: config.cache } : {}),
     ...(config.paramsInErrors !== undefined ? { paramsInErrors: config.paramsInErrors } : {}),
   });
   const db = new PgwasmDatabase<TRelations>(dialect, session, relations);
-  // `db.$cache.invalidate` is the cache's own invalidation; with no cache it stays the no-op it starts as.
-  const cache = config.cache;
-  if (cache) db.$cache = { invalidate: (params) => cache.onMutate(params) };
   return Object.assign(db, { $client: client });
 }
 

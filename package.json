@@ -107,7 +107,7 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
-    "bun-types": "^1.4.4",
+    "bun-types": "^1.4.5",
     "drizzle-kit": "rc",
     "drizzle-orm": "rc",
     "drizzle-seed": "rc",
@@ -124,6 +124,6 @@
     "vite": "8.3.5",
     "zod": "4.6.7"
   },
-  "packageManager": "bun@1.4.4",
+  "packageManager": "bun@1.4.5",
   "// @types/node": "Use the newest Node 26 release (mise.toml): the registry's latest tag points to 22.20.2, whose MessagePort declarations lack onmessage and typed message events required by Bun tests. Verified 26.5.1 via bun info @types/node@26 version."
 }
