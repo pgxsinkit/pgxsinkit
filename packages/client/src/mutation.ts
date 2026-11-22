@@ -1,5 +1,6 @@
 import {
   and,
+  asc,
   desc,
   eq,
   exists,
@@ -9,6 +10,7 @@ import {
   is,
   isNotNull,
   isNull,
+  like,
   lt,
   ne,
   notExists,
@@ -823,6 +825,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
               payloadJson: jsonStringifyPayload({
                 kind: "create",
                 value: item.input,
+                localValue: item.optimisticRecord,
               }),
               nowUs: item.nowUs,
               // A create has no Base server version (ADR-0015): its conflict is a PK collision, a
@@ -1226,6 +1229,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
 
       const url = mutationUrls.authoritative;
       let acksByMutationId: Map<string, BatchMutationAck["acks"][number]>;
+      let rejectedRequest: MutationRequestError | undefined;
 
       try {
         const authToken = await untilAborted(Promise.resolve(options.getAuthToken?.()));
@@ -1258,124 +1262,150 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
         const responseJson = (await response.json()) as BatchMutationAck;
         acksByMutationId = new Map(responseJson.acks.map((ack) => [ack.mutationId, ack]));
       } catch (error) {
-        // A pessimistic write is foreground: it never reached the server (transport / non-2xx), so the
-        // unit did not happen. Mark it failed — KEEPING the optimistic overlay so a retry can resend — and
-        // rethrow so the caller surfaces it. There is no background retry for pessimistic units.
-        const failedAtUs = nowMicroseconds();
-        const httpStatus = error instanceof MutationRequestError ? error.status : null;
-        const errorMessage = error instanceof Error ? error.message : "Authoritative write failed";
-        for (const rows of byContext.values()) {
-          await applyMutationStatusUpdates(
-            options.db,
-            rows[0]!.context,
-            rows.map((row) => {
-              const attemptCount = row.attemptCount + 1;
-              const outcome = resolveBatchFailureOutcome(attemptCount, maxMutationAttempts, failedAtUs);
-              return {
-                mutationId: row.mutationId,
-                status: outcome.status,
-                attemptCount,
-                updatedAtUs: failedAtUs,
-                lastError: errorMessage,
-                nextRetryAtUs: outcome.nextRetryAtUs,
-                lastHttpStatus: httpStatus,
-                conflictReason: null,
-              };
-            }),
+        // A definitive structural refusal declines this whole atomic unit. Settle it through the same
+        // rejection path as a typed business refusal, then preserve the foreground request error.
+        // Transport, auth and server faults leave the outcome unknown and keep the edits for a retry.
+        if (error instanceof MutationRequestError && classifyFailureStatus(error.status) === "quarantined") {
+          rejectedRequest = error;
+          acksByMutationId = new Map(
+            mutations.map((mutation) => [
+              mutation.mutationId,
+              { ...mutation, status: "rejected" as const, httpStatus: error.status, rejectionReason: error.message },
+            ]),
           );
+        } else {
+          const failedAtUs = nowMicroseconds();
+          const httpStatus = error instanceof MutationRequestError ? error.status : null;
+          const errorMessage = error instanceof Error ? error.message : "Authoritative write failed";
+          for (const rows of byContext.values()) {
+            await applyMutationStatusUpdates(
+              options.db,
+              rows[0]!.context,
+              rows.map((row) => {
+                const attemptCount = row.attemptCount + 1;
+                const outcome = resolveBatchFailureOutcome(attemptCount, maxMutationAttempts, failedAtUs);
+                return {
+                  mutationId: row.mutationId,
+                  status: outcome.status,
+                  attemptCount,
+                  updatedAtUs: failedAtUs,
+                  lastError: errorMessage,
+                  nextRetryAtUs: outcome.nextRetryAtUs,
+                  lastHttpStatus: httpStatus,
+                  conflictReason: null,
+                };
+              }),
+            );
+          }
+          throw error;
         }
-        throw error;
       }
 
       // Apply each member's ack.
       const ackedAtUs = nowMicroseconds();
       const failedAtUs = nowMicroseconds();
-      const rejectedIds = new Set<string>();
+      const rejectedIds = new Set(
+        prepared
+          .filter((row) => acksByMutationId.get(row.mutationId)?.status === "rejected")
+          .map((row) => row.mutationId),
+      );
       const conflictedIds = new Set<string>();
 
-      for (const rows of byContext.values()) {
-        await applyMutationStatusUpdates(
-          options.db,
-          rows[0]!.context,
-          rows.map((row) => {
-            const ack = acksByMutationId.get(row.mutationId);
+      const settleUnit = async () => {
+        for (const rows of byContext.values()) {
+          await applyMutationStatusUpdates(
+            options.db,
+            rows[0]!.context,
+            rows.map((row) => {
+              const ack = acksByMutationId.get(row.mutationId);
 
-            if (ack?.status === "rejected") {
-              // ADR-0022 §4: a business rejection. Terminal `rejected`; the overlay is auto-discarded below.
-              rejectedIds.add(row.mutationId);
+              if (ack?.status === "rejected") {
+                // ADR-0022 §4: a business rejection. Terminal `rejected`; the overlay is auto-discarded below.
+                rejectedIds.add(row.mutationId);
+                return {
+                  mutationId: row.mutationId,
+                  status: "rejected" as const,
+                  attemptCount: row.attemptCount + 1,
+                  updatedAtUs: failedAtUs,
+                  lastError: ack.rejectionReason ?? "Rejected by the authoritative endpoint",
+                  nextRetryAtUs: null,
+                  lastHttpStatus: ack.httpStatus ?? 409,
+                  conflictReason: ack.rejectionReason ?? "Rejected by the authoritative endpoint",
+                };
+              }
+
+              if (ack?.status === "conflicted") {
+                // ADR-0015: a stale member — terminal `conflicted`, overlay KEPT (resolve as a new write).
+                conflictedIds.add(row.mutationId);
+                return {
+                  mutationId: row.mutationId,
+                  status: "conflicted" as const,
+                  attemptCount: row.attemptCount + 1,
+                  updatedAtUs: failedAtUs,
+                  serverUpdatedAtUs: ack.serverUpdatedAtUs ?? null,
+                  replaceServerUpdatedAtUs: true,
+                  lastError: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
+                  nextRetryAtUs: null,
+                  lastHttpStatus: ack.httpStatus ?? 409,
+                  conflictReason: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
+                };
+              }
+
+              if (!ack || ack.status !== "acked") {
+                const attemptCount = row.attemptCount + 1;
+                const outcome = resolveFailureOutcome(
+                  ack?.httpStatus ?? null,
+                  attemptCount,
+                  maxMutationAttempts,
+                  failedAtUs,
+                );
+                return {
+                  mutationId: row.mutationId,
+                  status: outcome.status,
+                  attemptCount,
+                  updatedAtUs: failedAtUs,
+                  lastError: ack?.conflictReason ?? "Authoritative write not acknowledged",
+                  nextRetryAtUs: outcome.nextRetryAtUs,
+                  lastHttpStatus: ack?.httpStatus ?? null,
+                  conflictReason: null,
+                };
+              }
+
               return {
                 mutationId: row.mutationId,
-                status: "rejected" as const,
+                status: "acked" as const,
                 attemptCount: row.attemptCount + 1,
-                updatedAtUs: failedAtUs,
-                lastError: ack.rejectionReason ?? "Rejected by the authoritative endpoint",
-                nextRetryAtUs: null,
-                lastHttpStatus: ack.httpStatus ?? 409,
-                conflictReason: ack.rejectionReason ?? "Rejected by the authoritative endpoint",
-              };
-            }
-
-            if (ack?.status === "conflicted") {
-              // ADR-0015: a stale member — terminal `conflicted`, overlay KEPT (resolve as a new write).
-              conflictedIds.add(row.mutationId);
-              return {
-                mutationId: row.mutationId,
-                status: "conflicted" as const,
-                attemptCount: row.attemptCount + 1,
-                updatedAtUs: failedAtUs,
+                updatedAtUs: ackedAtUs,
+                ackedAtUs,
+                replaceAckedAtUs: true,
                 serverUpdatedAtUs: ack.serverUpdatedAtUs ?? null,
                 replaceServerUpdatedAtUs: true,
-                lastError: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
+                lastError: null,
                 nextRetryAtUs: null,
-                lastHttpStatus: ack.httpStatus ?? 409,
-                conflictReason: ack.conflictReason ?? "Stale write rejected (reject-if-stale)",
-              };
-            }
-
-            if (!ack || ack.status !== "acked") {
-              const attemptCount = row.attemptCount + 1;
-              const outcome = resolveFailureOutcome(
-                ack?.httpStatus ?? null,
-                attemptCount,
-                maxMutationAttempts,
-                failedAtUs,
-              );
-              return {
-                mutationId: row.mutationId,
-                status: outcome.status,
-                attemptCount,
-                updatedAtUs: failedAtUs,
-                lastError: ack?.conflictReason ?? "Authoritative write not acknowledged",
-                nextRetryAtUs: outcome.nextRetryAtUs,
-                lastHttpStatus: ack?.httpStatus ?? null,
+                lastHttpStatus: row.mutationKind === "delete" ? 204 : 200,
                 conflictReason: null,
               };
-            }
-
-            return {
-              mutationId: row.mutationId,
-              status: "acked" as const,
-              attemptCount: row.attemptCount + 1,
-              updatedAtUs: ackedAtUs,
-              ackedAtUs,
-              replaceAckedAtUs: true,
-              serverUpdatedAtUs: ack.serverUpdatedAtUs ?? null,
-              replaceServerUpdatedAtUs: true,
-              lastError: null,
-              nextRetryAtUs: null,
-              lastHttpStatus: row.mutationKind === "delete" ? 204 : 200,
-              conflictReason: null,
-            };
-          }),
-        );
-      }
-
-      // ADR-0022 §4: auto-discard the optimistic overlay for every rejected entity (the whole unit was
-      // declined). The terminal `rejected` journal row is kept for diagnostics + `onReject`.
-      for (const row of prepared) {
-        if (rejectedIds.has(row.mutationId)) {
-          await discardOverlayForSettledEntity(options.db, row.context, row.entityKey, row.entityKeyJson);
+            }),
+          );
         }
+
+        // Journal settlement and rollback share one commit. A reopened store must never retain an
+        // overlay containing a rejection that its journal has already marked terminal.
+        if (rejectedIds.size > 0) {
+          const restored = new Set<string>();
+          for (const row of prepared) {
+            const key = `${row.context.key}:${row.entityKeyJson}`;
+            if (rejectedIds.has(row.mutationId) && !restored.has(key)) {
+              await restoreOverlayAfterRejection(options.db, row.context, row.entityKey, row.entityKeyJson);
+              restored.add(key);
+            }
+          }
+        }
+      };
+      if (rejectedIds.size > 0) {
+        await runInTransaction(settleUnit);
+      } else {
+        await settleUnit();
       }
 
       const affectedContexts = [...byContext.keys()]
@@ -1402,6 +1432,7 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
       // self-verifying clear — it settles the marker to `false` iff no `sending` row remains anywhere.
       await settleRecoveryMarker();
 
+      if (rejectedRequest) throw rejectedRequest;
       return { acks: [...acksByMutationId.values()] };
     },
     reconcile: async (table) => {
@@ -1413,8 +1444,72 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
     },
     retryFailed: async (table) => {
       assertValidMutationTransition("failed", "pending");
+      assertValidMutationTransition("failed", "rejected");
       const contexts = filterContexts(tableContexts, table);
       const nowUs = nowMicroseconds();
+
+      // Older clients kept definitive foreground refusals as failed. An explicit retry settles those
+      // known-declined units locally, including their members on other tables, without resending them.
+      const allContexts = filterContexts(tableContexts, undefined);
+      const declinedUnits = new Set<string>();
+      for (const context of contexts) {
+        const journal = context.tables.journal;
+        const query = queryBuilder
+          .select({
+            unit: sql<string>`${journal.writeUnit}`.as("unit"),
+            httpStatus: sql<number>`${journal.lastHttpStatus}`.as("httpStatus"),
+          })
+          .from(journal)
+          .where(
+            and(eq(journal.status, "failed"), like(journal.writeMode, "pessimistic%"), isNotNull(journal.writeUnit)),
+          )
+          .toSQL();
+        for (const row of (
+          await options.db.query<{ unit: string; httpStatus: number }>(query.sql, query.params as unknown[])
+        ).rows) {
+          if (classifyFailureStatus(row.httpStatus) === "quarantined") declinedUnits.add(row.unit);
+        }
+      }
+      const repaired = new Set<string>();
+      for (const unitId of declinedUnits) {
+        await runInTransaction(async () => {
+          const rows = await readUnitPendingRows(options.db, allContexts, unitId, null);
+          if (
+            !rows.length ||
+            rows.some((row) => row.status !== "failed" || classifyFailureStatus(row.lastHttpStatus) !== "quarantined")
+          )
+            return;
+          const entities = new Set<string>();
+          for (const row of rows) {
+            const context = tableContexts[row.tableKey]!;
+            await applyMutationStatusUpdates(options.db, context, [
+              {
+                mutationId: row.mutationId,
+                status: "rejected",
+                attemptCount: row.attemptCount,
+                updatedAtUs: nowUs,
+                lastError: row.lastError,
+                conflictReason: row.lastError ?? "Rejected by the authoritative endpoint",
+                lastHttpStatus: row.lastHttpStatus,
+                nextRetryAtUs: null,
+              },
+            ]);
+            repaired.add(row.mutationId);
+          }
+          for (const row of rows) {
+            const key = `${row.tableKey}:${row.entityKeyJson}`;
+            if (!entities.has(key)) {
+              await restoreOverlayAfterRejection(
+                options.db,
+                tableContexts[row.tableKey]!,
+                JSON.parse(row.entityKeyJson) as Record<string, string>,
+                row.entityKeyJson,
+              );
+              entities.add(key);
+            }
+          }
+        });
+      }
 
       for (const context of contexts) {
         const journal = context.tables.journal;
@@ -1424,6 +1519,9 @@ export function createMutationRuntime<TRegistry extends SyncTableRegistry>(
           .where(eq(journal.status, "failed"))
           .toSQL();
         await options.db.query(query.sql, query.params as unknown[]);
+      }
+      if (repaired.size > 0 && options.onReject) {
+        await options.onReject(await readMutationDetailsForContexts(options.db, allContexts, repaired));
       }
     },
     recoverSending: async (table) => {
@@ -2556,6 +2654,7 @@ async function readUnitPendingRows(
   db: MutationDb,
   contexts: TableContext[],
   unitId: string,
+  statuses: MutationStatus[] | null = ["pending", "failed"],
 ): Promise<PendingBatchRow[]> {
   if (contexts.length === 0) {
     return [];
@@ -2566,7 +2665,7 @@ async function readUnitPendingRows(
     return queryBuilder
       .select(buildPendingRowsProjection(context))
       .from(journal)
-      .where(and(eq(journal.writeUnit, unitId), inArray(journal.status, ["pending", "failed"])));
+      .where(and(eq(journal.writeUnit, unitId), statuses ? inArray(journal.status, statuses) : undefined));
   });
 
   const query = queryDialect.sqlToQuery(
@@ -3095,26 +3194,15 @@ async function discardTerminalEntity(
 }
 
 /**
- * The shared overlay-discard statement: delete the entity's overlay row unless a journal row still
- * owes the entity — `owedStatuses` narrows which journal rows count as "owed" (all of them for a
- * conflict discard; only the un-sent pending/sending/failed set for a settled-unit discard).
+ * Delete an explicitly discarded entity's overlay only after its journal is empty.
  */
-function buildOverlayDiscardQuery(
-  context: TableContext,
-  entityKey: Record<string, string>,
-  entityKeyJson: string,
-  owedStatuses?: MutationStatus[],
-) {
+function buildOverlayDiscardQuery(context: TableContext, entityKey: Record<string, string>, entityKeyJson: string) {
   const overlay = context.tables.overlay;
   const journal = context.tables.journal;
   const owed = queryBuilder
     .select({ one: sql`1` })
     .from(journal)
-    .where(
-      owedStatuses
-        ? and(eq(journal.entityKeyJson, entityKeyJson), inArray(journal.status, owedStatuses))
-        : eq(journal.entityKeyJson, entityKeyJson),
-    );
+    .where(eq(journal.entityKeyJson, entityKeyJson));
 
   return queryBuilder
     .delete(overlay)
@@ -3129,20 +3217,90 @@ function buildOverlayDiscardQuery(
     .toSQL();
 }
 
-/**
- * Auto-discard the optimistic overlay for an entity whose pessimistic write-unit the authoritative endpoint
- * `rejected` (ADR-0022 §4). Unlike {@link discardTerminalEntity} this KEEPS the terminal `rejected` journal
- * row (for diagnostics + `onReject`); it only clears the overlay, and only when no still-owed
- * (`pending`/`sending`/`failed`) journal row depends on it — so a later un-sent write never loses its overlay.
- */
-async function discardOverlayForSettledEntity(
+/** Rebuild one shared overlay without declined units. The caller owns the local transaction. */
+async function restoreOverlayAfterRejection(
   db: MutationDb,
   context: TableContext,
   entityKey: Record<string, string>,
   entityKeyJson: string,
 ) {
-  const query = buildOverlayDiscardQuery(context, entityKey, entityKeyJson, ["pending", "sending", "failed"]);
-  await db.query(query.sql, query.params as unknown[]);
+  const syncedQuery = queryDialect.sqlToQuery(
+    sql`SELECT ${buildProjectedSelectColumns(context, context.syncedColumnsByPropertyKey)}
+        FROM ${context.tables.synced}
+        WHERE ${and(...context.pkColumnNames.map((name, i) => eq(context.syncedPkColumns[i]!, entityKey[name])))}`,
+  );
+  const synced = (await db.query(syncedQuery.sql, syncedQuery.params as unknown[])).rows[0];
+  const journal = context.tables.journal;
+  const query = queryBuilder
+    .select({
+      kind: sql<MutationKind>`${journal.mutationKind}`.as("kind"),
+      payload: sql<string>`${journal.payloadJson}`.as("payload"),
+      status: journal.status,
+      writeMode: sql<string | null>`${journal.writeMode}`.as("writeMode"),
+      enqueuedAtUs: sql<string>`${journal.enqueuedAtUs}::text`.as("enqueuedAtUs"),
+      serverUpdatedAtUs: sql<string | null>`${journal.serverUpdatedAtUs}::text`.as("serverUpdatedAtUs"),
+    })
+    .from(journal)
+    .where(and(eq(journal.entityKeyJson, entityKeyJson), ne(journal.status, "rejected")))
+    .orderBy(asc(journal.mutationSeq))
+    .toSQL();
+  const rows = (
+    await db.query<{
+      kind: MutationKind;
+      payload: string;
+      status: MutationStatus;
+      writeMode: string | null;
+      enqueuedAtUs: string;
+      serverUpdatedAtUs: string | null;
+    }>(query.sql, query.params as unknown[])
+  ).rows;
+  let record = synced ?? null;
+  let overlayKind = "pending_update";
+  let localUpdatedAtUs = "0";
+  let hasOverlay = false;
+  const rawVersion = context.serverVersionPropertyKey && synced?.[context.serverVersionPropertyKey];
+  const syncedVersion =
+    typeof rawVersion === "string" || typeof rawVersion === "number" || typeof rawVersion === "bigint"
+      ? BigInt(rawVersion)
+      : null;
+  for (const row of rows) {
+    // Blind writes never contributed to the visible overlay. An already echoed acknowledgement is
+    // likewise represented by the synced base and must not overwrite newer canonical fields.
+    if (
+      row.writeMode === "pessimistic-blind" ||
+      (row.status === "acked" &&
+        row.serverUpdatedAtUs !== null &&
+        syncedVersion != null &&
+        BigInt(row.serverUpdatedAtUs) <= syncedVersion)
+    )
+      continue;
+    const payload = ensureRecord(JSON.parse(row.payload));
+    if (row.kind === "create") {
+      record = ensureRecord(payload["localValue"] ?? createOptimisticRecordFromContext(context, payload["value"]));
+      overlayKind = "pending_create";
+    } else if (record && row.kind === "update") {
+      record = {
+        ...record,
+        ...ensureRecord(payload["patch"]),
+        ...buildUpdateManagedNowStamp(context, row.enqueuedAtUs),
+      };
+    } else if (record && row.kind === "delete") {
+      overlayKind = "pending_delete";
+    }
+    if (record) {
+      hasOverlay = true;
+      localUpdatedAtUs = row.enqueuedAtUs;
+    }
+  }
+  if (hasOverlay && record) {
+    await upsertOverlayRecordsBulk(db, context, [{ entityKey, record, overlayKind, localUpdatedAtUs }]);
+  } else {
+    const remove = queryBuilder
+      .delete(context.tables.overlay)
+      .where(and(...context.pkColumnNames.map((name, i) => eq(context.overlayPkColumns[i]!, entityKey[name]))))
+      .toSQL();
+    await db.query(remove.sql, remove.params as unknown[]);
+  }
 }
 
 async function reconcileTable(db: MutationDb, context: TableContext) {

@@ -41,13 +41,15 @@ export type MutationStatus = "pending" | "sending" | "acked" | "failed" | "quara
  * - `failed      -> pending`      retryFailed re-queues a failed row.
  * - `failed      -> quarantined`  the hard max-attempts cap is reached; stop retrying (also the restore
  *   quarantine of a recovered `failed` row, ADR-0035 decision 6 — the edge already existed).
+ * - `failed      -> rejected`     explicit retry repairs a persisted definitive pessimistic refusal
+ *   recorded as retryable by an older client. The unit rolls back locally without another request.
  */
 export const MUTATION_TRANSITIONS = {
   // `pending -> quarantined` exists ONLY for the restore-boot quarantine (ADR-0035 decision 6); the normal
   // flush path only ever claims a pending row (`-> sending`).
   pending: ["sending", "quarantined"],
   sending: ["acked", "failed", "quarantined", "conflicted", "rejected", "pending"],
-  failed: ["pending", "quarantined"],
+  failed: ["pending", "quarantined", "rejected"],
   quarantined: [],
   conflicted: [],
   rejected: [],

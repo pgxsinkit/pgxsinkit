@@ -52,6 +52,14 @@ goes through `POST /api/mutations` and is applied by the single in-database func
 function once from your registry with the `pgxsinkit-generate` CLI (a drizzle-kit migration). Do not
 invent REST endpoints per table; do not write to Postgres tables directly from the client.
 
+**Foreground rejection.** A definitive structural 4xx response from `/api/mutations/unit`
+rejects the whole unit and rolls back its local changes before the request error reaches the caller.
+`onReject` also receives the retained diagnostic entries. A typed `rejected` acknowledgement has
+the same rollback. When other edits share the entity, their surviving journal patches rebuild its
+overlay. Authentication, timeout, rate-limit, network and server failures retain unconfirmed work
+for retry. Explicit `retryFailed(table)` also settles older definitive pessimistic refusals locally,
+across every table in that unit, without another HTTP request. It retains unrelated uncertain writes.
+
 **Blind update — writing a row your read shape excludes.** A pessimistic write unit
 (`client.transaction({ mode: "pessimistic" }, (tx) => …)`) flush-routes to the authoritative endpoint and
 resolves with each member's `acked` / `conflicted` / `rejected` outcome. Alongside `create`/`update`/`delete`

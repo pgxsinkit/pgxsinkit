@@ -39,6 +39,12 @@ The first published contract is intentionally narrow, and focused tests pin its 
   `tests/unit/plpgsql-apply.test.ts` (candidate lists + a pgwasm apply that leaves the stored value
   untouched) and `tests/unit/update-managed-field-guard.test.ts` (the three request-path guards).
 
+Foreground write refusal coverage in `pessimistic-flush.test.ts` includes structural HTTP 400 rollback,
+typed rejection after an earlier uncertain edit, preservation of later independent fields and pending
+create defaults, transient-error retention, and interrupted rollback recovery. Rejection status and the
+rebuilt overlay commit atomically. Explicit retry also repairs an older persisted failed-400 unit with
+a rejected successor, including units spanning tables, without resending it or unrelated work.
+
 ## Migration snapshot compatibility
 
 Both validation gates run the installed Drizzle Kit's `check` against the reference and board

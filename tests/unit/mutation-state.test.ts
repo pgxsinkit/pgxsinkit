@@ -56,6 +56,7 @@ describe("quarantine state (ADR-0006)", () => {
 describe("rejected state (ADR-0022)", () => {
   it("allows entering rejected from sending (a business rejection from the authoritative endpoint)", () => {
     expect(isValidMutationTransition("sending", "rejected")).toBe(true);
+    expect(isValidMutationTransition("failed", "rejected")).toBe(true);
   });
 
   it("treats rejected as terminal (overlay auto-discarded, surfaced via onReject, never retried)", () => {

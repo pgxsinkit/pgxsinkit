@@ -163,6 +163,18 @@ directions:
 
 "Some writes are denied" versus "all writes are denied" is the whole discriminator.
 
+## Foreground rejection
+
+A definitive structural 4xx response from `/api/mutations/unit` rejects the complete unit. The client
+rolls back its local changes before reporting the request error, and `onReject` receives the retained
+diagnostic entries. Typed `rejected` acknowledgements use the same rollback. If several edits share an
+entity, the client rebuilds its visible overlay from the surviving edits in one local transaction.
+Network errors, server faults and transient 4xx responses keep their unconfirmed edits for retry.
+
+For a store created by a client that recorded a definitive foreground refusal as `failed`, explicit
+`retryFailed(table)` settles that refused unit locally. It preserves diagnostics and unrelated
+unconfirmed edits, includes unit members on other tables, and sends no HTTP request for the refusal.
+
 ## Blind pessimistic update
 
 A **pessimistic write unit** (`client.transaction({ mode: "pessimistic" }, …)`, ADR-0022) flush-routes to
