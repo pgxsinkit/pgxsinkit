@@ -33,6 +33,7 @@ const surfaces: [entry: string, module: object, exports: string[]][] = [
       "PgwasmError",
       "PgwasmFailedError",
       "StorageInUseError",
+      "TransactionAbortedError",
       "UnsupportedDataDirError",
       "UnsupportedFeatureError",
       "UnsupportedFilesystemError",

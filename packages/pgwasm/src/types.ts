@@ -106,9 +106,23 @@ function serializeBoolean(value: unknown): string {
 
 function serializeDate(value: unknown): string {
   if (typeof value === "string") return value;
+  if (value === Infinity) return "infinity";
+  if (value === -Infinity) return "-infinity";
   if (typeof value === "number") return new Date(value).toISOString();
   if (value instanceof Date) return value.toISOString();
   throw new Error("Invalid input for date type");
+}
+
+function parseDate(value: string): Date | number {
+  if (value === "infinity") return Infinity;
+  if (value === "-infinity") return -Infinity;
+  // PostgreSQL separates the date and time with a space and can emit an hour-only UTC offset.
+  // Normalize these to ISO so Date does not reinterpret years below 100 with its legacy parser.
+  if (value.startsWith("00") && value[4] === "-") {
+    const iso = value.replace(" ", "T");
+    return new Date(iso === value ? value : iso.replace(/([+-]\d{2})$/, "$1:00"));
+  }
+  return new Date(value);
 }
 
 function serializeBytea(value: unknown): string {
@@ -152,7 +166,7 @@ export const types = {
     to: TIMESTAMPTZ,
     from: [DATE, TIMESTAMP, TIMESTAMPTZ],
     serialize: serializeDate,
-    parse: (x: string) => new Date(x),
+    parse: parseDate,
   },
   bytea: { to: BYTEA, from: [BYTEA], serialize: serializeBytea, parse: parseBytea },
 } satisfies Record<string, TypeHandler>;

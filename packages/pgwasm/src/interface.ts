@@ -159,7 +159,10 @@ export interface Pgwasm extends AsyncDisposable {
   sql<T = Row>(sqlStrings: TemplateStringsArray, ...params: unknown[]): Promise<Results<T>>;
   /** Any number of statements, through the simple protocol, without parameters. */
   exec(sql: string, options?: QueryOptions): Promise<Results[]>;
-  /** Run `callback` in a transaction: COMMIT when it resolves, ROLLBACK when it throws. */
+  /**
+   * Run `callback` in a transaction: COMMIT when it resolves, ROLLBACK when it throws.
+   * Rejects with TransactionAbortedError if COMMIT rolls back an aborted transaction.
+   */
   transaction<T>(callback: (tx: Transaction) => Promise<T>): Promise<T>;
   /** Run `fn` while no query or transaction runs. */
   runExclusive<T>(fn: () => Promise<T>): Promise<T>;

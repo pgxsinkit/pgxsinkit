@@ -17,6 +17,8 @@ export interface EmscriptenNode {
   mode: number;
   id: number;
   rdev: number;
+  mtime?: number;
+  ctime?: number;
   parent: EmscriptenNode;
   mount: { opts: { root?: string } };
   node_ops: unknown;
@@ -65,6 +67,7 @@ export interface EmscriptenFS {
   writeFile(path: string, data: Uint8Array | string): void;
   utime(path: string, atime: number, mtime: number): void;
   chmod(path: string, mode: number): void;
+  doTruncate(stream: EmscriptenStream | null, node: EmscriptenNode, length: number): void;
   unlink(path: string): void;
   rmdir(path: string): void;
   makedev(major: number, minor: number): number;

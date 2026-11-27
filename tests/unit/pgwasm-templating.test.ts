@@ -42,6 +42,13 @@ describe("SQL templates", () => {
     });
   });
 
+  it("escapes embedded quotes in literal and interpolated identifiers", () => {
+    expect(query`SELECT ${identifier`a"b`} FROM ${identifier`${'two""quotes'}`};`).toEqual({
+      query: 'SELECT "a""b" FROM "two""""quotes";',
+      params: [],
+    });
+  });
+
   it("nests templates, keeping their parameters", () => {
     const statement = (filter?: string) =>
       query`SELECT * FROM ${identifier`test`}${filter !== undefined ? sql` WHERE ${identifier`foo`} = ${filter}` : sql``};`;

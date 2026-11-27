@@ -844,6 +844,13 @@ host ABI and data format 2. Chromium and WebKit passed all 40 IndexedDB and dump
 cases, including PG18 store refusal, and all 12 OPFS cases. The C build and regression results are
 recorded in the [PG19 qualification report](https://github.com/pgxsinkit/pgwasm-postgres/blob/77228df75b0b80e633c6153cbc17db69ca3a7f6e/docs/pg19-ga-release.md).
 
+The PG19 host also has regressions for these client-visible outcomes:
+
+- The IndexedDB browser suite writes 10,000 rows, checkpoints them, deletes them, vacuums the table, and reopens the store. Both the row count and the physical relation size must stay zero.
+- `pgwasm-transaction-outcome` distinguishes an implicit rollback reported by COMMIT (`TransactionAbortedError`, SQLSTATE `25P02`), an intentional rollback, a recovered savepoint and a deferred constraint failure.
+- `pgwasm-domain-params` verifies stored binary values using SQL hex encoding, including domains created after boot and domains used in arrays. It checks custom serializers and the caller's prepared statement.
+- `pgwasm-temporal` covers early AD years and infinite temporal values with the default codecs. The templating and live-format tests exercise embedded quotes in identifiers and percent signs in parameterized SQL.
+
 When changing PostgreSQL, the Circuits engine, durable-streams, pgwasm, or the internalized read path (the reader in `packages/client/src/circuits`, the applier in `packages/client/src/sync`), add at least one regression test for any newly observed drift.
 
 Recorded apply-semantics drift (read-path engine):

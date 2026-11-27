@@ -1,6 +1,8 @@
 // Began as a copy of `@electric-sql/pglite` (taken under its PostgreSQL License option, © ElectricSQL
 // — see NOTICE). Owned outright (ADR-0062); compatibility with PGlite is an anti-goal — evolve freely.
 
+import { quoteIdentifier } from "./core/names";
+
 const TemplateType = {
   part: "part",
   container: "container",
@@ -85,7 +87,7 @@ export function sql(strings: TemplateStringsArray, ...values: unknown[]): Templa
  * ```
  */
 export function identifier(strings: TemplateStringsArray, ...values: unknown[]): TemplatePart {
-  return { _templateType: TemplateType.part, str: `"${String.raw(strings, ...values)}"` };
+  return { _templateType: TemplateType.part, str: quoteIdentifier(String.raw(strings, ...values)) };
 }
 
 /** Raw SQL spliced into a template as it is, neither parametrized nor escaped. */

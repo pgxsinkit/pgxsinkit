@@ -24,6 +24,14 @@ await pg.exec("CREATE TABLE IF NOT EXISTS todo (id serial PRIMARY KEY, title tex
 const { rows } = await pg.query<{ id: number; title: string }>("SELECT * FROM todo");
 ```
 
+## Query date values
+
+The default query codecs return finite PostgreSQL `date`, `timestamp` and `timestamptz` values
+as JavaScript `Date` objects. PostgreSQL `infinity` and `-infinity` become numeric `Infinity`
+and `-Infinity`; these numbers can also be bound as date or timestamp parameters. Include
+`number` in the result type when a column can contain infinite dates. Per-query and instance
+parser overrides take precedence, and Drizzle uses its own temporal codecs.
+
 ## Storage
 
 `dataDir` names where the data directory lives, always with a scheme:

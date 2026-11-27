@@ -33,6 +33,7 @@ export {
   PgwasmError,
   PgwasmFailedError,
   StorageInUseError,
+  TransactionAbortedError,
   UnsupportedDataDirError,
   UnsupportedFeatureError,
   UnsupportedFilesystemError,

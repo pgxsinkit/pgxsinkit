@@ -4,7 +4,16 @@
 
 import type { BuildIdentity, FilesystemKind } from "./build/seam";
 import type { QueryOptions } from "./interface";
-import type { DatabaseError } from "./protocol/wire/messages";
+import { DatabaseError } from "./protocol/wire/messages";
+
+/** COMMIT ended an aborted transaction with ROLLBACK instead of committing its writes. */
+export class TransactionAbortedError extends DatabaseError {
+  constructor() {
+    super("Transaction was rolled back instead of committed", 0, "error");
+    this.severity = "ERROR";
+    this.code = "25P02";
+  }
+}
 
 /** The base of every error pgwasm itself raises (SQL errors are {@link DatabaseError}). */
 export class PgwasmError extends Error {

@@ -185,6 +185,39 @@ const harness = {
     base = await createPgwasm({ build: cBuild, dataDir: idb(name) });
   },
 
+  async vacuumTruncateReopen(name: string) {
+    const readState = async (pg: Pgwasm) =>
+      (
+        await pg.query<{ rows: number; bytes: number }>(
+          "SELECT count(*)::int AS rows, pg_relation_size('vacuum_truncate')::int AS bytes FROM vacuum_truncate",
+        )
+      ).rows;
+    await deleteStore(name, "retry");
+    const db = await createPgwasm({ build: cBuild, dataDir: idb(name) });
+    let before: Awaited<ReturnType<typeof readState>>;
+    let afterVacuum: Awaited<ReturnType<typeof readState>>;
+    try {
+      await db.exec("CREATE TABLE vacuum_truncate (id integer)");
+      await db.exec("INSERT INTO vacuum_truncate SELECT generate_series(1, 10000)");
+      // Ensure the original relation bytes reach IndexedDB before deleting the rows in shared buffers.
+      await db.exec("CHECKPOINT");
+      before = await readState(db);
+      await db.exec("DELETE FROM vacuum_truncate");
+      await db.exec("VACUUM vacuum_truncate");
+      afterVacuum = await readState(db);
+    } finally {
+      await db.close();
+    }
+    const reopened = await createPgwasm({ build: cBuild, dataDir: idb(name) });
+    try {
+      const afterReopen = await readState(reopened);
+      return { before, afterVacuum, afterReopen };
+    } finally {
+      await reopened.close();
+      await deleteStore(name, "report");
+    }
+  },
+
   /** Synthetic PG18 metadata proves refusal without needing an old backend in the current host. */
   async pg18StoreRefusal(name: string, marked: boolean) {
     const old = capturingBuild();

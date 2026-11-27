@@ -34,7 +34,8 @@ export async function formatQuery(
 
   // $1, $2… become %1$L, %2$L…: the `$` makes format() positional; a bare `%1L` would mean "width 1"
   // and consume arguments in order, binding the wrong value to a repeated or reordered placeholder.
-  const subbedQuery = query.replace(/\$([0-9]+)/g, (_, num: string) => `%${num}$L`);
+  // Escape the query's own percent signs before introducing format() placeholders.
+  const subbedQuery = query.replaceAll("%", "%%").replace(/\$([0-9]+)/g, (_, num: string) => `%${num}$L`);
   const runner = tx ?? pg;
   const result = await runner.query<{ query: string }>(
     `SELECT format($1, ${params.map((_, i) => `$${i + 2}`).join(", ")}) as query`,

@@ -39,6 +39,27 @@ describe("parsing text values by type", () => {
     expect(timestamptz.getUTCMilliseconds()).toEqual(new Date("2021-01-01T12:00:00.000Z").getUTCMilliseconds());
   });
 
+  it("preserves early AD years and explicit timestamp offsets", () => {
+    expect(types.parseType("0001-01-01", types.DATE)).toEqual(new Date("0001-01-01T00:00:00Z"));
+    expect(types.parseType("0050-06-15 12:30:00+00", types.TIMESTAMPTZ)).toEqual(new Date("0050-06-15T12:30:00Z"));
+    expect(types.parseType("0099-06-15 12:30:00+05:30", types.TIMESTAMPTZ)).toEqual(new Date("0099-06-15T07:00:00Z"));
+    expect(types.parseType("0050-06-15T12:30:00Z", types.TIMESTAMPTZ)).toEqual(new Date("0050-06-15T12:30:00Z"));
+    const local = new Date(0);
+    local.setFullYear(50, 5, 15);
+    local.setHours(12, 30, 0, 0);
+    expect(types.parseType("0050-06-15 12:30:00", types.TIMESTAMP)).toEqual(local);
+    expect(types.parseType("2000-02-29 12:30:00-03", types.TIMESTAMPTZ)).toEqual(new Date("2000-02-29T15:30:00Z"));
+    expect(types.parseType("12345-06-15 12:30:00+00", types.TIMESTAMPTZ)).toEqual(new Date("+012345-06-15T12:30:00Z"));
+  });
+
+  it("parses infinite dates and timestamps as numeric infinity", () => {
+    for (const oid of [types.DATE, types.TIMESTAMP, types.TIMESTAMPTZ]) {
+      expect(types.parseType("infinity", oid)).toBe(Infinity);
+      expect(types.parseType("-infinity", oid)).toBe(-Infinity);
+      expect(types.parseType(null, oid)).toBeNull();
+    }
+  });
+
   it("parses bytea", () => {
     expect(types.parseType("\\x010203", 17)).toEqual(Uint8Array.from([1, 2, 3]));
   });
@@ -74,6 +95,15 @@ describe("serializing values by type", () => {
     expect(serializer(1184)(1672531200000)).toEqual("2023-01-01T00:00:00.000Z");
     expect(serializer(1184)("2021-01-01T00:00:00.000Z")).toEqual("2021-01-01T00:00:00.000Z");
     expect(() => serializer(1184)(true)).toThrow();
+  });
+
+  it("serializes infinite dates and timestamps and rejects invalid finite dates", () => {
+    for (const oid of [types.DATE, types.TIMESTAMP, types.TIMESTAMPTZ]) {
+      expect(serializer(oid)(Infinity)).toBe("infinity");
+      expect(serializer(oid)(-Infinity)).toBe("-infinity");
+      expect(() => serializer(oid)(Number.NaN)).toThrow();
+      expect(() => serializer(oid)(new Date(Number.NaN))).toThrow();
+    }
   });
 
   it("serializes json, keeping a string as it is", () => {

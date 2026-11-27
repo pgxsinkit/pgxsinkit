@@ -18,6 +18,7 @@ import {
   PgwasmClosedError,
   PgwasmError,
   PgwasmFailedError,
+  TransactionAbortedError,
   UnsupportedFeatureError,
 } from "../errors";
 import type {
@@ -32,6 +33,7 @@ import type {
   Transaction,
 } from "../interface";
 import {
+  DataRowMessage,
   DatabaseError,
   NoticeMessage,
   NotificationResponseMessage,
@@ -58,7 +60,7 @@ import {
 } from "./internals";
 import { BUILD_MARKER_PATH, checkBuildMarker, encodeBuildMarker, PG_VERSION_PATH } from "./marker";
 import { Mutex } from "./mutex";
-import { quoteIdentifier, toPostgresName } from "./names";
+import { quoteIdentifier, randomId, toPostgresName } from "./names";
 import { parseDescribeStatementResults, parseResults } from "./parse";
 import { backupBaseName, describeStorage } from "./storage";
 
@@ -154,6 +156,8 @@ export class PgwasmInstance implements Pgwasm {
 
   readonly #parsers: Record<number | string, Parser>;
   readonly #serializers: Record<number | string, Serializer>;
+  readonly #domainArrays = new Set<number>();
+  #paramTypesStatement: string | undefined;
   #arrayTypesInitialized = false;
   #inTransaction = false;
 
@@ -510,15 +514,93 @@ export class PgwasmInstance implements Pgwasm {
     return chunks === undefined ? undefined : new Blob(chunks);
   }
 
-  #serializeParams(
+  async #serializeParams(
     params: readonly unknown[],
     dataTypeIDs: readonly number[],
     options?: QueryOptions,
-  ): (string | null)[] {
+  ): Promise<(string | null)[]> {
+    if (params.length === 0) return [];
+    let unresolved: Set<number> | undefined;
+    params.forEach((param, index) => {
+      const oid = dataTypeIDs[index] ?? 0;
+      if (
+        param !== null &&
+        param !== undefined &&
+        typeof param !== "string" &&
+        !options?.serializers?.[oid] &&
+        (!this.#serializers[oid] || this.#domainArrays.has(oid))
+      ) {
+        (unresolved ??= new Set()).add(oid);
+      }
+    });
+
+    if (unresolved === undefined) {
+      return params.map((param, index) => {
+        if (param === null || param === undefined) return null;
+        const oid = dataTypeIDs[index] ?? 0;
+        const serializer = options?.serializers?.[oid] ?? this.#serializers[oid];
+        return serializer ? serializer(param) : toText(param);
+      });
+    }
+
+    // Resolve against this transaction's catalog. Caching domain OIDs across a rollback or a
+    // dropped/recreated type can retain the wrong base serializer when PostgreSQL reuses an OID.
+    const types = new Map<number, { base: number; element: number; domain: boolean; array: boolean }>();
+    const name = (this.#paramTypesStatement ??= `pgwasm_param_types_${randomId()}`);
+    const text = `
+        WITH RECURSIVE types AS (
+          SELECT oid, typbasetype, typelem, typtype, typcategory FROM pg_catalog.pg_type
+          WHERE oid IN (${[...unresolved].join(",")})
+          UNION
+          SELECT t.oid, t.typbasetype, t.typelem, t.typtype, t.typcategory
+          FROM pg_catalog.pg_type t JOIN types p
+            ON t.oid = CASE WHEN p.typtype = 'd' THEN p.typbasetype ELSE p.typelem END
+          WHERE p.typtype = 'd' OR p.typcategory = 'A'
+        ) SELECT oid, typbasetype, typelem, typtype, typcategory FROM types
+      `;
+    // The caller has parsed its unnamed statement already. Catalog work uses a named
+    // statement and portal so its Parse/Bind cannot replace the caller's prepared state.
+    for (const message of [
+      serialize.close({ type: "S", name }),
+      serialize.parse({ name, text }),
+      serialize.bind({ statement: name, portal: name }),
+      serialize.execute({ portal: name }),
+      serialize.close({ type: "P", name }),
+      serialize.close({ type: "S", name }),
+    ]) {
+      for (const result of await this.#execNoPersist(message, options)) {
+        if (result instanceof DataRowMessage) {
+          types.set(Number(result.fields[0]), {
+            base: Number(result.fields[1]),
+            element: Number(result.fields[2]),
+            domain: result.fields[3] === "d",
+            array: result.fields[4] === "A",
+          });
+        }
+      }
+    }
+    const serializerFor = (oid: number, domainBase = false): Serializer | undefined => {
+      const override = options?.serializers?.[oid];
+      if (override) return override;
+      const type = types.get(oid);
+      const serializer = this.#serializers[oid];
+      if (serializer && !this.#domainArrays.has(oid)) return serializer;
+      if (type?.domain) {
+        const baseSerializer = serializerFor(type.base, true);
+        return baseSerializer ? (value) => (typeof value === "string" ? value : baseSerializer(value)) : undefined;
+      }
+      // Ordinary arrays created after boot still require refreshArrayTypes().
+      if (type?.array && (domainBase || types.get(type.element)?.domain)) {
+        const elementSerializer = serializerFor(type.element);
+        return (value) => arraySerializer(value, elementSerializer, oid);
+      }
+      return serializer;
+    };
+
     return params.map((param, index) => {
       if (param === null || param === undefined) return null;
       const oid = dataTypeIDs[index] ?? 0;
-      const serializer = options?.serializers?.[oid] ?? this.#serializers[oid];
+      const serializer = serializerFor(oid);
       return serializer ? serializer(param) : toText(param);
     });
   }
@@ -536,7 +618,7 @@ export class PgwasmInstance implements Pgwasm {
         const dataTypeIDs = parseDescribeStatementResults(
           await this.#execNoPersist(serialize.describe({ type: "S" }), options),
         );
-        const values = this.#serializeParams(params, dataTypeIDs, options);
+        const values = await this.#serializeParams(params, dataTypeIDs, options);
         results = [
           ...parsed,
           ...(await this.#execNoPersist(serialize.bind({ values }), options)),
@@ -648,7 +730,15 @@ export class PgwasmInstance implements Pgwasm {
         this.#inTransaction = false;
         if (!closed) {
           closed = true;
-          await this.#runExec("COMMIT");
+          const [commit] = await this.#runExec("COMMIT");
+          if (commit?.command === "ROLLBACK") {
+            throw makeQueryError({
+              error: new TransactionAbortedError(),
+              query: "COMMIT",
+              params: undefined,
+              options: undefined,
+            });
+          }
         } else {
           // An explicit tx.rollback() ran inside the transaction; persist its outcome now.
           await this.#persistAfterStatement();
@@ -695,16 +785,13 @@ export class PgwasmInstance implements Pgwasm {
   async #initArrayTypes({ force = false } = {}): Promise<void> {
     if (this.#arrayTypesInitialized && !force) return;
     this.#arrayTypesInitialized = true;
-    const types = await this.query<{ oid: number; typarray: number }>(`
-      SELECT b.oid, b.typarray
-      FROM pg_catalog.pg_type a
-      LEFT JOIN pg_catalog.pg_type b ON b.oid = a.typelem
-      WHERE a.typcategory = 'A'
-      GROUP BY b.oid, b.typarray
-      ORDER BY b.oid
+    const types = await this.query<{ oid: number; typarray: number; typtype: string }>(`
+      SELECT oid, typarray, typtype FROM pg_catalog.pg_type WHERE typarray <> 0 ORDER BY oid
     `);
     for (const type of types.rows) {
-      this.#serializers[type.typarray] = (value) => arraySerializer(value, this.#serializers[type.oid], type.typarray);
+      if (!this.#serializers[type.typarray] && type.typtype === "d") this.#domainArrays.add(type.typarray);
+      this.#serializers[type.typarray] ??= (value) =>
+        arraySerializer(value, this.#serializers[type.oid], type.typarray);
       this.#parsers[type.typarray] = (value) => arrayParser(value, this.#parsers[type.oid], type.typarray);
     }
   }

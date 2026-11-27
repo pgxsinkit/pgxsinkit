@@ -111,6 +111,15 @@ test.describe("an idb:// database", () => {
 });
 
 test.describe("IndexedDB storage correctness", () => {
+  test("persists a VACUUM truncate across close and reopen", async ({ page }) => {
+    await openHarness(page);
+    const result = await page.evaluate(() => window.pgwasmIdb.vacuumTruncateReopen("vacuum-truncate"));
+    expect(result.before).toEqual([{ rows: 10000, bytes: expect.any(Number) }]);
+    expect(result.before[0]?.bytes).toBeGreaterThan(0);
+    expect(result.afterVacuum).toEqual([{ rows: 0, bytes: 0 }]);
+    expect(result.afterReopen).toEqual(result.afterVacuum);
+  });
+
   for (const marked of [true, false]) {
     test(`refuses ${marked ? "a marked" : "an unmarked"} PG18 store and opens a separate PG19 store`, async ({
       page,

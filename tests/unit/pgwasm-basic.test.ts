@@ -95,6 +95,18 @@ describe("queries", () => {
     });
   });
 
+  it("addresses the exact table and column names when identifiers contain quotes", async () => {
+    const db = await createTestPgwasm();
+    const tableName = identifier`${'two""quotes'}`;
+    const columnName = identifier`sales"2026`;
+    await db.sql`CREATE TABLE ${tableName} (${columnName} TEXT);`;
+    await db.sql`INSERT INTO ${tableName} (${columnName}) VALUES (${"exact"});`;
+    expect((await db.sql`SELECT ${columnName} FROM ${tableName};`).rows).toEqual([{ 'sales"2026': "exact" }]);
+    expect((await db.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")).rows).toEqual([
+      { tablename: 'two""quotes' },
+    ]);
+  });
+
   it("round-trips the built-in types", async () => {
     const db = await createTestPgwasm();
     await db.query(`

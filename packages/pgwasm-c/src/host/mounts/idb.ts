@@ -91,6 +91,13 @@ export class IdbMount implements StorageMount {
     return (module) => {
       const FS = module.FS;
       if (!FS.analyzePath(this.#mountPoint).exists) FS.mkdirTree(this.#mountPoint);
+      // The pinned FS.doTruncate passes a legacy `timestamp` that MEMFS ignores. IDBFS compares
+      // mtimes when syncing, so a successful truncate must mark its changed bytes for persistence.
+      const doTruncate = FS.doTruncate.bind(FS);
+      FS.doTruncate = (stream, node, length) => {
+        doTruncate(stream, node, length);
+        node.mtime = node.ctime = Date.now();
+      };
       FS.mount(FS.filesystems.IDBFS, {}, this.#mountPoint);
       FS.symlink(this.#mountPoint, PGDATA);
     };

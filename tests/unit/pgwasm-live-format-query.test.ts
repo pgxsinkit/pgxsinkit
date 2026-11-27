@@ -41,6 +41,23 @@ describe("formatQuery inlines parameters as literals", () => {
     );
   });
 
+  it("preserves literal percent signs alongside repeated and reordered parameters", async () => {
+    const formatted = await formatQuery(
+      pg,
+      "SELECT $2::int % $1::int AS remainder, 'a%sb' AS literal, $3::text LIKE $4::text || '%' AS matches, $2::int AS repeated;",
+      [2, 5, "prefix%value", "prefix"],
+    );
+    expect(formatted).toBe(
+      "SELECT '5'::int % '2'::int AS remainder, 'a%sb' AS literal, 'prefix%value'::text LIKE 'prefix'::text || '%' AS matches, '5'::int AS repeated;",
+    );
+    expect((await pg.query(formatted)).rows).toEqual([{ remainder: 1, literal: "a%sb", matches: true, repeated: 5 }]);
+  });
+
+  it("keeps percent sequences in parameter values as data", async () => {
+    const formatted = await formatQuery(pg, "SELECT $1::text AS value", ["100% %s %1$L %%"]);
+    expect((await pg.query(formatted)).rows).toEqual([{ value: "100% %s %1$L %%" }]);
+  });
+
   it("formats json", async () => {
     expect(await formatQuery(pg, "SELECT * FROM t_json WHERE value = $1;", [{ test: "test" }])).toBe(
       `SELECT * FROM t_json WHERE value = '{"test": "test"}';`,
@@ -49,5 +66,6 @@ describe("formatQuery inlines parameters as literals", () => {
 
   it("returns a query without parameters as it is", async () => {
     expect(await formatQuery(pg, "SELECT 1", [])).toBe("SELECT 1");
+    expect(await formatQuery(pg, "SELECT 5 % 2, 'a%sb'", [])).toBe("SELECT 5 % 2, 'a%sb'");
   });
 });
