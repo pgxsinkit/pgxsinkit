@@ -27,13 +27,13 @@
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.4",
-    "@codemirror/commands": "6.11.1",
+    "@codemirror/commands": "6.11.2",
     "@codemirror/lang-sql": "6.10.0",
     "@codemirror/language": "6.13.1",
-    "@codemirror/view": "6.43.15",
+    "@codemirror/view": "6.44.2",
     "@uiw/codemirror-theme-github": "4.25.12",
-    "@uiw/codemirror-themes": "4.25.12",
-    "@uiw/react-codemirror": "4.25.12",
+    "@uiw/codemirror-themes": "4.25.13",
+    "@uiw/react-codemirror": "4.25.13",
     "psql-describe": "0.2.0"
   },
   "peerDependencies": {

@@ -24,7 +24,7 @@ import {
 } from "@pgxsinkit/schema";
 
 import {
-  buildPerfStorePath,
+  PERF_STORE_PATH,
   getPerfLabConnectionDefaults,
   loadPerfClient,
   type PerfLabClient,
@@ -163,7 +163,6 @@ export function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState<ProgressState>(null);
   const [metrics, setMetrics] = useState<LabMetrics>(initialMetrics);
-  const [runId, setRunId] = useState(() => createRunId());
   const [client, setClient] = useState<PerfLabClient | null>(null);
   const [bundle, setBundle] = useState<SyntheticRegistryBundle | null>(null);
   const [preparedScenario, setPreparedScenario] = useState<ScenarioInput | null>(null);
@@ -468,12 +467,11 @@ export function App() {
       ...(schemaName ? { schemaName } : {}),
     };
     const nextBundle = buildSyntheticRegistry(registryOptions);
-    const nextRunId = createRunId();
     const nextRuntimeDescriptor = buildRuntimeDescriptor(nextScenario, nextConnection);
     const authToken = demoAuthTokenByIdentity[nextConnection.authIdentity] ?? undefined;
 
     appendLog(
-      `Preparing browser lab with ${registryOptions.tableCount} tables, ${registryOptions.extraColumnCount} extra columns, local schema ${schemaName}, ${describeConnection(nextConnection)}, and store path ${buildPerfStorePath(nextRunId)}`,
+      `Preparing browser lab with ${registryOptions.tableCount} tables, ${registryOptions.extraColumnCount} extra columns, local schema ${schemaName}, ${describeConnection(nextConnection)}, and store path ${PERF_STORE_PATH}`,
     );
 
     const shouldPreseedRemoteRows =
@@ -496,7 +494,7 @@ export function App() {
 
       loadedClient = await loadPerfClient(
         nextBundle.registry,
-        buildPerfStorePath(nextRunId),
+        PERF_STORE_PATH,
         {
           mode: nextConnection.mode,
           batchWriteUrl: nextConnection.batchWriteUrl,
@@ -537,7 +535,6 @@ export function App() {
         setPreparedScenario({ ...nextScenario });
         setPreparedConnection({ ...nextConnection });
         setRuntimeDescriptor(nextRuntimeDescriptor);
-        setRunId(nextRunId);
         setStatus("ready");
         setMetrics({
           ...initialMetrics,
@@ -658,7 +655,7 @@ export function App() {
         <section className="status-strip panel">
           <div>
             <span className={`status-pill status-${status}`}>{status.toUpperCase()}</span>
-            <p className="status-copy">Store path: {buildPerfStorePath(runId)}</p>
+            <p className="status-copy">Store path: {PERF_STORE_PATH}</p>
           </div>
           <div>
             <strong>{metrics.activeTable}</strong>
@@ -1609,10 +1606,6 @@ function pickPercentile(values: number[], percentile: number): number {
 
   const index = Math.min(values.length - 1, Math.floor(values.length * percentile));
   return values[index] ?? values[values.length - 1] ?? 0;
-}
-
-function createRunId() {
-  return `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
 function resolveLocalScenarioSchemaName(scenario: ScenarioInput) {

@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from "bun:test";
 
 import { count, eq } from "drizzle-orm";
 
-import { getJournalTable, getOverlayTable } from "@pgxsinkit/client";
+import { getJournalTable } from "@pgxsinkit/client";
 import { demoSyncRegistry } from "@pgxsinkit/schema";
 
 import { createMutationRuntime, type MutationDetail } from "../../packages/client/src/mutation";
@@ -113,7 +113,7 @@ function attributedRejectFetch(rejectedEntityIds: string[], reason = "includes a
 describe("mutation quarantine (ADR-0006)", () => {
   it("quarantines a structural 4xx rejection, surfaces it, and never retries it", async () => {
     const quarantined: MutationDetail[][] = [];
-    const { db, runtime } = await createAuthorsRuntime({
+    const { runtime } = await createAuthorsRuntime({
       onQuarantine: (details) => {
         quarantined.push(details);
       },
@@ -144,7 +144,6 @@ describe("mutation quarantine (ADR-0006)", () => {
       const callsAfterFirst = fetchMock.mock.calls.length;
       await runtime.flush("authors");
       expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
-      void db;
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -454,7 +453,6 @@ describe("discardQuarantined (ADR-0006 — symmetric rollback)", () => {
         enqueuedAtUs: "1",
         updatedAtUs: "1",
       } as never);
-    const overlay = getOverlayTable(demoSyncRegistry, "authors");
 
     await runtime.discardQuarantined("authors", { id });
 
@@ -463,6 +461,5 @@ describe("discardQuarantined (ADR-0006 — symmetric rollback)", () => {
     expect(await readReadModel(db, id)).toEqual({ name: "Pending only", overlayKind: "pending_create" });
     // The conflicted row is untouched too.
     expect(await journalCount(db, conflictedId)).toBe(1);
-    void overlay;
   });
 });

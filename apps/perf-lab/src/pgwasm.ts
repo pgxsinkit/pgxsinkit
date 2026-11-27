@@ -79,11 +79,8 @@ export async function loadPerfClient(
   };
 }
 
-export function buildPerfStorePath(runId: string) {
-  void runId;
-  // A plain store path (ADR-0036); the browser derives the IndexedDB backend.
-  return "pgxsinkit-perf-lab-browser";
-}
+// A plain store path (ADR-0036); the browser derives the IndexedDB backend.
+export const PERF_STORE_PATH = "pgxsinkit-perf-lab-browser";
 
 async function resolveConnectionOptions(connectionOptions: PerfLabConnectionOptions) {
   if (connectionOptions.mode === "offline") {

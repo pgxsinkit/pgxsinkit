@@ -294,14 +294,13 @@ describe("claims (invariant 2) — one lock request, claim-counted", () => {
     const coordinator = createElectionCoordinator(deps, OPTIONS);
 
     const releaseA = coordinator.claimForProvision();
-    const releaseB = coordinator.claimForAttach();
+    coordinator.claimForAttach();
     expect(h.locks.reqs).toHaveLength(1);
     expect(h.locks.reqs[0]!.name).toBe(leaderLockName("my-store"));
 
     releaseA();
     expect(h.locks.reqs).toHaveLength(1);
     expect(h.locks.reqs[0]!.signal?.aborted).toBe(false);
-    void releaseB;
   });
 
   it("releasing the LAST claim while QUEUED aborts the request via its AbortSignal", () => {

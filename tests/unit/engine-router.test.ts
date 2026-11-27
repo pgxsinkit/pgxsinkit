@@ -584,7 +584,7 @@ describe("router tab-detach — a detaching tab is unregistered so tabCount fall
     router.attachTab(tabB.port);
     expect(router.tabCount()).toBe(2);
     expect(typeof closeListener).toBe("function"); // the router feature-detected `close` and subscribed
-    void messageListener;
+    expect(typeof messageListener).toBe("function");
 
     // The tab's agent is destroyed → the platform fires `close` → the router drops the crashed tab.
     closeListener!();

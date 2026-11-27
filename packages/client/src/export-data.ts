@@ -256,7 +256,11 @@ export async function performDataExport(
     pgDumpArgs,
     // Drop the reconcile triggers on the clone so `-t` yields portable, machinery-free tables.
     ...(deps.cloneCleanupSql.length > 0
-      ? { prepareClone: async (clone) => void (await clone.exec(deps.cloneCleanupSql)) }
+      ? {
+          prepareClone: async (clone) => {
+            await clone.exec(deps.cloneCleanupSql);
+          },
+        }
       : {}),
   });
 

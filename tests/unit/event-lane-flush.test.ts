@@ -835,7 +835,13 @@ describe("the flush driver (ADR-0053 decision 3)", () => {
   it("runs a pass on start (the boot/reconnect drain) and on each gate signal", async () => {
     let passes = 0;
     const { gate, fire } = manualGate();
-    const driver = createEventFlushDriver({ flush: async () => void passes++, gate, intervalMs: 60_000 });
+    const driver = createEventFlushDriver({
+      flush: async () => {
+        passes += 1;
+      },
+      gate,
+      intervalMs: 60_000,
+    });
 
     driver.start();
     await tick();
@@ -852,7 +858,12 @@ describe("the flush driver (ADR-0053 decision 3)", () => {
   it("pauses while the gate says offline, and resumes on the next signal", async () => {
     let passes = 0;
     const offline = manualGate(false);
-    const offlineDriver = createEventFlushDriver({ flush: async () => void passes++, gate: offline.gate });
+    const offlineDriver = createEventFlushDriver({
+      flush: async () => {
+        passes += 1;
+      },
+      gate: offline.gate,
+    });
     offlineDriver.start();
     offline.fire();
     await tick();
@@ -860,7 +871,12 @@ describe("the flush driver (ADR-0053 decision 3)", () => {
     await offlineDriver.stop();
 
     const online = manualGate(true);
-    const onlineDriver = createEventFlushDriver({ flush: async () => void passes++, gate: online.gate });
+    const onlineDriver = createEventFlushDriver({
+      flush: async () => {
+        passes += 1;
+      },
+      gate: online.gate,
+    });
     onlineDriver.start();
     await tick();
     expect(passes).toBe(1);

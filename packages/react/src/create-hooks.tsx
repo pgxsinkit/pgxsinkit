@@ -563,10 +563,9 @@ export function createSyncClientHooks<TRegistry extends SyncTableRegistry>() {
     error: Error | null;
   } {
     const client = useContext(SyncClientContext);
-    const ready = options?.ready ?? true;
     // Split the `ready` UI flag off the query filters so it never becomes a filter.
-    const { ready: _ready, ...filters } = options ?? {};
-    void _ready;
+    const { ready: readyOption, ...filters } = options ?? {};
+    const ready = readyOption ?? true;
     const filtersKey = JSON.stringify(filters);
     const stableFilters = useMemo<MutationListOptions<TRegistry>>(
       () => JSON.parse(filtersKey) as MutationListOptions<TRegistry>,

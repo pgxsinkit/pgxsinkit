@@ -43,6 +43,13 @@
   },
   "overrides": [
     {
+      // Compile-only fixtures use void to reference type probes without invoking them.
+      "files": ["tests/client-api-types.ts", "tests/read-projection-types.ts", "tests/registry-views-types.ts"],
+      "rules": {
+        "typescript/no-meaningless-void-operator": "off",
+      },
+    },
+    {
       // The lazy-guard tests intentionally pass a redundant `use` against *fake* builders (no real
       // `sql` fragment) to exercise the explicit-activation path, which would trip the redundancy check.
       "files": ["tests/**"],

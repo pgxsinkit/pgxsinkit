@@ -65,7 +65,7 @@ const todosRegistry = defineSyncRegistry({
     mode: "readonly",
     subscription: "lazy",
   }),
-});
+}) satisfies SyncTableRegistry;
 type TodosRegistry = typeof todosRegistry;
 
 // LOCAL-ONLY tables the "consumer" owns — absent from the registry above, so pgxsinkit models nothing about
@@ -84,9 +84,6 @@ const localDefsTable = pgTable("local_defs", { id: integer("id").primaryKey(), b
 // executionLimit-on-SW-direct rejection) without a real OPFS probe deciding the home.
 const idbfsTodosRegistry = attachSyncRegistryStorage(todosRegistry, { backend: "idbfs" });
 
-// `SyncTableRegistry` is referenced for the cross-check that the concretely-typed registry is assignable.
-const _registryTypeCheck: SyncTableRegistry = todosRegistry as unknown as SyncTableRegistry;
-void _registryTypeCheck;
 const readModel = getReadModelView(todosRegistry, "todos");
 
 let hosts: SyncWorkerHost<TodosRegistry>[] = [];
@@ -578,6 +575,7 @@ describe("pgwasm misuse trap is reflection-safe (attach client)", () => {
     expect(() => ({ ...client })).not.toThrow();
     expect(() => {
       for (const key in client) {
+        // oxlint-disable-next-line typescript/no-meaningless-void-operator -- Reading each enumerable value exercises getters during reflection.
         void (client as unknown as Record<string, unknown>)[key];
       }
     }).not.toThrow();

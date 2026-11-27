@@ -75,53 +75,62 @@ async function runProof(port: ProofPort, storeName: string): Promise<void> {
   // Engine handles bridged across stages; closed best-effort by cleanup if their stage failed midway.
   let pg: Awaited<ReturnType<typeof createOpfsPgwasm>> | undefined;
 
-  const proof =
-    (await run("probe", async () => {
-      const root = await opfsRoot();
-      const fileHandle = await root.getFileHandle(probeFileName, { create: true });
-      const handle = await (
-        fileHandle as unknown as { createSyncAccessHandle(): Promise<{ close(): void }> }
-      ).createSyncAccessHandle();
-      handle.close();
-      await root.removeEntry(probeFileName);
-    })) &&
-    (await run("boot", async () => {
-      const root = await opfsRoot();
-      const directory = await root.getDirectoryHandle(storeName, { create: true });
-      pg = await createOpfsPgwasm({
-        build: cBuild,
-        directory: directory as unknown as RepackedDirectory,
-        durability: "strict",
-        extentSize: 65_536,
-      });
-    })) &&
-    (await run("write", async () => {
-      await pg!.exec("CREATE TABLE sw_proof (id integer PRIMARY KEY, v text NOT NULL)");
-      await pg!.exec(`INSERT INTO sw_proof VALUES (1, '${PROOF_ROW}')`);
-      const rows = await pg!.query<{ v: string }>("SELECT v FROM sw_proof WHERE id = 1");
-      if (rows.rows[0]?.v !== PROOF_ROW) throw new Error(`written row not readable: ${JSON.stringify(rows.rows)}`);
-    })) &&
-    (await run("close", async () => {
-      await pg!.close();
-      pg = undefined;
-    })) &&
-    (await run("reopen", async () => {
-      const root = await opfsRoot();
-      const directory = await root.getDirectoryHandle(storeName, { create: false });
-      pg = await createOpfsPgwasm({
-        build: cBuild,
-        directory: directory as unknown as RepackedDirectory,
-        durability: "strict",
-        extentSize: 65_536,
-      });
-    })) &&
-    (await run("verify", async () => {
-      const rows = await pg!.query<{ v: string }>("SELECT v FROM sw_proof WHERE id = 1");
-      if (rows.rows[0]?.v !== PROOF_ROW) throw new Error(`persisted row missing: ${JSON.stringify(rows.rows)}`);
-      await pg!.close();
-      pg = undefined;
-    }));
-  void proof; // `failed` already captured stage-by-stage; the chain exists to stop at the first failure.
+  const stages = [
+    () =>
+      run("probe", async () => {
+        const root = await opfsRoot();
+        const fileHandle = await root.getFileHandle(probeFileName, { create: true });
+        const handle = await (
+          fileHandle as unknown as { createSyncAccessHandle(): Promise<{ close(): void }> }
+        ).createSyncAccessHandle();
+        handle.close();
+        await root.removeEntry(probeFileName);
+      }),
+    () =>
+      run("boot", async () => {
+        const root = await opfsRoot();
+        const directory = await root.getDirectoryHandle(storeName, { create: true });
+        pg = await createOpfsPgwasm({
+          build: cBuild,
+          directory: directory as unknown as RepackedDirectory,
+          durability: "strict",
+          extentSize: 65_536,
+        });
+      }),
+    () =>
+      run("write", async () => {
+        await pg!.exec("CREATE TABLE sw_proof (id integer PRIMARY KEY, v text NOT NULL)");
+        await pg!.exec(`INSERT INTO sw_proof VALUES (1, '${PROOF_ROW}')`);
+        const rows = await pg!.query<{ v: string }>("SELECT v FROM sw_proof WHERE id = 1");
+        if (rows.rows[0]?.v !== PROOF_ROW) throw new Error(`written row not readable: ${JSON.stringify(rows.rows)}`);
+      }),
+    () =>
+      run("close", async () => {
+        await pg!.close();
+        pg = undefined;
+      }),
+    () =>
+      run("reopen", async () => {
+        const root = await opfsRoot();
+        const directory = await root.getDirectoryHandle(storeName, { create: false });
+        pg = await createOpfsPgwasm({
+          build: cBuild,
+          directory: directory as unknown as RepackedDirectory,
+          durability: "strict",
+          extentSize: 65_536,
+        });
+      }),
+    () =>
+      run("verify", async () => {
+        const rows = await pg!.query<{ v: string }>("SELECT v FROM sw_proof WHERE id = 1");
+        if (rows.rows[0]?.v !== PROOF_ROW) throw new Error(`persisted row missing: ${JSON.stringify(rows.rows)}`);
+        await pg!.close();
+        pg = undefined;
+      }),
+  ];
+  for (const runStage of stages) {
+    if (!(await runStage())) break;
+  }
 
   await run("cleanup", async () => {
     if (pg) {
