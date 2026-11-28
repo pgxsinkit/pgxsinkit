@@ -1,4 +1,4 @@
-// The PGlite -> pgwasm rename codemod (pgwasm step 3, B4; step 4 runs it over emergent). Fixture-driven:
+// Fixture tests for the PGlite -> pgwasm rename codemod:
 // each case is a source text before and after, so the closed lists' reach — and their limits — are pinned.
 
 import { describe, expect, it } from "bun:test";

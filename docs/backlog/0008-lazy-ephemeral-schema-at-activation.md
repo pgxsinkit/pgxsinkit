@@ -5,7 +5,7 @@ Opened: 2026-07-27 · Area: client boot (schema exec), ephemeral consistency gro
 
 ## The residue this targets
 
-The ADR-0053-era engine-boot measurement campaign (emergent, 2026-07-26/27) decomposed the warm
+The ADR-0053-era engine-boot measurement campaign (2026-07-26/27) decomposed the warm
 boot's `schemaExec` phase after the fingerprint fast path already skips the durable replay. What
 remains on every warm boot is the `pgwasm.exec` crossings, not JS work:
 

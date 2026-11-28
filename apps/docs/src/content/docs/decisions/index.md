@@ -13,7 +13,7 @@ complete as ADRs are added.
 
 <!-- adr:list:start -->
 
-- [ADR-0001 — Unified TypeScript release, versioning, and tooling standard (emergent / conform-ed / pgxsinkit)](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0001-unified-ts-release-versioning-tooling-standard.md)
+- [ADR-0001 — Unified TypeScript release, versioning, and tooling standard](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0001-unified-ts-release-versioning-tooling-standard.md)
 - [ADR-0002 — Single in-database write path; retire the strategy/backend/artifact seam](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0002-single-in-database-write-path.md)
 - [ADR-0003 — Secured sync ingress: fail closed, one verified-claims adapter](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0003-secured-sync-ingress.md)
 - [ADR-0004 — One registry interpreter: shared resolvers and a registry fingerprint](https://github.com/pgxsinkit/pgxsinkit/blob/main/docs/adr/0004-one-registry-interpreter.md)

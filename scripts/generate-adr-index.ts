@@ -55,7 +55,10 @@ const items = adrFiles.map((file) => {
     .split("\n")
     .find((line) => line.startsWith("# "));
   if (!heading) throw new Error(`ADR ${file} has no '# ' title heading.`);
-  return `- [ADR-${num} — ${heading.replace(/^#\s+/, "").trim()}](${repoTree}/${file})`;
+  // Use a reader-facing title for the shared release standard. Its archived heading lists participating repositories.
+  const title =
+    num === "0001" ? "Unified TypeScript release, versioning, and tooling standard" : heading.slice(2).trim();
+  return `- [ADR-${num} — ${title}](${repoTree}/${file})`;
 });
 
 const block = `${START}\n\n${items.join("\n")}\n\n${END}`;

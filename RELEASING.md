@@ -9,7 +9,7 @@ server and dump packages, to **two** registries:
 | Registry                                   | Role                                                                                                      | How it's published                                                              |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | **GitHub Packages** (`npm.pkg.github.com`) | Canonical build output: a `dev` fast-cycle channel + the source-of-truth for releases. Auth even to read. | Automatic, by the `GitHub Packages` workflow (gated on validation)              |
-| **npmjs.com**                              | Public, prod-facing. What consumers (incl. emergent's CI/prod) install.                                   | Manual, by `bun run release:npm <tag>` — re-publishes the GH tarballs unchanged |
+| **npmjs.com**                              | Public release tarballs for application and CI installs.                                                  | Manual, by `bun run release:npm <tag>` — re-publishes the GH tarballs unchanged |
 
 ## Versioning — the tag is the only source of truth
 
@@ -62,7 +62,3 @@ its package release does not migrate or replace PG18 stores.
    than three tags are pushed at once"_ — a bulk `git push --tags` silently skips the publish.
 2. **All packages, one version.** Every public package releases at the same tag; never cherry-publish
    one. The publish derives a single version per run and pins siblings to it.
-
-(Consumers: emergent installs releases from public npm by default and treats GitHub Packages as a
-local-only dev channel — see emergent's `bun run dev:link` and
-`docs/runbooks/consuming-conform-ed-and-pgxsinkit.md`.)

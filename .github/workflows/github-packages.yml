@@ -1,9 +1,7 @@
 name: GitHub Packages
 
 # Mirrors the @pgxsinkit/* packages to the GitHub Packages npm registry (npm.pkg.github.com).
-# This is the INTERNAL channel — GitHub Packages requires auth even to install, so it is for
-# authenticated same-org consumers (e.g. the emergent app), not the public. npmjs.com stays the
-# public-facing registry.
+# Installing from GitHub Packages requires authentication. Public releases are mirrored to npmjs.com.
 #
 # NOTE: GitHub Packages requires the npm scope to equal the repo owner, so this only works once the
 # repo lives under a `pgxsinkit` GitHub org (scope @pgxsinkit == owner pgxsinkit).

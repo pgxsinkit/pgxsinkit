@@ -627,8 +627,7 @@ describe("readShapeStream batches", () => {
 
 // The end of a read is reported off the batch that ends it. A caller that closes on `onEnd` must never
 // lose that batch: the regression this guards was a `live: false` read of a populated stream returning
-// nothing (found by emergent's first native-path integration run, 2026-08-26: every `materializeShape`
-// returned `[]`).
+// nothing. In the 2026-08-26 integration run, every `materializeShape` returned `[]`.
 describe("readShapeStream end ordering", () => {
   function upToDateResponse(envelopes: StreamEnvelope[]): typeof fetch {
     return (async () =>

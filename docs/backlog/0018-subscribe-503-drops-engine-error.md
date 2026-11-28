@@ -16,7 +16,7 @@ request logs alone — or the first time a host asks for a server-side logging s
   status for the client (a 503 is retried; a denial would truncate the client's scope and drop rows,
   see the comment at the `catch`), but the status and body are discarded on the way. Nothing is
   logged, and the server exposes no logging/`onError` seam a host could plug into.
-- So a permanent misconfiguration reads exactly like a transient outage. On the emergent dev cluster
+- So a permanent misconfiguration reads exactly like a transient outage. On a development cluster
   (2026-09-11) the engine's replicated-table list had drifted from the sync registry; one untracked
   table (`competency_association`, behind `langListMembershipZh`) made every language subscribe
   batch 503 once a second for over an hour. The host's request log showed only

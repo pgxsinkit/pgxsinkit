@@ -2,9 +2,8 @@
 /**
  * Publish the public packages to the GitHub Packages npm registry (npm.pkg.github.com).
  *
- * This is the INTERNAL mirror: GitHub Packages requires authentication even to *install*, so it is
- * meant for authenticated consumers in the same org (e.g. the emergent app), not the general
- * public. npmjs.com stays the public-facing registry — that is published by `scripts/release-to-npm.ts`.
+ * Installing from GitHub Packages requires authentication. The public release mirror at
+ * npmjs.com is published by `scripts/release-to-npm.ts`.
  *
  * Mode is chosen from the git ref the workflow runs on:
  *   - tag push (bare semver, e.g. `0.2.1`)  -> "release parity": publish that exact version at the

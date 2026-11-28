@@ -356,7 +356,7 @@ describe("sync config contracts", () => {
     expect(() =>
       withManaged({ column: "createdBy", applyOn: ["create"], strategy: "nowMicroseconds", claimPath: ["sub"] }),
     ).toThrow(/apply only to "authClaim"/);
-    // A valid nested claim path (the emergent app_metadata.person_id case) is accepted.
+    // A nested claim path can identify the person who created the row.
     expect(() =>
       withManaged({
         column: "createdBy",

@@ -448,11 +448,11 @@ describe("composed elected placement path — attach → placement query → ele
   });
 
   it("a FIRE-AND-FORGET provision with an immediate same-port attach still reaches the engine BEFORE the attach", async () => {
-    // The app prewarm reality (emergent learner main.tsx, ADR-0032 optimisation B): `void provisionSyncWorker(...)`
+    // The prewarm sequence: `void provisionSyncWorker(...)`
     // at bootstrap, `attachSyncClient(...)` on the SAME port moments later — the provision is never awaited first.
     // For the accelerator to land, the provision envelope must arrive at the engine BEFORE the attach, so the
     // boot's `provisionAttempt` sample sees it; otherwise the boot silently degrades to a fresh openOwnedStore
-    // create (observed on every emergent warm reopen, 2026-07-26 measurements).
+    // create (observed on every measured warm reopen on 2026-07-26).
     const { scope: swScope, connect: swOnConnect } = makeFakeSharedScope();
     bootstrapWorkerScope({
       connect: () => undefined,
@@ -574,7 +574,7 @@ describe("composed elected placement path — attach → placement query → ele
 
 describe("provision pipe under a SURVIVING SharedWorker — newest pipe wins (ADR-0053 R3)", () => {
   it("a pre-placement pipe to a DEAD engine is SUPERSEDED by the election's pipe: the provision lands the accelerator", async () => {
-    // The live-traced warm-reopen hang (2026-07-26, emergent learner-web on Chromium `extendedLifetime`):
+    // The live-traced warm-reopen hang (2026-07-26, Chromium `extendedLifetime`):
     //   1044 connect-port (the DEAD engine's pipe) — BEFORE any placement result
     //   1336 placement result {electionRequired: true} → 1432 leader-granted → a FRESH engine
     //   2414 connect-port (the fresh pipe) → the provision flow BAILED on its terminal `piped` flag
@@ -599,7 +599,7 @@ describe("provision pipe under a SURVIVING SharedWorker — newest pipe wins (AD
     staleTab.port1.postMessage(wrapControlEnvelope({ type: "tab-detach" })); // the page closed; the SW did not
     await settle();
 
-    // ── The warm reopen: ONE fresh connection carrying emergent's prewarm shape — a fire-and-forget
+    // ── The warm reopen: ONE fresh connection using the prewarm sequence — a fire-and-forget
     //    `provisionSyncWorker` with the real `attachSyncClient` on the SAME port moments later.
     const { core, worker } = makeElectedEngine(101);
     let factoryCalls = 0;

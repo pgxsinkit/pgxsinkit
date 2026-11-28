@@ -20,7 +20,7 @@ to how `pgwasm-c` is packaged.
 
 ## Who it affects
 
-Browser applications have the DOM library, so emergent and the board never see it. It was found in
+Browser applications that include DOM types, such as the board, already satisfy this dependency. It surfaced in
 `pgxsinkit/circuits`, whose test harness is typed for Node alone and briefly used pgwasm as an
 in-process oracle: the workaround there was to add `"DOM"` to `lib` for the whole workspace.
 

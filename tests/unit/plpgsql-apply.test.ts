@@ -152,7 +152,7 @@ describe("plpgsql batch function generator", () => {
         conflictPolicy: "last-write-wins",
         governance: {
           managedFields: [
-            // The emergent case: an app-minted identity at a nested path, no `auth.uid()` involved.
+            // Resolve an application-issued person ID from a nested claim.
             {
               column: "createdByPersonId",
               applyOn: ["create"],

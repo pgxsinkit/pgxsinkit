@@ -1,5 +1,5 @@
-// The PGlite -> pgwasm public rename (ADR-0062 d5: no aliases), as a codemod. It rewrites pgxsinkit's own
-// sources (pgwasm step 3, B4) and is the codemod a consumer (emergent, step 4) runs over its tree.
+// The PGlite -> pgwasm public rename (ADR-0062 d5: no aliases), as a codemod. Run it over a workspace
+// to update its imports and identifiers.
 //
 //   bun scripts/codemods/pgwasm-rename.ts [--write] <file-or-dir>...
 //   bun scripts/codemods/pgwasm-rename.ts [--write] --typecheck-log <tsc-output> <file-or-dir>...
